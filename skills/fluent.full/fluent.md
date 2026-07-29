@@ -1,6 +1,6 @@
 ---
 name: fluent
-description: Use Fluent to review, build, fix, or improve software. Invoke when a user asks to install or initialize Fluent; capture an Observation; define a slice; create or refine a Brief, Behavior Specification, Technical Approach, Implementation Plan, or Work Item; run, queue, inspect, resume, or recover an Attempt; review a codebase through Fluent; manage or land a Merge Candidate; capture project Expertise; or configure Fluent's agents, scheduler, sandboxes, or remote execution.
+description: Operate Fluent, a self-improving software factory. Use when a user wants to review, build, fix, or improve software with Fluent. Invoke when they ask to install or initialize Fluent; capture an Observation; define a slice; create or refine a Brief, Behavior Specification, Technical Approach, Implementation Plan, or Work Item; run, queue, inspect, resume, or recover an Attempt; review a codebase through Fluent; manage or land a Merge Candidate; capture project Expertise; or configure Fluent's agents, scheduler, sandboxes, or remote execution.
 ---
 
 # Fluent
@@ -157,11 +157,7 @@ Fargate are outside the Local Preview.
 
 When `.fluent/` does not exist:
 
-1. Confirm that the current directory is the Git repository root. If the
-   repository is at `<project>/main`, run `cd <project>/main && fluent init`;
-   `fluent init` does not initialize a parent directory or a subdirectory.
-
-2. Before running `fluent init`, ask:
+1. Before running `fluent init`, ask:
 
    ```text
    Which follow-up mode should this project use?
@@ -171,11 +167,11 @@ When `.fluent/` does not exist:
    (b) execute — corrective findings are authorized and queued automatically
    ```
 
-3. After the user chooses, run `fluent init` from that Git repository root.
+2. After the user chooses, run `fluent init`.
 
-4. If the user chose `propose`, leave `.fluent/config.yaml` unchanged.
+3. If the user chose `propose`, leave `.fluent/config.yaml` unchanged.
 
-5. If the user chose `execute`, write this nested mapping to
+4. If the user chose `execute`, write this nested mapping to
    `.fluent/config.yaml` after init:
 
    ```yaml

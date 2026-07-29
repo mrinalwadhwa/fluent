@@ -7,6 +7,11 @@ use std::path::{Component, Path, PathBuf};
 const SCHEMA_VERSION: u32 = 1;
 const SIDECAR_NAME: &str = ".fluent-managed.json";
 const SHIM_MARKER: &str = "fluent-shim: true";
+/// Exact digest of the bundled Fluent skill released immediately before
+/// provenance sidecars were introduced. Keep this bounded: an unlisted copy
+/// remains user-owned until the operator removes it.
+const KNOWN_PRIOR_FLUENT_BUNDLE_DIGESTS: &[&str] =
+    &["37076758c949e0701fa33a09e525aacd81021c4317c7f6f4212825b4f25982d0"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -16,12 +21,6 @@ pub enum InstallOutcome {
     ReplacedShim,
     ReplacedLegacy,
     Conflict,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum MigrationEntry {
-    Directory(String),
-    File(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,11 +41,13 @@ pub fn install_bundled_skill(
     agent: &str,
     scope: &str,
 ) -> Result<InstallOutcome> {
-    let migration_digests = crate::content::BUNDLED_SKILL_MIGRATION_DIGESTS
-        .iter()
-        .filter_map(|(candidate, digest)| (*candidate == skill).then_some(*digest))
-        .collect::<Vec<_>>();
-    install_bundled_skill_with_legacy_digests(skill, skills_dir, agent, scope, &migration_digests)
+    install_bundled_skill_with_legacy_digests(
+        skill,
+        skills_dir,
+        agent,
+        scope,
+        KNOWN_PRIOR_FLUENT_BUNDLE_DIGESTS,
+    )
 }
 
 fn install_bundled_skill_with_legacy_digests(
@@ -54,22 +55,12 @@ fn install_bundled_skill_with_legacy_digests(
     skills_dir: &Path,
     agent: &str,
     scope: &str,
-    migration_digests: &[&str],
+    legacy_fluent_bundle_digests: &[&str],
 ) -> Result<InstallOutcome> {
     let files = bundled_files(skill)?;
     let skill_dir = skills_dir.join(skill);
 
-    let exists = match fs::symlink_metadata(&skill_dir) {
-        Ok(metadata) if metadata.file_type().is_dir() => true,
-        Ok(_) => return Ok(InstallOutcome::Conflict),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Failed to inspect skill at {}", skill_dir.display()));
-        }
-    };
-
-    let outcome = if !exists {
+    let outcome = if !skill_dir.exists() {
         InstallOutcome::Installed
     } else if is_current_managed(&skill_dir, skill, agent, scope, &files)? {
         return Ok(InstallOutcome::Current);
@@ -78,7 +69,9 @@ fn install_bundled_skill_with_legacy_digests(
             format!("Failed to replace managed skill at {}", skill_dir.display())
         })?;
         InstallOutcome::Updated
-    } else if !has_sidecar(&skill_dir)? && is_known_prior_bundle(&skill_dir, migration_digests)? {
+    } else if !has_sidecar(&skill_dir)?
+        && is_known_prior_bundle(&skill_dir, skill, legacy_fluent_bundle_digests)?
+    {
         fs::remove_dir_all(&skill_dir).with_context(|| {
             format!(
                 "Failed to replace prior Fluent skill at {}",
@@ -196,27 +189,23 @@ fn has_sidecar(skill_dir: &Path) -> Result<bool> {
     }
 }
 
-fn is_known_prior_bundle(skill_dir: &Path, migration_digests: &[&str]) -> Result<bool> {
-    if !fs::symlink_metadata(skill_dir)?.file_type().is_dir() {
+fn is_known_prior_bundle(skill_dir: &Path, skill: &str, legacy_digests: &[&str]) -> Result<bool> {
+    if skill != "fluent" {
         return Ok(false);
     }
-    let mut entries = Vec::new();
-    if !collect_migration_entries(skill_dir, skill_dir, &mut entries)? {
+    let mut files = Vec::new();
+    if !collect_bundle_files(skill_dir, skill_dir, &mut files)? {
         return Ok(false);
     }
-    if entries.is_empty() {
+    if files.is_empty() {
         return Ok(false);
     }
-    entries.sort_by(|left, right| migration_entry_path(left).cmp(migration_entry_path(right)));
-    let digest = digest_migration_entries(&entries, |path| fs::read(skill_dir.join(path)))?;
-    Ok(migration_digests.contains(&digest.as_str()))
+    files.sort();
+    let digest = digest_paths(&files, |path| fs::read(skill_dir.join(path)))?;
+    Ok(legacy_digests.contains(&digest.as_str()))
 }
 
-fn collect_migration_entries(
-    root: &Path,
-    dir: &Path,
-    entries: &mut Vec<MigrationEntry>,
-) -> Result<bool> {
+fn collect_bundle_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<bool> {
     for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
@@ -225,57 +214,19 @@ fn collect_migration_entries(
             .expect("bundle entry remains below root");
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            let relative = relative.display().to_string();
-            if !is_safe_relative_path(&relative) {
-                return Ok(false);
-            }
-            entries.push(MigrationEntry::Directory(relative));
-            if !collect_migration_entries(root, &path, entries)? {
+            if !collect_bundle_files(root, &path, files)? {
                 return Ok(false);
             }
         } else if file_type.is_file() {
             let relative = relative.display().to_string();
             if relative != SIDECAR_NAME && is_safe_relative_path(&relative) {
-                entries.push(MigrationEntry::File(relative));
-            } else if relative != SIDECAR_NAME {
-                return Ok(false);
+                files.push(relative);
             }
         } else {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-fn migration_entry_path(entry: &MigrationEntry) -> &str {
-    match entry {
-        MigrationEntry::Directory(path) | MigrationEntry::File(path) => path,
-    }
-}
-
-fn digest_migration_entries<F>(entries: &[MigrationEntry], mut read: F) -> std::io::Result<String>
-where
-    F: FnMut(&str) -> std::io::Result<Vec<u8>>,
-{
-    let mut hasher = Sha256::new();
-    for entry in entries {
-        match entry {
-            MigrationEntry::Directory(path) => {
-                hasher.update(b"dir\0");
-                hasher.update(path.as_bytes());
-                hasher.update([0]);
-            }
-            MigrationEntry::File(path) => {
-                let bytes = read(path)?;
-                hasher.update(b"file\0");
-                hasher.update(path.as_bytes());
-                hasher.update([0]);
-                hasher.update((bytes.len() as u64).to_be_bytes());
-                hasher.update(bytes);
-            }
-        }
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn read_valid_sidecar(
@@ -449,21 +400,11 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn public_migration_manifest_covers_every_prior_skill() {
-        let skills = crate::content::BUNDLED_SKILL_MIGRATION_DIGESTS
-            .iter()
-            .map(|(skill, _)| *skill)
-            .collect::<Vec<_>>();
+    fn production_prior_bundle_digest_remains_allowlisted() {
         assert_eq!(
-            skills,
-            [
-                "fluent",
-                "review-architecture",
-                "review-behaviors",
-                "review-documentation",
-                "review-skills",
-                "review-tests",
-            ]
+            KNOWN_PRIOR_FLUENT_BUNDLE_DIGESTS,
+            &["37076758c949e0701fa33a09e525aacd81021c4317c7f6f4212825b4f25982d0"],
+            "the production migration allowlist must retain the prior release digest"
         );
     }
 
@@ -474,11 +415,10 @@ mod tests {
         let skill_dir = skills_dir.join("fluent");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(skill_dir.join("SKILL.md"), "exact prior bundle").unwrap();
-        let mut entries = Vec::new();
-        assert!(collect_migration_entries(&skill_dir, &skill_dir, &mut entries).unwrap());
-        entries.sort_by(|left, right| migration_entry_path(left).cmp(migration_entry_path(right)));
-        let digest =
-            digest_migration_entries(&entries, |path| fs::read(skill_dir.join(path))).unwrap();
+        let mut files = Vec::new();
+        assert!(collect_bundle_files(&skill_dir, &skill_dir, &mut files).unwrap());
+        files.sort();
+        let digest = digest_paths(&files, |path| fs::read(skill_dir.join(path))).unwrap();
 
         let outcome = install_bundled_skill_with_legacy_digests(
             "fluent",
@@ -499,7 +439,7 @@ mod tests {
         fs::create_dir_all(&near_match_dir).unwrap();
         fs::write(near_match_dir.join("SKILL.md"), "near prior bundle").unwrap();
         assert!(
-            !is_known_prior_bundle(&near_match_dir, &[&digest]).unwrap(),
+            !is_known_prior_bundle(&near_match_dir, "fluent", &[&digest]).unwrap(),
             "only the exact bounded digest can be adopted"
         );
     }

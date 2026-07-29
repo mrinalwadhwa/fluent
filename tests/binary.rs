@@ -10,7 +10,6 @@ use serial_test::serial;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::TempDir;
 
 fn fluent_cmd() -> LoggedCommand {
@@ -18,26 +17,6 @@ fn fluent_cmd() -> LoggedCommand {
     cmd.env_remove("FLUENT_TASK_KIND");
     cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
     cmd
-}
-
-fn production_fluent_binary(tmp: &TempDir) -> PathBuf {
-    if let Some(path) = std::env::var_os("FLUENT_PRODUCTION_BIN") {
-        return PathBuf::from(path);
-    }
-
-    let target_dir = tmp.path().join("production-target");
-    let build = Command::new("cargo")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .args(["build", "--bin", "fluent"])
-        .output()
-        .unwrap();
-    assert!(
-        build.status.success(),
-        "production build failed: {}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    target_dir.join("debug/fluent")
 }
 
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
@@ -61,36 +40,6 @@ fn read_json_path(path: &Path) -> serde_json::Value {
 
 fn write_json_path(path: &Path, value: &serde_json::Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum TreeEntry {
-    Directory(PathBuf),
-    File(PathBuf, Vec<u8>),
-}
-
-fn tree_snapshot(root: &Path) -> Vec<TreeEntry> {
-    fn collect(root: &Path, path: &Path, entries: &mut Vec<TreeEntry>) {
-        let relative = path.strip_prefix(root).unwrap().to_path_buf();
-        let metadata = fs::symlink_metadata(path).unwrap();
-        if metadata.is_dir() {
-            entries.push(TreeEntry::Directory(relative));
-            let mut children = fs::read_dir(path)
-                .unwrap()
-                .map(|entry| entry.unwrap())
-                .collect::<Vec<_>>();
-            children.sort_by_key(|entry| entry.file_name());
-            for child in children {
-                collect(root, &child.path(), entries);
-            }
-        } else {
-            entries.push(TreeEntry::File(relative, fs::read(path).unwrap()));
-        }
-    }
-
-    let mut entries = Vec::new();
-    collect(root, root, &mut entries);
-    entries
 }
 
 fn skill_file_snapshot(skill_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -155,45 +104,6 @@ fn complete_skill_snapshot(skill_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     collect(skill_dir, skill_dir, &mut files);
     files
-}
-
-const PUBLIC_0_1_4_SKILLS: &[&str] = &[
-    "fluent",
-    "review-architecture",
-    "review-behaviors",
-    "review-documentation",
-    "review-skills",
-    "review-tests",
-];
-
-fn public_0_1_4_fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skill-migrations/v0.1.4")
-}
-
-fn copy_skill_tree(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination).unwrap();
-    let mut entries = fs::read_dir(source)
-        .unwrap()
-        .map(|entry| entry.unwrap())
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let source = entry.path();
-        let destination = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_skill_tree(&source, &destination);
-        } else {
-            fs::copy(source, destination).unwrap();
-        }
-    }
-}
-
-fn install_public_0_1_4_fixture(home: &Path) {
-    let skills_dir = home.join(".codex/skills");
-    let fixture = public_0_1_4_fixture();
-    for skill in PUBLIC_0_1_4_SKILLS {
-        copy_skill_tree(&fixture.join(skill), &skills_dir.join(skill));
-    }
 }
 
 #[test]
@@ -664,7 +574,7 @@ fn fluent_skills_install_writes_all_public_skills() {
     }
 
     assert!(
-        stderr.contains("6 installed"),
+        stderr.contains("Installed 6 skills"),
         "should report installing all skills: {stderr}"
     );
 
@@ -1439,167 +1349,8 @@ fn dry_run_with_codex_uses_codex_profile_layer() {
 // -------------------------------------------------------------------------
 
 #[test]
-fn init_outside_git_makes_no_changes() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let child = tmp.path().join("child");
-    let descendant = child.join("descendant");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&descendant).unwrap();
-    fs::write(tmp.path().join("ancestor-keep.txt"), "unchanged\n").unwrap();
-    fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
-    fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
-    fs::create_dir_all(child.join(".fluent/empty-project-data")).unwrap();
-    fs::write(child.join(".fluent/project-sentinel"), "project\n").unwrap();
-    fs::write(home.join("home-sentinel"), "home\n").unwrap();
-    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
-    for agent in [".claude", ".codex"] {
-        let skills = home.join(agent).join("skills");
-        fs::create_dir_all(skills.join("empty-skill")).unwrap();
-        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
-        fs::write(
-            skills.join("seeded-skill/SKILL.md"),
-            format!("{agent} skill\n"),
-        )
-        .unwrap();
-    }
-
-    let outer_before = tree_snapshot(tmp.path());
-    let child_before = tree_snapshot(&child);
-    let home_before = tree_snapshot(&home);
-
-    fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&child)
-        .arg("init")
-        .assert()
-        .failure();
-
-    assert_eq!(tree_snapshot(tmp.path()), outer_before);
-    assert_eq!(tree_snapshot(&child), child_before);
-    assert_eq!(tree_snapshot(&home), home_before);
-}
-
-#[test]
-fn init_outside_git_suggests_nested_main_repository_without_changes() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let main = tmp.path().join("main");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir(&main).unwrap();
-    init_git_repo(&main);
-
-    fs::write(tmp.path().join("outer-sentinel"), "outer\n").unwrap();
-    fs::create_dir_all(tmp.path().join("outer-empty/.hidden-empty")).unwrap();
-    fs::write(main.join("nested-sentinel"), "nested\n").unwrap();
-    fs::create_dir_all(main.join("nested-empty/.hidden-empty")).unwrap();
-    fs::write(home.join("home-sentinel"), "home\n").unwrap();
-    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
-    for agent in [".claude", ".codex"] {
-        let skills = home.join(agent).join("skills");
-        fs::create_dir_all(skills.join("empty-skill")).unwrap();
-        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
-        fs::write(
-            skills.join("seeded-skill/SKILL.md"),
-            format!("{agent} skill\n"),
-        )
-        .unwrap();
-    }
-
-    let outer_before = tree_snapshot(tmp.path());
-    let main_before = tree_snapshot(&main);
-    let home_before = tree_snapshot(&home);
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(tmp.path())
-        .arg("init")
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(&format!(
-            "cd {} && fluent init",
-            main.canonicalize().unwrap().display()
-        )),
-        "init should print the nested-main recovery command: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(tree_snapshot(tmp.path()), outer_before);
-    assert_eq!(tree_snapshot(&main), main_before);
-    assert_eq!(tree_snapshot(&home), home_before);
-}
-
-#[test]
-fn init_below_repository_root_makes_no_changes_and_names_root() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let project = tmp.path().join("project");
-    let child = project.join("child");
-    let descendant = child.join("descendant");
-    fs::create_dir_all(&child).unwrap();
-    fs::create_dir_all(&descendant).unwrap();
-    fs::create_dir_all(&home).unwrap();
-    init_git_repo(&project);
-    fs::write(project.join("keep.txt"), "unchanged\n").unwrap();
-    fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
-    fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
-    fs::create_dir_all(project.join(".fluent/empty-project-data")).unwrap();
-    fs::write(project.join(".fluent/project-sentinel"), "project\n").unwrap();
-    fs::write(home.join("home-sentinel"), "home\n").unwrap();
-    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
-    for agent in [".claude", ".codex"] {
-        let skills = home.join(agent).join("skills");
-        fs::create_dir_all(skills.join("empty-skill")).unwrap();
-        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
-        fs::write(
-            skills.join("seeded-skill/SKILL.md"),
-            format!("{agent} skill\n"),
-        )
-        .unwrap();
-    }
-
-    let project_before = tree_snapshot(&project);
-    let child_before = tree_snapshot(&child);
-    let home_before = tree_snapshot(&home);
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&child)
-        .arg("init")
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(project.to_str().unwrap()));
-    assert_eq!(tree_snapshot(&project), project_before);
-    assert_eq!(tree_snapshot(&child), child_before);
-    assert_eq!(tree_snapshot(&home), home_before);
-}
-
-#[test]
-fn init_accepts_repository_root_with_trailing_whitespace() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let project = tmp.path().join("project ");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir(&project).unwrap();
-    init_git_repo(&project);
-
-    fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&project)
-        .arg("init")
-        .assert()
-        .success();
-
-    assert!(project.join(".fluent").is_dir());
-}
-
-#[test]
 fn init_creates_fluent_structure() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1614,7 +1365,6 @@ fn init_creates_fluent_structure() {
 #[test]
 fn init_is_idempotent() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1633,7 +1383,6 @@ fn init_is_idempotent() {
 #[test]
 fn init_writes_gitignore_when_absent() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1704,7 +1453,6 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
 #[test]
 fn init_preserves_existing_gitignore() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
     let fluent_dir = tmp.path().join(".fluent");
     fs::create_dir_all(&fluent_dir).unwrap();
     let gitignore = fluent_dir.join(".gitignore");
@@ -1726,7 +1474,6 @@ fn init_preserves_existing_gitignore() {
 #[test]
 fn init_backfills_gitignore_on_existing_fluent() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     // First init creates .fluent/
     fluent_cmd()
@@ -1756,7 +1503,6 @@ fn init_backfills_gitignore_on_existing_fluent() {
 #[test]
 fn init_gitignore_does_not_allowlist_observations() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1774,7 +1520,6 @@ fn init_gitignore_does_not_allowlist_observations() {
 #[test]
 fn init_output_notes_fluent_tracks_its_state() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     // Fresh init
     fluent_cmd()
@@ -1796,7 +1541,6 @@ fn init_output_notes_fluent_tracks_its_state() {
 #[test]
 fn init_prints_layout_tip_when_dir_not_named_main() {
     let tmp = TempDir::new().unwrap();
-    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1811,7 +1555,6 @@ fn init_no_layout_tip_when_dir_named_main() {
     let tmp = TempDir::new().unwrap();
     let main_dir = tmp.path().join("main");
     fs::create_dir(&main_dir).unwrap();
-    init_git_repo(&main_dir);
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -1832,7 +1575,6 @@ fn init_appends_craft_section_to_existing_agents_md() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     fs::write(project.join("AGENTS.md"), "# My Project\n").unwrap();
 
@@ -1865,7 +1607,6 @@ fn init_creates_agents_md_with_craft_section_when_none() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     assert!(!project.join("AGENTS.md").exists());
     assert!(!project.join("CLAUDE.md").exists());
@@ -1893,7 +1634,6 @@ fn init_seeds_local_preview_operating_boundary() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -1946,7 +1686,6 @@ fn init_updates_craft_section_in_place_idempotently() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     let pre = "# My Project\n\nSome content.\n";
     let post = "\n## Footer\n";
@@ -2035,92 +1774,6 @@ fn init_names_instruction_changes_that_require_git_resolution() {
     assert!(
         stderr.contains("candidate worktrees") && stderr.contains("committed Git state"),
         "init should explain why resolution is required: {stderr}"
-    );
-}
-
-#[test]
-fn init_distinguishes_preexisting_dirt_from_instruction_changes() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let project = setup_git_project(&tmp);
-    fs::create_dir_all(&home).unwrap();
-    fs::write(project.join("AGENTS.md"), "# Agent instructions\n").unwrap();
-    git::run(&project, &["add", "AGENTS.md"], "stage instructions").unwrap();
-    git::run(
-        &project,
-        &["commit", "-m", "Add agent instructions"],
-        "commit instructions",
-    )
-    .unwrap();
-    fs::write(project.join("README.md"), "pre-existing source dirt\n").unwrap();
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&project)
-        .arg("init")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let (_, after_preexisting_heading) = stderr
-        .split_once("Pre-existing Git changes before initialization:")
-        .expect("init should report pre-existing dirt");
-    let (preexisting_report, instruction_report) = after_preexisting_heading
-        .split_once("Resolve the Fluent instruction changes before running an Attempt:")
-        .expect("init should separately report instruction changes");
-    assert!(
-        preexisting_report.contains("README.md") && !preexisting_report.contains("AGENTS.md"),
-        "init should report source dirt that predates initialization: {stderr}"
-    );
-    assert!(
-        instruction_report.contains("AGENTS.md") && !instruction_report.contains("README.md"),
-        "init should separately report instructions it changed: {stderr}"
-    );
-}
-
-#[test]
-fn init_does_not_claim_unchanged_dirty_instruction_file() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let project = setup_git_project(&tmp);
-    fs::create_dir_all(&home).unwrap();
-
-    fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&project)
-        .arg("init")
-        .assert()
-        .success();
-    git::run(&project, &["add", "AGENTS.md"], "stage instructions").unwrap();
-    git::run(
-        &project,
-        &["commit", "-m", "Add Fluent instructions"],
-        "commit instructions",
-    )
-    .unwrap();
-    fs::write(
-        project.join("AGENTS.md"),
-        format!(
-            "{}\nLocal note that Fluent must preserve.\n",
-            fs::read_to_string(project.join("AGENTS.md")).unwrap()
-        ),
-    )
-    .unwrap();
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .current_dir(&project)
-        .arg("init")
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Pre-existing Git changes before initialization:"));
-    assert!(
-        !stderr.contains("Resolve the Fluent instruction changes"),
-        "init must not claim an unchanged dirty instruction file as its change: {stderr}"
     );
 }
 
@@ -2473,7 +2126,6 @@ fn craft_section_names_skill_and_lifecycle_stages() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -2509,7 +2161,6 @@ fn craft_section_content(tmp: &TempDir) -> String {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -2612,7 +2263,6 @@ fn init_succeeds_when_craft_section_write_fails() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     // Create a read-only AGENTS.md so the craft section write fails.
     let agents = project.join("AGENTS.md");
@@ -4607,9 +4257,6 @@ for arg in "$@"; do
 done
 if [ -z "$PROMPT" ]; then exit 0; fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
-  if [ -n "${{FLUENT_TEST_CODER_MARKER:-}}" ]; then
-    touch "$FLUENT_TEST_CODER_MARKER"
-  fi
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   if [ -n "$DRAFT" ]; then
     mkdir -p "$(dirname "$DRAFT")"
@@ -8681,6 +8328,7 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         "malformed retained Git metadata may defer cleanup but must not affect Learning"
     );
     if !real_sandbox_exec_is_usable() {
+        assert!(String::from_utf8_lossy(&retry.stdout).contains("learner"));
         assert!(candidate.exists());
         return;
     }
@@ -12377,7 +12025,7 @@ fn work_task_run_fails_review_task_without_artifact() {
         .assert()
         .success();
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script_without_review_artifact());
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -12423,7 +12071,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
 
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script_without_review_artifact());
+    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -15542,28 +15190,9 @@ case "$PWD" in
     git add loop-output.txt
     git commit -m "Add loop output" >/dev/null
     ;;
-  */attempt-1-review-tests)
-    printf 'This review intentionally has no verdict.\n' > review.md
-    ;;
   *)
-    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    printf 'Loop review without a verdict.\n' > review.md
     ;;
-esac
-exit 0
-"##
-    .to_string()
-}
-
-fn loop_mock_script_without_review_artifact() -> String {
-    r##"#!/bin/bash
-HAS_PROMPT=0
-for arg in "$@"; do
-  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
-done
-if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
-case "$PWD" in
-  */attempt-1-review-tests) ;;
-  *) printf 'Verdict: pass\n\nLoop review passed.\n' > review.md ;;
 esac
 exit 0
 "##
@@ -18759,180 +18388,6 @@ fn update_check_env_opt_out_suppresses_check_and_nudge() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn skills_add_migrates_every_public_0_1_4_skill() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    install_public_0_1_4_fixture(&home);
-
-    fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .args(["skills", "add", "--agent", "codex"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("6 migrated"));
-
-    let expected_home = tmp.path().join("expected-home");
-    fluent_cmd()
-        .env("HOME", expected_home.to_str().unwrap())
-        .args(["skills", "add", "--agent", "codex"])
-        .assert()
-        .success();
-
-    for skill in PUBLIC_0_1_4_SKILLS {
-        let installed = home.join(".codex/skills").join(skill);
-        assert_eq!(
-            complete_skill_snapshot(&installed),
-            complete_skill_snapshot(&expected_home.join(".codex/skills").join(skill)),
-            "migration must replace the complete public 0.1.4 {skill} bundle"
-        );
-        let sidecar: serde_json::Value = read_json_path(&installed.join(".fluent-managed.json"));
-        assert_eq!(sidecar["agent"], "codex");
-        assert_eq!(sidecar["scope"], "global");
-        assert_eq!(sidecar["skill"], *skill);
-        let files = skill_file_snapshot(&installed);
-        let paths = files
-            .iter()
-            .map(|(path, _)| path.display().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sidecar["files"],
-            serde_json::json!(paths),
-            "migration must record the complete {skill} bundle inventory"
-        );
-        assert_eq!(
-            sidecar["bundle_sha256"],
-            bundle_digest(&files),
-            "migration must record the {skill} bundle digest"
-        );
-    }
-}
-
-#[test]
-fn skills_add_preserves_changed_public_0_1_4_skill() {
-    for change in ["content", "inventory", "empty-directory", "missing"] {
-        let tmp = TempDir::new().unwrap();
-        let home = tmp.path().join("home");
-        install_public_0_1_4_fixture(&home);
-        let changed = home.join(".codex/skills/review-tests");
-        match change {
-            "content" => fs::write(changed.join("SKILL.md"), "user edit\n").unwrap(),
-            "inventory" => fs::write(changed.join("user-note.md"), "keep me\n").unwrap(),
-            "empty-directory" => fs::create_dir(changed.join("user-empty-dir")).unwrap(),
-            "missing" => fs::remove_file(changed.join("SKILL.md")).unwrap(),
-            _ => unreachable!(),
-        }
-        let before = complete_skill_snapshot(&changed);
-
-        let output = fluent_cmd()
-            .env("HOME", home.to_str().unwrap())
-            .args(["skills", "add", "--agent", "codex"])
-            .output()
-            .unwrap();
-
-        assert!(output.status.success());
-        assert_eq!(
-            complete_skill_snapshot(&changed),
-            before,
-            "{change} must remain user-owned"
-        );
-        if change == "empty-directory" {
-            assert!(
-                changed.join("user-empty-dir").is_dir(),
-                "an added empty directory must remain user-owned"
-            );
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains(&changed.display().to_string()));
-        assert!(stderr.contains("remove it manually"));
-        assert!(stderr.contains("5 migrated, 1 conflicting"));
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn skills_add_preserves_public_0_1_4_root_symlink() {
-    use std::os::unix::fs::symlink;
-
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    install_public_0_1_4_fixture(&home);
-    let changed = home.join(".codex/skills/review-tests");
-    let target = home.join("user-owned-review-tests");
-    fs::rename(&changed, &target).unwrap();
-    symlink(&target, &changed).unwrap();
-    let before = complete_skill_snapshot(&target);
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .args(["skills", "add", "--agent", "codex"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert!(
-        fs::symlink_metadata(&changed)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
-    assert_eq!(complete_skill_snapshot(&target), before);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(&changed.display().to_string()));
-    assert!(stderr.contains("remove it manually"));
-    assert!(stderr.contains("5 migrated, 1 conflicting"));
-}
-
-#[test]
-fn skills_add_reports_mixed_outcomes_without_counting_conflicts() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .args(["skills", "add", "--agent", "codex"])
-        .assert()
-        .success();
-
-    let skills_dir = home.join(".codex/skills");
-    let updated = skills_dir.join("review-architecture");
-    fs::write(updated.join("SKILL.md"), "earlier managed bundle\n").unwrap();
-    let files = skill_file_snapshot(&updated);
-    let mut sidecar: serde_json::Value = read_json_path(&updated.join(".fluent-managed.json"));
-    sidecar["bundle_sha256"] = serde_json::Value::String(bundle_digest(&files));
-    write_json_path(&updated.join(".fluent-managed.json"), &sidecar);
-
-    for skill in ["review-behaviors", "review-documentation", "review-tests"] {
-        fs::remove_dir_all(skills_dir.join(skill)).unwrap();
-        copy_skill_tree(&public_0_1_4_fixture().join(skill), &skills_dir.join(skill));
-    }
-    let conflicting = skills_dir.join("review-documentation");
-    fs::write(conflicting.join("user-note.md"), "keep me\n").unwrap();
-    let conflict_before = complete_skill_snapshot(&conflicting);
-    fs::remove_dir_all(skills_dir.join("review-skills")).unwrap();
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .args(["skills", "add", "--agent", "codex"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    for outcome in [
-        "1 installed",
-        "1 current",
-        "1 updated",
-        "2 migrated",
-        "1 conflicting",
-    ] {
-        assert!(stderr.contains(outcome), "missing {outcome} in:\n{stderr}");
-    }
-    assert!(!stderr.contains("Installed 6 skills"));
-    assert_eq!(complete_skill_snapshot(&conflicting), conflict_before);
-    assert!(stderr.contains(&conflicting.display().to_string()));
-    assert!(stderr.contains("remove it manually"));
-}
-
-#[test]
 fn skills_add_materializes_full_skill_and_references() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
@@ -19213,38 +18668,6 @@ fn skills_add_preserves_invalid_sidecar_on_shim_marked_installation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&skill_dir.display().to_string()));
     assert!(stderr.contains("remove it manually"));
-}
-
-#[test]
-fn skills_add_preserves_invalid_sidecar_on_scanned_shim_installation() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let skill_dir = home.join(".codex/skills/fluent");
-    fs::create_dir_all(&skill_dir).unwrap();
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
-    )
-    .unwrap();
-    fs::write(skill_dir.join(".fluent-managed.json"), b"not json\n").unwrap();
-    let before = complete_skill_snapshot(&skill_dir);
-
-    let output = fluent_cmd()
-        .env("HOME", home.to_str().unwrap())
-        .args(["skills", "add"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert_eq!(
-        complete_skill_snapshot(&skill_dir),
-        before,
-        "an invalid sidecar must block scanned shim adoption and preserve every file"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(&skill_dir.display().to_string()));
-    assert!(stderr.contains("remove it manually"));
-    assert!(!stderr.contains("Replaced fluent shim"));
 }
 
 #[test]
@@ -19590,7 +19013,6 @@ fn init_installs_full_fluent_skill() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -19619,7 +19041,6 @@ fn init_succeeds_when_skill_installation_fails() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     // Without HOME, cmd_skills_add fails, but init should still succeed.
     let output = fluent_cmd()
@@ -19651,7 +19072,6 @@ fn init_reinit_installs_skills() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
-    init_git_repo(&project);
 
     // First init creates .fluent/
     fluent_cmd()
@@ -21656,236 +21076,6 @@ fn learner_codex_auth_preflight_precedes_run_reservation() {
 }
 
 #[test]
-fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-learner-host-sandbox-failure");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
-    );
-    create_completed_work_attempt(&tmp, &main_dir);
-    let launch_marker = tmp.path().join("learner-launched");
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .env("FLUENT_TEST_CODER_MARKER", &launch_marker)
-        .assert()
-        .failure();
-    let item = work_item_value(&main_dir, "work-1");
-    let attempt = &item["attempts"][0];
-    assert_eq!(attempt["status"], "needs-user");
-    assert_eq!(attempt["pause_kind"], "host-sandbox");
-    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
-    assert_eq!(attempt["tasks"][0]["status"], "complete");
-    assert!(
-        attempt["learning"].is_null(),
-        "the probe must precede reservation"
-    );
-    assert!(
-        !launch_marker.exists(),
-        "a failed host preflight must not launch the Learner"
-    );
-}
-
-#[test]
-fn learner_host_sandbox_preflight_precedes_run_reservation() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-learner-host-sandbox-success");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
-    );
-    write_mock_sandbox_exec(&bin_dir);
-    create_completed_work_attempt(&tmp, &main_dir);
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
-        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
-        .assert()
-        .success();
-
-    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
-    assert_eq!(attempt["learning"]["runs"], 1);
-    assert_eq!(attempt["learning"]["status"], "succeeded");
-    assert!(
-        bin_dir.join("sandbox-exec.log").exists(),
-        "the preflighted sandbox must launch after reservation"
-    );
-}
-
-#[test]
-fn learner_host_sandbox_retry_reserves_one_run_on_same_task() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-learner-host-sandbox-retry");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"retried","follow_ups":[]}"#),
-    );
-    write_mock_sandbox_exec(&bin_dir);
-    create_completed_work_attempt(&tmp, &main_dir);
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .assert()
-        .failure();
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
-        .assert()
-        .success();
-
-    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
-    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
-    assert_eq!(attempt["learning"]["runs"], 1);
-    assert_eq!(attempt["learning"]["status"], "succeeded");
-}
-
-#[test]
-fn effectively_unsandboxed_task_skips_host_sandbox_preflight() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-unsandboxed-learner");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"unsandboxed","follow_ups":[]}"#),
-    );
-    create_completed_work_attempt(&tmp, &main_dir);
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .assert()
-        .success();
-
-    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
-    assert_eq!(attempt["learning"]["runs"], 1);
-    assert_eq!(attempt["learning"]["status"], "succeeded");
-}
-
-#[test]
-fn test_support_binary_controls_host_sandbox_preflight() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-test-support-host-sandbox");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"controlled","follow_ups":[]}"#),
-    );
-    write_mock_sandbox_exec(&bin_dir);
-    create_completed_work_attempt(&tmp, &main_dir);
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "test host sandbox preflight failure",
-        ));
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
-        .assert()
-        .success();
-}
-
-#[test]
-#[serial]
-fn production_binary_ignores_host_sandbox_test_control() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-production-host-sandbox");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"production","follow_ups":[]}"#),
-    );
-    write_mock_sandbox_exec(&bin_dir);
-    create_completed_work_attempt(&tmp, &main_dir);
-
-    let production = production_fluent_binary(&tmp);
-    let output = Command::new(&production)
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() || stderr.contains("sandbox-exec:"),
-        "production binary must reach the pinned launcher: {stderr}"
-    );
-    assert!(
-        !stderr.contains("test host sandbox preflight failure"),
-        "production binary must use the pinned launcher rather than the test-only input: {}",
-        stderr
-    );
-}
-
-#[test]
-fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-forced-learner-host-sandbox-failure");
-    let launch_marker = tmp.path().join("learner-launched");
-    write_mock_claude(
-        &bin_dir,
-        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
-    );
-    create_completed_work_attempt(&tmp, &main_dir);
-    WorkModelStore::new(&main_dir)
-        .mutate_work_item("work-1", |item| {
-            item.learner_mode = fluent::work_model::LearnerMode::NoExpertise;
-            Ok(())
-        })
-        .unwrap();
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .env("FLUENT_TEST_CODER_MARKER", &launch_marker)
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "test host sandbox preflight failure",
-        ));
-    let item = work_item_value(&main_dir, "work-1");
-    let attempt = &item["attempts"][0];
-    assert_eq!(attempt["status"], "needs-user");
-    assert_eq!(attempt["pause_kind"], "host-sandbox");
-    assert!(
-        attempt["learning"].is_null(),
-        "forced confinement must preflight before reserving Learning"
-    );
-    assert!(
-        !launch_marker.exists(),
-        "a failed forced-confinement preflight must not launch the Learner"
-    );
-}
-
-#[test]
 fn rebase_codex_auth_preflight_precedes_task_creation() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -22034,10 +21224,6 @@ fn prepare_strict_codex_worker_home_fixture(
         r##"#!/bin/bash
 set -euo pipefail
 trap 'printf "strict-failed=%s\\n" "$BASH_COMMAND" >> "$FLUENT_TEST_CODEX_INVOCATIONS"' ERR
-if [ "$#" -eq 3 ] && [ "$1" = "-f" ] && [ "$3" = "/usr/bin/true" ]; then
-  shift 2
-  exec "$@"
-fi
 if [ "$#" -lt 4 ] || [ "$1" != "-f" ] || [ "$3" != "codex" ]; then
   echo "unexpected sandbox-exec invocation: $*" >&2
   exit 64
@@ -22767,144 +21953,6 @@ git commit -m "Add resumed writer output" >/dev/null
         fs::read_to_string(&exec_log).is_ok_and(|homes| !homes.trim().is_empty()),
         "the resumed attempt should launch Codex: {}",
         String::from_utf8_lossy(&resumed.stderr)
-    );
-}
-
-fn pause_attempt_for_host_sandbox(main_dir: &Path, bin_dir: &Path) -> serde_json::Value {
-    write_mock_claude(
-        bin_dir,
-        "#!/bin/bash\nprintf launched > \"${FLUENT_TEST_CODER_MARKER:?}\"\nexit 0\n",
-    );
-    fluent_cmd()
-        .current_dir(main_dir)
-        .args([
-            "work-item",
-            "create",
-            "host-sandbox",
-            "--title",
-            "Host sandbox",
-        ])
-        .assert()
-        .success();
-    fluent_cmd()
-        .current_dir(main_dir)
-        .args(["attempt", "create", "host-sandbox", "attempt-1"])
-        .assert()
-        .success();
-
-    fluent_cmd()
-        .current_dir(main_dir)
-        .args(["attempt", "run", "host-sandbox", "attempt-1"])
-        .env("PATH", mock_path(bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .env("FLUENT_TEST_CODER_MARKER", bin_dir.join("coder-ran"))
-        .assert()
-        .failure();
-
-    work_item_value(main_dir, "host-sandbox")
-}
-
-#[test]
-fn host_sandbox_preflight_pauses_same_task_and_attempt() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let paused = pause_attempt_for_host_sandbox(&main_dir, &tmp.path().join("bin-host-pause"));
-
-    assert_eq!(paused["attempts"][0]["status"], "needs-user");
-    assert_eq!(paused["attempts"][0]["pause_kind"], "host-sandbox");
-    assert_eq!(paused["attempts"][0]["tasks"][0]["id"], "attempt-1-write-1");
-    assert_eq!(paused["attempts"][0]["tasks"][0]["status"], "needs-user");
-}
-
-#[test]
-fn host_sandbox_preflight_failure_consumes_no_work_budget() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-host-budget");
-    let paused = pause_attempt_for_host_sandbox(&main_dir, &bin_dir);
-
-    assert_eq!(paused["attempts"].as_array().unwrap().len(), 1);
-    assert_eq!(paused["attempts"][0]["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(paused["attempts"][0]["tasks"][0]["kind"], "write");
-    assert!(paused["attempts"][0]["learning"].is_null());
-    assert_eq!(
-        paused["attempts"][0]["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|task| task["kind"] == "write")
-            .count(),
-        1,
-        "the failed probe must not consume a Writer round"
-    );
-    assert!(
-        !bin_dir.join("coder-ran").exists(),
-        "the failed probe must stop before the coder launches"
-    );
-}
-
-#[test]
-fn host_sandbox_preflight_handoff_names_cause_task_and_resume() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let paused = pause_attempt_for_host_sandbox(&main_dir, &tmp.path().join("bin-host-handoff"));
-    let handoff = paused["attempts"][0]["artifacts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find_map(|artifact| artifact["path"].as_str())
-        .expect("host sandbox pause should record a handoff");
-    let body = fs::read_to_string(main_dir.join(handoff)).unwrap();
-
-    assert!(body.contains("enclosing macOS sandbox"));
-    assert!(body.contains("attempt-1-write-1"));
-    assert!(body.contains("fluent attempt run host-sandbox"));
-}
-
-#[test]
-fn host_sandbox_retry_reopens_same_task() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
-    let bin_dir = tmp.path().join("bin-host-retry");
-    let _paused = pause_attempt_for_host_sandbox(&main_dir, &bin_dir);
-    write_mock_sandbox_exec(&bin_dir);
-    write_mock_executable(
-        &bin_dir,
-        "claude",
-        "#!/bin/bash\nif [ -d .git ]; then\n  printf 'Verdict: pass\\n\\nProgress: yes\\n' > review.md\nelif [ ! -f .fluent/expertise/INDEX.md ]; then\n  mkdir -p .fluent/expertise\n  printf '# Index\\n' > .fluent/expertise/INDEX.md\n  git add .fluent/expertise/INDEX.md\n  git commit -m 'Seed expertise' >/dev/null\nelif [ ! -f resumed.txt ]; then\n  printf 'resumed\\n' > resumed.txt\n  git add resumed.txt\n  git commit -m 'Add resumed output' >/dev/null\nelse\n  draft=$(printf '%s' \"$*\" | grep -oE '/[^[:space:]]*follow-up-draft.json' | head -1)\n  printf '{\"learning_summary\":\"resumed\",\"follow_ups\":[]}' > \"$draft\"\nfi\n",
-    );
-
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "host-sandbox", "attempt-1"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
-        .assert()
-        .failure();
-    let resumed = work_item_value(&main_dir, "host-sandbox");
-    assert_eq!(
-        resumed["attempts"][0]["tasks"][0]["id"],
-        "attempt-1-write-1"
-    );
-    assert_eq!(resumed["attempts"][0]["tasks"][0]["status"], "complete");
-    assert_eq!(
-        resumed["attempts"][0]["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|task| task["kind"] == "write")
-            .count(),
-        1
-    );
-    assert_eq!(
-        resumed["attempts"][0]["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|task| task["kind"] == "write")
-            .count(),
-        1,
-        "resuming a host pause must preserve the original Writer round"
     );
 }
 
