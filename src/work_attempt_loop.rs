@@ -1080,10 +1080,11 @@ fn run_learner_step(
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain
     // their confinement even when the caller requested `--no-sandbox`.
-    let prepared_sandbox = match prepare_learner_host_sandbox(
+    let prepared_run = match prepare_learner_run(
         project_root,
         item,
         attempt_index,
+        candidate_id,
         mode,
         config.no_sandbox,
         codex_worker.as_ref(),
@@ -1152,7 +1153,7 @@ fn run_learner_step(
             mode,
             &config,
             runs,
-            prepared_sandbox.as_ref(),
+            &prepared_run,
         );
     }
 
@@ -1167,25 +1168,40 @@ fn run_learner_step(
         candidate_id,
         mode,
         &config,
-        prepared_sandbox.as_ref(),
+        &prepared_run,
     );
     finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
     })
 }
 
-/// Preflight the resolved Learner policy while the Learner lease is held but before
-/// `reserve_learner_run` writes an in-progress Learning record.  The run directory
-/// name is deterministic under that lease, so the later launch renders the same
-/// profile roots without reserving a durable run just to discover a host failure.
-fn prepare_learner_host_sandbox(
+/// The exact initial Learner launch retained across host preflight, reservation,
+/// and execution. Its temporary isolated workspace and allocated evidence surface
+/// remain alive until the Learner finishes, so the profile Fluent preflights is the
+/// profile Fluent launches.
+struct PreparedLearnerRun {
+    sandbox: Option<work_task_executor::PreparedLearnerSandbox>,
+    workspace_path: PathBuf,
+    launch_workspace_path: PathBuf,
+    review_artifact_paths: Vec<PathBuf>,
+    tester_artifact_paths: Vec<PathBuf>,
+    handoff_dir: PathBuf,
+    denied_write_roots: Vec<PathBuf>,
+    run_dir: PathBuf,
+    isolated_workspace: Option<HandoffOnlyWorkspace>,
+}
+
+/// Prepare and preflight the resolved Learner launch while the Learner lease is
+/// held but before `reserve_learner_run` writes an in-progress Learning record.
+fn prepare_learner_run(
     project_root: &Path,
     item: &WorkItem,
     attempt_index: usize,
+    candidate_id: &str,
     mode: work_task_executor::LearnerExecutionMode,
     no_sandbox: bool,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-) -> Result<Option<work_task_executor::PreparedLearnerSandbox>> {
+) -> Result<PreparedLearnerRun> {
     let attempt = &item.attempts[attempt_index];
     let write_output = attempt
         .tasks
@@ -1202,63 +1218,99 @@ fn prepare_learner_host_sandbox(
     let review_artifact_paths = all_review_artifact_paths(project_root, attempt)?;
     let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt)?;
     let mapping = attempt.coder_mapping.for_task_kind(TaskKind::Write);
-    let handoff_dir = project_root
-        .join(crate::learner::handoff_dir_rel(&item.id, &attempt.id))
-        .join("runs")
-        .join(format!(
-            "run-{}",
-            next_learner_run_number(project_root, &item.id, &attempt.id)?
-        ))
-        .join("staging");
+    let handoff_only = mode.is_post_land();
+    let baseline_commit = if handoff_only {
+        item.merge_candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .filter(|candidate| candidate.merge_state.status == MergeCandidateMergeStatus::Merged)
+            .and_then(|candidate| candidate.merge_state.merged_commit.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "handoff-only Learner retry has no persisted merged commit for {:?}",
+                    candidate_id
+                )
+            })?
+    } else {
+        write_output.commit.clone()
+    };
+    let bundle_source = if handoff_only {
+        project_root
+    } else {
+        workspace_path.as_path()
+    };
+    let isolated_workspace = (!mode.expertise_writable())
+        .then(|| {
+            HandoffOnlyWorkspace::create(
+                bundle_source,
+                project_root,
+                &item.id,
+                &attempt.id,
+                &baseline_commit,
+                &review_artifact_paths,
+                &tester_artifact_paths,
+            )
+        })
+        .transpose()?;
+    let launch_workspace_path = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.workspace_path.clone())
+        .unwrap_or_else(|| workspace_path.clone());
+    let launch_review_artifact_paths = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.review_artifact_paths.clone())
+        .unwrap_or_else(|| review_artifact_paths.clone());
+    let launch_tester_artifact_paths = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.tester_artifact_paths.clone())
+        .unwrap_or_else(|| tester_artifact_paths.clone());
+    let real_handoff_dir =
+        project_root.join(crate::learner::handoff_dir_rel(&item.id, &attempt.id));
+    let run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+    let handoff_dir = isolated_workspace
+        .as_ref()
+        .map(|isolated| isolated.handoff_dir.clone())
+        .unwrap_or_else(|| run_dir.join("staging"));
     let denied_write_roots = if mode.expertise_writable() {
         Vec::new()
     } else {
-        vec![project_root.to_path_buf(), workspace_path.clone()]
+        let mut roots = vec![project_root.to_path_buf(), workspace_path.clone()];
+        roots.push(crate::worktree::git_common_dir(&workspace_path)?);
+        roots.sort();
+        roots.dedup();
+        roots
     };
-    work_task_executor::prepare_learner_host_sandbox(
+    let sandbox = work_task_executor::prepare_learner_host_sandbox(
         work_task_executor::LearnerRunInputs {
-            workspace_path: &workspace_path,
+            workspace_path: &launch_workspace_path,
             resolver: &ContentResolver::new(Some(project_root)),
             extra_args: &[],
             coder_kind: mapping.coder,
             no_sandbox,
             model: None,
             effort: None,
-            review_artifact_paths: &review_artifact_paths,
-            tester_artifact_paths: &tester_artifact_paths,
+            review_artifact_paths: &launch_review_artifact_paths,
+            tester_artifact_paths: &launch_tester_artifact_paths,
             diff_command: "git diff",
             handoff_dir: &handoff_dir,
             denied_write_roots: &denied_write_roots,
-            handoff_only: mode.is_post_land(),
+            handoff_only,
             repair: None,
         },
         mode,
         codex_worker,
-    )
-}
-
-fn next_learner_run_number(
-    project_root: &Path,
-    work_item_id: &str,
-    attempt_id: &str,
-) -> Result<u32> {
-    let runs = project_root
-        .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id))
-        .join("runs");
-    let mut highest = 0;
-    if let Ok(entries) = fs::read_dir(runs) {
-        for entry in entries {
-            let name = entry?.file_name();
-            if let Some(number) = name
-                .to_string_lossy()
-                .strip_prefix("run-")
-                .and_then(|n| n.parse().ok())
-            {
-                highest = highest.max(number);
-            }
-        }
-    }
-    Ok(highest + 1)
+    )?;
+    Ok(PreparedLearnerRun {
+        sandbox,
+        workspace_path,
+        launch_workspace_path,
+        review_artifact_paths: launch_review_artifact_paths,
+        tester_artifact_paths: launch_tester_artifact_paths,
+        handoff_dir,
+        denied_write_roots,
+        run_dir,
+        isolated_workspace,
+    })
 }
 
 /// The outcome of the fresh, lock-held no-expertise preparation mutation.
@@ -1296,7 +1348,7 @@ fn settle_no_expertise_learner(
     mode: work_task_executor::LearnerExecutionMode,
     config: &LearnerConfig<'_>,
     runs: u32,
-    prepared_sandbox: Option<&work_task_executor::PreparedLearnerSandbox>,
+    prepared_run: &PreparedLearnerRun,
 ) -> Result<()> {
     let work_item_id = item.id.clone();
     let attempt_id = item.attempts[attempt_index].id.clone();
@@ -1331,7 +1383,7 @@ fn settle_no_expertise_learner(
         candidate_id,
         mode,
         config,
-        prepared_sandbox,
+        prepared_run,
     ) {
         Ok(handoff) => handoff,
         Err(run) => {
@@ -1800,13 +1852,12 @@ fn try_learn(
     candidate_id: &str,
     mode: work_task_executor::LearnerExecutionMode,
     config: &LearnerConfig<'_>,
-    prepared_sandbox: Option<&work_task_executor::PreparedLearnerSandbox>,
+    prepared_run: &PreparedLearnerRun,
 ) -> Result<crate::follow_up::LearnerHandoffV1> {
     // A post-land handoff-only retry uses the merged commit as its baseline; a
     // pre-land capture or no-expertise run uses the reviewed Writer SHA. Both
     // non-capture modes run from an isolated snapshot with denied live roots.
     let handoff_only = mode.is_post_land();
-    let runs_isolated = !mode.expertise_writable();
     let work_item_id = item.id.clone();
     let attempt = &item.attempts[attempt_index];
     let attempt_id = attempt.id.clone();
@@ -1819,14 +1870,9 @@ fn try_learn(
         .and_then(|(i, task)| task.output.as_ref().map(|output| (i, output.clone())))
         .ok_or_else(|| anyhow::anyhow!("no completed write task with output"))?;
 
-    let workspace_path = resolve_managed_sibling_workspace_path(
-        project_root,
-        &write_output.workspace_path,
-        "learner workspace",
-    )?;
-
-    let review_artifact_paths = all_review_artifact_paths(project_root, attempt)?;
-    let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt)?;
+    let workspace_path = &prepared_run.workspace_path;
+    let review_artifact_paths = &prepared_run.review_artifact_paths;
+    let tester_artifact_paths = &prepared_run.tester_artifact_paths;
 
     let mapping_pair = attempt.coder_mapping.for_task_kind(TaskKind::Write);
     let coder_kind = mapping_pair.coder;
@@ -1894,37 +1940,14 @@ fn try_learn(
     } else {
         write_output.commit.as_str()
     };
-    // The isolated snapshot bundles the repository that holds the baseline commit.
-    // A post-land run's merged commit lives in the live project checkout; a pre-
-    // land no-expertise run's reviewed Writer SHA lives in the candidate worktree.
-    let bundle_source = if handoff_only {
-        project_root
-    } else {
-        workspace_path.as_path()
-    };
-    let isolated_workspace = runs_isolated
-        .then(|| {
-            HandoffOnlyWorkspace::create(
-                bundle_source,
-                project_root,
-                &work_item_id,
-                &attempt_id,
-                &baseline_commit,
-                &review_artifact_paths,
-                &tester_artifact_paths,
-            )
-        })
-        .transpose()?;
-    let learner_workspace_path = isolated_workspace
-        .as_ref()
-        .map(|isolated| isolated.workspace_path.as_path())
-        .unwrap_or(workspace_path.as_path());
+    let isolated_workspace = prepared_run.isolated_workspace.as_ref();
+    let learner_workspace_path = prepared_run.launch_workspace_path.as_path();
     let real_handoff_dir =
         project_root.join(crate::learner::handoff_dir_rel(&work_item_id, &attempt_id));
     // Allocate a collision-safe, host-owned run directory from on-disk state. It
     // holds the transcript and submitted-draft evidence the coder cannot reach;
     // the coder-writable staging directory is a separate sibling beneath it.
-    let run_dir = allocate_learner_run_dir(&real_handoff_dir.join("runs"))?;
+    let run_dir = prepared_run.run_dir.clone();
     // The transcript lives on the host-owned run surface, outside every coder-
     // writable root: the host writes it, so it survives the disposable clone and
     // lets the one-refresh auth policy classify a 401.
@@ -1933,38 +1956,13 @@ fn try_learn(
     // surface; post-land it stages inside the isolated clone because the live
     // project root is denied. Either way the host-owned evidence stays a non-
     // writable sibling of the staging directory.
-    let pre_land_staging = run_dir.join("staging");
-    let handoff_dir = isolated_workspace
-        .as_ref()
-        .map(|isolated| isolated.handoff_dir.as_path())
-        .unwrap_or(pre_land_staging.as_path());
-    let learner_review_artifact_paths = isolated_workspace
-        .as_ref()
-        .map(|isolated| isolated.review_artifact_paths.as_slice())
-        .unwrap_or(review_artifact_paths.as_slice());
-    let learner_tester_artifact_paths = isolated_workspace
-        .as_ref()
-        .map(|isolated| isolated.tester_artifact_paths.as_slice())
-        .unwrap_or(tester_artifact_paths.as_slice());
+    let handoff_dir = prepared_run.handoff_dir.as_path();
+    let learner_review_artifact_paths = review_artifact_paths.as_slice();
+    let learner_tester_artifact_paths = tester_artifact_paths.as_slice();
     let diff_range = format!("{accepted_base}...{accepted_tip}");
     let diff_command =
         review_diff_command::render_review_diff_command(learner_workspace_path, &diff_range);
-    let denied_write_roots = if runs_isolated {
-        // Deny every live root for both isolated modes: the live project checkout,
-        // the candidate worktree, and shared Git metadata. A no-expertise run must
-        // never retarget the reviewed candidate; a post-land run must never mutate
-        // the merged branch.
-        let mut roots = vec![project_root.to_path_buf(), workspace_path.clone()];
-        // The candidate worktree shares the live repository's common Git dir, so
-        // resolve it from the worktree, which is always a real repository even when
-        // the live project checkout is not directly inspectable.
-        roots.push(crate::worktree::git_common_dir(&workspace_path)?);
-        roots.sort();
-        roots.dedup();
-        roots
-    } else {
-        Vec::new()
-    };
+    let denied_write_roots = &prepared_run.denied_write_roots;
 
     if mode.expertise_writable() {
         // Pre-land: one host-owned Git transaction spans the initial coder, every
@@ -1976,7 +1974,7 @@ fn try_learn(
         let mut transaction = LearnerGitTransaction::begin(&workspace_path, &baseline_commit)?;
         let result = run_pre_land_learner(
             project_root,
-            &workspace_path,
+            workspace_path,
             item,
             attempt_index,
             write_task_index,
@@ -1997,7 +1995,7 @@ fn try_learn(
                 coder_kind,
                 model: model.as_deref(),
                 effort: effort.as_deref(),
-                prepared_sandbox,
+                prepared_sandbox: prepared_run.sandbox.as_ref(),
             },
         );
         return match result {
@@ -2038,7 +2036,7 @@ fn try_learn(
         mode,
         codex_worker: config.codex_worker,
         repair: None,
-        prepared_sandbox,
+        prepared_sandbox: prepared_run.sandbox.as_ref(),
     });
     // Account for this invocation's return before inspecting its result. A
     // no-expertise ledger pins the raw return (B10); a post-land run confines the

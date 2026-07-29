@@ -12353,7 +12353,7 @@ fn work_task_run_fails_review_task_without_artifact() {
         .assert()
         .success();
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
+    write_mock_claude(&bin_dir, &loop_mock_script_without_review_artifact());
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -12399,7 +12399,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
 
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
+    write_mock_claude(&bin_dir, &loop_mock_script_without_review_artifact());
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -15518,11 +15518,28 @@ case "$PWD" in
     git add loop-output.txt
     git commit -m "Add loop output" >/dev/null
     ;;
-  *)
-    # Leave the artifact absent so review-task failure tests exercise the
-    # executor's missing-artifact path rather than an invalid review body.
-    :
+  */attempt-1-review-tests)
+    printf 'This review intentionally has no verdict.\n' > review.md
     ;;
+  *)
+    printf 'Verdict: pass\n\nLoop review passed.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+    .to_string()
+}
+
+fn loop_mock_script_without_review_artifact() -> String {
+    r##"#!/bin/bash
+HAS_PROMPT=0
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
+done
+if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
+case "$PWD" in
+  */attempt-1-review-tests) ;;
+  *) printf 'Verdict: pass\n\nLoop review passed.\n' > review.md ;;
 esac
 exit 0
 "##
