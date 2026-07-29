@@ -7259,6 +7259,137 @@ random banner prose that must be ignored
         );
     }
 
+    /// Builds a reviewed Write Attempt with its pre-created Merge Candidate, then
+    /// suspends the Attempt to the typed host-sandbox pause — the exact state a
+    /// Learner host-sandbox preflight leaves behind after reviews have passed and
+    /// the candidate already identifies the reviewed Writer commit.
+    fn host_sandbox_paused_candidate_work_item() -> WorkItem {
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Preserve candidate across host-sandbox pause".to_string(),
+            attempts: vec![Attempt {
+                id: "attempt-1".to_string(),
+                work_item_id: "work-1".to_string(),
+                kind: AttemptKind::Write,
+                status: AttemptStatus::Complete,
+                coder_mapping: CoderMapping::default(),
+                tasks: vec![completed_write_task("attempt-1-write-1", "original")],
+                review_state: Some(AttemptReviewState::Passed),
+                ..Default::default()
+            }],
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+        work_item
+            .create_or_get_merge_candidate("attempt-1")
+            .expect("a reviewed attempt creates its candidate");
+        suspend_attempt(&mut work_item.attempts[0], PauseKind::HostSandbox);
+        work_item
+    }
+
+    #[test]
+    fn host_sandbox_paused_candidate_is_structurally_valid_and_round_trips() {
+        // B1: a reviewed candidate whose Attempt paused for a host-sandbox
+        // preflight failure persists and reloads as a structurally valid Work
+        // Item — the review evidence and the reviewed Writer commit survive.
+        let work_item = host_sandbox_paused_candidate_work_item();
+        assert_eq!(work_item.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            work_item.attempts[0].pause_kind,
+            Some(PauseKind::HostSandbox)
+        );
+        work_item
+            .validate()
+            .expect("a host-sandbox-paused reviewed candidate is structurally valid");
+        work_item.merge_candidates[0]
+            .validate(&work_item)
+            .expect("the candidate itself validates against its paused attempt");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        store.create_work_item(&work_item).unwrap();
+        let read = store.read_work_item("work-1").unwrap();
+        read.validate()
+            .expect("the reloaded Work Item stays structurally valid");
+        assert_eq!(read.attempts[0].pause_kind, Some(PauseKind::HostSandbox));
+        assert_eq!(
+            read.merge_candidates.len(),
+            1,
+            "the pre-created candidate reloads alongside the typed pause"
+        );
+    }
+
+    #[test]
+    fn host_sandbox_paused_candidate_blocks_landing_until_learner_succeeds() {
+        // B2: structural validity is not landing readiness. The host-sandbox
+        // pause happens before the Learner runs, so the preserved candidate
+        // stays blocked at the advancement gate until the Learner succeeds.
+        let mut work_item = host_sandbox_paused_candidate_work_item();
+        let candidate = work_item.merge_candidates[0].clone();
+        let error = candidate
+            .validate_advancement(&work_item)
+            .expect_err("a candidate paused before its Learner cannot land");
+        assert!(
+            matches!(error, WorkModelError::AttemptLearningNotSucceeded { .. }),
+            "the block is the shared non-succeeded-Learner reason: {error}"
+        );
+
+        // Once the host sandbox recovers and the Learner succeeds, the same
+        // durable landing gate opens.
+        let handoff = crate::follow_up::ArtifactRef {
+            path: "handoff.json".to_string(),
+            digest: "sha256:x".to_string(),
+        };
+        work_item.attempts[0].learning = Some(AttemptLearning::succeeded(1, handoff));
+        work_item.merge_candidates[0]
+            .clone()
+            .validate_advancement(&work_item)
+            .expect("a succeeded Learner passes the landing gate");
+    }
+
+    #[test]
+    fn host_sandbox_exception_does_not_admit_neighboring_states() {
+        // B3: the exception is exactly `needs-user` with `pause_kind:
+        // host-sandbox`. Every other pause kind, and every non-passed review
+        // state, keeps a pending candidate structurally invalid.
+        for pause in [
+            PauseKind::Auth,
+            PauseKind::Uncertain,
+            PauseKind::RoundCap,
+            PauseKind::TranscriptPump,
+        ] {
+            let mut work_item = host_sandbox_paused_candidate_work_item();
+            suspend_attempt(&mut work_item.attempts[0], pause);
+            assert_eq!(
+                work_item.validate().unwrap_err(),
+                WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                    candidate_id: "attempt-1-merge-candidate".to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                },
+                "a {pause:?} pause must not inherit the host-sandbox exception"
+            );
+        }
+
+        for (status, review) in [
+            (AttemptStatus::Executing, AttemptReviewState::NotReviewed),
+            (AttemptStatus::Reviewing, AttemptReviewState::Uncertain),
+            (AttemptStatus::Complete, AttemptReviewState::Failed),
+        ] {
+            let mut work_item = host_sandbox_paused_candidate_work_item();
+            work_item.attempts[0].status = status.clone();
+            work_item.attempts[0].pause_kind = None;
+            work_item.attempts[0].review_state = Some(review.clone());
+            assert_eq!(
+                work_item.validate().unwrap_err(),
+                WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                    candidate_id: "attempt-1-merge-candidate".to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                },
+                "a {status:?}/{review:?} attempt keeps its pending candidate invalid"
+            );
+        }
+    }
+
     #[test]
     fn merge_candidate_validation_requires_latest_write_output() {
         let mut work_item = WorkItem {
