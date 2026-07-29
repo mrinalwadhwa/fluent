@@ -4152,22 +4152,26 @@ fn prepare_reviewer_hook_cache(
     attempt_id: &str,
     task_id: &str,
 ) {
-    let _lock = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
-        Ok(lock) => lock,
+    let admission = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
+        Ok(lock) => {
+            let store = WorkModelStore::new(project_root);
+            match reclaim_terminal_reviewer_caches(project_root, &store) {
+                Ok(()) => Some((lock, store)),
+                Err(error) => {
+                    eprintln!(
+                        "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
+                    );
+                    None
+                }
+            }
+        }
         Err(error) => {
             eprintln!(
                 "  Reviewer prep     {task_id} starting cold: cache lock check failed: {error}"
             );
-            return;
+            None
         }
     };
-    let store = WorkModelStore::new(project_root);
-    if let Err(error) = reclaim_terminal_reviewer_caches(project_root, &store) {
-        eprintln!(
-            "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
-        );
-        return;
-    }
 
     let context = hooks::HookContext {
         work_item_id: Some(work_item_id.to_string()),
@@ -4177,18 +4181,19 @@ fn prepare_reviewer_hook_cache(
         log_dir: artifact_dir.join("hooks"),
         ..Default::default()
     };
-    match hooks::run_hook(
+    let hook_result = hooks::run_hook(
         candidate_workspace,
         "prepare-pre-review",
         candidate_workspace,
         &context,
-    ) {
+    );
+    let hook_passed = matches!(&hook_result, Ok(Some(outcome)) if outcome.passed);
+    match hook_result {
         Ok(Some(outcome)) if outcome.passed => {
             eprintln!(
                 "  Reviewer prep     prepare-pre-review hook passed (log: {})",
                 outcome.log_path.display()
             );
-            admit_hook_reviewer_cache(project_root, artifact_dir, task_id, &store);
         }
         Ok(Some(outcome)) => eprintln!(
             "  Reviewer prep     prepare-pre-review hook failed (exit {}, log: {})",
@@ -4197,6 +4202,30 @@ fn prepare_reviewer_hook_cache(
         ),
         Ok(None) => {}
         Err(error) => eprintln!("  Reviewer prep     prepare-pre-review hook error: {error:#}"),
+    }
+
+    if hook_passed {
+        if let Some((_lock, store)) = admission {
+            admit_hook_reviewer_cache(project_root, artifact_dir, task_id, &store);
+        } else {
+            remove_unadmitted_hook_cache(artifact_dir);
+        }
+    } else {
+        // A failed hook must not leave an unaccounted managed cache behind while
+        // the Reviewer continues to execute. Its other output remains evidence.
+        remove_unadmitted_hook_cache(artifact_dir);
+    }
+}
+
+/// Keep custom hook preparation available when cache admission itself cannot be
+/// established. Only canonical cache directories are discarded; noncanonical
+/// hook output remains available to the cold reviewer.
+fn remove_unadmitted_hook_cache(artifact_dir: &Path) {
+    if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
+        eprintln!(
+            "  Reviewer prep     retained cache {}: {error:#}",
+            artifact_dir.display()
+        );
     }
 }
 
@@ -6244,6 +6273,41 @@ mod tests {
         assert!(
             !artifact.join("target").exists(),
             "over-budget hook cache must be removed while noncanonical output remains"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_prepare_pre_review_removes_managed_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let artifact = project.join("review-artifact");
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(project.join(".fluent/hooks")).unwrap();
+        let hook = project.join(".fluent/hooks/prepare-pre-review");
+        fs::write(
+            &hook,
+            "#!/bin/sh\nmkdir -p \"$FLUENT_REVIEWER_ARTIFACT_DIR/target\"\nprintf cache > \"$FLUENT_REVIEWER_ARTIFACT_DIR/target/output\"\nprintf evidence > \"$FLUENT_REVIEWER_ARTIFACT_DIR/hook-note\"\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+
+        prepare_reviewer_hook_cache(
+            project,
+            project,
+            &artifact,
+            "work-1",
+            "attempt-1",
+            "review-1",
+        );
+
+        assert!(artifact.join("hook-note").is_file());
+        assert!(
+            !artifact.join("target").exists(),
+            "a failed hook must not retain an unadmitted managed cache"
         );
     }
 
