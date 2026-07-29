@@ -6036,6 +6036,31 @@ and tell the user to run `codex login`.
 Test: tests/binary.rs (learner_codex_auth_preflight_precedes_run_reservation)
 Test: tests/binary.rs (rebase_codex_auth_preflight_precedes_task_creation)
 
+## Reviewer build-cache bounds
+
+### B1
+
+WHEN Fluent prepares a Reviewer Task, THE SYSTEM SHALL reclaim canonical build
+cache directories from terminal Reviewer Tasks before admitting a warm cache.
+
+### B2
+
+WHEN the prospective managed reviewer cache fits the configured project budget
+and host free-space floor, THE SYSTEM SHALL copy the candidate's canonical
+build-cache directories into that Reviewer's artifact area.
+
+### B3
+
+IF cache configuration is invalid, accounting or free-space inspection fails,
+or a prospective warm cache exceeds either limit, THEN THE SYSTEM SHALL name
+the Reviewer and reason, start it cold, and continue the Attempt.
+
+### B4
+
+WHEN a Reviewer Task becomes terminal, THE SYSTEM SHALL remove only canonical
+build-cache directories from its artifact area and preserve review evidence,
+logs, transcripts, and noncanonical hook output.
+
 ## Generated commit wording
 
 ### B1

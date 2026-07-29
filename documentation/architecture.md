@@ -170,15 +170,25 @@ The `behaviors.md` format supports two markers on EARS statements:
 - `Test:` — names a test that verifies the behavior.
 - `Untestable:` — marks a behavior as genuinely untestable with a reason.
 
-Before launching each review Task, Fluent pre-populates the reviewer's
+Before launching each review Task, Fluent may pre-populate the reviewer's
 artifact directory with the candidate's build outputs so reviewers start
-with a warm build cache. Fluent detects the project toolchain from
-marker files (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle`)
-and copies the canonical build directories using reflink, hardlink, or
-deep copy in that order. A `.fluent/hooks/prepare-pre-review` hook
-overrides the built-in detection when present. Review-only and
-post-merge review Attempts skip this step because they review the source
-checkout, not a candidate with writer-produced build outputs.
+with a warm build cache. It serializes admission with a project-level lock,
+first removes canonical cache directories from terminal reviewer Tasks, and
+then accounts for the remaining managed caches. The copy proceeds only when
+the prospective logical bytes fit both `reviewer-cache.max-project-gib` and
+`reviewer-cache.min-free-gib`; each setting layers project configuration over
+user configuration over a 50 GiB default. Invalid configuration, failed
+accounting, unavailable filesystem capacity, or either exceeded limit starts
+that reviewer cold without pausing the Attempt. Fluent detects toolchains from
+marker files (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle`) and
+copies canonical directories using reflink, hardlink, or deep copy in that
+order. A `.fluent/hooks/prepare-pre-review` hook still overrides built-in
+detection. When a Reviewer Task becomes terminal, Fluent removes only its
+canonical cache directories (`target`, `node_modules`, `dist`, `.next`,
+`build`, `.gradle`) and retains review evidence, hook output, logs, and
+transcripts; a later admission retries any failed cleanup. Review-only and
+post-merge review Attempts skip built-in cache preparation because they review
+the source checkout, not a candidate with writer-produced build outputs.
 
 `fluent attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
