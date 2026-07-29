@@ -178,6 +178,22 @@ run_harness() {
   HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" bash "$HARNESS" "$@"
 }
 
+# Install tripwire executables that record any attempt to reach the network or a
+# model. Each appends to $TRIPWIRE_LOG and fails so accidental use is loud.
+write_tripwires() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local name
+  for name in curl wget claude codex; do
+    cat > "$dir/$name" <<TRIP
+#!/usr/bin/env bash
+printf '%s\n' "$name" >> "$TRIPWIRE_LOG"
+exit 97
+TRIP
+    chmod +x "$dir/$name"
+  done
+}
+
 assert_contains() {
   if ! printf '%s' "$1" | grep -Fq -- "$2"; then
     printf '    FAIL: output missing "%s"\n' "$2"
@@ -344,6 +360,46 @@ test_failure_preserves_evidence_and_resume() {
   return $rc
 }
 
+test_automated_test_uses_only_local_doubles() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A fake installer selects Fluent through the boundary without the network.
+  local installer="$WORK/fake-installer"
+  write_fake_installer "$installer"
+
+  # Tripwires catch any model launch or network fetch.
+  TRIPWIRE_LOG="$WORK/tripwire-log"
+  : > "$TRIPWIRE_LOG"
+  local tripwire_bin="$WORK/tripwire-bin"
+  write_tripwires "$tripwire_bin"
+
+  local rc=0
+  # Drive the full journey with the local doubles on PATH.
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
+    bash "$HARNESS" prepare "$ROOT" --installer "$installer" > /dev/null 2>&1 || rc=1
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
+    bash "$HARNESS" run "$ROOT" > /dev/null 2>&1 || rc=1
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
+    bash "$HARNESS" land "$ROOT" > /dev/null 2>&1 || rc=1
+
+  # No model or network double was ever invoked.
+  if [ -s "$TRIPWIRE_LOG" ]; then
+    printf '    FAIL: harness reached the network or a model: %s\n' \
+      "$(cat "$TRIPWIRE_LOG")"
+    rc=1
+  fi
+  # The operator's real home is untouched.
+  [ "$(ls -A "$REAL_HOME")" = "sentinel" ] \
+    || { printf '    FAIL: operator home changed\n'; rc=1; }
+  [ "$(cat "$REAL_HOME/sentinel")" = "untouched" ] \
+    || { printf '    FAIL: operator home content changed\n'; rc=1; }
+  # The journey still completed against the local doubles.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: journey did not complete\n'; rc=1; }
+  return $rc
+}
+
 printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
@@ -354,5 +410,7 @@ run_test "ready handoff is actionable" test_ready_handoff_is_actionable
 run_test "land verifies target" test_land_verifies_target
 run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
+run_test "automated test uses only local doubles" \
+  test_automated_test_uses_only_local_doubles
 
 summarize_and_exit
