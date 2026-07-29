@@ -770,7 +770,7 @@ fn complete_write_task(
 }
 
 fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
-    run_review_task_with_coder(config, None)
+    run_review_task_with_coder(config, None, &FilesystemReviewerCacheAdmission)
 }
 
 /// Run a Review Task, optionally injecting the reviewer coder factory.
@@ -783,6 +783,7 @@ fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 fn run_review_task_with_coder(
     config: WorkTaskRunConfig<'_>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
+    cache_admission: &dyn ReviewerCacheAdmission,
 ) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
@@ -982,6 +983,7 @@ fn run_review_task_with_coder(
             config.work_item_id,
             config.attempt_id,
             config.task_id,
+            cache_admission,
         );
     }
 
@@ -4118,6 +4120,7 @@ fn prepare_reviewer_build_cache(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
+    admission: &dyn ReviewerCacheAdmission,
 ) {
     let hook_name = "prepare-pre-review";
     if hooks::find_hook(candidate_workspace, hook_name).is_some() {
@@ -4128,14 +4131,16 @@ fn prepare_reviewer_build_cache(
             work_item_id,
             attempt_id,
             task_id,
+            admission,
         );
     } else if let Some(toolchain) = prep::detect_toolchain(candidate_workspace) {
-        admit_reviewer_build_cache(
+        admit_reviewer_build_cache_with_admission(
             project_root,
             candidate_workspace,
             artifact_dir,
             toolchain,
             task_id,
+            admission,
         );
     }
 }
@@ -4151,11 +4156,12 @@ fn prepare_reviewer_hook_cache(
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
+    cache_admission: &dyn ReviewerCacheAdmission,
 ) {
     let admission = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
         Ok(lock) => {
             let store = WorkModelStore::new(project_root);
-            match reclaim_terminal_reviewer_caches(project_root, &store) {
+            match cache_admission.reclaim_terminal_caches(project_root, &store) {
                 Ok(()) => Some((lock, store)),
                 Err(error) => {
                     eprintln!(
@@ -4206,7 +4212,13 @@ fn prepare_reviewer_hook_cache(
 
     if hook_passed {
         if let Some((_lock, store)) = admission {
-            admit_hook_reviewer_cache(project_root, artifact_dir, task_id, &store);
+            admit_hook_reviewer_cache_with_admission(
+                project_root,
+                artifact_dir,
+                task_id,
+                &store,
+                cache_admission,
+            );
         } else {
             remove_unadmitted_hook_cache(artifact_dir);
         }
@@ -4312,23 +4324,6 @@ impl ReviewerCacheAdmission for FilesystemReviewerCacheAdmission {
     }
 }
 
-fn admit_reviewer_build_cache(
-    project_root: &Path,
-    candidate_workspace: &Path,
-    artifact_dir: &Path,
-    toolchain: &prep::Toolchain,
-    task_id: &str,
-) {
-    admit_reviewer_build_cache_with_admission(
-        project_root,
-        candidate_workspace,
-        artifact_dir,
-        toolchain,
-        task_id,
-        &FilesystemReviewerCacheAdmission,
-    );
-}
-
 fn admit_reviewer_build_cache_with_admission(
     project_root: &Path,
     candidate_workspace: &Path,
@@ -4387,21 +4382,6 @@ fn admit_reviewer_build_cache_with_admission(
 /// Account for canonical caches a custom preparation hook wrote into this
 /// Reviewer's artifact area. On every failed or over-limit check, remove only
 /// those rebuildable directories and leave the hook's other output intact.
-fn admit_hook_reviewer_cache(
-    project_root: &Path,
-    artifact_dir: &Path,
-    task_id: &str,
-    store: &WorkModelStore,
-) {
-    admit_hook_reviewer_cache_with_admission(
-        project_root,
-        artifact_dir,
-        task_id,
-        store,
-        &FilesystemReviewerCacheAdmission,
-    );
-}
-
 fn admit_hook_reviewer_cache_with_admission(
     project_root: &Path,
     artifact_dir: &Path,
@@ -4674,7 +4654,13 @@ fn allowed_status_prefix(workspace_path: &Path, allowed_artifact_dir: &Path) -> 
 fn filtered_status_entries(entries: &[String], allowed_prefix: &Path) -> Vec<String> {
     let mut filtered = entries
         .iter()
-        .filter(|entry| !status_entry_touches_path(entry, allowed_prefix))
+        .filter(|entry| {
+            !status_entry_touches_path(entry, allowed_prefix)
+                && !status_entry_touches_path(
+                    entry,
+                    Path::new(".fluent/work/locks/reviewer-cache.lock"),
+                )
+        })
         .cloned()
         .collect::<Vec<_>>();
     filtered.sort();
@@ -4732,6 +4718,12 @@ fn collect_protected_fluent_files(
         let path = entry.path();
         let relative = path.strip_prefix(workspace_path)?.to_path_buf();
         if relative == allowed || relative.starts_with(allowed) {
+            continue;
+        }
+        if relative == Path::new(".fluent/work/locks/reviewer-cache.lock") {
+            // Cache admission owns this project-level coordination file. It can be
+            // created while a review-only source checkout is guarded, but it is
+            // never reviewer output and must not be restored or attributed to it.
             continue;
         }
         let file_type = entry.file_type()?;
@@ -6325,6 +6317,7 @@ mod tests {
             "work-1",
             "attempt-1",
             "review-1",
+            &FilesystemReviewerCacheAdmission,
         );
 
         assert!(artifact.join("hook-note").is_file());
@@ -6360,6 +6353,7 @@ mod tests {
             "work-1",
             "attempt-1",
             "review-1",
+            &FilesystemReviewerCacheAdmission,
         );
 
         assert!(artifact.join("hook-note").is_file());
@@ -6402,8 +6396,135 @@ mod tests {
         }
     }
 
+    struct CacheObservingReviewCoder {
+        saw_warm_cache: Arc<Mutex<bool>>,
+    }
+
+    impl crate::coder::Coder for CacheObservingReviewCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the review route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            *self.saw_warm_cache.lock().unwrap() = working_dir.join("target/output").is_file();
+            fs::write(working_dir.join("review.md"), "review evidence")?;
+            Ok(0)
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the review route never runs interactively")
+        }
+    }
+
     #[test]
     fn reviewer_cache_admission_warms_within_project_budget() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let git = |args: &[&str]| crate::git::run(&project_root, args, "test git setup").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t.co"]);
+        git(&["config", "user.name", "t"]);
+        fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"cache-route\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project_root.join("target")).unwrap();
+        fs::write(project_root.join("target/output"), "candidate cache").unwrap();
+        fs::create_dir_all(project_root.join(".fluent")).unwrap();
+        fs::write(
+            project_root.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "baseline"]);
+        let head = crate::git::run_stdout(&project_root, &["rev-parse", "HEAD"], "head").unwrap();
+
+        let store = WorkModelStore::new(&project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Warm reviewer cache".to_string(),
+            ..Default::default()
+        };
+        item.add_review_only_attempt("attempt-1", &["architecture"], "main", head.trim(), true)
+            .unwrap();
+        let review_task_id = "attempt-1-review-architecture".to_string();
+        let artifact_dir = project_root.join(crate::work_model::work_artifact_path(
+            "work-1",
+            "attempt-1",
+            &review_task_id,
+        ));
+        store.create_work_item(&item).unwrap();
+
+        let saw_warm_cache = Arc::new(Mutex::new(false));
+        let saw_warm_cache_for_coder = Arc::clone(&saw_warm_cache);
+        let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
+            Box::new(CacheObservingReviewCoder {
+                saw_warm_cache: Arc::clone(&saw_warm_cache_for_coder),
+            })
+        };
+        let admission = SyntheticReviewerCacheAdmission {
+            total: Ok(0),
+            free: Ok(u64::MAX),
+        };
+        let resolver = ContentResolver::new(Some(&project_root));
+        run_review_task_with_coder(
+            WorkTaskRunConfig {
+                project_root: &project_root,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: &review_task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+            &admission,
+        )
+        .unwrap();
+
+        assert!(
+            *saw_warm_cache.lock().unwrap(),
+            "the production reviewer route must receive the admitted cache"
+        );
+        assert!(
+            !artifact_dir.join("target").exists(),
+            "terminal cleanup must reclaim only the canonical cache"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact_dir.join("review.md")).unwrap(),
+            "review evidence"
+        );
+    }
+
+    #[test]
+    fn reviewer_cache_helper_warms_within_project_budget() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
         let candidate = project.join("candidate");
@@ -6589,7 +6710,20 @@ mod tests {
         git(&["config", "user.email", "t@t.co"]);
         git(&["config", "user.name", "t"]);
         fs::write(project_root.join("tracked.txt"), b"original").unwrap();
-        git(&["add", "tracked.txt"]);
+        fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"terminal-cache\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project_root.join("target")).unwrap();
+        fs::write(project_root.join("target/output"), "candidate cache").unwrap();
+        fs::create_dir_all(project_root.join(".fluent")).unwrap();
+        fs::write(
+            project_root.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
         git(&["commit", "-q", "-m", "baseline"]);
         let head = crate::git::run_stdout(project_root, &["rev-parse", "HEAD"], "head").unwrap();
 
@@ -6629,6 +6763,7 @@ mod tests {
                 store_lock: None,
             },
             Some(&make_coder),
+            &FilesystemReviewerCacheAdmission,
         )
         .expect_err("a composite coder+confinement-restore failure must return an error");
 
@@ -6670,6 +6805,25 @@ mod tests {
             review.status,
             TaskStatus::NeedsUser,
             "the Review Task is durably terminalized through the real route, never left Executing"
+        );
+        let artifact_dir = project_root.join(crate::work_model::work_artifact_path(
+            "work-1",
+            "attempt-1",
+            &review_task_id,
+        ));
+        assert!(
+            !artifact_dir.join("target").exists(),
+            "NeedsUser Reviewer settlement must reclaim the admitted canonical cache"
+        );
+        assert!(
+            project_root
+                .join(crate::work_model::work_artifact_path(
+                    "work-1",
+                    "attempt-1",
+                    "needs-user-attempt-1-review-architecture.md",
+                ))
+                .is_file(),
+            "terminal cleanup must retain the NeedsUser handoff evidence"
         );
         assert_eq!(
             after.attempts[0].status,
