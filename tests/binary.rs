@@ -18457,11 +18457,20 @@ fn skills_add_migrates_every_public_0_1_4_skill() {
         assert_eq!(sidecar["agent"], "codex");
         assert_eq!(sidecar["scope"], "global");
         assert_eq!(sidecar["skill"], *skill);
-        assert!(sidecar["bundle_sha256"].as_str().is_some());
-        assert!(
-            sidecar["files"]
-                .as_array()
-                .is_some_and(|files| !files.is_empty())
+        let files = skill_file_snapshot(&installed);
+        let paths = files
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sidecar["files"],
+            serde_json::json!(paths),
+            "migration must record the complete {skill} bundle inventory"
+        );
+        assert_eq!(
+            sidecar["bundle_sha256"],
+            bundle_digest(&files),
+            "migration must record the {skill} bundle digest"
         );
     }
 }
