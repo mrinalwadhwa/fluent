@@ -360,30 +360,50 @@ phase_run() {
   run_fluent "$logs/attempt-create.log" attempt create "$wi" "$ATTEMPT_ID" \
     || fail_phase "$root" "run" "$logs/attempt-create.log" "run"
 
-  # Advance the Attempt through the Learner until a ready candidate appears.
+  # Advance the Attempt until its Learner has succeeded. A Merge Candidate can
+  # exist before the Learner runs, but landing requires a succeeded Learner, so
+  # readiness is gated on the stored Attempt learning state — not merely on the
+  # candidate record.
   local attempt_log="$logs/attempt-run.log"
+  local attempt_show_log="$logs/attempt-show.log"
   : > "$attempt_log"
-  local status=""
+  : > "$attempt_show_log"
+  local learning="" attempt_status=""
   for _ in 1 2 3 4 5 6 7 8; do
     run_fluent "$attempt_log" attempt run "$wi" "$ATTEMPT_ID" \
       || fail_phase "$root" "run" "$attempt_log" "run"
-    local show_log="$logs/candidate-show.log"
-    if capture_fluent "$show_log" merge-candidate show "$wi" "$cand" \
-      > "$logs/candidate.json" 2>/dev/null; then
-      status="$(jq -r '.merge_state.status' "$logs/candidate.json")"
-      break
-    fi
+    capture_fluent "$attempt_show_log" attempt show "$wi" "$ATTEMPT_ID" \
+      > "$logs/attempt.json" 2>/dev/null \
+      || fail_phase "$root" "run" "$attempt_show_log" "run"
+    learning="$(jq -r '.learning.status // "none"' "$logs/attempt.json")"
+    attempt_status="$(jq -r '.status // "none"' "$logs/attempt.json")"
+    case "$learning" in
+      succeeded) break ;;
+      failed) fail_phase "$root" "run" "$attempt_show_log" "run" ;;
+    esac
+    case "$attempt_status" in
+      needs-user|failed) fail_phase "$root" "run" "$attempt_show_log" "run" ;;
+    esac
   done
 
+  # The Learner never reached a succeeded state within the retry budget: a
+  # truthful nonterminal state that must not be handed off as ready.
+  [ "$learning" = "succeeded" ] \
+    || fail_phase "$root" "run" "$attempt_show_log" "run"
+
+  # Confirm the succeeded Attempt exposes a pending Merge Candidate to inspect.
+  local show_log="$logs/candidate-show.log"
+  capture_fluent "$show_log" merge-candidate show "$wi" "$cand" \
+    > "$logs/candidate.json" 2>/dev/null \
+    || fail_phase "$root" "run" "$show_log" "run"
+  local status
+  status="$(jq -r '.merge_state.status' "$logs/candidate.json")"
   case "$status" in
     pending)
       : # ready to inspect
       ;;
-    needs-user|failed|merge-failed)
-      fail_phase "$root" "run" "$logs/candidate-show.log" "run"
-      ;;
     *)
-      fail_phase "$root" "run" "$attempt_log" "run"
+      fail_phase "$root" "run" "$show_log" "run"
       ;;
   esac
 

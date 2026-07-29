@@ -37,6 +37,24 @@ STAGE_FILE="$STATE_DIR/stage"
 stage() { cat "$STAGE_FILE"; }
 set_stage() { printf '%s\n' "$1" > "$STAGE_FILE"; }
 
+# Count `attempt run` invocations so the Learner can succeed only after a
+# configurable number of runs, modelling a candidate that exists before the
+# Learner has succeeded.
+RUNS_FILE="$STATE_DIR/runs"
+[ -f "$RUNS_FILE" ] || printf '0\n' > "$RUNS_FILE"
+runs() { cat "$RUNS_FILE"; }
+# The Learner reports "succeeded" once this many `attempt run` calls have
+# happened; 0 means never (it stays in-progress forever).
+LEARNER_SUCCEED_AT="${FAKE_LEARNER_SUCCEED_AT:-1}"
+learning_status() {
+  local n; n="$(runs)"
+  if [ "$LEARNER_SUCCEED_AT" -ne 0 ] && [ "$n" -ge "$LEARNER_SUCCEED_AT" ]; then
+    printf 'succeeded'
+  else
+    printf 'in-progress'
+  fi
+}
+
 record() {
   [ -n "${FAKE_CMD_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_CMD_LOG"
   return 0
@@ -73,19 +91,22 @@ case "${1:-}" in
         set_stage "attempt"
         ;;
       run)
-        [ "$(stage)" = "attempt" ] || reject "attempt run out of order"
+        case "$(stage)" in attempt|ran) ;; *) reject "attempt run out of order (stage=$(stage))" ;; esac
         if [ "${FAKE_ATTEMPT_RUN_FAILS:-0}" = "1" ]; then
           reject "simulated attempt run failure"
         fi
-        # Produce the fix on a candidate branch, leaving main untouched.
-        git checkout -q -b smoke-candidate
-        printf 'hello\n' > greeting.txt
-        git add greeting.txt
-        git commit -q -m "Make greeting say hello"
-        CANDIDATE_COMMIT="$(git rev-parse HEAD)"
-        git checkout -q main
-        mkdir -p .fluent/work/merge-candidates
-        cat > ".fluent/work/merge-candidates/${CANDIDATE_ID}.json" <<JSON
+        printf '%s\n' "$(( $(runs) + 1 ))" > "$RUNS_FILE"
+        # The first run produces the fix on a candidate branch, leaving main
+        # untouched. The candidate exists before the Learner has succeeded.
+        if [ "$(stage)" = "attempt" ]; then
+          git checkout -q -b smoke-candidate
+          printf 'hello\n' > greeting.txt
+          git add greeting.txt
+          git commit -q -m "Make greeting say hello"
+          CANDIDATE_COMMIT="$(git rev-parse HEAD)"
+          git checkout -q main
+          mkdir -p .fluent/work/merge-candidates
+          cat > ".fluent/work/merge-candidates/${CANDIDATE_ID}.json" <<JSON
 {
   "id": "${CANDIDATE_ID}",
   "candidate_commit": "${CANDIDATE_COMMIT}",
@@ -93,7 +114,21 @@ case "${1:-}" in
   "merge_state": { "status": "pending", "merged_commit": null }
 }
 JSON
-        set_stage "ran"
+          set_stage "ran"
+        fi
+        ;;
+      show)
+        # Expose the stored Attempt as JSON, including its Learner state.
+        LEARN="$(learning_status)"
+        ASTATUS="executing"
+        [ "$LEARN" = "succeeded" ] && ASTATUS="complete"
+        cat <<JSON
+{
+  "id": "attempt-1",
+  "status": "${ASTATUS}",
+  "learning": { "status": "${LEARN}", "runs": $(runs) }
+}
+JSON
         ;;
       *) reject "unknown attempt subcommand: $sub" ;;
     esac
@@ -262,9 +297,10 @@ test_run_uses_public_sequence_and_stops_before_land() {
   run_harness run "$ROOT" > "$WORK/run.out" 2>&1
 
   local rc=0
-  # The recorded commands follow the public first-run sequence.
+  # The recorded commands follow the public first-run sequence. `attempt show`
+  # gates readiness on the stored Learner state before the candidate is shown.
   local expected
-  expected="$(printf 'init\nwork-item create\nattempt create\nattempt run\nmerge-candidate show\n')"
+  expected="$(printf 'init\nwork-item create\nattempt create\nattempt run\nattempt show\nmerge-candidate show\n')"
   if [ "$(cat "$FAKE_CMD_LOG")" != "$expected" ]; then
     printf '    FAIL: unexpected command sequence:\n%s\n' "$(cat "$FAKE_CMD_LOG")"
     rc=1
@@ -285,6 +321,57 @@ test_run_uses_public_sequence_and_stops_before_land() {
   if [ -n "$(git -C "$ROOT/project/main" status --porcelain)" ]; then
     printf '    FAIL: target repository is dirty after run\n'; rc=1
   fi
+  return $rc
+}
+
+test_run_waits_for_learner_success() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # The candidate is produced on the first attempt run, but the Learner never
+  # reaches "succeeded". The harness must not hand off a ready candidate.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_LEARNER_SUCCEED_AT=0 \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run handed off before the Learner succeeded\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The candidate record exists, proving the gate is on the Learner, not merely
+  # on the candidate's presence.
+  [ -f "$ROOT/project/main/.fluent/work/merge-candidates/attempt-1-merge-candidate.json" ] \
+    || { printf '    FAIL: candidate was never created\n'; rc=1; }
+  # No ready handoff was printed.
+  if printf '%s' "$out" | grep -q 'ready Merge Candidate'; then
+    printf '    FAIL: printed a ready handoff without a succeeded Learner\n'; rc=1
+  fi
+  # The failure is truthful: it names the run phase and preserves the root.
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  # The safe phase stays prepared so resume repeats run, not land.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced without a succeeded Learner\n'; rc=1; }
+  return $rc
+}
+
+test_run_reaches_ready_after_delayed_learner() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # The Learner succeeds only on the second run: the candidate exists first.
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_LEARNER_SUCCEED_AT=2 \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1 \
+    || { printf '    FAIL: run did not reach a ready candidate\n'; rc=1; }
+  # The harness advanced the Attempt more than once before handing off.
+  if [ "$(grep -c '^attempt run$' "$FAKE_CMD_LOG")" -lt 2 ]; then
+    printf '    FAIL: harness handed off on the first candidate\n'; rc=1
+  fi
+  # It then reached the ready state.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase not ran after delayed Learner\n'; rc=1; }
   return $rc
 }
 
@@ -406,6 +493,9 @@ run_test "prepare is isolated" test_prepare_is_isolated
 run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
 run_test "run uses public sequence and stops before land" \
   test_run_uses_public_sequence_and_stops_before_land
+run_test "run waits for learner success" test_run_waits_for_learner_success
+run_test "run reaches ready after delayed learner" \
+  test_run_reaches_ready_after_delayed_learner
 run_test "ready handoff is actionable" test_ready_handoff_is_actionable
 run_test "land verifies target" test_land_verifies_target
 run_test "failure preserves evidence and resume" \
