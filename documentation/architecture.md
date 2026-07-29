@@ -183,7 +183,10 @@ that reviewer cold without pausing the Attempt. Fluent detects toolchains from
 marker files (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle`) and
 copies canonical directories using reflink, hardlink, or deep copy in that
 order. A `.fluent/hooks/prepare-pre-review` hook still overrides built-in
-detection. When a Reviewer Task becomes terminal, Fluent removes only its
+detection, but runs under that same lock after terminal-cache reclamation. Its
+noncanonical output is always retained; canonical cache directories it creates
+are retained only when their post-hook accounting fits both limits, otherwise
+they are removed and the reviewer continues cold. When a Reviewer Task becomes terminal, Fluent removes only its
 canonical cache directories (`target`, `node_modules`, `dist`, `.next`,
 `build`, `.gradle`) and retains review evidence, hook output, logs, and
 transcripts; a later admission retries any failed cleanup. Review-only and

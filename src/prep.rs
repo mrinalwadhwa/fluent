@@ -44,7 +44,20 @@ pub fn populate_reviewer_cache(
 ) -> Result<()> {
     for dir_name in toolchain.dirs {
         let src = candidate.join(dir_name);
-        if !src.is_dir() {
+        let metadata = match std::fs::symlink_metadata(&src) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", src.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "canonical build directory {} must not be a symlink",
+                src.display()
+            );
+        }
+        if !metadata.is_dir() {
             continue;
         }
         let dst = artifact_dir.join(dir_name);
@@ -61,22 +74,35 @@ pub fn populate_reviewer_cache(
 }
 
 /// Return the canonical build-cache directories present directly under `root`.
-pub fn managed_cache_dirs(root: &Path) -> Vec<PathBuf> {
+fn managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for name in TOOLCHAINS.iter().flat_map(|toolchain| toolchain.dirs) {
         let path = root.join(name);
-        if path.is_dir() && !dirs.contains(&path) {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "canonical managed cache {} must not be a symlink",
+                path.display()
+            );
+        }
+        if metadata.is_dir() && !dirs.contains(&path) {
             dirs.push(path);
         }
     }
-    dirs
+    Ok(dirs)
 }
 
 /// Sum regular-file lengths below canonical cache directories without following
 /// symlinks. Metadata failures and arithmetic overflow fail closed.
 pub fn managed_cache_bytes(root: &Path) -> Result<u64> {
     let mut total = 0_u64;
-    for path in managed_cache_dirs(root) {
+    for path in managed_cache_dirs(root)? {
         total = total
             .checked_add(directory_logical_bytes(&path)?)
             .ok_or_else(|| {
@@ -90,7 +116,20 @@ pub fn toolchain_cache_bytes(root: &Path, toolchain: &Toolchain) -> Result<u64> 
     let mut total = 0_u64;
     for name in toolchain.dirs {
         let path = root.join(name);
-        if path.is_dir() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "canonical build directory {} must not be a symlink",
+                path.display()
+            );
+        }
+        if metadata.is_dir() {
             total = total
                 .checked_add(directory_logical_bytes(&path)?)
                 .ok_or_else(|| {
@@ -143,9 +182,29 @@ pub fn filesystem_free_bytes(path: &Path) -> Result<u64> {
 /// Remove only canonical managed cache directories, preserving every other
 /// reviewer artifact.
 pub fn remove_managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
-    let dirs = managed_cache_dirs(root);
+    let mut dirs = Vec::new();
+    for name in TOOLCHAINS.iter().flat_map(|toolchain| toolchain.dirs) {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => {
+                if !dirs.contains(&path) {
+                    dirs.push(path);
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        }
+    }
     for path in &dirs {
-        std::fs::remove_dir_all(path).with_context(|| {
+        let result = if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            std::fs::remove_file(path)
+        } else {
+            std::fs::remove_dir_all(path)
+        };
+        result.with_context(|| {
             format!("failed to remove managed reviewer cache {}", path.display())
         })?;
     }
@@ -316,6 +375,18 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("notes"), tmp.path().join("target/link"))
             .unwrap();
         assert_eq!(managed_cache_bytes(tmp.path()).unwrap(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_canonical_cache_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, tmp.path().join("target")).unwrap();
+
+        let error = managed_cache_bytes(tmp.path()).unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
     }
 
     #[test]

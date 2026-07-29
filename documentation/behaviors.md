@@ -6060,6 +6060,7 @@ the Reviewer and reason, start it cold, and continue the Attempt.
 WHEN a Reviewer Task becomes terminal, THE SYSTEM SHALL remove only canonical
 build-cache directories from its artifact area and preserve review evidence,
 logs, transcripts, and noncanonical hook output.
+Test: src/work_task_executor.rs (prepare_pre_review_reclaims_only_canonical_cache_dirs)
 
 ## Generated commit wording
 

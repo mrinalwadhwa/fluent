@@ -4121,39 +4121,14 @@ fn prepare_reviewer_build_cache(
 ) {
     let hook_name = "prepare-pre-review";
     if hooks::find_hook(candidate_workspace, hook_name).is_some() {
-        let log_dir = artifact_dir.join("hooks");
-        let context = hooks::HookContext {
-            work_item_id: Some(work_item_id.to_string()),
-            attempt_id: Some(attempt_id.to_string()),
-            task_id: Some(task_id.to_string()),
-            reviewer_artifact_dir: Some(artifact_dir.to_path_buf()),
-            log_dir,
-            ..Default::default()
-        };
-        match hooks::run_hook(
+        prepare_reviewer_hook_cache(
+            project_root,
             candidate_workspace,
-            hook_name,
-            candidate_workspace,
-            &context,
-        ) {
-            Ok(Some(outcome)) if outcome.passed => {
-                eprintln!(
-                    "  Reviewer prep     {hook_name} hook passed (log: {})",
-                    outcome.log_path.display()
-                );
-            }
-            Ok(Some(outcome)) => {
-                eprintln!(
-                    "  Reviewer prep     {hook_name} hook failed (exit {}, log: {})",
-                    outcome.exit_code,
-                    outcome.log_path.display()
-                );
-            }
-            Ok(None) => {}
-            Err(err) => {
-                eprintln!("  Reviewer prep     {hook_name} hook error: {err:#}");
-            }
-        }
+            artifact_dir,
+            work_item_id,
+            attempt_id,
+            task_id,
+        );
     } else if let Some(toolchain) = prep::detect_toolchain(candidate_workspace) {
         admit_reviewer_build_cache(
             project_root,
@@ -4162,6 +4137,66 @@ fn prepare_reviewer_build_cache(
             toolchain,
             task_id,
         );
+    }
+}
+
+/// Run custom reviewer preparation while holding the same admission lock as the
+/// built-in cache path. The hook keeps its established contract, but canonical
+/// cache directories it creates are retained only after the bounded admission
+/// check; all other hook output remains untouched.
+fn prepare_reviewer_hook_cache(
+    project_root: &Path,
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) {
+    let _lock = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!(
+                "  Reviewer prep     {task_id} starting cold: cache lock check failed: {error}"
+            );
+            return;
+        }
+    };
+    let store = WorkModelStore::new(project_root);
+    if let Err(error) = reclaim_terminal_reviewer_caches(project_root, &store) {
+        eprintln!(
+            "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
+        );
+        return;
+    }
+
+    let context = hooks::HookContext {
+        work_item_id: Some(work_item_id.to_string()),
+        attempt_id: Some(attempt_id.to_string()),
+        task_id: Some(task_id.to_string()),
+        reviewer_artifact_dir: Some(artifact_dir.to_path_buf()),
+        log_dir: artifact_dir.join("hooks"),
+        ..Default::default()
+    };
+    match hooks::run_hook(
+        candidate_workspace,
+        "prepare-pre-review",
+        candidate_workspace,
+        &context,
+    ) {
+        Ok(Some(outcome)) if outcome.passed => {
+            eprintln!(
+                "  Reviewer prep     prepare-pre-review hook passed (log: {})",
+                outcome.log_path.display()
+            );
+            admit_hook_reviewer_cache(project_root, artifact_dir, task_id, &store);
+        }
+        Ok(Some(outcome)) => eprintln!(
+            "  Reviewer prep     prepare-pre-review hook failed (exit {}, log: {})",
+            outcome.exit_code,
+            outcome.log_path.display()
+        ),
+        Ok(None) => {}
+        Err(error) => eprintln!("  Reviewer prep     prepare-pre-review hook error: {error:#}"),
     }
 }
 
@@ -4275,6 +4310,53 @@ fn admit_reviewer_build_cache(
         Err(error) => eprintln!(
             "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
         ),
+    }
+}
+
+/// Account for canonical caches a custom preparation hook wrote into this
+/// Reviewer's artifact area. On every failed or over-limit check, remove only
+/// those rebuildable directories and leave the hook's other output intact.
+fn admit_hook_reviewer_cache(
+    project_root: &Path,
+    artifact_dir: &Path,
+    task_id: &str,
+    store: &WorkModelStore,
+) {
+    let decision = (|| -> Result<Option<&'static str>> {
+        let limits = crate::config::resolve_reviewer_cache_config(project_root)
+            .map_err(anyhow::Error::new)?;
+        let current = managed_reviewer_cache_total(project_root, store)?;
+        if current > limits.max_project_bytes.value {
+            return Ok(Some("project cache budget"));
+        }
+        let free = prep::filesystem_free_bytes(artifact_dir)?;
+        if free < limits.min_free_bytes.value {
+            return Ok(Some("host free-space floor"));
+        }
+        Ok(None)
+    })();
+    match decision {
+        Ok(None) => eprintln!("  Reviewer prep     admitted prepare-pre-review managed cache"),
+        Ok(Some(reason)) => {
+            if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
+                eprintln!(
+                    "  Reviewer prep     retained cache {}: {error:#}",
+                    artifact_dir.display()
+                );
+            }
+            eprintln!("  Reviewer prep     {task_id} starting cold: {reason} would be exceeded");
+        }
+        Err(error) => {
+            if let Err(cleanup_error) = prep::remove_managed_cache_dirs(artifact_dir) {
+                eprintln!(
+                    "  Reviewer prep     retained cache {}: {cleanup_error:#}",
+                    artifact_dir.display()
+                );
+            }
+            eprintln!(
+                "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
+            );
+        }
     }
 }
 
@@ -6091,6 +6173,77 @@ mod tests {
             after.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::TranscriptPump),
             "the preserved typed pump primary classifies the pause, not the cleanup failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_pre_review_reclaims_only_canonical_cache_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let artifact_relative =
+            crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
+        let artifact = project.join(&artifact_relative);
+        fs::create_dir_all(&artifact).unwrap();
+        fs::create_dir_all(project.join(".fluent/hooks")).unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 0\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+        let hook = project.join(".fluent/hooks/prepare-pre-review");
+        fs::write(
+            &hook,
+            "#!/bin/sh\nmkdir -p \"$FLUENT_REVIEWER_ARTIFACT_DIR/target\"\nprintf cache > \"$FLUENT_REVIEWER_ARTIFACT_DIR/target/output\"\nprintf evidence > \"$FLUENT_REVIEWER_ARTIFACT_DIR/hook-note\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+
+        let store = WorkModelStore::new(project);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Hook cache".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut item.attempts[0].tasks[0];
+        task.id = "review-1".to_string();
+        task.kind = TaskKind::Review;
+        task.status = TaskStatus::Executing;
+        task.workspace_access.writes.clear();
+        task.workspace_access.reads.push(WorkspaceRef {
+            id: "candidate".to_string(),
+            path: "candidate".to_string(),
+        });
+        task.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "candidate".to_string(),
+            source_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            base_commit: None,
+        });
+        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: artifact_relative,
+        });
+        store.create_work_item(&item).unwrap();
+
+        prepare_reviewer_hook_cache(
+            project,
+            project,
+            &artifact,
+            "work-1",
+            "attempt-1",
+            "review-1",
+        );
+
+        assert!(artifact.join("hook-note").is_file());
+        assert!(
+            !artifact.join("target").exists(),
+            "over-budget hook cache must be removed while noncanonical output remains"
         );
     }
 
