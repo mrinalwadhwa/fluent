@@ -1,6 +1,6 @@
 ---
 name: fluent
-description: Operate Fluent, a self-improving software factory. Use when a user wants to review, build, fix, or improve software with Fluent. Invoke when they ask to install or initialize Fluent; capture an Observation; define a slice; create or refine a Brief, Behavior Specification, Technical Approach, Implementation Plan, or Work Item; run, queue, inspect, resume, or recover an Attempt; review a codebase through Fluent; manage or land a Merge Candidate; capture project Expertise; or configure Fluent's agents, scheduler, sandboxes, or remote execution.
+description: Operate the fluent workflow to build software autonomously over extended periods. Interactive stages (brief, behaviors, approach, plan) run with the user. Autonomous execution loops writer → tester → parallel reviewers, then runs the Learner after a passing review round. Only a successful Learner run produces a ready Merge Candidate. A retryable Learner failure resumes with `fluent attempt run`; a non-relaunchable evidence failure stays blocked for human recovery. When a decision needs a human, it sets `needs-user` and pauses, then resumes once the user resolves it.
 ---
 
 # Fluent
@@ -12,8 +12,6 @@ Behaviors describe what the system must do; the approach describes how. If execu
 ## Work model
 
 The delegated build lifecycle is the Work model: Work Item → Attempt → Task → Workspace → Merge Candidate. Work Items represent planned Fluent work, Attempts carry one execution history, Tasks are schedulable units, and Workspaces are the filesystem contexts Tasks read or write. A Merge Candidate record may exist while the Learner is retryable; it becomes ready to land only after the Learner succeeds.
-
-Only a successful Learner run produces a ready Merge Candidate.
 
 ## Make sure fluent is installed
 

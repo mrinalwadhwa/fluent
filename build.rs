@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
@@ -18,6 +19,95 @@ fn main() {
     println!("cargo:rustc-env=FLUENT_BUILD_COMMIT={commit}");
 
     generate_bundled_skills();
+    generate_skill_migrations();
+}
+
+/// Embed exact historical bundle identities that may be adopted without a
+/// managed-installation record.
+fn generate_skill_migrations() {
+    let migrations_dir = PathBuf::from("skill-migrations");
+    println!("cargo:rerun-if-changed={}", migrations_dir.display());
+    let fixture_dir = migrations_dir.join("v0.1.4");
+    let mut entries = Vec::new();
+
+    if fixture_dir.is_dir() {
+        let mut skills = fs::read_dir(&fixture_dir)
+            .expect("failed to read skill migration fixture")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("failed to iterate skill migration fixture");
+        skills.sort_by_key(|entry| entry.file_name());
+        for skill in skills {
+            if !skill
+                .file_type()
+                .expect("failed to inspect skill fixture")
+                .is_dir()
+            {
+                continue;
+            }
+            let name = skill.file_name().to_string_lossy().to_string();
+            let mut files = Vec::new();
+            collect_migration_files(&skill.path(), &skill.path(), &mut files);
+            assert!(
+                !files.is_empty(),
+                "migration fixture {name} must not be empty"
+            );
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut hasher = Sha256::new();
+            for (path, bytes) in files {
+                hasher.update(path.as_bytes());
+                hasher.update([0]);
+                hasher.update((bytes.len() as u64).to_be_bytes());
+                hasher.update(bytes);
+            }
+            entries.push((name, format!("{:x}", hasher.finalize())));
+        }
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let dest = out_dir.join("skill_migrations.rs");
+    let mut code = String::from("/// Historical skill bundles eligible for exact migration.\n");
+    code.push_str("pub const BUNDLED_SKILL_MIGRATION_DIGESTS: &[(&str, &str)] = &[\n");
+    for (skill, digest) in entries {
+        code.push_str("    (");
+        write_rust_str_literal(&mut code, &skill);
+        code.push_str(", ");
+        write_rust_str_literal(&mut code, &digest);
+        code.push_str("),\n");
+    }
+    code.push_str("];\n");
+    fs::write(dest, code).expect("failed to write skill_migrations.rs");
+}
+
+fn collect_migration_files(root: &Path, dir: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+    let mut entries = fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| panic!("failed to iterate {}: {error}", dir.display()));
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("migration entry remains below fixture")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file_type = entry
+            .file_type()
+            .expect("failed to inspect migration entry");
+        if file_type.is_dir() {
+            collect_migration_files(root, &path, files);
+        } else if file_type.is_file() {
+            files.push((
+                relative,
+                fs::read(&path).expect("failed to read migration file"),
+            ));
+        } else {
+            panic!(
+                "migration fixture contains non-regular entry: {}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn print_git_rerun_paths() {

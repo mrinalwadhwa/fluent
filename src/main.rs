@@ -28,6 +28,7 @@ use fluent::observations;
 use fluent::os;
 use fluent::post_merge_review;
 use fluent::review;
+use fluent::skill_install::{self, InstallOutcome};
 use fluent::update;
 use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
@@ -1782,10 +1783,43 @@ fn cmd_skills_add(
     let install_dirs = resolve_install_dirs(cwd, &home, force_global, force_project, &agent)?;
 
     for dir in &install_dirs {
-        for name in &names {
-            work_task_executor::materialize_skill(name, dir)?;
+        let (agent_name, scope) = install_identity(cwd, dir);
+        let outcomes = names
+            .iter()
+            .map(|name| install_skill(name, dir, agent_name, scope))
+            .collect::<Result<Vec<_>>>()?;
+        if outcomes
+            .iter()
+            .all(|outcome| *outcome == InstallOutcome::Current)
+        {
+            eprintln!("Skills are current in {}", dir.display());
+        } else {
+            eprintln!("Installed {} skills to {}", names.len(), dir.display());
         }
-        eprintln!("Installed {} skills to {}", names.len(), dir.display());
+    }
+
+    let mut reported_dirs = install_dirs.clone();
+    for dir in fluent_installation_dirs(cwd, &home) {
+        if !reported_dirs.contains(&dir) {
+            reported_dirs.push(dir);
+        }
+    }
+    let scopes = reported_dirs
+        .iter()
+        .map(|dir| install_identity(cwd, dir).1)
+        .collect::<Vec<_>>();
+    if scopes.contains(&"global") && scopes.contains(&"project") {
+        let installations = reported_dirs
+            .iter()
+            .map(|dir| {
+                let (_, scope) = install_identity(cwd, dir);
+                format!("{scope} {}", dir.join("fluent").display())
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        eprintln!(
+            "Managed Fluent installations: {installations}. The agent may display both entries."
+        );
     }
 
     // Scan for shim-marked fluent installations in candidate directories
@@ -1799,6 +1833,35 @@ fn cmd_skills_add(
     }
 
     Ok(())
+}
+
+fn fluent_installation_dirs(cwd: &Path, home: &str) -> Vec<PathBuf> {
+    global_skill_roots(home)
+        .into_iter()
+        .chain(std::iter::once(cwd.join(".claude/skills")))
+        .filter(|dir| dir.join("fluent").is_dir())
+        .collect()
+}
+
+fn install_skill(skill: &str, dir: &Path, agent: &str, scope: &str) -> Result<InstallOutcome> {
+    let outcome = skill_install::install_bundled_skill(skill, dir, agent, scope)?;
+    if outcome == InstallOutcome::Conflict {
+        eprintln!(
+            "Skipped unmarked skill at {}; remove it manually before Fluent can install there",
+            dir.join(skill).display()
+        );
+    }
+    Ok(outcome)
+}
+
+fn install_identity(cwd: &Path, dir: &Path) -> (&'static str, &'static str) {
+    if dir == cwd.join(".claude/skills") {
+        ("claude", "project")
+    } else if dir.ends_with(".codex/skills") {
+        ("codex", "global")
+    } else {
+        ("claude", "global")
+    }
 }
 
 fn resolve_install_dirs(
@@ -1869,8 +1932,15 @@ fn replace_shim_if_present(skills_dir: &Path) -> Result<()> {
     if !is_fluent_shim(skills_dir) {
         return Ok(());
     }
-    work_task_executor::materialize_skill("fluent", skills_dir)?;
-    eprintln!("Replaced fluent shim in {}", skills_dir.display());
+    let agent = if skills_dir.ends_with(".codex/skills") {
+        "codex"
+    } else {
+        "claude"
+    };
+    let outcome = install_skill("fluent", skills_dir, agent, "global")?;
+    if outcome == InstallOutcome::ReplacedShim {
+        eprintln!("Replaced fluent shim in {}", skills_dir.display());
+    }
     Ok(())
 }
 

@@ -31,6 +31,18 @@ sandbox setup, credential injection, session continuity, worktree
 creation, and remote execution. The fluent skill bridges the two — an
 agent reads it and can drive the entire workflow.
 
+`fluent skills add` materializes bundled skills at agent-facing roots. Each
+installed bundle records a `.fluent-managed.json` sidecar with its schema,
+agent, scope, skill name, complete file inventory, and content digest. A
+self-consistent sidecar grants Fluent authority to update that same identity
+across releases, even when its earlier digest is unknown to the running
+binary. Any malformed or mismatched sidecar, changed file, missing file, or
+unlisted file withdraws that authority: Fluent preserves the directory and
+reports its path with cleanup guidance. Exact allowlisted pre-sidecar bundles
+and Fluent-marked shims remain bounded migration targets. The fixed data copy
+used by the bootstrap shim is host-owned hand-off data, not a managed
+agent-facing installation.
+
 ## Workflow
 
 ```

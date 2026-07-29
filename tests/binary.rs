@@ -7,6 +7,7 @@ use fluent::work_model::WorkModelStore;
 use log::LoggedCommand;
 use predicates::prelude::*;
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -39,6 +40,109 @@ fn read_json_path(path: &Path) -> serde_json::Value {
 
 fn write_json_path(path: &Path, value: &serde_json::Value) {
     fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap()
+}
+
+fn skill_file_snapshot(skill_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let mut entries = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name != ".fluent-managed.json")
+            {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(skill_dir, skill_dir, &mut files);
+    files
+}
+
+fn bundle_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
+    let mut hasher = Sha256::new();
+    for (path, bytes) in files {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn complete_skill_snapshot(skill_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(root: &Path, dir: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let mut entries = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(skill_dir, skill_dir, &mut files);
+    files
+}
+
+const PUBLIC_0_1_4_SKILLS: &[&str] = &[
+    "fluent",
+    "review-architecture",
+    "review-behaviors",
+    "review-documentation",
+    "review-skills",
+    "review-tests",
+];
+
+fn public_0_1_4_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skill-migrations/v0.1.4")
+}
+
+fn copy_skill_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    let mut entries = fs::read_dir(source)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let source = entry.path();
+        let destination = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_skill_tree(&source, &destination);
+        } else {
+            fs::copy(source, destination).unwrap();
+        }
+    }
+}
+
+fn install_public_0_1_4_fixture(home: &Path) {
+    let skills_dir = home.join(".codex/skills");
+    let fixture = public_0_1_4_fixture();
+    for skill in PUBLIC_0_1_4_SKILLS {
+        copy_skill_tree(&fixture.join(skill), &skills_dir.join(skill));
+    }
 }
 
 #[test]
@@ -18323,6 +18427,129 @@ fn update_check_env_opt_out_suppresses_check_and_nudge() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn skills_add_migrates_every_public_0_1_4_skill() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    install_public_0_1_4_fixture(&home);
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("6 migrated"));
+
+    let expected_home = tmp.path().join("expected-home");
+    fluent_cmd()
+        .env("HOME", expected_home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    for skill in PUBLIC_0_1_4_SKILLS {
+        let installed = home.join(".codex/skills").join(skill);
+        assert_eq!(
+            complete_skill_snapshot(&installed),
+            complete_skill_snapshot(&expected_home.join(".codex/skills").join(skill)),
+            "migration must replace the complete public 0.1.4 {skill} bundle"
+        );
+        let sidecar: serde_json::Value = read_json_path(&installed.join(".fluent-managed.json"));
+        assert_eq!(sidecar["agent"], "codex");
+        assert_eq!(sidecar["scope"], "global");
+        assert_eq!(sidecar["skill"], *skill);
+        assert!(sidecar["bundle_sha256"].as_str().is_some());
+        assert!(
+            sidecar["files"]
+                .as_array()
+                .is_some_and(|files| !files.is_empty())
+        );
+    }
+}
+
+#[test]
+fn skills_add_preserves_changed_public_0_1_4_skill() {
+    for change in ["content", "inventory"] {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        install_public_0_1_4_fixture(&home);
+        let changed = home.join(".codex/skills/review-tests");
+        match change {
+            "content" => fs::write(changed.join("SKILL.md"), "user edit\n").unwrap(),
+            "inventory" => fs::write(changed.join("user-note.md"), "keep me\n").unwrap(),
+            _ => unreachable!(),
+        }
+        let before = complete_skill_snapshot(&changed);
+
+        let output = fluent_cmd()
+            .env("HOME", home.to_str().unwrap())
+            .args(["skills", "add", "--agent", "codex"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            complete_skill_snapshot(&changed),
+            before,
+            "{change} must remain user-owned"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&changed.display().to_string()));
+        assert!(stderr.contains("remove it manually"));
+        assert!(stderr.contains("5 migrated, 1 conflicting"));
+    }
+}
+
+#[test]
+fn skills_add_reports_mixed_outcomes_without_counting_conflicts() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    let skills_dir = home.join(".codex/skills");
+    let updated = skills_dir.join("review-architecture");
+    fs::write(updated.join("SKILL.md"), "earlier managed bundle\n").unwrap();
+    let files = skill_file_snapshot(&updated);
+    let mut sidecar: serde_json::Value = read_json_path(&updated.join(".fluent-managed.json"));
+    sidecar["bundle_sha256"] = serde_json::Value::String(bundle_digest(&files));
+    write_json_path(&updated.join(".fluent-managed.json"), &sidecar);
+
+    for skill in ["review-behaviors", "review-documentation", "review-tests"] {
+        fs::remove_dir_all(skills_dir.join(skill)).unwrap();
+        copy_skill_tree(&public_0_1_4_fixture().join(skill), &skills_dir.join(skill));
+    }
+    let conflicting = skills_dir.join("review-documentation");
+    fs::write(conflicting.join("user-note.md"), "keep me\n").unwrap();
+    let conflict_before = complete_skill_snapshot(&conflicting);
+    fs::remove_dir_all(skills_dir.join("review-skills")).unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for outcome in [
+        "1 installed",
+        "1 current",
+        "1 updated",
+        "2 migrated",
+        "1 conflicting",
+    ] {
+        assert!(stderr.contains(outcome), "missing {outcome} in:\n{stderr}");
+    }
+    assert!(!stderr.contains("Installed 6 skills"));
+    assert_eq!(complete_skill_snapshot(&conflicting), conflict_before);
+    assert!(stderr.contains(&conflicting.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+}
+
+#[test]
 fn skills_add_materializes_full_skill_and_references() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
@@ -18358,6 +18585,365 @@ fn skills_add_materializes_full_skill_and_references() {
         review_skill.exists(),
         "review skills must also be materialized"
     );
+}
+
+#[test]
+fn skills_add_updates_prior_managed_release_without_digest_allowlist() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".codex/skills/fluent");
+    fs::create_dir_all(&skill_dir).unwrap();
+
+    let earlier_content = b"---\nname: fluent\n---\nearlier release\n".to_vec();
+    fs::write(skill_dir.join("SKILL.md"), &earlier_content).unwrap();
+    let files = skill_file_snapshot(&skill_dir);
+    let sidecar = serde_json::json!({
+        "schema_version": 1,
+        "fluent_version": "earlier-release",
+        "agent": "codex",
+        "scope": "global",
+        "skill": "fluent",
+        "bundle_sha256": bundle_digest(&files),
+        "files": files.iter().map(|(path, _)| path.display().to_string()).collect::<Vec<_>>(),
+    });
+    write_json_path(&skill_dir.join(".fluent-managed.json"), &sidecar);
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(skill_dir.join("SKILL.md")).unwrap(),
+        earlier_content,
+        "a self-consistent earlier sidecar must authorize an update"
+    );
+    let updated: serde_json::Value = read_json_path(&skill_dir.join(".fluent-managed.json"));
+    assert_ne!(updated["bundle_sha256"], sidecar["bundle_sha256"]);
+
+    let expected_home = tmp.path().join("expected-home");
+    fluent_cmd()
+        .env("HOME", expected_home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+    assert_eq!(
+        complete_skill_snapshot(&skill_dir),
+        complete_skill_snapshot(&expected_home.join(".codex/skills/fluent")),
+        "a cross-release update must install exactly the running bundle and provenance"
+    );
+}
+
+#[test]
+fn skills_add_leaves_one_managed_installation_per_agent_and_scope() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    let skill_dir = home.join(".codex/skills/fluent");
+    assert!(skill_dir.join("SKILL.md").is_file());
+    let sidecar: serde_json::Value = read_json_path(&skill_dir.join(".fluent-managed.json"));
+    assert_eq!(sidecar["schema_version"], 1);
+    assert_eq!(sidecar["agent"], "codex");
+    assert_eq!(sidecar["scope"], "global");
+    assert_eq!(sidecar["skill"], "fluent");
+    assert!(sidecar["bundle_sha256"].as_str().is_some());
+}
+
+#[test]
+fn skills_add_preserves_edited_added_and_missing_managed_files() {
+    for mutation in ["edited", "added", "missing"] {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fluent_cmd()
+            .env("HOME", home.to_str().unwrap())
+            .args(["skills", "add", "--agent", "codex"])
+            .assert()
+            .success();
+
+        let skill_dir = home.join(".codex/skills/fluent");
+        match mutation {
+            "edited" => fs::write(skill_dir.join("SKILL.md"), "user edit\n").unwrap(),
+            "added" => {
+                fs::create_dir_all(skill_dir.join("user-content/nested")).unwrap();
+                fs::write(skill_dir.join("user-content/nested/note.md"), "keep me\n").unwrap();
+            }
+            "missing" => fs::remove_file(skill_dir.join("SKILL.md")).unwrap(),
+            _ => unreachable!(),
+        }
+        let before = complete_skill_snapshot(&skill_dir);
+
+        let output = fluent_cmd()
+            .env("HOME", home.to_str().unwrap())
+            .args(["skills", "add", "--agent", "codex"])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{mutation} installation must not fail"
+        );
+        assert_eq!(
+            complete_skill_snapshot(&skill_dir),
+            before,
+            "{mutation} managed installation must remain byte-for-byte unchanged"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&skill_dir.display().to_string()));
+        assert!(stderr.contains("remove it manually"));
+    }
+}
+
+#[test]
+fn skills_add_preserves_malformed_and_identity_mismatched_sidecars() {
+    for mutation in ["malformed", "identity-mismatched"] {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fluent_cmd()
+            .env("HOME", home.to_str().unwrap())
+            .args(["skills", "add", "--agent", "codex"])
+            .assert()
+            .success();
+        let skill_dir = home.join(".codex/skills/fluent");
+        if mutation == "malformed" {
+            fs::write(skill_dir.join(".fluent-managed.json"), b"not json\n").unwrap();
+        } else {
+            let files = skill_file_snapshot(&skill_dir);
+            let sidecar = serde_json::json!({
+                "schema_version": 1,
+                "fluent_version": "current-release",
+                "agent": "claude",
+                "scope": "global",
+                "skill": "fluent",
+                "bundle_sha256": bundle_digest(&files),
+                "files": files.iter().map(|(path, _)| path.display().to_string()).collect::<Vec<_>>(),
+            });
+            write_json_path(&skill_dir.join(".fluent-managed.json"), &sidecar);
+        }
+        let before = complete_skill_snapshot(&skill_dir);
+
+        let output = fluent_cmd()
+            .env("HOME", home.to_str().unwrap())
+            .args(["skills", "add", "--agent", "codex"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            complete_skill_snapshot(&skill_dir),
+            before,
+            "{mutation} sidecar must preserve all bytes"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&skill_dir.display().to_string()));
+        assert!(stderr.contains("remove it manually"));
+    }
+}
+
+#[test]
+fn skills_add_reports_unmarked_conflict_without_modifying_it() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".codex/skills/fluent");
+    fs::create_dir_all(skill_dir.join("references")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fluent\n---\nuser-owned\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join("references/user-note.md"), "keep this\n").unwrap();
+    let before = complete_skill_snapshot(&skill_dir);
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(complete_skill_snapshot(&skill_dir), before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&skill_dir.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+}
+
+#[test]
+fn skills_add_replaces_stale_shim_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".claude/skills/fluent");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success();
+
+    assert!(
+        !fs::read_to_string(skill_dir.join("SKILL.md"))
+            .unwrap()
+            .contains("stale shim"),
+        "a Fluent-marked shim must migrate to the bundled installation"
+    );
+    assert!(skill_dir.join(".fluent-managed.json").is_file());
+}
+
+#[test]
+fn skills_add_preserves_invalid_sidecar_on_shim_marked_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".claude/skills/fluent");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join(".fluent-managed.json"), b"not json\n").unwrap();
+    let before = complete_skill_snapshot(&skill_dir);
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        complete_skill_snapshot(&skill_dir),
+        before,
+        "an invalid sidecar must block shim adoption and preserve every file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&skill_dir.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+}
+
+#[test]
+fn skills_add_preserves_invalid_sidecar_on_scanned_shim_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".codex/skills/fluent");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join(".fluent-managed.json"), b"not json\n").unwrap();
+    let before = complete_skill_snapshot(&skill_dir);
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        complete_skill_snapshot(&skill_dir),
+        before,
+        "an invalid sidecar must block scanned shim adoption and preserve every file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&skill_dir.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+    assert!(!stderr.contains("Replaced fluent shim"));
+}
+
+#[test]
+fn skills_add_does_not_rewrite_current_managed_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    let skill_dir = home.join(".codex/skills/fluent");
+    let before = complete_skill_snapshot(&skill_dir);
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    assert_eq!(complete_skill_snapshot(&skill_dir), before);
+}
+
+#[test]
+fn skills_add_current_installation_reports_success_without_warning() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("current").and(predicate::str::contains("warning:").not()),
+        );
+}
+
+#[test]
+fn skills_add_preserves_and_reports_cross_scope_installations() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add", "--global"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add", "--project"])
+        .assert()
+        .success();
+
+    let global = home.join(".claude/skills/fluent");
+    let project_skill = project.join(".claude/skills/fluent");
+    let global_before = complete_skill_snapshot(&global);
+    let project_before = complete_skill_snapshot(&project_skill);
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .args(["skills", "add"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(complete_skill_snapshot(&global), global_before);
+    assert_eq!(complete_skill_snapshot(&project_skill), project_before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&global.display().to_string()));
+    assert!(stderr.contains(&project_skill.display().to_string()));
+    assert!(stderr.contains("global") && stderr.contains("project"));
+    assert!(stderr.contains("may display both"));
 }
 
 #[test]
@@ -18710,7 +19296,7 @@ fn init_reinit_installs_skills() {
 }
 
 #[test]
-fn skills_add_refreshes_stale_installation() {
+fn skills_add_preserves_unmarked_stale_installation() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let skills_dir = home.join(".claude/skills");
@@ -18724,21 +19310,21 @@ fn skills_add_refreshes_stale_installation() {
     )
     .unwrap();
 
-    fluent_cmd()
+    let before = complete_skill_snapshot(&fluent_dir);
+    let output = fluent_cmd()
         .env("HOME", home.to_str().unwrap())
         .args(["skills", "add"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
 
-    let content = fs::read_to_string(fluent_dir.join("SKILL.md")).unwrap();
     assert!(
-        !content.contains("Old version"),
-        "skills add must overwrite stale full skill with the current binary's version"
+        output.status.success(),
+        "an unmarked stale installation must not make skills add fail"
     );
-    assert!(
-        content.contains("fluent"),
-        "refreshed skill must contain fluent content"
-    );
+    assert_eq!(complete_skill_snapshot(&fluent_dir), before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&fluent_dir.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
 }
 
 #[test]

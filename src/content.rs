@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
+include!(concat!(env!("OUT_DIR"), "/skill_migrations.rs"));
 
 /// Resolve runtime content the Fluent binary reads directly.
 ///
@@ -809,6 +810,17 @@ Check item {{ITEM_ID}}.
                 .iter()
                 .any(|(p, _)| p.starts_with("fluent/references/")),
             "bundled fluent skill must include references"
+        );
+    }
+
+    #[test]
+    fn bundled_fluent_skill_uses_public_description() {
+        const DESCRIPTION: &str = "description: Operate Fluent, a self-improving software factory. Use when a user wants to review, build, fix, or improve software with Fluent. Invoke when they ask to install or initialize Fluent; capture an Observation; define a slice; create or refine a Brief, Behavior Specification, Technical Approach, Implementation Plan, or Work Item; run, queue, inspect, resume, or recover an Attempt; review a codebase through Fluent; manage or land a Merge Candidate; capture project Expertise; or configure Fluent's agents, scheduler, sandboxes, or remote execution.";
+        let skill = bundled_skill_content("fluent/SKILL.md")
+            .expect("bundled fluent skill must have SKILL.md");
+        assert!(
+            skill.lines().any(|line| line == DESCRIPTION),
+            "bundled fluent skill must use the approved public description"
         );
     }
 
