@@ -213,8 +213,6 @@ phase_prepare() {
   local install_boundary
   if [ -n "$binary" ]; then
     install_boundary="binary:$(absolute_path "$binary")"
-  elif [ "$installer" != "$DEFAULT_INSTALLER" ]; then
-    install_boundary="installer:$installer"
   else
     install_boundary="installer:$installer"
   fi
