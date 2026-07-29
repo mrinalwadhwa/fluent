@@ -238,9 +238,62 @@ test_prepare_rejects_nonempty_root() {
   return $rc
 }
 
+test_run_uses_public_sequence_and_stops_before_land() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > "$WORK/run.out" 2>&1
+
+  local rc=0
+  # The recorded commands follow the public first-run sequence.
+  local expected
+  expected="$(printf 'init\nwork-item create\nattempt create\nattempt run\nmerge-candidate show\n')"
+  if [ "$(cat "$FAKE_CMD_LOG")" != "$expected" ]; then
+    printf '    FAIL: unexpected command sequence:\n%s\n' "$(cat "$FAKE_CMD_LOG")"
+    rc=1
+  fi
+  # run never lands.
+  if grep -q 'merge-candidate land' "$FAKE_CMD_LOG"; then
+    printf '    FAIL: run invoked land\n'; rc=1
+  fi
+  # The manifest advances to the ran safe phase and records the candidate.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase not ran\n'; rc=1; }
+  [ "$(jq -r '.merge_candidate_id' "$ROOT/harness/manifest.json")" = "attempt-1-merge-candidate" ] \
+    || { printf '    FAIL: candidate id not recorded\n'; rc=1; }
+  # main is untouched — the fix lives only on the candidate branch.
+  if ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: main already carries the fix before landing\n'; rc=1
+  fi
+  if [ -n "$(git -C "$ROOT/project/main" status --porcelain)" ]; then
+    printf '    FAIL: target repository is dirty after run\n'; rc=1
+  fi
+  return $rc
+}
+
+test_ready_handoff_is_actionable() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > "$WORK/run.out" 2>&1
+
+  local rc=0 out
+  out="$(cat "$WORK/run.out")"
+  # The exact inspection command names the stored candidate.
+  assert_contains "$out" "merge-candidate show clean-room-fixture attempt-1-merge-candidate" || rc=1
+  # A separate explicit land command targets this same root.
+  assert_contains "$out" "land $ROOT" || rc=1
+  return $rc
+}
+
 printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
 run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
+run_test "run uses public sequence and stops before land" \
+  test_run_uses_public_sequence_and_stops_before_land
+run_test "ready handoff is actionable" test_ready_handoff_is_actionable
 
 summarize_and_exit

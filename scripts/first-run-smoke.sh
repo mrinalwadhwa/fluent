@@ -131,6 +131,10 @@ grep -q '^hello$' greeting.txt
 CHECK
   chmod +x "$project/check.sh"
 
+  # Fluent stores its Work state under .fluent/work; keep it out of the tree so
+  # the target repository stays clean around a land.
+  printf '/.fluent/work/\n' > "$project/.gitignore"
+
   mkdir -p "$project/.fluent"
   cat > "$project/.fluent/tester.yaml" <<'TESTER'
 commands:
@@ -255,6 +259,157 @@ MANIFEST
 }
 
 # ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+# Globals set by phase_run and read by run_fluent.
+RUN_PROJECT=""
+RUN_HOME=""
+RUN_BIN=""
+
+# Invoke the selected Fluent binary against the fixture repository with the
+# isolated home, appending the command and its exit status to a phase log.
+# Returns the command's exit code.
+run_fluent() {
+  local logfile="$1"; shift
+  local rc=0
+  printf '$ fluent %s\n' "$*" >> "$logfile"
+  ( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" ) >> "$logfile" 2>&1 || rc=$?
+  printf 'exit: %s\n' "$rc" >> "$logfile"
+  return "$rc"
+}
+
+# Capture one Fluent command's stdout while still logging it. Prints stdout on
+# success; returns the command's exit code.
+capture_fluent() {
+  local logfile="$1"; shift
+  local out rc=0
+  out="$( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" 2>>"$logfile" )" || rc=$?
+  printf '$ fluent %s\n%s\nexit: %s\n' "$*" "$out" "$rc" >> "$logfile"
+  [ "$rc" -eq 0 ] && printf '%s' "$out"
+  return "$rc"
+}
+
+# Install or select Fluent through the configured public boundary.
+select_fluent() {
+  local boundary="$1" bin="$2" logfile="$3"
+  local kind="${boundary%%:*}" rest="${boundary#*:}"
+  printf '# install boundary: %s\n' "$boundary" >> "$logfile"
+  case "$kind" in
+    binary)
+      [ -f "$rest" ] || die "prebuilt binary not found: $rest"
+      cp "$rest" "$bin"
+      chmod +x "$bin"
+      ;;
+    installer)
+      if [ -f "$rest" ]; then
+        bash "$rest" --install-path "$(dirname "$bin")" --no-modify-path \
+          >> "$logfile" 2>&1
+      else
+        command -v curl >/dev/null 2>&1 || die "curl not found for installer $rest"
+        curl -fsSL "$rest" \
+          | sh -s -- --install-path "$(dirname "$bin")" --no-modify-path \
+          >> "$logfile" 2>&1
+      fi
+      ;;
+    *) die "unrecognized install boundary: $boundary" ;;
+  esac
+  [ -x "$bin" ] || die "install did not produce an executable at $bin"
+}
+
+phase_run() {
+  local root="${1-}"
+  [ -n "$root" ] || die "run requires a smoke root path"
+  root="$(absolute_path "$root")"
+  [ -f "$(manifest_path "$root")" ] || die "no harness manifest under $root"
+  [ "$(manifest_get "$root" '.schema_version')" = "$SCHEMA_VERSION" ] \
+    || die "smoke root has an incompatible manifest schema"
+
+  local safe_phase wi cand
+  safe_phase="$(manifest_get "$root" '.safe_phase')"
+  wi="$(manifest_get "$root" '.work_item_id')"
+  cand="${ATTEMPT_ID}-merge-candidate"
+
+  RUN_PROJECT="$(project_dir "$root")"
+  RUN_HOME="$(home_dir "$root")"
+  RUN_BIN="$(manifest_get "$root" '.fluent_bin')"
+
+  # Already at a ready candidate: reprint the handoff without repeating work.
+  if [ "$safe_phase" = "ran" ]; then
+    print_ready_handoff "$root" "$wi" "$cand"
+    return 0
+  fi
+  [ "$safe_phase" = "prepared" ] \
+    || die "run expects a prepared smoke root (safe_phase=$safe_phase)"
+
+  local logs install_log
+  logs="$(log_dir "$root")"
+  install_log="$logs/install.log"
+  : > "$install_log"
+  select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log"
+
+  # init -> Work Item -> Attempt (public first-run commands).
+  run_fluent "$logs/init.log" init \
+    || fail_phase "$root" "run" "$logs/init.log" "run"
+  run_fluent "$logs/work-item.log" work-item create "$wi" \
+    --title "Clean-room fixture" \
+    --brief-file "$(workitem_dir "$root")/brief.md" \
+    --behaviors-file "$(workitem_dir "$root")/behaviors.md" \
+    --approach-file "$(workitem_dir "$root")/approach.md" \
+    --plan-file "$(workitem_dir "$root")/plan.md" \
+    --instructions-file "$(workitem_dir "$root")/instructions.md" \
+    || fail_phase "$root" "run" "$logs/work-item.log" "run"
+  run_fluent "$logs/attempt-create.log" attempt create "$wi" "$ATTEMPT_ID" \
+    || fail_phase "$root" "run" "$logs/attempt-create.log" "run"
+
+  # Advance the Attempt through the Learner until a ready candidate appears.
+  local attempt_log="$logs/attempt-run.log"
+  : > "$attempt_log"
+  local i status=""
+  for i in 1 2 3 4 5 6 7 8; do
+    run_fluent "$attempt_log" attempt run "$wi" "$ATTEMPT_ID" \
+      || fail_phase "$root" "run" "$attempt_log" "run"
+    local show_log="$logs/candidate-show.log"
+    if capture_fluent "$show_log" merge-candidate show "$wi" "$cand" \
+      > "$logs/candidate.json" 2>/dev/null; then
+      status="$(jq -r '.merge_state.status' "$logs/candidate.json")"
+      break
+    fi
+  done
+
+  case "$status" in
+    pending)
+      : # ready to inspect
+      ;;
+    needs-user|failed|merge-failed)
+      fail_phase "$root" "run" "$logs/candidate-show.log" "run"
+      ;;
+    *)
+      fail_phase "$root" "run" "$attempt_log" "run"
+      ;;
+  esac
+
+  manifest_set "$root" "merge_candidate_id" "$cand"
+  manifest_set "$root" "safe_phase" "ran"
+  cp "$logs/candidate.json" "$(evidence_dir "$root")/merge-candidate.json"
+
+  print_ready_handoff "$root" "$wi" "$cand"
+}
+
+# Print the exact candidate-inspection command and the explicit land command.
+print_ready_handoff() {
+  local root="$1" wi="$2" cand="$3"
+  info "Reached a ready Merge Candidate. The harness stops before landing."
+  info ""
+  info "Inspect the candidate:"
+  info "  ( cd $(project_dir "$root") && HOME=$(home_dir "$root") \\"
+  info "    $(manifest_get "$root" '.fluent_bin') merge-candidate show $wi $cand )"
+  info ""
+  info "Land it after human acceptance:"
+  info "  $SELF land $root"
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -276,7 +431,7 @@ main() {
   local phase="$1"; shift
   case "$phase" in
     prepare) phase_prepare "$@" ;;
-    run)     die "run phase is not available yet" ;;
+    run)     phase_run "$@" ;;
     land)    die "land phase is not available yet" ;;
     -h|--help) usage ;;
     *) die "unknown phase: $phase" ;;
