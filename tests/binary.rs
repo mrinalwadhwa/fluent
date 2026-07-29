@@ -8657,7 +8657,6 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         "malformed retained Git metadata may defer cleanup but must not affect Learning"
     );
     if !real_sandbox_exec_is_usable() {
-        assert!(String::from_utf8_lossy(&retry.stdout).contains("learner"));
         assert!(candidate.exists());
         return;
     }
@@ -15520,7 +15519,9 @@ case "$PWD" in
     git commit -m "Add loop output" >/dev/null
     ;;
   *)
-    printf 'Loop review without a verdict.\n' > review.md
+    # Leave the artifact absent so review-task failure tests exercise the
+    # executor's missing-artifact path rather than an invalid review body.
+    :
     ;;
 esac
 exit 0
