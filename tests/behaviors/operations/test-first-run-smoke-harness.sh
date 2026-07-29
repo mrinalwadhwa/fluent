@@ -303,6 +303,33 @@ test_prepare_rejects_nonempty_root() {
   return $rc
 }
 
+test_prepare_encodes_json_significant_root() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A valid filesystem path containing a JSON-significant double quote. A raw
+  # heredoc manifest would emit invalid JSON here and break the later jq reads.
+  local quoted_root="$WORK/say \"hi\"/smoke"
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+    bash "$HARNESS" prepare "$quoted_root" --binary "$FAKE_FLUENT_SRC" \
+    > /dev/null 2>&1
+
+  local rc=0 mpath="$quoted_root/harness/manifest.json"
+  # The manifest is valid JSON and decodes to the exact root path.
+  if ! jq -e . "$mpath" > /dev/null 2>&1; then
+    printf '    FAIL: manifest is not valid JSON for a quoted root\n'; rc=1
+  fi
+  [ "$(jq -r '.smoke_root' "$mpath")" = "$quoted_root" ] \
+    || { printf '    FAIL: manifest smoke_root not JSON-encoded\n'; rc=1; }
+  # run continues to a ready candidate despite the quote in the path.
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+    bash "$HARNESS" run "$quoted_root" > "$WORK/run.out" 2>&1 \
+    || { printf '    FAIL: run failed for a quoted root\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$mpath")" = "ran" ] \
+    || { printf '    FAIL: quoted root did not reach the ready phase\n'; rc=1; }
+  return $rc
+}
+
 test_run_uses_public_sequence_and_stops_before_land() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -576,6 +603,8 @@ printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
 run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
+run_test "prepare encodes json significant root" \
+  test_prepare_encodes_json_significant_root
 run_test "run uses public sequence and stops before land" \
   test_run_uses_public_sequence_and_stops_before_land
 run_test "run waits for learner success" test_run_waits_for_learner_success

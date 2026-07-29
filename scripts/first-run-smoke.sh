@@ -239,19 +239,28 @@ phase_prepare() {
   local fluent_bin
   fluent_bin="$(bin_dir "$root")/fluent"
 
-  cat > "$(manifest_path "$root")" <<MANIFEST
-{
-  "schema_version": $SCHEMA_VERSION,
-  "smoke_root": "$root",
-  "safe_phase": "prepared",
-  "install_boundary": "$install_boundary",
-  "fluent_bin": "$fluent_bin",
-  "work_item_id": "$WORK_ITEM_ID",
-  "attempt_id": "$ATTEMPT_ID",
-  "merge_candidate_id": null,
-  "merged_commit": null
-}
-MANIFEST
+  # Build the manifest with jq so a root, boundary, or binary path containing
+  # JSON-significant characters (quotes, backslashes) is encoded, not
+  # interpolated. A raw heredoc would emit invalid JSON for such paths.
+  jq -n \
+    --argjson schema "$SCHEMA_VERSION" \
+    --arg root "$root" \
+    --arg boundary "$install_boundary" \
+    --arg bin "$fluent_bin" \
+    --arg wi "$WORK_ITEM_ID" \
+    --arg attempt "$ATTEMPT_ID" \
+    '{
+      schema_version: $schema,
+      smoke_root: $root,
+      safe_phase: "prepared",
+      run_stage: null,
+      install_boundary: $boundary,
+      fluent_bin: $bin,
+      work_item_id: $wi,
+      attempt_id: $attempt,
+      merge_candidate_id: null,
+      merged_commit: null
+    }' > "$(manifest_path "$root")"
 
   info "Prepared clean-room smoke root: $root"
   info "  isolated home:  $(home_dir "$root")"
