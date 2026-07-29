@@ -3170,12 +3170,18 @@ impl MergeCandidate {
                 field: "candidate_commit",
             });
         }
+        // A pending candidate normally requires its Attempt to be Complete with
+        // Passed reviews. A host-sandbox recovery pause relaxes only the completed
+        // status — the reviewed candidate persists across the pause — but the
+        // reviews must still have passed, so a `needs-user`/`host-sandbox` pause
+        // with absent, uncertain, or failed reviews stays invalid. An already
+        // failed merge is exempt entirely.
         let host_sandbox_paused = attempt.status == AttemptStatus::NeedsUser
             && attempt.pause_kind == Some(PauseKind::HostSandbox);
+        let status_ok = attempt.status == AttemptStatus::Complete || host_sandbox_paused;
+        let reviews_passed = attempt.review_state == Some(AttemptReviewState::Passed);
         if self.merge_state.status != MergeCandidateMergeStatus::Failed
-            && !host_sandbox_paused
-            && (attempt.status != AttemptStatus::Complete
-                || attempt.review_state != Some(AttemptReviewState::Passed))
+            && !(status_ok && reviews_passed)
         {
             return Err(WorkModelError::MergeCandidateAttemptReviewsNotPassed {
                 candidate_id: self.id.clone(),
@@ -7386,6 +7392,36 @@ random banner prose that must be ignored
                     attempt_id: "attempt-1".to_string(),
                 },
                 "a {status:?}/{review:?} attempt keeps its pending candidate invalid"
+            );
+        }
+
+        // The host-sandbox exception relaxes only the completed status; it never
+        // relaxes the passed-review requirement. A `needs-user`/`host-sandbox`
+        // pause whose reviews are absent, uncertain, or failed keeps its pending
+        // candidate structurally invalid.
+        for review in [
+            AttemptReviewState::NotReviewed,
+            AttemptReviewState::Uncertain,
+            AttemptReviewState::Failed,
+        ] {
+            let mut work_item = host_sandbox_paused_candidate_work_item();
+            work_item.attempts[0].review_state = Some(review.clone());
+            assert_eq!(
+                work_item.attempts[0].status,
+                AttemptStatus::NeedsUser,
+                "the pause leaves the attempt in needs-user"
+            );
+            assert_eq!(
+                work_item.attempts[0].pause_kind,
+                Some(PauseKind::HostSandbox)
+            );
+            assert_eq!(
+                work_item.validate().unwrap_err(),
+                WorkModelError::MergeCandidateAttemptReviewsNotPassed {
+                    candidate_id: "attempt-1-merge-candidate".to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                },
+                "a host-sandbox pause with {review:?} reviews stays invalid"
             );
         }
     }
