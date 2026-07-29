@@ -165,11 +165,14 @@ FAKE
 }
 
 # Write a fake installer that places the fake Fluent binary at --install-path.
+# It records the HOME it ran with to $INSTALLER_HOME_LOG so a test can prove the
+# harness runs the installer under the isolated smoke home, never the operator's.
 write_fake_installer() {
   local installer_path="$1"
   cat > "$installer_path" <<INSTALLER
 #!/usr/bin/env bash
 set -euo pipefail
+[ -n "\${INSTALLER_HOME_LOG:-}" ] && printf '%s\n' "\$HOME" > "\$INSTALLER_HOME_LOG"
 install_path=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
@@ -181,6 +184,17 @@ done
 mkdir -p "\$install_path"
 cp "$FAKE_FLUENT_SRC" "\$install_path/fluent"
 chmod +x "\$install_path/fluent"
+INSTALLER
+  chmod +x "$installer_path"
+}
+
+# Write a fake installer that always fails without producing a binary.
+write_failing_installer() {
+  local installer_path="$1"
+  cat > "$installer_path" <<'INSTALLER'
+#!/usr/bin/env bash
+printf 'installer: simulated download failure\n' >&2
+exit 1
 INSTALLER
   chmod +x "$installer_path"
 }
@@ -447,6 +461,38 @@ test_failure_preserves_evidence_and_resume() {
   return $rc
 }
 
+test_installer_failure_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # An installer that fails without producing a binary.
+  local installer="$WORK/failing-installer"
+  write_failing_installer "$installer"
+
+  run_harness prepare "$ROOT" --installer "$installer" > /dev/null 2>&1
+
+  local rc=0
+  if run_harness run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should exit non-zero when the installer fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The smoke root is preserved.
+  [ -d "$ROOT/project/main/.git" ] || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  # The failure names the run phase, its install log, and the exact resume.
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/install.log" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
+  # The install log retains the installer's own failure diagnostic.
+  assert_contains "$(cat "$ROOT/harness/logs/install.log")" "simulated download failure" || rc=1
+  # The safe phase stays prepared so resume repeats run, not land.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the install failure\n'; rc=1; }
+  # No Fluent command ran: the boundary failed before init.
+  [ -s "$FAKE_CMD_LOG" ] \
+    && { printf '    FAIL: a Fluent command ran despite a failed install\n'; rc=1; }
+  return $rc
+}
+
 test_automated_test_uses_only_local_doubles() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -454,6 +500,8 @@ test_automated_test_uses_only_local_doubles() {
   # A fake installer selects Fluent through the boundary without the network.
   local installer="$WORK/fake-installer"
   write_fake_installer "$installer"
+  INSTALLER_HOME_LOG="$WORK/installer-home"
+  : > "$INSTALLER_HOME_LOG"
 
   # Tripwires catch any model launch or network fetch.
   TRIPWIRE_LOG="$WORK/tripwire-log"
@@ -466,6 +514,7 @@ test_automated_test_uses_only_local_doubles() {
   HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
     bash "$HARNESS" prepare "$ROOT" --installer "$installer" > /dev/null 2>&1 || rc=1
   HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
+    INSTALLER_HOME_LOG="$INSTALLER_HOME_LOG" \
     bash "$HARNESS" run "$ROOT" > /dev/null 2>&1 || rc=1
   HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$tripwire_bin:$PATH" \
     bash "$HARNESS" land "$ROOT" > /dev/null 2>&1 || rc=1
@@ -476,6 +525,10 @@ test_automated_test_uses_only_local_doubles() {
       "$(cat "$TRIPWIRE_LOG")"
     rc=1
   fi
+  # The installer ran under the isolated smoke home, not the operator's.
+  [ "$(cat "$INSTALLER_HOME_LOG")" = "$ROOT/home" ] \
+    || { printf '    FAIL: installer ran with HOME=%s, want %s\n' \
+           "$(cat "$INSTALLER_HOME_LOG")" "$ROOT/home"; rc=1; }
   # The operator's real home is untouched.
   [ "$(ls -A "$REAL_HOME")" = "sentinel" ] \
     || { printf '    FAIL: operator home changed\n'; rc=1; }
@@ -500,6 +553,8 @@ run_test "ready handoff is actionable" test_ready_handoff_is_actionable
 run_test "land verifies target" test_land_verifies_target
 run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
+run_test "installer failure preserves evidence and resume" \
+  test_installer_failure_preserves_evidence_and_resume
 run_test "automated test uses only local doubles" \
   test_automated_test_uses_only_local_doubles
 

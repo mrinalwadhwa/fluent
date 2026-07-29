@@ -288,31 +288,49 @@ capture_fluent() {
   return "$rc"
 }
 
-# Install or select Fluent through the configured public boundary.
+# Install or select Fluent through the configured boundary. Every installer form
+# runs with the isolated smoke HOME so a real installer never reads or writes the
+# operator's home. Returns non-zero on any failure (logging the reason) so the
+# caller can route it through the durable phase-failure contract.
 select_fluent() {
   local boundary="$1" bin="$2" logfile="$3"
   local kind="${boundary%%:*}" rest="${boundary#*:}"
   printf '# install boundary: %s\n' "$boundary" >> "$logfile"
   case "$kind" in
     binary)
-      [ -f "$rest" ] || die "prebuilt binary not found: $rest"
-      cp "$rest" "$bin"
-      chmod +x "$bin"
+      if [ ! -f "$rest" ]; then
+        printf 'error: prebuilt binary not found: %s\n' "$rest" >> "$logfile"
+        return 1
+      fi
+      cp "$rest" "$bin" && chmod +x "$bin" || return 1
       ;;
     installer)
       if [ -f "$rest" ]; then
-        bash "$rest" --install-path "$(dirname "$bin")" --no-modify-path \
-          >> "$logfile" 2>&1
+        HOME="$RUN_HOME" bash "$rest" \
+          --install-path "$(dirname "$bin")" --no-modify-path \
+          >> "$logfile" 2>&1 || return 1
       else
-        command -v curl >/dev/null 2>&1 || die "curl not found for installer $rest"
-        curl -fsSL "$rest" \
-          | sh -s -- --install-path "$(dirname "$bin")" --no-modify-path \
-          >> "$logfile" 2>&1
+        if ! command -v curl >/dev/null 2>&1; then
+          printf 'error: curl not found for installer %s\n' "$rest" >> "$logfile"
+          return 1
+        fi
+        # Pipe under one subshell so both curl and sh see the isolated HOME.
+        ( HOME="$RUN_HOME" \
+          && curl -fsSL "$rest" \
+             | HOME="$RUN_HOME" sh -s -- \
+                 --install-path "$(dirname "$bin")" --no-modify-path \
+        ) >> "$logfile" 2>&1 || return 1
       fi
       ;;
-    *) die "unrecognized install boundary: $boundary" ;;
+    *)
+      printf 'error: unrecognized install boundary: %s\n' "$boundary" >> "$logfile"
+      return 1
+      ;;
   esac
-  [ -x "$bin" ] || die "install did not produce an executable at $bin"
+  if [ ! -x "$bin" ]; then
+    printf 'error: install did not produce an executable at %s\n' "$bin" >> "$logfile"
+    return 1
+  fi
 }
 
 phase_run() {
@@ -344,7 +362,8 @@ phase_run() {
   logs="$(log_dir "$root")"
   install_log="$logs/install.log"
   : > "$install_log"
-  select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log"
+  select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log" \
+    || fail_phase "$root" "run" "$install_log" "run"
 
   # init -> Work Item -> Attempt (public first-run commands).
   run_fluent "$logs/init.log" init \
