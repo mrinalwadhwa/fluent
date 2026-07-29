@@ -613,7 +613,7 @@ fn fluent_skills_install_writes_all_public_skills() {
     }
 
     assert!(
-        stderr.contains("Installed 6 skills"),
+        stderr.contains("6 installed"),
         "should report installing all skills: {stderr}"
     );
 
