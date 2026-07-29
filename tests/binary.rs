@@ -18494,6 +18494,12 @@ fn skills_add_preserves_changed_public_0_1_4_skill() {
             before,
             "{change} must remain user-owned"
         );
+        if change == "empty-directory" {
+            assert!(
+                changed.join("user-empty-dir").is_dir(),
+                "an added empty directory must remain user-owned"
+            );
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(&changed.display().to_string()));
         assert!(stderr.contains("remove it manually"));
