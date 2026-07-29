@@ -90,11 +90,15 @@ manifest_get() {
 }
 
 # Set one manifest field to a string value (read-modify-write via a temp file).
+# The temporary copy is allocated beside the manifest under the smoke root so the
+# rename is an atomic same-directory replacement — never a cross-filesystem copy —
+# and no durable-state file ever escapes the one-root clean-room boundary. An
+# interrupted update leaves the prior manifest untouched and readable.
 manifest_set() {
   local root="$1" key="$2" value="$3"
   local path tmp
   path="$(manifest_path "$root")"
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${path}.XXXXXX")"
   jq --arg v "$value" ".${key} = \$v" "$path" > "$tmp"
   mv "$tmp" "$path"
 }
@@ -244,20 +248,30 @@ phase_prepare() {
     install_boundary="installer:$installer"
   fi
 
-  mkdir -p \
-    "$(home_dir "$root")" \
-    "$(bin_dir "$root")" \
-    "$(evidence_dir "$root")" \
-    "$(log_dir "$root")" \
-    "$(workitem_dir "$root")" \
-    "$root/harness"
+  # Create the durable evidence home first so any later failure has somewhere to
+  # record itself and a marker that makes the partial root resumable. This
+  # minimal step is the irreducible precondition for the resumable contract: if
+  # it cannot be created there is nowhere under the root to preserve evidence.
+  mkdir -p "$(log_dir "$root")" \
+    || die "cannot create harness evidence directory under $root"
 
-  # Mark the prepare incomplete before any fallible seeding so a mid-seed failure
-  # leaves a resumable root: preserved, logged, and accepted by a later prepare.
+  # Mark the prepare incomplete before any fallible setup so a failure — whether
+  # in directory creation or seeding — leaves a resumable root: preserved,
+  # logged, and accepted by a later prepare.
   local prepare_log
   prepare_log="$(log_dir "$root")/prepare.log"
   printf 'incomplete\n' > "$root/harness/.prepare-incomplete"
   begin_log "$prepare_log" "prepare"
+
+  # The remaining smoke directories are fallible setup; route a permissions or
+  # disk failure through the durable phase-failure contract instead of exiting
+  # bare under set -e without a phase, log, or resume command.
+  { mkdir -p \
+      "$(home_dir "$root")" \
+      "$(bin_dir "$root")" \
+      "$(evidence_dir "$root")" \
+      "$(workitem_dir "$root")"; } >> "$prepare_log" 2>&1 \
+    || fail_phase "$root" "prepare" "$prepare_log" "prepare"
 
   # A resume re-seeds from scratch: discard the harness-owned partial repository
   # and planning inputs so the rebuild does not inherit a broken half-state.
@@ -576,12 +590,15 @@ phase_land() {
   # candidate is already merged in Fluent, so a second `merge-candidate land`
   # cannot be relied on to succeed. Inspect the durable candidate state and skip
   # the land command when the merge has already happened, then re-run only the
-  # idempotent verification the earlier attempt did not finish.
-  local merge_status="pending"
-  if capture_fluent "$logs/land-precheck.log" merge-candidate show "$wi" "$cand" \
-       > "$logs/precandidate.json" 2>/dev/null; then
-    merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json")"
-  fi
+  # idempotent verification the earlier attempt did not finish. A precheck that
+  # cannot read the candidate leaves the merge state unknown — it may already be
+  # merged — so treat it as a durable land failure rather than assuming the merge
+  # still needs to happen and blindly re-landing.
+  capture_fluent "$logs/land-precheck.log" merge-candidate show "$wi" "$cand" \
+    > "$logs/precandidate.json" 2>/dev/null \
+    || fail_phase "$root" "land" "$logs/land-precheck.log" "land"
+  local merge_status
+  merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json")"
 
   if [ "$merge_status" != "merged" ]; then
     # Land only the accepted candidate through Fluent.

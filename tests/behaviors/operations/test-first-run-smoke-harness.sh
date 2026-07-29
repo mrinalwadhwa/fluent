@@ -211,6 +211,48 @@ GIT
   chmod +x "$dir/git"
 }
 
+# Write a fake `mkdir` that fails when asked to create a specific target, into
+# <dir>/mkdir. Placed first on PATH with $FAILING_MKDIR_MATCH set, it makes one
+# prepare-phase directory-setup call fail so the durable failure-and-resume
+# contract can be exercised without depending on real permission errors.
+write_failing_mkdir() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_mkdir
+  real_mkdir="$(command -v mkdir)"
+  cat > "$dir/mkdir" <<MKDIR
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "\${FAILING_MKDIR_MATCH:-}" ]; then
+    printf 'mkdir: simulated directory-setup failure: %s\n' "\$a" >&2
+    exit 1
+  fi
+done
+exec "$real_mkdir" "\$@"
+MKDIR
+  chmod +x "$dir/mkdir"
+}
+
+# Write a fake `jq` that crashes mid-write for a manifest update, into <dir>/jq.
+# manifest_set invokes `jq --arg v <value> ...`; the fake emits a partial JSON
+# document to stdout and exits non-zero for exactly that form, modelling a crash
+# during a durable checkpoint. All other jq calls (reads, `jq -n`) pass through.
+write_crashing_jq() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_jq
+  real_jq="$(command -v jq)"
+  cat > "$dir/jq" <<JQ
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--arg" ] && [ "\${2:-}" = "v" ]; then
+  printf '{ "schema_version": 1, "smoke_'
+  exit 1
+fi
+exec "$real_jq" "\$@"
+JQ
+  chmod +x "$dir/jq"
+}
+
 # Write a fake installer that always fails without producing a binary.
 write_failing_installer() {
   local installer_path="$1"
@@ -679,6 +721,133 @@ test_prepare_failure_preserves_evidence_and_resume() {
   return $rc
 }
 
+test_prepare_directory_failure_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A failing `mkdir` first on PATH makes the isolated-home directory setup fail
+  # after the durable evidence home exists, modelling a permissions or disk error
+  # during prepare's directory creation.
+  local trap_bin="$WORK/failing-mkdir-bin"
+  write_failing_mkdir "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    FAILING_MKDIR_MATCH="$ROOT/home" \
+    bash "$HARNESS" prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare.out" 2>&1; then
+    printf '    FAIL: prepare should exit non-zero when directory setup fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/prepare.out")"
+  # Durable evidence exists even though the failure struck during directory setup,
+  # before any seeding: a marker, a log, and no premature manifest.
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    || { printf '    FAIL: no incomplete-prepare marker retained\n'; rc=1; }
+  [ -f "$ROOT/harness/logs/prepare.log" ] \
+    || { printf '    FAIL: no prepare log retained\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    && { printf '    FAIL: a manifest was written despite the failure\n'; rc=1; }
+  # The failure names the phase, its log, and the exact prepare resume command.
+  assert_contains "$out" 'phase "prepare" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/prepare.log" || rc=1
+  assert_contains "$out" "prepare $ROOT" || rc=1
+  assert_contains "$(cat "$ROOT/harness/logs/prepare.log")" "simulated directory-setup failure" || rc=1
+
+  # Execute the printed resume with working directory creation. The marked partial
+  # root is accepted and prepares to completion.
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare-resume.out" 2>&1 \
+    || { printf '    FAIL: prepare resume did not complete\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    || { printf '    FAIL: resume did not write a manifest\n'; rc=1; }
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    && { printf '    FAIL: incomplete marker left after a completed prepare\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: resumed prepare did not reach the prepared phase\n'; rc=1; }
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: run after a resumed prepare did not reach ready\n'; rc=1; }
+  return $rc
+}
+
+test_interrupted_manifest_update_keeps_prior_manifest() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  # Snapshot the prepared manifest, then crash the very next manifest update.
+  local before; before="$(cat "$ROOT/harness/manifest.json")"
+  local crash_bin="$WORK/crashing-jq-bin"
+  write_crashing_jq "$crash_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$crash_bin:$PATH" \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should fail when a manifest update is interrupted\n'; rc=1
+  fi
+  # The prior manifest survives intact and readable: the interrupted write went to
+  # a root-local temp and never replaced the manifest, so the rename is atomic.
+  if ! jq -e . "$ROOT/harness/manifest.json" > /dev/null 2>&1; then
+    printf '    FAIL: manifest is not valid JSON after an interrupted update\n'; rc=1
+  fi
+  [ "$(cat "$ROOT/harness/manifest.json")" = "$before" ] \
+    || { printf '    FAIL: interrupted update corrupted or changed the manifest\n'; rc=1; }
+  # Any residual temp file stayed beside the manifest under the smoke root, not in
+  # the system temp directory.
+  if ls "${TMPDIR:-/tmp}"/manifest.json.* >/dev/null 2>&1; then
+    printf '    FAIL: a manifest temp file escaped to the system temp dir\n'; rc=1
+  fi
+  return $rc
+}
+
+test_land_precheck_failure_does_not_replay_land() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # Land merges the candidate, then the post-land candidate-show trips, leaving
+  # safe_phase at ran with the merge already done.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_POST_LAND_SHOW_FAILS=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when post-land verification fails\n'; rc=1
+  fi
+  ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null \
+    || { printf '    FAIL: candidate was not actually merged\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past a failed land verification\n'; rc=1; }
+
+  local before
+  before="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+
+  # Resume while the candidate-show still trips: the precheck cannot read the
+  # merge state. The harness must treat this as a durable land failure and must
+  # NOT replay the non-idempotent land against an already-merged candidate.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_POST_LAND_SHOW_FAILS=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land-resume.out" 2>&1; then
+    printf '    FAIL: land resume should fail when the precheck cannot read the candidate\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land-resume.out")"
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/land-precheck.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+  local after
+  after="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+  [ "$after" -eq "$before" ] \
+    || { printf '    FAIL: resume replayed merge-candidate land (%s -> %s)\n' "$before" "$after"; rc=1; }
+  # The merge state is untouched and safe_phase still ran, so a later clean resume
+  # can finish the verification.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past a failed precheck\n'; rc=1; }
+  run_harness land "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: clean land resume did not complete\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: clean resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
 test_relative_installer_override_is_durable() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -816,6 +985,12 @@ run_test "installer failure preserves evidence and resume" \
   test_installer_failure_preserves_evidence_and_resume
 run_test "prepare failure preserves evidence and resume" \
   test_prepare_failure_preserves_evidence_and_resume
+run_test "prepare directory failure preserves evidence and resume" \
+  test_prepare_directory_failure_preserves_evidence_and_resume
+run_test "interrupted manifest update keeps prior manifest" \
+  test_interrupted_manifest_update_keeps_prior_manifest
+run_test "land precheck failure does not replay land" \
+  test_land_precheck_failure_does_not_replay_land
 run_test "relative installer override is durable" \
   test_relative_installer_override_is_durable
 run_test "land replay safe after post-land failure" \
