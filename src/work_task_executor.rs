@@ -1064,7 +1064,7 @@ fn run_review_task_with_coder(
         &review_path,
         &crate::notify::notify,
     );
-    reclaim_reviewer_cache_after_terminal(&config, &artifact_dir);
+    reclaim_reviewer_cache_after_terminal(&config, &artifact_dir, cache_reporter);
     outcome
 }
 
@@ -4447,7 +4447,11 @@ fn admit_hook_reviewer_cache_with_admission(
     }
 }
 
-fn reclaim_reviewer_cache_after_terminal(config: &WorkTaskRunConfig<'_>, artifact_dir: &Path) {
+fn reclaim_reviewer_cache_after_terminal(
+    config: &WorkTaskRunConfig<'_>,
+    artifact_dir: &Path,
+    reporter: &dyn Fn(&str),
+) {
     let terminal = config
         .store
         .read_work_item(config.work_item_id)
@@ -4467,10 +4471,10 @@ fn reclaim_reviewer_cache_after_terminal(config: &WorkTaskRunConfig<'_>, artifac
         .unwrap_or(false);
     if terminal {
         if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
-            eprintln!(
+            reporter(&format!(
                 "  Reviewer prep     retained cache {}: {error:#}",
                 artifact_dir.display()
-            );
+            ));
         }
     }
 }
@@ -6418,6 +6422,31 @@ mod tests {
         }
     }
 
+    struct TracingFilesystemReviewerCacheAdmission {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ReviewerCacheAdmission for TracingFilesystemReviewerCacheAdmission {
+        fn reclaim_terminal_caches(
+            &self,
+            project_root: &Path,
+            store: &WorkModelStore,
+        ) -> Result<()> {
+            self.events.lock().unwrap().push("reclaim");
+            reclaim_terminal_reviewer_caches(project_root, store)
+        }
+
+        fn managed_cache_total(&self, project_root: &Path, store: &WorkModelStore) -> Result<u64> {
+            self.events.lock().unwrap().push("total");
+            managed_reviewer_cache_total(project_root, store)
+        }
+
+        fn filesystem_free_bytes(&self, artifact_dir: &Path) -> Result<u64> {
+            self.events.lock().unwrap().push("free");
+            prep::filesystem_free_bytes(artifact_dir)
+        }
+    }
+
     struct CacheObservingReviewCoder {
         saw_warm_cache: Arc<Mutex<bool>>,
     }
@@ -6750,16 +6779,27 @@ mod tests {
     fn reviewer_cache_admission_reclaims_terminal_caches_first() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
+        let candidate = project.join("candidate");
+        let new_artifact = project.join("new-artifact");
+        fs::create_dir_all(candidate.join("target")).unwrap();
+        fs::write(candidate.join("target/output"), "candidate cache").unwrap();
+        fs::create_dir_all(&new_artifact).unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
         let artifact_relative =
-            crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
+            crate::work_model::work_artifact_path("old-work", "attempt-1", "review-1");
         let artifact = project.join(&artifact_relative);
         fs::create_dir_all(artifact.join("target")).unwrap();
-        fs::write(artifact.join("target/output"), "cache").unwrap();
+        let output = fs::File::create(artifact.join("target/output")).unwrap();
+        output.set_len(2 * 1024 * 1024 * 1024).unwrap();
         fs::write(artifact.join("review.md"), "evidence").unwrap();
 
-        let store = WorkModelStore::new(project);
         let mut item = WorkItem {
-            id: "work-1".to_string(),
+            id: "old-work".to_string(),
             title: "Terminal reviewer cache".to_string(),
             ..Default::default()
         };
@@ -6783,14 +6823,34 @@ mod tests {
         task.artifact_area = Some(crate::work_model::TaskArtifactArea {
             path: artifact_relative,
         });
+        let store = WorkModelStore::new(project);
         store.create_work_item(&item).unwrap();
 
-        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let admission = TracingFilesystemReviewerCacheAdmission {
+            events: Arc::clone(&events),
+        };
+
+        admit_reviewer_build_cache_with_admission(
+            project,
+            &candidate,
+            &new_artifact,
+            &prep::TOOLCHAINS[0],
+            "new-reviewer",
+            &admission,
+            &report_reviewer_cache,
+        );
 
         assert!(!artifact.join("target").exists());
         assert_eq!(
             fs::read_to_string(artifact.join("review.md")).unwrap(),
             "evidence"
+        );
+        assert!(new_artifact.join("target/output").is_file());
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["reclaim", "total", "free"],
+            "admission must reclaim before it accounts for and warms the next Reviewer"
         );
     }
 
@@ -6956,7 +7016,14 @@ mod tests {
         let mut blocked_permissions = original_permissions.clone();
         blocked_permissions.set_mode(0o555);
         fs::set_permissions(&artifact, blocked_permissions).unwrap();
-        reclaim_reviewer_cache_after_terminal(&config, &artifact);
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let messages_for_reporter = Arc::clone(&messages);
+        reclaim_reviewer_cache_after_terminal(&config, &artifact, &move |message| {
+            messages_for_reporter
+                .lock()
+                .unwrap()
+                .push(message.to_string())
+        });
         fs::set_permissions(&artifact, original_permissions).unwrap();
 
         assert!(artifact.join("target").exists());
@@ -6969,6 +7036,9 @@ mod tests {
             fs::read_to_string(artifact.join("review.md")).unwrap(),
             "review evidence"
         );
+        assert!(messages.lock().unwrap().iter().any(|message| {
+            message.contains("retained cache") && message.contains(&artifact.display().to_string())
+        }));
 
         reclaim_terminal_reviewer_caches(project, &store).unwrap();
         assert!(
