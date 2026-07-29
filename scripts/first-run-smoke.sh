@@ -52,6 +52,16 @@ shq() {
   printf '%q' "$1"
 }
 
+# Begin a log section without discarding evidence from a prior failed attempt.
+# A resumed phase re-runs the same command against the same log path; appending
+# a banner instead of truncating keeps the earlier failed command, its output,
+# and its exit status preserved beneath the smoke root.
+begin_log() {
+  local logfile="$1" label="$2"
+  printf '\n===== %s (%s) =====\n' "$label" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    >> "$logfile"
+}
+
 # Report a phase failure with its log and the exact resume command, then exit
 # non-zero. The smoke root is preserved untouched.
 fail_phase() {
@@ -201,7 +211,11 @@ phase_prepare() {
   [ -n "$root" ] || die "prepare requires a smoke root path"
   root="$(absolute_path "$root")"
 
-  # Reject a nonempty root unless it already holds a compatible manifest.
+  # Reject a nonempty root unless it already holds a compatible manifest or an
+  # incomplete-prepare marker. A prior prepare that failed mid-seed leaves the
+  # marker and no manifest, so the printed `prepare` resume can rebuild the
+  # harness-owned partial state instead of tripping the nonempty guard.
+  local resuming=0
   if [ -e "$root" ]; then
     if [ -f "$(manifest_path "$root")" ]; then
       local existing
@@ -211,14 +225,21 @@ phase_prepare() {
       info "Reusing existing smoke root: $root"
       return 0
     fi
-    if [ -n "$(ls -A -- "$root" 2>/dev/null)" ]; then
+    if [ -f "$root/harness/.prepare-incomplete" ]; then
+      resuming=1
+    elif [ -n "$(ls -A -- "$root" 2>/dev/null)" ]; then
       die "smoke root $root is not empty and has no harness manifest"
     fi
   fi
 
+  # Resolve a local installer or binary to an absolute path now so the boundary
+  # stored in the manifest stays valid when `run` later executes from a
+  # different working directory. A URL (never an existing file) is kept verbatim.
   local install_boundary
   if [ -n "$binary" ]; then
     install_boundary="binary:$(absolute_path "$binary")"
+  elif [ -f "$installer" ]; then
+    install_boundary="installer:$(absolute_path "$installer")"
   else
     install_boundary="installer:$installer"
   fi
@@ -231,8 +252,25 @@ phase_prepare() {
     "$(workitem_dir "$root")" \
     "$root/harness"
 
-  seed_fixture_repo "$(project_dir "$root")"
-  seed_planning_inputs "$(workitem_dir "$root")"
+  # Mark the prepare incomplete before any fallible seeding so a mid-seed failure
+  # leaves a resumable root: preserved, logged, and accepted by a later prepare.
+  local prepare_log
+  prepare_log="$(log_dir "$root")/prepare.log"
+  printf 'incomplete\n' > "$root/harness/.prepare-incomplete"
+  begin_log "$prepare_log" "prepare"
+
+  # A resume re-seeds from scratch: discard the harness-owned partial repository
+  # and planning inputs so the rebuild does not inherit a broken half-state.
+  if [ "$resuming" = "1" ]; then
+    info "Resuming an incomplete prepare: $root"
+    rm -rf "$(project_dir "$root")" "$(workitem_dir "$root")"
+    mkdir -p "$(workitem_dir "$root")"
+  fi
+
+  { seed_fixture_repo "$(project_dir "$root")"; } >> "$prepare_log" 2>&1 \
+    || fail_phase "$root" "prepare" "$prepare_log" "prepare"
+  { seed_planning_inputs "$(workitem_dir "$root")"; } >> "$prepare_log" 2>&1 \
+    || fail_phase "$root" "prepare" "$prepare_log" "prepare"
 
   # Record the resolved binary path now for a prebuilt override; the installer
   # path selects the same location during run.
@@ -261,6 +299,9 @@ phase_prepare() {
       merge_candidate_id: null,
       merged_commit: null
     }' > "$(manifest_path "$root")"
+
+  # The manifest is the durable completion marker; drop the incomplete flag.
+  rm -f "$root/harness/.prepare-incomplete"
 
   info "Prepared clean-room smoke root: $root"
   info "  isolated home:  $(home_dir "$root")"
@@ -399,7 +440,7 @@ phase_run() {
 
   if [ "$done_rank" -lt "$(run_stage_rank installed)" ]; then
     install_log="$logs/install.log"
-    : > "$install_log"
+    begin_log "$install_log" "install"
     select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log" \
       || fail_phase "$root" "run" "$install_log" "run"
     manifest_set "$root" "run_stage" "installed"
@@ -434,8 +475,8 @@ phase_run() {
   # candidate record.
   local attempt_log="$logs/attempt-run.log"
   local attempt_show_log="$logs/attempt-show.log"
-  : > "$attempt_log"
-  : > "$attempt_show_log"
+  begin_log "$attempt_log" "attempt run"
+  begin_log "$attempt_show_log" "attempt show"
   local learning="" attempt_status=""
   for _ in 1 2 3 4 5 6 7 8; do
     run_fluent "$attempt_log" attempt run "$wi" "$ATTEMPT_ID" \
@@ -529,11 +570,24 @@ phase_land() {
   local logs land_log
   logs="$(log_dir "$root")"
   land_log="$logs/land.log"
-  : > "$land_log"
+  begin_log "$land_log" "land"
 
-  # Land only the accepted candidate through Fluent.
-  run_fluent "$land_log" merge-candidate land "$wi" "$cand" \
-    || fail_phase "$root" "land" "$land_log" "land"
+  # A land resume must never replay a successful, non-idempotent land: the
+  # candidate is already merged in Fluent, so a second `merge-candidate land`
+  # cannot be relied on to succeed. Inspect the durable candidate state and skip
+  # the land command when the merge has already happened, then re-run only the
+  # idempotent verification the earlier attempt did not finish.
+  local merge_status="pending"
+  if capture_fluent "$logs/land-precheck.log" merge-candidate show "$wi" "$cand" \
+       > "$logs/precandidate.json" 2>/dev/null; then
+    merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json")"
+  fi
+
+  if [ "$merge_status" != "merged" ]; then
+    # Land only the accepted candidate through Fluent.
+    run_fluent "$land_log" merge-candidate land "$wi" "$cand" \
+      || fail_phase "$root" "land" "$land_log" "land"
+  fi
 
   # The fixture's executable test must now pass on the target.
   local check_log="$logs/fixture-check.log"

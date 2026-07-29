@@ -140,6 +140,12 @@ JSON
     case "$sub" in
       show)
         [ -f "$rec" ] || reject "no such merge candidate"
+        # Model a post-land verification failure: the merge already happened
+        # (stage=landed) but the harness's candidate-show step trips once. A
+        # resume with this flag cleared must complete without re-landing.
+        if [ "${FAKE_POST_LAND_SHOW_FAILS:-0}" = "1" ] && [ "$(stage)" = "landed" ]; then
+          reject "simulated post-land show failure"
+        fi
         cat "$rec"
         ;;
       land)
@@ -189,6 +195,20 @@ cp "$FAKE_FLUENT_SRC" "\$install_path/fluent"
 chmod +x "\$install_path/fluent"
 INSTALLER
   chmod +x "$installer_path"
+}
+
+# Write a fake `git` that fails on any invocation, into <dir>/git. Placed first
+# on PATH, it makes the prepare phase's repository seeding fail so the mid-seed
+# failure-and-resume contract can be exercised deterministically.
+write_failing_git() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<'GIT'
+#!/usr/bin/env bash
+printf 'git: simulated seeding failure\n' >&2
+exit 1
+GIT
+  chmod +x "$dir/git"
 }
 
 # Write a fake installer that always fails without producing a binary.
@@ -613,6 +633,119 @@ test_installer_failure_preserves_evidence_and_resume() {
   return $rc
 }
 
+test_prepare_failure_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A failing `git` first on PATH makes the fixture-repo seeding fail mid-prepare.
+  local trap_bin="$WORK/failing-git-bin"
+  write_failing_git "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    bash "$HARNESS" prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare.out" 2>&1; then
+    printf '    FAIL: prepare should exit non-zero when seeding fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/prepare.out")"
+  # The partial root is preserved with a phase log and an exact prepare resume.
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    || { printf '    FAIL: no incomplete-prepare marker retained\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    && { printf '    FAIL: a manifest was written despite the failure\n'; rc=1; }
+  assert_contains "$out" 'phase "prepare" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/prepare.log" || rc=1
+  assert_contains "$out" "prepare $ROOT" || rc=1
+  assert_contains "$(cat "$ROOT/harness/logs/prepare.log")" "simulated seeding failure" || rc=1
+
+  # Execute the exact printed resume with a working git. The partial root is
+  # accepted (not rejected as nonempty) and prepares to completion.
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare-resume.out" 2>&1 \
+    || { printf '    FAIL: prepare resume did not complete\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    || { printf '    FAIL: resume did not write a manifest\n'; rc=1; }
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    && { printf '    FAIL: incomplete marker left after a completed prepare\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: resumed prepare did not reach the prepared phase\n'; rc=1; }
+  # The rebuilt fixture is sound: its test fails before the fix, and a full run
+  # still reaches a ready candidate.
+  if ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: rebuilt fixture test should fail before the fix\n'; rc=1
+  fi
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: run after a resumed prepare did not reach ready\n'; rc=1; }
+  return $rc
+}
+
+test_relative_installer_override_is_durable() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A local installer referenced by a path relative to the prepare CWD.
+  mkdir -p "$WORK/tools"
+  write_fake_installer "$WORK/tools/install.sh"
+
+  local rc=0
+  ( cd "$WORK" && HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+      bash "$HARNESS" prepare "$ROOT" --installer ./tools/install.sh ) \
+    > /dev/null 2>&1 || { printf '    FAIL: prepare failed\n'; rc=1; }
+  # prepare resolved the relative override to an absolute boundary in the manifest.
+  local boundary
+  boundary="$(jq -r '.install_boundary' "$ROOT/harness/manifest.json")"
+  case "$boundary" in
+    installer:/*) : ;;
+    *) printf '    FAIL: installer boundary not absolute: %s\n' "$boundary"; rc=1 ;;
+  esac
+  # run from a different working directory still resolves the local installer.
+  ( cd / && HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+      bash "$HARNESS" run "$ROOT" ) > "$WORK/run.out" 2>&1 \
+    || { printf '    FAIL: run could not resolve the relative installer from another dir\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: run did not reach ready with a resolved installer\n'; rc=1; }
+  return $rc
+}
+
+test_land_replay_safe_after_post_land_failure() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # Land merges the candidate, then the post-land candidate-show trips. The merge
+  # already happened, so the phase must fail without advancing safe_phase.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_POST_LAND_SHOW_FAILS=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when post-land verification fails\n'; rc=1
+  fi
+  assert_contains "$(cat "$WORK/land.out")" 'phase "land" failed' || rc=1
+  # The candidate really did merge: the fixture now passes on main.
+  ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null \
+    || { printf '    FAIL: candidate was not actually merged\n'; rc=1; }
+  # safe_phase stays ran so the printed resume repeats land.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past a failed land verification\n'; rc=1; }
+
+  local before
+  before="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+
+  # Resume with the failure cleared. It must finish the verification WITHOUT a
+  # second land — the fake rejects a second land, proving the resume relies on
+  # the durable candidate state rather than replaying the merge.
+  run_harness land "$ROOT" > "$WORK/land-resume.out" 2>&1 \
+    || { printf '    FAIL: land resume did not complete\n'; rc=1; }
+  local after
+  after="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+  [ "$after" -eq "$before" ] \
+    || { printf '    FAIL: resume replayed merge-candidate land (%s -> %s)\n' "$before" "$after"; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: land resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
 test_automated_test_uses_only_local_doubles() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -681,6 +814,12 @@ run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
 run_test "installer failure preserves evidence and resume" \
   test_installer_failure_preserves_evidence_and_resume
+run_test "prepare failure preserves evidence and resume" \
+  test_prepare_failure_preserves_evidence_and_resume
+run_test "relative installer override is durable" \
+  test_relative_installer_override_is_durable
+run_test "land replay safe after post-land failure" \
+  test_land_replay_safe_after_post_land_failure
 run_test "automated test uses only local doubles" \
   test_automated_test_uses_only_local_doubles
 

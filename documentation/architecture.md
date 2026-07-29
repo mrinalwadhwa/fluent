@@ -1297,7 +1297,11 @@ scripts/first-run-smoke.sh land /path/to/smoke-root
 
 Choose any empty (or not-yet-existing) directory as the smoke root; `prepare`
 refuses a nonempty directory unless it already holds a compatible harness
-manifest, so re-running `prepare` on the same root is safe. Everything the
+manifest or an incomplete-prepare marker left by an earlier interrupted
+`prepare`, so both re-running `prepare` on a finished root and resuming one that
+failed mid-seed are safe. A relative `--installer` or `--binary` override is
+resolved to an absolute path during `prepare`, so `run` selects the same
+boundary even when invoked from a different working directory. Everything the
 smoke touches — the isolated `HOME`, the repository at `<root>/project/main`,
 the selected binary, phase logs under `<root>/harness/logs`, and evidence under
 `<root>/evidence` — lives beneath the root. The harness never deletes the root,
@@ -1321,9 +1325,14 @@ preserves the whole root, and prints the failed phase, its log path under
 `<root>/harness/logs`, and the exact command that resumes from the last safe
 phase. Authentication, provider-capacity, `needs-user`, and non-ready
 candidates are preserved nonterminal states: read the named log, resolve the
-cause, and re-run the printed resume command against the same root. Landing is
-gated on a succeeded Learner, so `run` stops with a truthful nonterminal state
-rather than handing off a candidate whose Learner has not yet succeeded.
+cause, and re-run the printed resume command against the same root. A resumed
+phase appends to its existing log rather than truncating it, so the failed
+command that first stopped the phase stays in the evidence. Re-running `land`
+after a successful merge is safe: the phase inspects the durable candidate state
+and skips the merge when it has already happened, finishing only the outstanding
+verification. Landing is gated on a succeeded Learner, so `run` stops with a
+truthful nonterminal state rather than handing off a candidate whose Learner has
+not yet succeeded.
 
 ## Agents
 
