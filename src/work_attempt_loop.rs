@@ -549,6 +549,7 @@ fn default_learner_run_coder(
         request.mode,
         Some(capture),
         request.codex_worker,
+        request.prepared_sandbox,
     )
 }
 
@@ -949,6 +950,7 @@ pub(crate) struct LearnerCoderRequest<'a> {
     codex_worker: Option<&'a crate::codex_worker::CodexWorkerEnvironment>,
     /// When set, a bounded schema repair rather than a fresh audit.
     repair: Option<work_task_executor::SchemaRepairInput<'a>>,
+    prepared_sandbox: Option<&'a work_task_executor::PreparedLearnerSandbox>,
 }
 
 /// The Learner's coder-run is injected so the orchestration around it — running
@@ -1078,7 +1080,7 @@ fn run_learner_step(
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain
     // their confinement even when the caller requested `--no-sandbox`.
-    if let Err(error) = preflight_learner_host_sandbox(
+    let prepared_sandbox = match prepare_learner_host_sandbox(
         project_root,
         item,
         attempt_index,
@@ -1086,25 +1088,28 @@ fn run_learner_step(
         config.no_sandbox,
         codex_worker.as_ref(),
     ) {
-        if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
-            store.mutate_work_item(&work_item_id, |fresh| {
-                let index = attempt_index_by_id(fresh, &attempt_id)?;
-                crate::work_model::transition_attempt(
-                    &mut fresh.attempts[index],
-                    AttemptStatus::NeedsUser,
-                    Some(PauseKind::HostSandbox),
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
+                store.mutate_work_item(&work_item_id, |fresh| {
+                    let index = attempt_index_by_id(fresh, &attempt_id)?;
+                    crate::work_model::transition_attempt(
+                        &mut fresh.attempts[index],
+                        AttemptStatus::NeedsUser,
+                        Some(PauseKind::HostSandbox),
+                    );
+                    Ok(())
+                })?;
+                *item = store.read_work_item(&work_item_id)?;
+                eprintln!(
+                    "  Warning: Learner host sandbox preflight failed; retry after restoring the host boundary: {}",
+                    host.message()
                 );
-                Ok(())
-            })?;
-            *item = store.read_work_item(&work_item_id)?;
-            eprintln!(
-                "  Warning: Learner host sandbox preflight failed; retry after restoring the host boundary: {}",
-                host.message()
-            );
-            return Ok(());
+                return Ok(());
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
 
     // A fresh, lock-held reservation with landing validation. It re-reads the durable
     // state under the model lock and decides whether THIS runner launches, so a
@@ -1147,6 +1152,7 @@ fn run_learner_step(
             mode,
             &config,
             runs,
+            prepared_sandbox.as_ref(),
         );
     }
 
@@ -1161,6 +1167,7 @@ fn run_learner_step(
         candidate_id,
         mode,
         &config,
+        prepared_sandbox.as_ref(),
     );
     finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
@@ -1171,14 +1178,14 @@ fn run_learner_step(
 /// `reserve_learner_run` writes an in-progress Learning record.  The run directory
 /// name is deterministic under that lease, so the later launch renders the same
 /// profile roots without reserving a durable run just to discover a host failure.
-fn preflight_learner_host_sandbox(
+fn prepare_learner_host_sandbox(
     project_root: &Path,
     item: &WorkItem,
     attempt_index: usize,
     mode: work_task_executor::LearnerExecutionMode,
     no_sandbox: bool,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-) -> Result<()> {
+) -> Result<Option<work_task_executor::PreparedLearnerSandbox>> {
     let attempt = &item.attempts[attempt_index];
     let write_output = attempt
         .tasks
@@ -1208,7 +1215,7 @@ fn preflight_learner_host_sandbox(
     } else {
         vec![project_root.to_path_buf(), workspace_path.clone()]
     };
-    work_task_executor::preflight_learner_host_sandbox(
+    work_task_executor::prepare_learner_host_sandbox(
         work_task_executor::LearnerRunInputs {
             workspace_path: &workspace_path,
             resolver: &ContentResolver::new(Some(project_root)),
@@ -1289,6 +1296,7 @@ fn settle_no_expertise_learner(
     mode: work_task_executor::LearnerExecutionMode,
     config: &LearnerConfig<'_>,
     runs: u32,
+    prepared_sandbox: Option<&work_task_executor::PreparedLearnerSandbox>,
 ) -> Result<()> {
     let work_item_id = item.id.clone();
     let attempt_id = item.attempts[attempt_index].id.clone();
@@ -1323,6 +1331,7 @@ fn settle_no_expertise_learner(
         candidate_id,
         mode,
         config,
+        prepared_sandbox,
     ) {
         Ok(handoff) => handoff,
         Err(run) => {
@@ -1791,6 +1800,7 @@ fn try_learn(
     candidate_id: &str,
     mode: work_task_executor::LearnerExecutionMode,
     config: &LearnerConfig<'_>,
+    prepared_sandbox: Option<&work_task_executor::PreparedLearnerSandbox>,
 ) -> Result<crate::follow_up::LearnerHandoffV1> {
     // A post-land handoff-only retry uses the merged commit as its baseline; a
     // pre-land capture or no-expertise run uses the reviewed Writer SHA. Both
@@ -1987,6 +1997,7 @@ fn try_learn(
                 coder_kind,
                 model: model.as_deref(),
                 effort: effort.as_deref(),
+                prepared_sandbox,
             },
         );
         return match result {
@@ -2027,6 +2038,7 @@ fn try_learn(
         mode,
         codex_worker: config.codex_worker,
         repair: None,
+        prepared_sandbox,
     });
     // Account for this invocation's return before inspecting its result. A
     // no-expertise ledger pins the raw return (B10); a post-land run confines the
@@ -2140,6 +2152,7 @@ fn try_learn(
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,
                     }),
+                    prepared_sandbox: None,
                 });
                 // Pin this repair invocation's raw return before its draft is read,
                 // so a no-expertise repair that mutated Git cannot escape accounting
@@ -2205,6 +2218,7 @@ struct PreLandLearnerContext<'a> {
     coder_kind: CoderKind,
     model: Option<&'a str>,
     effort: Option<&'a str>,
+    prepared_sandbox: Option<&'a work_task_executor::PreparedLearnerSandbox>,
 }
 
 /// Run the whole pre-land logical Learner: the initial coder, the bounded
@@ -2245,6 +2259,7 @@ fn run_pre_land_learner(
         mode: work_task_executor::LearnerExecutionMode::Capture,
         codex_worker: config.codex_worker,
         repair: None,
+        prepared_sandbox: ctx.prepared_sandbox,
     });
     transaction.capture_return(workspace_path)?;
     coder_result?;
@@ -2304,6 +2319,7 @@ fn run_pre_land_learner(
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,
                     }),
+                    prepared_sandbox: None,
                 });
                 transaction.capture_return(workspace_path)?;
                 repair_result?;

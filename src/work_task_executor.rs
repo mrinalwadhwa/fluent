@@ -3054,6 +3054,17 @@ pub struct LearnerRunInputs<'a> {
     pub repair: Option<SchemaRepairInput<'a>>,
 }
 
+/// The exact Seatbelt profile that passed host preflight for a Learner launch.
+///
+/// The profile guard owns the temporary profile file, so the launch cannot outlive
+/// the boundary it preflighted.  It is intentionally crate-private: only the
+/// Attempt adapter may carry one across durable Learner reservation.
+pub(crate) struct PreparedLearnerSandbox {
+    sandbox: CoderSandbox,
+    _profile: os::SandboxProfile,
+    effectively_sandboxed: bool,
+}
+
 /// The rejected draft and exact validation error handed to a bounded schema
 /// repair. The coder must correct only the schema problem the validator
 /// reported, preserving every follow-up id and its content.
@@ -3279,6 +3290,7 @@ pub(crate) fn run_learner_captured_in_mode_with_codex_worker(
     mode: LearnerExecutionMode,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    prepared_sandbox: Option<&PreparedLearnerSandbox>,
 ) -> Result<()> {
     let coder_kind = inputs.coder_kind;
     let model = inputs.model.map(|s| s.to_string());
@@ -3288,6 +3300,7 @@ pub(crate) fn run_learner_captured_in_mode_with_codex_worker(
         mode,
         capture,
         codex_worker,
+        prepared_sandbox,
         HostPreparation::Production,
         move |sandbox| coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref()),
     )
@@ -3365,6 +3378,7 @@ fn run_learner_with_coder(
         mode,
         capture,
         None,
+        None,
         host_preparation,
         make_coder,
     )
@@ -3375,6 +3389,7 @@ fn run_learner_with_coder_with_codex_worker(
     mode: LearnerExecutionMode,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
     prepared_codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    prepared_sandbox: Option<&PreparedLearnerSandbox>,
     mut host_preparation: HostPreparation<'_>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
@@ -3454,14 +3469,24 @@ fn run_learner_with_coder_with_codex_worker(
     // still read-only. The granted expertise, handoff, and artifact paths may not
     // exist yet; Seatbelt profiles deliberately support such deterministic future
     // paths. Keep this profile alive and reuse it below for the actual launch.
-    let (sandbox, _sandbox_profile) = plan_learner_sandbox(
-        &inputs,
-        mode,
-        effectively_sandboxed,
-        codex_worker,
-        &expertise_dir,
-        &mut readable_roots,
-    )?;
+    let (sandbox, _sandbox_profile, effectively_sandboxed) =
+        if let Some(prepared) = prepared_sandbox {
+            (
+                prepared.sandbox.clone(),
+                None,
+                prepared.effectively_sandboxed,
+            )
+        } else {
+            let (sandbox, profile) = plan_learner_sandbox(
+                &inputs,
+                mode,
+                effectively_sandboxed,
+                codex_worker,
+                &expertise_dir,
+                &mut readable_roots,
+            )?;
+            (sandbox, profile, effectively_sandboxed)
+        };
 
     fs::create_dir_all(&expertise_dir)?;
     fs::create_dir_all(inputs.handoff_dir)?;
@@ -3591,11 +3616,11 @@ fn plan_learner_sandbox(
 ///
 /// This shares the launch planner, so a genuinely unsandboxed capture performs no
 /// host probe while forced-confinement modes retain the production Seatbelt check.
-pub(crate) fn preflight_learner_host_sandbox(
+pub(crate) fn prepare_learner_host_sandbox(
     inputs: LearnerRunInputs<'_>,
     mode: LearnerExecutionMode,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-) -> Result<()> {
+) -> Result<Option<PreparedLearnerSandbox>> {
     let effectively_sandboxed =
         mode.effectively_sandboxed(inputs.no_sandbox) || codex_worker.is_some();
     let mut readable_roots = inputs
@@ -3607,7 +3632,7 @@ pub(crate) fn preflight_learner_host_sandbox(
     readable_roots.sort();
     readable_roots.dedup();
     let expertise_dir = inputs.workspace_path.join(".fluent/expertise");
-    let _ = plan_learner_sandbox(
+    let (sandbox, profile) = plan_learner_sandbox(
         &inputs,
         mode,
         effectively_sandboxed,
@@ -3615,7 +3640,11 @@ pub(crate) fn preflight_learner_host_sandbox(
         &expertise_dir,
         &mut readable_roots,
     )?;
-    Ok(())
+    Ok(profile.map(|profile| PreparedLearnerSandbox {
+        sandbox,
+        _profile: profile,
+        effectively_sandboxed,
+    }))
 }
 
 /// The rendered Learner system and user prompts for one invocation. Built by the

@@ -12354,7 +12354,7 @@ fn work_task_run_fails_review_task_without_artifact() {
         .assert()
         .success();
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -12400,7 +12400,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
 
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    write_mock_claude(&bin_dir, &loop_mock_script_without_verdict());
 
     fluent_cmd()
         .current_dir(&main_dir)
