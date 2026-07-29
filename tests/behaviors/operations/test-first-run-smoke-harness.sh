@@ -517,6 +517,25 @@ test_failure_preserves_evidence_and_resume() {
   # The safe phase stays at prepared so resume repeats run, not land.
   [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
     || { printf '    FAIL: safe_phase advanced past the failure\n'; rc=1; }
+  # init, the Work Item, and the Attempt were created before the failure, so the
+  # harness checkpointed them and must not replay them on resume.
+  [ "$(jq -r '.run_stage' "$ROOT/harness/manifest.json")" = "attempt" ] \
+    || { printf '    FAIL: run_stage not checkpointed at attempt\n'; rc=1; }
+
+  # Clear the injected failure and execute the exact printed resume command. It
+  # must reach a ready candidate by reusing the existing Work Item and Attempt,
+  # not by re-running the non-idempotent setup commands.
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(grep -c '^init$' "$FAKE_CMD_LOG")" -eq 1 ] \
+    || { printf '    FAIL: resume replayed init\n'; rc=1; }
+  [ "$(grep -c '^work-item create$' "$FAKE_CMD_LOG")" -eq 1 ] \
+    || { printf '    FAIL: resume replayed work-item create\n'; rc=1; }
+  [ "$(grep -c '^attempt create$' "$FAKE_CMD_LOG")" -eq 1 ] \
+    || { printf '    FAIL: resume replayed attempt create\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
+  assert_contains "$(cat "$WORK/resume.out")" "ready Merge Candidate" || rc=1
   return $rc
 }
 

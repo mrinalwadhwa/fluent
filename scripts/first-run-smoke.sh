@@ -280,6 +280,20 @@ RUN_PROJECT=""
 RUN_HOME=""
 RUN_BIN=""
 
+# Rank the completed run-setup stages so a resumed run skips public commands it
+# has already run. init, work-item create, and attempt create are not idempotent
+# — replaying them against existing objects would fail — so each records a
+# durable checkpoint and resume continues from the first unfinished stage.
+run_stage_rank() {
+  case "$1" in
+    installed) printf '1' ;;
+    init)      printf '2' ;;
+    work-item) printf '3' ;;
+    attempt)   printf '4' ;;
+    *)         printf '0' ;;
+  esac
+}
+
 # Invoke the selected Fluent binary against the fixture repository with the
 # isolated home, appending the command and its exit status to a phase log.
 # Returns the command's exit code.
@@ -373,26 +387,46 @@ phase_run() {
   [ "$safe_phase" = "prepared" ] \
     || die "run expects a prepared smoke root (safe_phase=$safe_phase)"
 
+  # Resume from the first unfinished setup stage. A failed `run` prints its own
+  # `run` command; replaying it must not re-run init or re-create the Work Item
+  # and Attempt, which Fluent rejects for objects that already exist.
+  local stage done_rank
+  stage="$(manifest_get "$root" '.run_stage // "none"')"
+  done_rank="$(run_stage_rank "$stage")"
+
   local logs install_log
   logs="$(log_dir "$root")"
-  install_log="$logs/install.log"
-  : > "$install_log"
-  select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log" \
-    || fail_phase "$root" "run" "$install_log" "run"
 
-  # init -> Work Item -> Attempt (public first-run commands).
-  run_fluent "$logs/init.log" init \
-    || fail_phase "$root" "run" "$logs/init.log" "run"
-  run_fluent "$logs/work-item.log" work-item create "$wi" \
-    --title "Clean-room fixture" \
-    --brief-file "$(workitem_dir "$root")/brief.md" \
-    --behaviors-file "$(workitem_dir "$root")/behaviors.md" \
-    --approach-file "$(workitem_dir "$root")/approach.md" \
-    --plan-file "$(workitem_dir "$root")/plan.md" \
-    --instructions-file "$(workitem_dir "$root")/instructions.md" \
-    || fail_phase "$root" "run" "$logs/work-item.log" "run"
-  run_fluent "$logs/attempt-create.log" attempt create "$wi" "$ATTEMPT_ID" \
-    || fail_phase "$root" "run" "$logs/attempt-create.log" "run"
+  if [ "$done_rank" -lt "$(run_stage_rank installed)" ]; then
+    install_log="$logs/install.log"
+    : > "$install_log"
+    select_fluent "$(manifest_get "$root" '.install_boundary')" "$RUN_BIN" "$install_log" \
+      || fail_phase "$root" "run" "$install_log" "run"
+    manifest_set "$root" "run_stage" "installed"
+  fi
+
+  # init -> Work Item -> Attempt (public first-run commands), each checkpointed.
+  if [ "$done_rank" -lt "$(run_stage_rank init)" ]; then
+    run_fluent "$logs/init.log" init \
+      || fail_phase "$root" "run" "$logs/init.log" "run"
+    manifest_set "$root" "run_stage" "init"
+  fi
+  if [ "$done_rank" -lt "$(run_stage_rank work-item)" ]; then
+    run_fluent "$logs/work-item.log" work-item create "$wi" \
+      --title "Clean-room fixture" \
+      --brief-file "$(workitem_dir "$root")/brief.md" \
+      --behaviors-file "$(workitem_dir "$root")/behaviors.md" \
+      --approach-file "$(workitem_dir "$root")/approach.md" \
+      --plan-file "$(workitem_dir "$root")/plan.md" \
+      --instructions-file "$(workitem_dir "$root")/instructions.md" \
+      || fail_phase "$root" "run" "$logs/work-item.log" "run"
+    manifest_set "$root" "run_stage" "work-item"
+  fi
+  if [ "$done_rank" -lt "$(run_stage_rank attempt)" ]; then
+    run_fluent "$logs/attempt-create.log" attempt create "$wi" "$ATTEMPT_ID" \
+      || fail_phase "$root" "run" "$logs/attempt-create.log" "run"
+    manifest_set "$root" "run_stage" "attempt"
+  fi
 
   # Advance the Attempt until its Learner has succeeded. A Merge Candidate can
   # exist before the Learner runs, but landing requires a succeeded Learner, so
