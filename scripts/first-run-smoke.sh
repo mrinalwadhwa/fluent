@@ -365,8 +365,8 @@ phase_run() {
   # Advance the Attempt through the Learner until a ready candidate appears.
   local attempt_log="$logs/attempt-run.log"
   : > "$attempt_log"
-  local i status=""
-  for i in 1 2 3 4 5 6 7 8; do
+  local status=""
+  for _ in 1 2 3 4 5 6 7 8; do
     run_fluent "$attempt_log" attempt run "$wi" "$ATTEMPT_ID" \
       || fail_phase "$root" "run" "$attempt_log" "run"
     local show_log="$logs/candidate-show.log"
@@ -410,6 +410,78 @@ print_ready_handoff() {
 }
 
 # ---------------------------------------------------------------------------
+# land
+# ---------------------------------------------------------------------------
+
+phase_land() {
+  local root="${1-}"
+  [ -n "$root" ] || die "land requires a smoke root path"
+  root="$(absolute_path "$root")"
+  [ -f "$(manifest_path "$root")" ] || die "no harness manifest under $root"
+  [ "$(manifest_get "$root" '.schema_version')" = "$SCHEMA_VERSION" ] \
+    || die "smoke root has an incompatible manifest schema"
+
+  local safe_phase wi cand
+  safe_phase="$(manifest_get "$root" '.safe_phase')"
+  wi="$(manifest_get "$root" '.work_item_id')"
+  cand="$(manifest_get "$root" '.merge_candidate_id')"
+
+  if [ "$safe_phase" = "landed" ]; then
+    info "Already landed: $(manifest_get "$root" '.merged_commit')"
+    return 0
+  fi
+  [ "$safe_phase" = "ran" ] \
+    || die "land expects a ready smoke root (safe_phase=$safe_phase); run first"
+  if [ "$cand" = "null" ] || [ -z "$cand" ]; then
+    die "manifest has no ready Merge Candidate to land"
+  fi
+
+  RUN_PROJECT="$(project_dir "$root")"
+  RUN_HOME="$(home_dir "$root")"
+  RUN_BIN="$(manifest_get "$root" '.fluent_bin')"
+
+  local logs land_log
+  logs="$(log_dir "$root")"
+  land_log="$logs/land.log"
+  : > "$land_log"
+
+  # Land only the accepted candidate through Fluent.
+  run_fluent "$land_log" merge-candidate land "$wi" "$cand" \
+    || fail_phase "$root" "land" "$land_log" "land"
+
+  # The fixture's executable test must now pass on the target.
+  local check_log="$logs/fixture-check.log"
+  if ! ( cd "$RUN_PROJECT" && ./check.sh ) > "$check_log" 2>&1; then
+    fail_phase "$root" "land" "$check_log" "land"
+  fi
+
+  # The target repository must be clean after the merge.
+  if [ -n "$(git -C "$RUN_PROJECT" status --porcelain)" ]; then
+    git -C "$RUN_PROJECT" status --porcelain > "$logs/target-dirty.log"
+    fail_phase "$root" "land" "$logs/target-dirty.log" "land"
+  fi
+
+  # Record the merged commit from Fluent's stored candidate state.
+  local merged
+  capture_fluent "$logs/landed-show.log" merge-candidate show "$wi" "$cand" \
+    > "$logs/landed-candidate.json" \
+    || fail_phase "$root" "land" "$logs/landed-show.log" "land"
+  merged="$(jq -r '.merge_state.merged_commit' "$logs/landed-candidate.json")"
+  if [ -z "$merged" ] || [ "$merged" = "null" ]; then
+    fail_phase "$root" "land" "$logs/landed-show.log" "land"
+  fi
+
+  manifest_set "$root" "merged_commit" "$merged"
+  manifest_set "$root" "safe_phase" "landed"
+  cp "$logs/landed-candidate.json" "$(evidence_dir "$root")/merged-candidate.json"
+
+  info "Landed Merge Candidate $cand"
+  info "  merged commit: $merged"
+  info "  fixture test:  passed"
+  info "  target repo:   clean"
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -432,7 +504,7 @@ main() {
   case "$phase" in
     prepare) phase_prepare "$@" ;;
     run)     phase_run "$@" ;;
-    land)    die "land phase is not available yet" ;;
+    land)    phase_land "$@" ;;
     -h|--help) usage ;;
     *) die "unknown phase: $phase" ;;
   esac

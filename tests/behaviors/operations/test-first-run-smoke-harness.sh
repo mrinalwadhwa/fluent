@@ -288,6 +288,62 @@ test_ready_handoff_is_actionable() {
   return $rc
 }
 
+test_land_verifies_target() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+  run_harness land "$ROOT" > "$WORK/land.out" 2>&1
+
+  local rc=0
+  # The candidate lands and the fixture test now passes on main.
+  if ! ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: fixture test does not pass after land\n'; rc=1
+  fi
+  # The target repository is clean.
+  if [ -n "$(git -C "$ROOT/project/main" status --porcelain)" ]; then
+    printf '    FAIL: target repository is dirty after land\n'; rc=1
+  fi
+  # The manifest records the merged commit and the landed safe phase.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: safe_phase not landed\n'; rc=1; }
+  local merged
+  merged="$(jq -r '.merged_commit' "$ROOT/harness/manifest.json")"
+  [ "$merged" = "$(git -C "$ROOT/project/main" rev-parse HEAD)" ] \
+    || { printf '    FAIL: merged_commit does not match main HEAD\n'; rc=1; }
+  # The land command is the only path that reached land.
+  grep -q 'merge-candidate land' "$FAKE_CMD_LOG" \
+    || { printf '    FAIL: land was never invoked\n'; rc=1; }
+  return $rc
+}
+
+test_failure_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # Force the Attempt run to fail mid-phase.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_ATTEMPT_RUN_FAILS=1 \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should exit non-zero when a phase fails\n'; rc=1
+  fi
+  local out
+  out="$(cat "$WORK/run.out")"
+  # The smoke root is preserved.
+  [ -d "$ROOT/project/main/.git" ] || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  # The failure names the phase, a log, and the exact resume command.
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
+  # The safe phase stays at prepared so resume repeats run, not land.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the failure\n'; rc=1; }
+  return $rc
+}
+
 printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
@@ -295,5 +351,8 @@ run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
 run_test "run uses public sequence and stops before land" \
   test_run_uses_public_sequence_and_stops_before_land
 run_test "ready handoff is actionable" test_ready_handoff_is_actionable
+run_test "land verifies target" test_land_verifies_target
+run_test "failure preserves evidence and resume" \
+  test_failure_preserves_evidence_and_resume
 
 summarize_and_exit
