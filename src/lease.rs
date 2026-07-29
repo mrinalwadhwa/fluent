@@ -68,6 +68,21 @@ pub fn acquire(lock_path: &Path) -> io::Result<TaskLease> {
     }
 }
 
+/// Acquire an exclusive lease, waiting for a peer that is currently using the
+/// same resource. Reviewer cache admission uses this to make accounting and
+/// copying one project-wide transaction.
+pub fn acquire_blocking(lock_path: &Path) -> io::Result<TaskLease> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path)?;
+    flock(&file, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+    Ok(TaskLease { _file: file })
+}
+
 pub fn is_leased(lock_path: &Path) -> bool {
     let file = match OpenOptions::new().read(true).open(lock_path) {
         Ok(f) => f,

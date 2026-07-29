@@ -27,6 +27,11 @@ pub const DEFAULT_LEARNER_SCHEMA_REPAIR_BUDGET: u32 = 2;
 pub const DEFAULT_TRANSCRIPT_CONSOLE_PREVIEW_LIMIT: u32 = 8 * 1024;
 /// Built-in interval, in milliseconds, between transcript-pump status flushes.
 pub const DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS: u32 = 1000;
+/// Built-in maximum managed reviewer cache footprint for one project.
+pub const DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB: u64 = 50;
+/// Built-in filesystem space reserved after a reviewer cache admission.
+pub const DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB: u64 = 50;
+const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Which configuration layer supplied a resolved leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +175,13 @@ pub struct ResolvedTranscriptPumpConfig {
     pub status_flush_interval_ms: ResolvedLeaf<u32>,
 }
 
+/// Reviewer cache limits resolved from project, then user, then built-in defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReviewerCacheConfig {
+    pub max_project_bytes: ResolvedLeaf<u64>,
+    pub min_free_bytes: ResolvedLeaf<u64>,
+}
+
 /// A configured follow-up or scheduler value that could not be parsed or
 /// validated. Names the configuration path and the affected key so the caller
 /// can fail closed instead of silently substituting a lower-precedence value.
@@ -301,6 +313,21 @@ fn convert_priority(raw: &serde_yaml::Value) -> Result<i64, String> {
         .ok_or_else(|| "expected an integer".to_string())
 }
 
+fn convert_gib(raw: &serde_yaml::Value) -> Result<u64, String> {
+    let value = raw
+        .as_i64()
+        .ok_or_else(|| "expected a non-negative integer GiB value".to_string())?;
+    if value < 0 {
+        return Err(format!(
+            "expected a non-negative integer GiB value, found {value}"
+        ));
+    }
+    u64::try_from(value)
+        .map_err(|_| format!("value {value} is out of range"))?
+        .checked_mul(GIB_BYTES)
+        .ok_or_else(|| format!("value {value} GiB overflows bytes"))
+}
+
 fn digest_hex(canonical: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -316,6 +343,42 @@ pub fn resolve_follow_up_policy(
         &project_config_path(project_root),
         user_config_path().as_deref(),
     )
+}
+
+/// Resolve reviewer cache safety limits. A malformed configured leaf fails
+/// closed so callers can run the reviewer cold while naming its source.
+pub fn resolve_reviewer_cache_config(
+    project_root: &Path,
+) -> Result<ResolvedReviewerCacheConfig, FollowUpConfigError> {
+    resolve_reviewer_cache_config_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )
+}
+
+pub(crate) fn resolve_reviewer_cache_config_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> Result<ResolvedReviewerCacheConfig, FollowUpConfigError> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    Ok(ResolvedReviewerCacheConfig {
+        max_project_bytes: resolve_leaf(
+            &layers,
+            &["reviewer-cache", "max-project-gib"],
+            DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB
+                .checked_mul(GIB_BYTES)
+                .expect("built-in reviewer cache budget fits u64"),
+            convert_gib,
+        )?,
+        min_free_bytes: resolve_leaf(
+            &layers,
+            &["reviewer-cache", "min-free-gib"],
+            DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB
+                .checked_mul(GIB_BYTES)
+                .expect("built-in reviewer free-space floor fits u64"),
+            convert_gib,
+        )?,
+    })
 }
 
 fn resolve_follow_up_policy_from(
@@ -793,6 +856,39 @@ coders:
             resolved.status_flush_interval_ms.value,
             DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS
         );
+    }
+
+    #[test]
+    fn reviewer_cache_limits_layer_and_convert_gib_to_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "reviewer-cache:\n  max-project-gib: 3\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "reviewer-cache:\n  max-project-gib: 2\n  min-free-gib: 4\n",
+        );
+        let resolved = resolve_reviewer_cache_config_from(&project, Some(&user)).unwrap();
+        assert_eq!(resolved.max_project_bytes.value, 3 * GIB_BYTES);
+        assert_eq!(resolved.max_project_bytes.source, ConfigSource::Project);
+        assert_eq!(resolved.min_free_bytes.value, 4 * GIB_BYTES);
+        assert_eq!(resolved.min_free_bytes.source, ConfigSource::User);
+    }
+
+    #[test]
+    fn invalid_reviewer_cache_limit_names_owning_file_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "reviewer-cache:\n  min-free-gib: no\n",
+        );
+        let error = resolve_reviewer_cache_config_from(&project, None).unwrap_err();
+        assert_eq!(error.path, project);
+        assert_eq!(error.key, "reviewer-cache.min-free-gib");
     }
 
     #[test]

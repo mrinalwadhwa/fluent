@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct Toolchain {
@@ -58,6 +58,98 @@ pub fn populate_reviewer_cache(
         })?;
     }
     Ok(())
+}
+
+/// Return the canonical build-cache directories present directly under `root`.
+pub fn managed_cache_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for name in TOOLCHAINS.iter().flat_map(|toolchain| toolchain.dirs) {
+        let path = root.join(name);
+        if path.is_dir() && !dirs.contains(&path) {
+            dirs.push(path);
+        }
+    }
+    dirs
+}
+
+/// Sum regular-file lengths below canonical cache directories without following
+/// symlinks. Metadata failures and arithmetic overflow fail closed.
+pub fn managed_cache_bytes(root: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for path in managed_cache_dirs(root) {
+        total = total
+            .checked_add(directory_logical_bytes(&path)?)
+            .ok_or_else(|| {
+                anyhow::anyhow!("managed cache size overflow below {}", root.display())
+            })?;
+    }
+    Ok(total)
+}
+
+pub fn toolchain_cache_bytes(root: &Path, toolchain: &Toolchain) -> Result<u64> {
+    let mut total = 0_u64;
+    for name in toolchain.dirs {
+        let path = root.join(name);
+        if path.is_dir() {
+            total = total
+                .checked_add(directory_logical_bytes(&path)?)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("build cache size overflow below {}", root.display())
+                })?;
+        }
+    }
+    Ok(total)
+}
+
+fn directory_logical_bytes(path: &Path) -> Result<u64> {
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(path)
+        .with_context(|| format!("failed to read managed cache directory {}", path.display()))?
+    {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            total = total
+                .checked_add(directory_logical_bytes(&entry.path())?)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("managed cache size overflow below {}", path.display())
+                })?;
+        } else if metadata.is_file() {
+            total = total.checked_add(metadata.len()).ok_or_else(|| {
+                anyhow::anyhow!("managed cache size overflow below {}", path.display())
+            })?;
+        }
+    }
+    Ok(total)
+}
+
+/// Return free bytes on the filesystem that contains `path`.
+pub fn filesystem_free_bytes(path: &Path) -> Result<u64> {
+    let stat = rustix::fs::statvfs(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to inspect free space at {}: {error}",
+            path.display()
+        )
+    })?;
+    u64::try_from(stat.f_bavail)
+        .ok()
+        .and_then(|blocks| blocks.checked_mul(u64::from(stat.f_frsize)))
+        .ok_or_else(|| anyhow::anyhow!("free-space calculation overflow at {}", path.display()))
+}
+
+/// Remove only canonical managed cache directories, preserving every other
+/// reviewer artifact.
+pub fn remove_managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    let dirs = managed_cache_dirs(root);
+    for path in &dirs {
+        std::fs::remove_dir_all(path).with_context(|| {
+            format!("failed to remove managed reviewer cache {}", path.display())
+        })?;
+    }
+    Ok(dirs)
 }
 
 fn copy_dir_with_fallback(src: &Path, dst: &Path) -> Result<()> {
@@ -212,5 +304,30 @@ mod tests {
         let tc = &TOOLCHAINS[0]; // rust — no target/ dir
         populate_reviewer_cache(&candidate, &artifact, tc).unwrap();
         assert!(!artifact.join("target").exists());
+    }
+
+    #[test]
+    fn managed_cache_bytes_counts_regular_files_without_following_links() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("target/nested")).unwrap();
+        std::fs::write(tmp.path().join("target/nested/output"), b"1234").unwrap();
+        std::fs::write(tmp.path().join("notes"), b"preserved").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path().join("notes"), tmp.path().join("target/link"))
+            .unwrap();
+        assert_eq!(managed_cache_bytes(tmp.path()).unwrap(), 4);
+    }
+
+    #[test]
+    fn removes_only_canonical_managed_cache_dirs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("review.md"), "evidence").unwrap();
+        remove_managed_cache_dirs(tmp.path()).unwrap();
+        assert!(!tmp.path().join("target").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("review.md")).unwrap(),
+            "evidence"
+        );
     }
 }

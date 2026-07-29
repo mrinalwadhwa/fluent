@@ -976,6 +976,7 @@ fn run_review_task_with_coder(
 
     if let Some(candidate_path) = readable_workspace_paths.first() {
         prepare_reviewer_build_cache(
+            config.project_root,
             candidate_path,
             &artifact_dir,
             config.work_item_id,
@@ -1043,13 +1044,15 @@ fn run_review_task_with_coder(
     // failure must never mask or erase a coder/pump failure, and no raw `?` after
     // the reservation may leave the Task Executing.
     let cleanup_result = readable_workspaces.finish();
-    finalize_review_outcome(
+    let outcome = finalize_review_outcome(
         &config,
         run_result,
         cleanup_result,
         &review_path,
         &crate::notify::notify,
-    )
+    );
+    reclaim_reviewer_cache_after_terminal(&config, &artifact_dir);
+    outcome
 }
 
 /// A terminal review failure that a supported resume can retry: an expired auth
@@ -4109,6 +4112,7 @@ fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
 }
 
 fn prepare_reviewer_build_cache(
+    project_root: &Path,
     candidate_workspace: &Path,
     artifact_dir: &Path,
     work_item_id: &str,
@@ -4151,19 +4155,153 @@ fn prepare_reviewer_build_cache(
             }
         }
     } else if let Some(toolchain) = prep::detect_toolchain(candidate_workspace) {
-        match prep::populate_reviewer_cache(candidate_workspace, artifact_dir, toolchain) {
-            Ok(()) => {
-                eprintln!(
-                    "  Reviewer prep     pre-populated {} build cache from candidate",
-                    toolchain.name,
-                );
+        admit_reviewer_build_cache(
+            project_root,
+            candidate_workspace,
+            artifact_dir,
+            toolchain,
+            task_id,
+        );
+    }
+}
+
+fn reviewer_cache_lock_path(project_root: &Path) -> PathBuf {
+    project_root.join(".fluent/work/locks/reviewer-cache.lock")
+}
+
+fn task_is_terminal(task: &crate::work_model::Task) -> bool {
+    matches!(
+        task.status,
+        TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+    )
+}
+
+fn reviewer_cache_artifact_dir(
+    project_root: &Path,
+    task: &crate::work_model::Task,
+) -> Result<PathBuf> {
+    let area = task
+        .artifact_area
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Reviewer Task {:?} has no artifact area", task.id))?;
+    resolve_managed_artifact_area_path(project_root, &area.path)
+}
+
+fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore) -> Result<()> {
+    for item in store.list_work_items()? {
+        for attempt in &item.attempts {
+            for task in &attempt.tasks {
+                if task.kind != TaskKind::Review || !task_is_terminal(task) {
+                    continue;
+                }
+                let artifact_dir = reviewer_cache_artifact_dir(project_root, task)?;
+                if artifact_dir.exists() {
+                    prep::remove_managed_cache_dirs(&artifact_dir)?;
+                }
             }
-            Err(err) => {
-                eprintln!(
-                    "  Reviewer prep     failed to copy {} build cache: {err:#}",
-                    toolchain.name,
-                );
+        }
+    }
+    Ok(())
+}
+
+fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> Result<u64> {
+    let mut total = 0_u64;
+    for item in store.list_work_items()? {
+        for attempt in &item.attempts {
+            for task in &attempt.tasks {
+                if task.kind != TaskKind::Review {
+                    continue;
+                }
+                let artifact_dir = reviewer_cache_artifact_dir(project_root, task)?;
+                if artifact_dir.exists() {
+                    total = total
+                        .checked_add(prep::managed_cache_bytes(&artifact_dir)?)
+                        .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
+                }
             }
+        }
+    }
+    Ok(total)
+}
+
+fn admit_reviewer_build_cache(
+    project_root: &Path,
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    toolchain: &prep::Toolchain,
+    task_id: &str,
+) {
+    let lock = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!(
+                "  Reviewer prep     {task_id} starting cold: cache lock check failed: {error}"
+            );
+            return;
+        }
+    };
+    let store = WorkModelStore::new(project_root);
+    let decision = (|| -> Result<Option<&'static str>> {
+        reclaim_terminal_reviewer_caches(project_root, &store)?;
+        let limits = crate::config::resolve_reviewer_cache_config(project_root)
+            .map_err(anyhow::Error::new)?;
+        let current = managed_reviewer_cache_total(project_root, &store)?;
+        let prospective = prep::toolchain_cache_bytes(candidate_workspace, toolchain)?;
+        let total = current
+            .checked_add(prospective)
+            .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
+        if total > limits.max_project_bytes.value {
+            return Ok(Some("project cache budget"));
+        }
+        let free = prep::filesystem_free_bytes(artifact_dir)?;
+        let required = prospective
+            .checked_add(limits.min_free_bytes.value)
+            .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
+        if free < required {
+            return Ok(Some("host free-space floor"));
+        }
+        prep::populate_reviewer_cache(candidate_workspace, artifact_dir, toolchain)?;
+        Ok(None)
+    })();
+    drop(lock);
+    match decision {
+        Ok(None) => eprintln!(
+            "  Reviewer prep     pre-populated {} build cache from candidate",
+            toolchain.name
+        ),
+        Ok(Some(reason)) => {
+            eprintln!("  Reviewer prep     {task_id} starting cold: {reason} would be exceeded")
+        }
+        Err(error) => eprintln!(
+            "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
+        ),
+    }
+}
+
+fn reclaim_reviewer_cache_after_terminal(config: &WorkTaskRunConfig<'_>, artifact_dir: &Path) {
+    let terminal = config
+        .store
+        .read_work_item(config.work_item_id)
+        .ok()
+        .and_then(|item| {
+            item.attempts
+                .iter()
+                .find(|attempt| attempt.id == config.attempt_id)
+                .and_then(|attempt| {
+                    attempt
+                        .tasks
+                        .iter()
+                        .find(|task| task.id == config.task_id)
+                        .map(task_is_terminal)
+                })
+        })
+        .unwrap_or(false);
+    if terminal {
+        if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
+            eprintln!(
+                "  Reviewer prep     retained cache {}: {error:#}",
+                artifact_dir.display()
+            );
         }
     }
 }
