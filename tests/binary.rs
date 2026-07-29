@@ -1428,6 +1428,24 @@ fn init_outside_git_makes_no_changes() {
     fs::write(tmp.path().join("ancestor-keep.txt"), "unchanged\n").unwrap();
     fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
     fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
+    fs::create_dir_all(child.join(".fluent/empty-project-data")).unwrap();
+    fs::write(child.join(".fluent/project-sentinel"), "project\n").unwrap();
+    fs::write(home.join("home-sentinel"), "home\n").unwrap();
+    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
+    for agent in [".claude", ".codex"] {
+        let skills = home.join(agent).join("skills");
+        fs::create_dir_all(skills.join("empty-skill")).unwrap();
+        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
+        fs::write(
+            skills.join("seeded-skill/SKILL.md"),
+            format!("{agent} skill\n"),
+        )
+        .unwrap();
+    }
+
+    let outer_before = tree_snapshot(tmp.path());
+    let child_before = tree_snapshot(&child);
+    let home_before = tree_snapshot(&home);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -1436,23 +1454,9 @@ fn init_outside_git_makes_no_changes() {
         .assert()
         .failure();
 
-    assert_eq!(
-        fs::read_to_string(child.join("keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert_eq!(
-        fs::read_to_string(tmp.path().join("ancestor-keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert_eq!(
-        fs::read_to_string(descendant.join("keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert!(!tmp.path().join(".fluent").exists());
-    assert!(!child.join(".fluent").exists());
-    assert!(!descendant.join(".fluent").exists());
-    assert!(!home.join(".local/share/fluent").exists());
-    assert!(!home.join(".claude/skills").exists());
+    assert_eq!(tree_snapshot(tmp.path()), outer_before);
+    assert_eq!(tree_snapshot(&child), child_before);
+    assert_eq!(tree_snapshot(&home), home_before);
 }
 
 #[test]
@@ -1519,6 +1523,24 @@ fn init_below_repository_root_makes_no_changes_and_names_root() {
     fs::write(project.join("keep.txt"), "unchanged\n").unwrap();
     fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
     fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
+    fs::create_dir_all(project.join(".fluent/empty-project-data")).unwrap();
+    fs::write(project.join(".fluent/project-sentinel"), "project\n").unwrap();
+    fs::write(home.join("home-sentinel"), "home\n").unwrap();
+    fs::create_dir_all(home.join(".local/share/fluent/empty-data")).unwrap();
+    for agent in [".claude", ".codex"] {
+        let skills = home.join(agent).join("skills");
+        fs::create_dir_all(skills.join("empty-skill")).unwrap();
+        fs::create_dir_all(skills.join("seeded-skill")).unwrap();
+        fs::write(
+            skills.join("seeded-skill/SKILL.md"),
+            format!("{agent} skill\n"),
+        )
+        .unwrap();
+    }
+
+    let project_before = tree_snapshot(&project);
+    let child_before = tree_snapshot(&child);
+    let home_before = tree_snapshot(&home);
 
     let output = fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -1529,23 +1551,9 @@ fn init_below_repository_root_makes_no_changes_and_names_root() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains(project.to_str().unwrap()));
-    assert_eq!(
-        fs::read_to_string(project.join("keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert_eq!(
-        fs::read_to_string(child.join("keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert_eq!(
-        fs::read_to_string(descendant.join("keep.txt")).unwrap(),
-        "unchanged\n"
-    );
-    assert!(!project.join(".fluent").exists());
-    assert!(!child.join(".fluent").exists());
-    assert!(!descendant.join(".fluent").exists());
-    assert!(!home.join(".local/share/fluent").exists());
-    assert!(!home.join(".claude/skills").exists());
+    assert_eq!(tree_snapshot(&project), project_before);
+    assert_eq!(tree_snapshot(&child), child_before);
+    assert_eq!(tree_snapshot(&home), home_before);
 }
 
 #[test]
