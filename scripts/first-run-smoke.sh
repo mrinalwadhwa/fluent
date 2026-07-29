@@ -46,6 +46,12 @@ info() {
   printf '%s\n' "$1"
 }
 
+# Shell-escape a value so a printed command stays executable even when a path
+# contains spaces or other shell metacharacters.
+shq() {
+  printf '%q' "$1"
+}
+
 # Report a phase failure with its log and the exact resume command, then exit
 # non-zero. The smoke root is preserved untouched.
 fail_phase() {
@@ -54,7 +60,7 @@ fail_phase() {
   printf 'error: smoke phase "%s" failed\n' "$phase" >&2
   printf '  smoke root preserved: %s\n' "$root" >&2
   printf '  phase log: %s\n' "$log" >&2
-  printf '  resume with: %s %s %q\n' "$SELF" "$resume_phase" "$root" >&2
+  printf '  resume with: %s %s %s\n' "$(shq "$SELF")" "$resume_phase" "$(shq "$root")" >&2
   exit 1
 }
 
@@ -253,7 +259,7 @@ MANIFEST
   info "  evidence:       $(evidence_dir "$root")"
   info "  install source: $install_boundary"
   info ""
-  info "Next: $SELF run $root"
+  info "Next: $(shq "$SELF") run $(shq "$root")"
 }
 
 # ---------------------------------------------------------------------------
@@ -439,11 +445,11 @@ print_ready_handoff() {
   info "Reached a ready Merge Candidate. The harness stops before landing."
   info ""
   info "Inspect the candidate:"
-  info "  ( cd $(project_dir "$root") && HOME=$(home_dir "$root") \\"
-  info "    $(manifest_get "$root" '.fluent_bin') merge-candidate show $wi $cand )"
+  info "  ( cd $(shq "$(project_dir "$root")") && HOME=$(shq "$(home_dir "$root")") \\"
+  info "    $(shq "$(manifest_get "$root" '.fluent_bin')") merge-candidate show $(shq "$wi") $(shq "$cand") )"
   info ""
   info "Land it after human acceptance:"
-  info "  $SELF land $root"
+  info "  $(shq "$SELF") land $(shq "$root")"
 }
 
 # ---------------------------------------------------------------------------

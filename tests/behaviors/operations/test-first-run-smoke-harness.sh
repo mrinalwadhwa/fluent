@@ -405,6 +405,38 @@ test_ready_handoff_is_actionable() {
   return $rc
 }
 
+test_ready_handoff_quotes_paths_with_spaces() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A valid smoke root whose path contains a space.
+  local spaced_root="$WORK/first run/smoke"
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+    bash "$HARNESS" prepare "$spaced_root" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
+    bash "$HARNESS" run "$spaced_root" > "$WORK/run.out" 2>&1
+
+  local rc=0
+  # The printed inspection command must execute despite the space and show the
+  # candidate — proving every inserted path is shell-escaped.
+  local insp
+  insp="$(grep -A1 -- '( cd ' "$WORK/run.out")"
+  if ! FAKE_CMD_LOG="$FAKE_CMD_LOG" eval "$insp" > "$WORK/insp.out" 2>&1; then
+    printf '    FAIL: printed inspection command did not execute:\n%s\n' "$insp"; rc=1
+  fi
+  assert_contains "$(cat "$WORK/insp.out")" "attempt-1-merge-candidate" || rc=1
+
+  # The printed land command (the last handoff line) must also execute.
+  local land_cmd
+  land_cmd="$(tail -1 "$WORK/run.out")"
+  if ! HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" eval "$land_cmd" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: printed land command did not execute:\n%s\n' "$land_cmd"; rc=1
+  fi
+  [ "$(jq -r '.safe_phase' "$spaced_root/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: printed land command did not land the candidate\n'; rc=1; }
+  return $rc
+}
+
 test_land_verifies_target() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -550,6 +582,8 @@ run_test "run waits for learner success" test_run_waits_for_learner_success
 run_test "run reaches ready after delayed learner" \
   test_run_reaches_ready_after_delayed_learner
 run_test "ready handoff is actionable" test_ready_handoff_is_actionable
+run_test "ready handoff quotes paths with spaces" \
+  test_ready_handoff_quotes_paths_with_spaces
 run_test "land verifies target" test_land_verifies_target
 run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
