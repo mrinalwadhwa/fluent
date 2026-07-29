@@ -4916,11 +4916,10 @@ Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
 WHEN `fluent skills add` runs,
 THE SYSTEM SHALL materialize the full fluent skill — its `SKILL.md` and
 `references/` — from the running binary into the target skill
-directories, together with the review skills, and SHALL replace any
-installed fluent shim it finds with the full skill.
+directories, together with the review skills, and SHALL record one managed
+installation sidecar for each selected agent, scope, and skill identity.
 Test: tests/binary.rs (skills_add_materializes_full_skill_and_references,
-skills_add_replaces_shim_marked_directory,
-skills_add_does_not_clobber_unmarked_directory)
+skills_add_leaves_one_managed_installation_per_agent_and_scope)
 
 ### B2
 
@@ -4971,6 +4970,48 @@ WHEN `fluent skills show <name> --path` is invoked,
 THE SYSTEM SHALL print the absolute path to the named skill's SKILL.md
 to stdout without printing the file content.
 Test: tests/binary.rs (skills_show_prints_skill_path)
+
+### B9
+
+WHEN a managed skill from an earlier Fluent release still matches its sidecar,
+THE SYSTEM SHALL update it to the running bundle without requiring the earlier
+bundle digest to be known by the running binary.
+Test: tests/binary.rs (skills_add_updates_prior_managed_release_without_digest_allowlist)
+
+### B10
+
+IF a sidecar-bearing installation does not have a valid sidecar for the
+selected agent, scope, skill, and complete file inventory, or an installation
+has no recognized ownership record,
+THEN THE SYSTEM SHALL preserve the directory byte-for-byte and report its path
+with cleanup guidance, even when it otherwise matches a legacy adoption route.
+Test: tests/binary.rs (skills_add_preserves_edited_added_and_missing_managed_files,
+skills_add_preserves_malformed_and_identity_mismatched_sidecars,
+skills_add_preserves_invalid_sidecar_on_shim_marked_installation,
+skills_add_reports_unmarked_conflict_without_modifying_it)
+
+### B11
+
+WHEN both global and project managed Fluent installations exist,
+THE SYSTEM SHALL preserve both and report their scopes and paths, including
+that the agent may display both entries.
+Test: tests/binary.rs (skills_add_preserves_and_reports_cross_scope_installations)
+
+### B12
+
+WHEN a managed installation already matches the running bundle,
+THE SYSTEM SHALL leave its files unchanged and report that it is current
+without an installation-failure warning.
+Test: tests/binary.rs (skills_add_does_not_rewrite_current_managed_installation,
+skills_add_current_installation_reports_success_without_warning)
+
+### B13
+
+WHEN Fluent finds a sidecar-free exact allowlisted pre-sidecar bundle or a
+sidecar-free Fluent-marked shim,
+THE SYSTEM SHALL replace it with a managed installation of the running bundle.
+Test: src/skill_install.rs (adopts_an_exact_allowlisted_bundle_and_rejects_a_near_match)
+Test: tests/binary.rs (skills_add_replaces_stale_shim_installation)
 
 ## Documentation review — commit conventions
 
