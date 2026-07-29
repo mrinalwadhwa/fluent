@@ -18468,7 +18468,7 @@ fn skills_add_migrates_every_public_0_1_4_skill() {
 
 #[test]
 fn skills_add_preserves_changed_public_0_1_4_skill() {
-    for change in ["content", "inventory"] {
+    for change in ["content", "inventory", "missing"] {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         install_public_0_1_4_fixture(&home);
@@ -18476,6 +18476,7 @@ fn skills_add_preserves_changed_public_0_1_4_skill() {
         match change {
             "content" => fs::write(changed.join("SKILL.md"), "user edit\n").unwrap(),
             "inventory" => fs::write(changed.join("user-note.md"), "keep me\n").unwrap(),
+            "missing" => fs::remove_file(changed.join("SKILL.md")).unwrap(),
             _ => unreachable!(),
         }
         let before = complete_skill_snapshot(&changed);
