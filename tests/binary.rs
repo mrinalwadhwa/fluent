@@ -21659,6 +21659,93 @@ fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
 }
 
 #[test]
+fn learner_host_sandbox_preflight_precedes_run_reservation() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-host-sandbox-success");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
+    write_mock_sandbox_exec(&bin_dir);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
+        .assert()
+        .success();
+
+    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
+    assert_eq!(attempt["learning"]["runs"], 1);
+    assert_eq!(attempt["learning"]["status"], "succeeded");
+    assert!(
+        bin_dir.join("sandbox-exec.log").exists(),
+        "the preflighted sandbox must launch after reservation"
+    );
+}
+
+#[test]
+fn learner_host_sandbox_retry_reserves_one_run_on_same_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-host-sandbox-retry");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"retried","follow_ups":[]}"#),
+    );
+    write_mock_sandbox_exec(&bin_dir);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .assert()
+        .success();
+
+    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
+    assert_eq!(attempt["tasks"][0]["id"], "attempt-1-write-1");
+    assert_eq!(attempt["learning"]["runs"], 1);
+    assert_eq!(attempt["learning"]["status"], "succeeded");
+}
+
+#[test]
+fn effectively_unsandboxed_task_skips_host_sandbox_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-unsandboxed-learner");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"unsandboxed","follow_ups":[]}"#),
+    );
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .success();
+
+    let attempt = work_item_value(&main_dir, "work-1")["attempts"][0].clone();
+    assert_eq!(attempt["learning"]["runs"], 1);
+    assert_eq!(attempt["learning"]["status"], "succeeded");
+}
+
+#[test]
 fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
