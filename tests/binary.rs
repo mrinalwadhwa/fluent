@@ -21847,7 +21847,11 @@ fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin-forced-learner-host-sandbox-failure");
-    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    let launch_marker = tmp.path().join("learner-launched");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
     create_completed_work_attempt(&tmp, &main_dir);
     WorkModelStore::new(&main_dir)
         .mutate_work_item("work-1", |item| {
@@ -21861,23 +21865,23 @@ fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(&bin_dir))
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .env("FLUENT_TEST_CODER_MARKER", &launch_marker)
         .assert()
-        .failure();
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .assert()
-        .failure();
+        .success()
+        .stderr(predicate::str::contains(
+            "test host sandbox preflight failure",
+        ));
     let item = work_item_value(&main_dir, "work-1");
+    let attempt = &item["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["pause_kind"], "host-sandbox");
     assert!(
-        item["attempts"][0]["learning"].is_null(),
-        "forced confinement must preflight before reservation"
+        attempt["learning"].is_null(),
+        "forced confinement must preflight before reserving Learning"
     );
     assert!(
-        item["attempts"][0]["learning"].is_null(),
-        "no-sandbox must not reserve a forced-confinement Learner run"
+        !launch_marker.exists(),
+        "a failed forced-confinement preflight must not launch the Learner"
     );
 }
 

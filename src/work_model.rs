@@ -3170,7 +3170,10 @@ impl MergeCandidate {
                 field: "candidate_commit",
             });
         }
+        let host_sandbox_paused = attempt.status == AttemptStatus::NeedsUser
+            && attempt.pause_kind == Some(PauseKind::HostSandbox);
         if self.merge_state.status != MergeCandidateMergeStatus::Failed
+            && !host_sandbox_paused
             && (attempt.status != AttemptStatus::Complete
                 || attempt.review_state != Some(AttemptReviewState::Passed))
         {
