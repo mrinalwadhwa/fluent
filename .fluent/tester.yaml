@@ -1,5 +1,9 @@
 commands:
   - command: |
+      cargo build
+      production_bin="$(pwd)/target/debug/fluent-production"
+      cp target/debug/fluent "$production_bin"
+      export FLUENT_PRODUCTION_BIN="$production_bin"
       cargo build --features test-support
       test_bin="$(pwd)/target/debug/fluent-test-support"
       cp target/debug/fluent "$test_bin"

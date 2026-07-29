@@ -21780,17 +21780,6 @@ fn test_support_binary_controls_host_sandbox_preflight() {
 #[test]
 #[serial]
 fn production_binary_ignores_host_sandbox_test_control() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let build = Command::new("cargo")
-        .current_dir(manifest_dir)
-        .args(["build", "--bin", "fluent"])
-        .output()
-        .unwrap();
-    assert!(
-        build.status.success(),
-        "production build failed: {}",
-        String::from_utf8_lossy(&build.stderr)
-    );
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin-production-host-sandbox");
@@ -21801,7 +21790,10 @@ fn production_binary_ignores_host_sandbox_test_control() {
     write_mock_sandbox_exec(&bin_dir);
     create_completed_work_attempt(&tmp, &main_dir);
 
-    let production = manifest_dir.join("target/debug/fluent");
+    let production = PathBuf::from(
+        std::env::var_os("FLUENT_PRODUCTION_BIN")
+            .expect("tester must provide the copied production Fluent binary"),
+    );
     let output = Command::new(&production)
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1"])
