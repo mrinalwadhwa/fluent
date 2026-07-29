@@ -4623,14 +4623,14 @@ Test: tests/binary.rs (init_succeeds_when_skill_installation_fails)
 ### B8
 
 IF `fluent init` is invoked outside a Git working tree,
-THEN THE SYSTEM SHALL make no project or skill changes. When the immediate
+THEN THE SYSTEM SHALL make no project, Fluent-data, or agent-skill changes. When the immediate
 `<project>/main` child is a Git repository root, THE SYSTEM SHALL print
 `cd <project>/main && fluent init` as the recovery command.
 Test: tests/binary.rs (init_outside_git_makes_no_changes)
 Test: tests/binary.rs (init_outside_git_suggests_nested_main_repository_without_changes)
 
 IF `fluent init` is invoked below a Git repository root,
-THEN THE SYSTEM SHALL make no project or skill changes and name the repository
+THEN THE SYSTEM SHALL make no project, Fluent-data, or agent-skill changes and name the repository
 root where initialization can run.
 Test: tests/binary.rs (init_below_repository_root_makes_no_changes_and_names_root)
 
