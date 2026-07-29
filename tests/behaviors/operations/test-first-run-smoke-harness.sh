@@ -144,6 +144,9 @@ JSON
         ;;
       land)
         [ "$(stage)" = "ran" ] || reject "land out of order (stage=$(stage))"
+        if [ "${FAKE_LAND_FAILS:-0}" = "1" ]; then
+          reject "simulated land failure"
+        fi
         git merge -q --ff-only smoke-candidate
         MERGED="$(git rev-parse HEAD)"
         tmp="$(mktemp)"
@@ -494,6 +497,45 @@ test_land_verifies_target() {
   return $rc
 }
 
+test_land_failure_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # Force the land itself to fail so the land phase exercises the recovery
+  # contract, not only its success path.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_LAND_FAILS=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when the merge fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land.out")"
+  # The smoke root is preserved with the failed phase, its log, and a resume.
+  [ -d "$ROOT/project/main/.git" ] || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/land.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+  # The safe phase stays at ran so the resume repeats land, not run.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past the land failure\n'; rc=1; }
+  # main never received the merge.
+  if ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: main carries the fix despite a failed land\n'; rc=1
+  fi
+
+  # Clear the injected failure and execute the printed land resume; it lands.
+  run_harness land "$ROOT" > "$WORK/land-resume.out" 2>&1 \
+    || { printf '    FAIL: land resume did not land the candidate\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: land resume did not reach the landed phase\n'; rc=1; }
+  if ! ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: fixture test does not pass after the land resume\n'; rc=1
+  fi
+  return $rc
+}
+
 test_failure_preserves_evidence_and_resume() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -633,6 +675,8 @@ run_test "ready handoff is actionable" test_ready_handoff_is_actionable
 run_test "ready handoff quotes paths with spaces" \
   test_ready_handoff_quotes_paths_with_spaces
 run_test "land verifies target" test_land_verifies_target
+run_test "land failure preserves evidence and resume" \
+  test_land_failure_preserves_evidence_and_resume
 run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
 run_test "installer failure preserves evidence and resume" \
