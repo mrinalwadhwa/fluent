@@ -271,6 +271,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         &LearnerConfig {
                             run_coder: &run_coder,
                             codex_worker: None,
+                            no_sandbox: config.no_sandbox,
                         },
                     )?;
                     // A no-expertise Learner persists every terminal transition
@@ -480,6 +481,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 Some(LearnerConfig {
                     run_coder: &run_coder,
                     codex_worker: None,
+                    no_sandbox: config.no_sandbox,
                 }),
             )?;
             let should_stop = matches!(
@@ -740,7 +742,9 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
     match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
         AttemptStatus::NeedsUser => match attempt.pause_kind {
-            Some(PauseKind::Auth) | Some(PauseKind::TranscriptPump) => {
+            Some(PauseKind::Auth)
+            | Some(PauseKind::TranscriptPump)
+            | Some(PauseKind::HostSandbox) => {
                 // Resume only a cleanly resumable Attempt: a hard-Failed or
                 // still-live peer Task means resuming could discard a hard
                 // failure or race a running Task. Such a mixed state needs the
@@ -953,6 +957,7 @@ pub(crate) struct LearnerCoderRequest<'a> {
 struct LearnerConfig<'a> {
     run_coder: &'a dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>,
     codex_worker: Option<&'a crate::codex_worker::CodexWorkerEnvironment>,
+    no_sandbox: bool,
 }
 
 /// The verdict of a fresh, serialized Learner reservation.
@@ -1070,6 +1075,37 @@ fn run_learner_step(
         None
     };
 
+    // Probe the resolved Learner boundary before changing durable Learning state.
+    // Capture may genuinely run unsandboxed; the protected modes and Codex retain
+    // their confinement even when the caller requested `--no-sandbox`.
+    if let Err(error) = preflight_learner_host_sandbox(
+        project_root,
+        item,
+        attempt_index,
+        mode,
+        config.no_sandbox,
+        codex_worker.as_ref(),
+    ) {
+        if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
+            store.mutate_work_item(&work_item_id, |fresh| {
+                let index = attempt_index_by_id(fresh, &attempt_id)?;
+                crate::work_model::transition_attempt(
+                    &mut fresh.attempts[index],
+                    AttemptStatus::NeedsUser,
+                    Some(PauseKind::HostSandbox),
+                );
+                Ok(())
+            })?;
+            *item = store.read_work_item(&work_item_id)?;
+            eprintln!(
+                "  Warning: Learner host sandbox preflight failed; retry after restoring the host boundary: {}",
+                host.message()
+            );
+            return Ok(());
+        }
+        return Err(error);
+    }
+
     // A fresh, lock-held reservation with landing validation. It re-reads the durable
     // state under the model lock and decides whether THIS runner launches, so a
     // record a peer already succeeded, took non-relaunchable (its coder already ran
@@ -1090,6 +1126,7 @@ fn run_learner_step(
     let config = LearnerConfig {
         run_coder: config.run_coder,
         codex_worker: codex_worker.as_ref(),
+        no_sandbox: config.no_sandbox,
     };
 
     // A pre-land no-expertise run must leave every candidate pointer at the reviewed
@@ -1128,6 +1165,93 @@ fn run_learner_step(
     finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
     })
+}
+
+/// Preflight the resolved Learner policy while the Learner lease is held but before
+/// `reserve_learner_run` writes an in-progress Learning record.  The run directory
+/// name is deterministic under that lease, so the later launch renders the same
+/// profile roots without reserving a durable run just to discover a host failure.
+fn preflight_learner_host_sandbox(
+    project_root: &Path,
+    item: &WorkItem,
+    attempt_index: usize,
+    mode: work_task_executor::LearnerExecutionMode,
+    no_sandbox: bool,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+) -> Result<()> {
+    let attempt = &item.attempts[attempt_index];
+    let write_output = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .and_then(|task| task.output.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("no completed write task with output"))?;
+    let workspace_path = resolve_managed_sibling_workspace_path(
+        project_root,
+        &write_output.workspace_path,
+        "learner workspace",
+    )?;
+    let review_artifact_paths = all_review_artifact_paths(project_root, attempt)?;
+    let tester_artifact_paths = all_tester_artifact_paths(project_root, attempt)?;
+    let mapping = attempt.coder_mapping.for_task_kind(TaskKind::Write);
+    let handoff_dir = project_root
+        .join(crate::learner::handoff_dir_rel(&item.id, &attempt.id))
+        .join("runs")
+        .join(format!(
+            "run-{}",
+            next_learner_run_number(project_root, &item.id, &attempt.id)?
+        ))
+        .join("staging");
+    let denied_write_roots = if mode.expertise_writable() {
+        Vec::new()
+    } else {
+        vec![project_root.to_path_buf(), workspace_path.clone()]
+    };
+    work_task_executor::preflight_learner_host_sandbox(
+        work_task_executor::LearnerRunInputs {
+            workspace_path: &workspace_path,
+            resolver: &ContentResolver::new(Some(project_root)),
+            extra_args: &[],
+            coder_kind: mapping.coder,
+            no_sandbox,
+            model: None,
+            effort: None,
+            review_artifact_paths: &review_artifact_paths,
+            tester_artifact_paths: &tester_artifact_paths,
+            diff_command: "git diff",
+            handoff_dir: &handoff_dir,
+            denied_write_roots: &denied_write_roots,
+            handoff_only: mode.is_post_land(),
+            repair: None,
+        },
+        mode,
+        codex_worker,
+    )
+}
+
+fn next_learner_run_number(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<u32> {
+    let runs = project_root
+        .join(crate::learner::handoff_dir_rel(work_item_id, attempt_id))
+        .join("runs");
+    let mut highest = 0;
+    if let Ok(entries) = fs::read_dir(runs) {
+        for entry in entries {
+            let name = entry?.file_name();
+            if let Some(number) = name
+                .to_string_lossy()
+                .strip_prefix("run-")
+                .and_then(|n| n.parse().ok())
+            {
+                highest = highest.max(number);
+            }
+        }
+    }
+    Ok(highest + 1)
 }
 
 /// The outcome of the fresh, lock-held no-expertise preparation mutation.
@@ -5787,6 +5911,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -5837,6 +5962,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &failing_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -5965,6 +6091,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6066,6 +6193,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6121,6 +6249,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6178,6 +6307,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         );
         assert!(
@@ -6330,6 +6460,7 @@ mod tests {
                         &LearnerConfig {
                             run_coder: &run_coder,
                             codex_worker: None,
+                            no_sandbox: false,
                         },
                     )
                     .unwrap();
@@ -6375,6 +6506,7 @@ mod tests {
                 &LearnerConfig {
                     run_coder: &run_coder,
                     codex_worker: None,
+                    no_sandbox: false,
                 },
             )
             .unwrap();
@@ -6425,6 +6557,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6641,6 +6774,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6689,6 +6823,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -6735,6 +6870,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7045,6 +7181,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7079,6 +7216,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7116,6 +7254,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7155,6 +7294,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7187,6 +7327,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7272,6 +7413,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -7757,6 +7899,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder: &run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap();
@@ -8034,6 +8177,46 @@ mod tests {
             TaskStatus::Planned,
             "the pump-failed write task resets to Planned to retry"
         );
+    }
+
+    #[test]
+    fn host_sandbox_pause_is_resumable() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            status: AttemptStatus::NeedsUser,
+            pause_kind: Some(PauseKind::HostSandbox),
+            tasks: vec![Task {
+                id: "attempt-1-write-1".to_string(),
+                kind: TaskKind::Write,
+                status: TaskStatus::NeedsUser,
+                role: "author".to_string(),
+                instructions: None,
+                work_item_id: "work-1".to_string(),
+                attempt_id: Some("attempt-1".to_string()),
+                workspace_access: WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: None,
+                review_context: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: None,
+                started_at: None,
+                completed_at: None,
+            }],
+            completed_at: Some("2026-07-28T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            reject_terminal_attempt(&attempt).unwrap(),
+            TerminalCheck::Reopen
+        ));
+        crate::work_model::reopen_attempt(&mut attempt);
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Planned);
     }
 
     #[test]
@@ -8368,6 +8551,7 @@ mod tests {
             Some(LearnerConfig {
                 run_coder,
                 codex_worker: None,
+                no_sandbox: false,
             }),
         )
         .unwrap()

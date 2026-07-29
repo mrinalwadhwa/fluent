@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use std::env;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::NamedTempFile;
 
 use crate::coder::CoderKind;
@@ -10,6 +12,110 @@ use crate::content::ContentResolver;
 pub struct SandboxProfile {
     _temp_file: NamedTempFile,
     pub path: PathBuf,
+}
+
+/// The enclosing host could not apply Fluent's production Seatbelt profile.
+///
+/// This is distinct from a coder failure: the workload never started, so callers
+/// can pause and later retry the same Task without charging its work budget.
+#[derive(Debug)]
+pub struct HostSandboxPreflightError {
+    message: String,
+}
+
+impl fmt::Display for HostSandboxPreflightError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "host sandbox preflight failed: {}", self.message)
+    }
+}
+
+impl std::error::Error for HostSandboxPreflightError {}
+
+impl HostSandboxPreflightError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Apply an already-rendered production profile to a harmless command.
+///
+/// macOS is the only platform where Fluent uses Seatbelt. Keeping this probe
+/// adjacent to profile rendering makes it impossible for launch planners to
+/// accidentally test a weaker boundary than the one they later hand to a coder.
+pub fn preflight_profile(profile: &SandboxProfile) -> Result<()> {
+    #[cfg(feature = "test-support")]
+    if let Some(result) = test_preflight_result() {
+        return result;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        preflight_profile_with(profile, |profile_path| {
+            Command::new(sandbox_exec_program())
+                .arg("-f")
+                .arg(profile_path)
+                .arg("/usr/bin/true")
+                .output()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = profile;
+        Ok(())
+    }
+}
+
+/// Enable a deterministic probe outcome only for test-support binaries.
+///
+/// Production builds always execute the system-owned Seatbelt launcher. The
+/// test runner opts into this narrow seam so integration fixtures can control
+/// the host capability without replacing the trusted launcher through `PATH`.
+#[cfg(feature = "test-support")]
+fn test_preflight_result() -> Option<Result<()>> {
+    match env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT")
+        .ok()
+        .as_deref()
+    {
+        Some("pass") => Some(Ok(())),
+        Some("fail") => Some(Err(HostSandboxPreflightError {
+            message: "test host sandbox preflight failure".to_string(),
+        }
+        .into())),
+        _ => None,
+    }
+}
+
+/// Select the system-owned Seatbelt launcher.
+///
+/// The preflight must exercise the same trusted production boundary in every
+/// build. Tests that need to control the probe inject its executor through
+/// [`preflight_profile_with`] instead of replacing a security boundary via
+/// `PATH`.
+fn sandbox_exec_program() -> &'static str {
+    "/usr/bin/sandbox-exec"
+}
+
+/// Run a rendered profile through a caller-supplied probe executor.
+///
+/// Production calls this through [`preflight_profile`] with the trusted absolute
+/// Seatbelt launcher. Route tests can inject only the probe execution, while
+/// retaining the real rendered profile and every surrounding state transition.
+pub fn preflight_profile_with(
+    profile: &SandboxProfile,
+    run_probe: impl FnOnce(&Path) -> std::io::Result<std::process::Output>,
+) -> Result<()> {
+    let output = run_probe(&profile.path).map_err(|error| HostSandboxPreflightError {
+        message: format!("could not execute sandbox-exec: {error}"),
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("sandbox-exec exited with {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(HostSandboxPreflightError { message: detail }.into());
+    }
+    Ok(())
 }
 
 /// Render a Claude Seatbelt sandbox profile with placeholder substitution.
@@ -338,6 +444,27 @@ mod tests {
         assert!(!content.contains("_HOME_"));
         assert!(!content.contains("_SANDBOX_ROOT_"));
         assert!(!content.contains("_SANDBOX_ROOT_RULES_"));
+    }
+
+    #[test]
+    fn task_host_sandbox_preflight_runs_before_reservation_or_launch() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile(&resolver, "/Users/test", "/Users/test/project").unwrap();
+        let expected_path = profile.path.clone();
+        let observed_path = std::cell::RefCell::new(None);
+
+        preflight_profile_with(&profile, |path| {
+            *observed_path.borrow_mut() = Some(path.to_path_buf());
+            Command::new("/usr/bin/true").output()
+        })
+        .unwrap();
+
+        assert_eq!(observed_path.into_inner(), Some(expected_path));
+    }
+
+    #[test]
+    fn host_sandbox_preflight_uses_the_system_launcher() {
+        assert_eq!(sandbox_exec_program(), "/usr/bin/sandbox-exec");
     }
 
     #[test]

@@ -100,6 +100,47 @@ pub fn run(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<()> {
+    let profile =
+        preflight_sandbox_profile(candidate_workspace, artifact_dir, no_sandbox, resolver)?;
+    run_with_sandbox_profile(candidate_workspace, artifact_dir, profile.as_ref())
+}
+
+/// Render and apply the Tester production boundary without creating artifacts or
+/// launching a test command. Callers that reserve Tasks use this before their
+/// durable reservation, then pass the returned profile to `run_with_sandbox_profile`
+/// so the exact probed profile encloses the workload.
+pub fn preflight_sandbox_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<Option<os::SandboxProfile>> {
+    if no_sandbox {
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let candidate_abs =
+        fs::canonicalize(candidate_workspace).unwrap_or_else(|_| candidate_workspace.to_path_buf());
+    let artifact_abs =
+        fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
+    let writable_roots = tester_writable_roots(&candidate_abs, &artifact_abs, Path::new(&home));
+    match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
+        Ok(profile) => {
+            os::preflight_profile(&profile)?;
+            Ok(Some(profile))
+        }
+        Err(err) => {
+            eprintln!("  Warning: sandbox render failed: {err:#}; running unsandboxed");
+            Ok(None)
+        }
+    }
+}
+
+pub fn run_with_sandbox_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    sandbox_profile: Option<&os::SandboxProfile>,
+) -> Result<()> {
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
 
     let config = match read_tester_config(&tester_yaml_path) {
@@ -137,29 +178,11 @@ pub fn run(
     let commands_dir = artifact_dir.join("commands");
     fs::create_dir_all(&commands_dir)?;
 
-    let _sandbox_profile = if no_sandbox {
-        None
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let candidate_abs = fs::canonicalize(candidate_workspace)
-            .unwrap_or_else(|_| candidate_workspace.to_path_buf());
-        let artifact_abs =
-            fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
-        let home_path = Path::new(&home);
-        let writable_roots = tester_writable_roots(&candidate_abs, &artifact_abs, home_path);
-        match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
-            Ok(profile) => {
-                eprintln!("  Sandbox profile  {}", profile.path.display());
-                Some(profile)
-            }
-            Err(err) => {
-                eprintln!("  Warning: sandbox render failed: {err:#}; running unsandboxed");
-                None
-            }
-        }
-    };
+    if let Some(profile) = sandbox_profile {
+        eprintln!("  Sandbox profile  {}", profile.path.display());
+    }
 
-    let sandbox_path = _sandbox_profile.as_ref().map(|p| &p.path);
+    let sandbox_path = sandbox_profile.as_ref().map(|p| &p.path);
 
     let mut command_results = Vec::new();
     for (index, cmd) in config.commands.iter().enumerate() {

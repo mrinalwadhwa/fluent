@@ -1890,32 +1890,41 @@ fn rebase_candidate_with_coder(
     };
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);
     let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
+
+    // Render and probe the exact production boundary before creating the rebase
+    // artifact area or recording an executing Task. The deterministic artifact path
+    // may be granted before it exists; Seatbelt only needs its rendered pathname.
+    let (sandbox, sandbox_profile) = match preflight_rebase_sandbox(
+        config,
+        source_workspace,
+        &rebase_artifact_dir,
+        codex_worker.as_ref(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
+                let task = new_rebase_task(config, candidate, &rebase_task_id, TaskStatus::Planned);
+                add_rebase_task_to_attempt(
+                    config.store,
+                    config.work_item_id,
+                    &candidate.attempt_id,
+                    task,
+                )?;
+                crate::work_task_executor::pause_task_for_host_sandbox(
+                    config.store,
+                    config.project_root,
+                    config.work_item_id,
+                    &candidate.attempt_id,
+                    &rebase_task_id,
+                    host,
+                )?;
+            }
+            return Err(error);
+        }
+    };
     fs::create_dir_all(&rebase_artifact_dir)?;
 
-    let now = crate::work_model::now_iso8601();
-    let rebase_task = Task {
-        id: rebase_task_id.clone(),
-        kind: TaskKind::Rebase,
-        status: TaskStatus::Executing,
-        role: "rebase".to_string(),
-        instructions: None,
-        work_item_id: config.work_item_id.to_string(),
-        attempt_id: Some(candidate.attempt_id.clone()),
-        workspace_access: WorkspaceAccess {
-            reads: Vec::new(),
-            writes: vec![candidate.source_workspace.clone()],
-        },
-        artifact_area: Some(crate::work_model::TaskArtifactArea {
-            path: work_artifact_path(config.work_item_id, &candidate.attempt_id, &rebase_task_id),
-        }),
-        review_context: None,
-        input_artifacts: Vec::new(),
-        depends_on: None,
-        output: None,
-        created_at: Some(now.clone()),
-        started_at: Some(now),
-        completed_at: None,
-    };
+    let rebase_task = new_rebase_task(config, candidate, &rebase_task_id, TaskStatus::Executing);
     add_rebase_task_to_attempt(
         config.store,
         config.work_item_id,
@@ -1938,6 +1947,8 @@ fn rebase_candidate_with_coder(
         &rebase_artifact_dir,
         &rebase_task_id,
         codex_worker.as_ref(),
+        sandbox,
+        sandbox_profile,
         make_coder,
     ) {
         Ok(RebaseOutcome::NeedsUser { diagnostic }) => {
@@ -1953,13 +1964,28 @@ fn rebase_candidate_with_coder(
             Ok(RebaseOutcome::NeedsUser { diagnostic })
         }
         Ok(outcome) => Ok(outcome),
-        Err(err) => Err(settle_reserved_rebase_failure(
-            config,
-            &candidate.attempt_id,
-            &rebase_task_id,
-            &candidate.id,
-            err,
-        )),
+        Err(err) => {
+            // A Seatbelt probe is an infrastructure pause, not a failed rebase.
+            // Record the owning Attempt and its handoff through the same boundary
+            // as ordinary Tasks before settling the Candidate's paired state.
+            if let Some(host) = err.downcast_ref::<crate::os::HostSandboxPreflightError>() {
+                crate::work_task_executor::pause_task_for_host_sandbox(
+                    config.store,
+                    config.project_root,
+                    config.work_item_id,
+                    &candidate.attempt_id,
+                    &rebase_task_id,
+                    host,
+                )?;
+            }
+            Err(settle_reserved_rebase_failure(
+                config,
+                &candidate.attempt_id,
+                &rebase_task_id,
+                &candidate.id,
+                err,
+            ))
+        }
     }
 }
 
@@ -1977,6 +2003,8 @@ fn run_reserved_rebase(
     rebase_artifact_dir: &Path,
     rebase_task_id: &str,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    sandbox: CoderSandbox,
+    _sandbox_profile: Option<os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
@@ -2004,19 +2032,6 @@ fn run_reserved_rebase(
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
-
-    let (sandbox, _sandbox_profile) = if config.no_sandbox && codex_worker.is_none() {
-        (CoderSandbox::None, None)
-    } else {
-        let common_git_dir = worktree::git_common_dir(source_workspace)?;
-        build_coder_sandbox_with_codex_home(
-            config.coder_kind,
-            config.resolver,
-            source_workspace,
-            &[common_git_dir, rebase_artifact_dir.to_path_buf()],
-            codex_worker.map(|worker| worker.home()),
-        )?
-    };
 
     eprintln!("  Fluent           work rebase");
     eprintln!("  Work Item         {}", config.work_item_id);
@@ -2133,6 +2148,64 @@ fn next_rebase_task_id(item: &WorkItem, attempt_id: &str) -> String {
     }
 }
 
+fn new_rebase_task(
+    config: &WorkMergeConfig<'_>,
+    candidate: &MergeCandidate,
+    rebase_task_id: &str,
+    status: TaskStatus,
+) -> Task {
+    let now = crate::work_model::now_iso8601();
+    let started_at = (status == TaskStatus::Executing).then_some(now.clone());
+    Task {
+        id: rebase_task_id.to_string(),
+        kind: TaskKind::Rebase,
+        status,
+        role: "rebase".to_string(),
+        instructions: None,
+        work_item_id: config.work_item_id.to_string(),
+        attempt_id: Some(candidate.attempt_id.clone()),
+        workspace_access: WorkspaceAccess {
+            reads: Vec::new(),
+            writes: vec![candidate.source_workspace.clone()],
+        },
+        artifact_area: Some(crate::work_model::TaskArtifactArea {
+            path: work_artifact_path(config.work_item_id, &candidate.attempt_id, rebase_task_id),
+        }),
+        review_context: None,
+        input_artifacts: Vec::new(),
+        depends_on: None,
+        output: None,
+        created_at: Some(now.clone()),
+        started_at,
+        completed_at: None,
+    }
+}
+
+/// Render and probe the rebase boundary while all rebase state is still read-only.
+fn preflight_rebase_sandbox(
+    config: &WorkMergeConfig<'_>,
+    source_workspace: &Path,
+    rebase_artifact_dir: &Path,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    if config.no_sandbox && codex_worker.is_none() {
+        return Ok((CoderSandbox::None, None));
+    }
+
+    let common_git_dir = worktree::git_common_dir(source_workspace)?;
+    let (sandbox, profile) = build_coder_sandbox_with_codex_home(
+        config.coder_kind,
+        config.resolver,
+        source_workspace,
+        &[common_git_dir, rebase_artifact_dir.to_path_buf()],
+        codex_worker.map(|worker| worker.home()),
+    )?;
+    if let Some(profile) = profile.as_ref() {
+        os::preflight_profile(profile)?;
+    }
+    Ok((sandbox, profile))
+}
+
 fn add_rebase_task_to_attempt(
     store: &WorkModelStore,
     work_item_id: &str,
@@ -2176,7 +2249,10 @@ fn settle_reserved_rebase_failure(
 ) -> anyhow::Error {
     let hard_failure = primary
         .downcast_ref::<crate::transcript_pump::TranscriptPumpError>()
-        .is_none();
+        .is_none()
+        && primary
+            .downcast_ref::<crate::os::HostSandboxPreflightError>()
+            .is_none();
     match settle_reserved_rebase_together(
         config,
         attempt_id,

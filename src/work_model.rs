@@ -2776,6 +2776,10 @@ pub enum PauseKind {
     /// operator fixes it. It is deliberately not `RoundCap`, so it is not charged
     /// against the write-round budget or rejected as a terminal cap on resume.
     TranscriptPump,
+    /// Fluent could not apply its production macOS Seatbelt boundary before the
+    /// workload started. This is host infrastructure, so retrying the same Task
+    /// after the enclosing sandbox recovers must not consume a work round.
+    HostSandbox,
 }
 
 /// Coarse attempt lifecycle state.
@@ -3303,7 +3307,9 @@ fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
     match status {
         AttemptStatus::Failed => 5,
         AttemptStatus::NeedsUser => match pause {
-            Some(PauseKind::Auth) | Some(PauseKind::TranscriptPump) => 3,
+            Some(PauseKind::Auth)
+            | Some(PauseKind::TranscriptPump)
+            | Some(PauseKind::HostSandbox) => 3,
             // RoundCap, Uncertain, or an unclassified pause is non-resumable.
             _ => 4,
         },
@@ -8888,6 +8894,24 @@ random banner prose that must be ignored
         assert_eq!(read.attempts[0].status, AttemptStatus::NeedsUser);
         assert_eq!(read.attempts[0].pause_kind, Some(PauseKind::Auth));
         assert!(read.attempts[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn host_sandbox_pause_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("host-sandbox-pause", "Host sandbox pause");
+        item.add_initial_attempt("attempt-1").unwrap();
+        suspend_attempt(&mut item.attempts[0], PauseKind::HostSandbox);
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        store.create_work_item(&item).unwrap();
+
+        let read = store.read_work_item("host-sandbox-pause").unwrap();
+        assert_eq!(
+            read.attempts[0].pause_kind,
+            Some(PauseKind::HostSandbox),
+            "the explicit host-sandbox pause survives durable storage"
+        );
     }
 
     #[test]

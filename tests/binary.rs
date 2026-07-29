@@ -16,6 +16,7 @@ fn fluent_cmd() -> LoggedCommand {
     let mut cmd = LoggedCommand::cargo_bin("fluent");
     cmd.env_remove("FLUENT_TASK_KIND");
     cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
+    cmd.env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass");
     cmd
 }
 
@@ -12354,7 +12355,7 @@ fn work_task_run_fails_review_task_without_artifact() {
         .assert()
         .success();
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -12400,7 +12401,7 @@ fn work_task_run_ignores_stale_review_artifact() {
     fs::write(&review_path, "Verdict: pass\n\nstale\n").unwrap();
 
     let bin_dir = tmp.path().join("bin-review");
-    write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -21614,6 +21615,79 @@ fn learner_codex_auth_preflight_precedes_run_reservation() {
 }
 
 #[test]
+fn learner_host_sandbox_failure_preserves_learning_and_pauses_same_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-learner-host-sandbox-failure");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure();
+
+    let item = work_item_value(&main_dir, "work-1");
+    let attempt = &item["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["pause_kind"], "host-sandbox");
+    assert!(
+        attempt["learning"].is_null(),
+        "the probe must precede reservation"
+    );
+}
+
+#[test]
+fn forced_sandbox_learner_preflights_despite_no_sandbox_request() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-forced-learner-host-sandbox-failure");
+    write_mock_claude(&bin_dir, &loop_mock_script("pass"));
+    create_completed_work_attempt(&tmp, &main_dir);
+    WorkModelStore::new(&main_dir)
+        .mutate_work_item("work-1", |item| {
+            item.learner_mode = fluent::work_model::LearnerMode::NoExpertise;
+            Ok(())
+        })
+        .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure();
+
+    let item = work_item_value(&main_dir, "work-1");
+    assert!(
+        item["attempts"][0]["learning"].is_null(),
+        "forced confinement must preflight before reservation"
+    );
+    assert!(
+        item["attempts"][0]["learning"].is_null(),
+        "no-sandbox must not reserve a forced-confinement Learner run"
+    );
+}
+
+#[test]
 fn rebase_codex_auth_preflight_precedes_task_creation() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -21762,6 +21836,10 @@ fn prepare_strict_codex_worker_home_fixture(
         r##"#!/bin/bash
 set -euo pipefail
 trap 'printf "strict-failed=%s\\n" "$BASH_COMMAND" >> "$FLUENT_TEST_CODEX_INVOCATIONS"' ERR
+if [ "$#" -eq 3 ] && [ "$1" = "-f" ] && [ "$3" = "/usr/bin/true" ]; then
+  shift 2
+  exec "$@"
+fi
 if [ "$#" -lt 4 ] || [ "$1" != "-f" ] || [ "$3" != "codex" ]; then
   echo "unexpected sandbox-exec invocation: $*" >&2
   exit 64
@@ -22491,6 +22569,144 @@ git commit -m "Add resumed writer output" >/dev/null
         fs::read_to_string(&exec_log).is_ok_and(|homes| !homes.trim().is_empty()),
         "the resumed attempt should launch Codex: {}",
         String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
+fn pause_attempt_for_host_sandbox(main_dir: &Path, bin_dir: &Path) -> serde_json::Value {
+    write_mock_claude(
+        bin_dir,
+        "#!/bin/bash\nprintf launched > \"${FLUENT_TEST_CODER_MARKER:?}\"\nexit 0\n",
+    );
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args([
+            "work-item",
+            "create",
+            "host-sandbox",
+            "--title",
+            "Host sandbox",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "create", "host-sandbox", "attempt-1"])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(main_dir)
+        .args(["attempt", "run", "host-sandbox", "attempt-1"])
+        .env("PATH", mock_path(bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .env("FLUENT_TEST_CODER_MARKER", bin_dir.join("coder-ran"))
+        .assert()
+        .failure();
+
+    work_item_value(main_dir, "host-sandbox")
+}
+
+#[test]
+fn host_sandbox_preflight_pauses_same_task_and_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let paused = pause_attempt_for_host_sandbox(&main_dir, &tmp.path().join("bin-host-pause"));
+
+    assert_eq!(paused["attempts"][0]["status"], "needs-user");
+    assert_eq!(paused["attempts"][0]["pause_kind"], "host-sandbox");
+    assert_eq!(paused["attempts"][0]["tasks"][0]["id"], "attempt-1-write-1");
+    assert_eq!(paused["attempts"][0]["tasks"][0]["status"], "needs-user");
+}
+
+#[test]
+fn host_sandbox_preflight_failure_consumes_no_work_budget() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-host-budget");
+    let paused = pause_attempt_for_host_sandbox(&main_dir, &bin_dir);
+
+    assert_eq!(paused["attempts"].as_array().unwrap().len(), 1);
+    assert_eq!(paused["attempts"][0]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(paused["attempts"][0]["tasks"][0]["kind"], "write");
+    assert!(paused["attempts"][0]["learning"].is_null());
+    assert_eq!(
+        paused["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        1,
+        "the failed probe must not consume a Writer round"
+    );
+    assert!(
+        !bin_dir.join("coder-ran").exists(),
+        "the failed probe must stop before the coder launches"
+    );
+}
+
+#[test]
+fn host_sandbox_preflight_handoff_names_cause_task_and_resume() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let paused = pause_attempt_for_host_sandbox(&main_dir, &tmp.path().join("bin-host-handoff"));
+    let handoff = paused["attempts"][0]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|artifact| artifact["path"].as_str())
+        .expect("host sandbox pause should record a handoff");
+    let body = fs::read_to_string(main_dir.join(handoff)).unwrap();
+
+    assert!(body.contains("enclosing macOS sandbox"));
+    assert!(body.contains("attempt-1-write-1"));
+    assert!(body.contains("fluent attempt run host-sandbox"));
+}
+
+#[test]
+fn host_sandbox_retry_reopens_same_task() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-host-retry");
+    let _paused = pause_attempt_for_host_sandbox(&main_dir, &bin_dir);
+    write_mock_sandbox_exec(&bin_dir);
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        "#!/bin/bash\nif [ -d .git ]; then\n  printf 'Verdict: pass\\n\\nProgress: yes\\n' > review.md\nelif [ ! -f .fluent/expertise/INDEX.md ]; then\n  mkdir -p .fluent/expertise\n  printf '# Index\\n' > .fluent/expertise/INDEX.md\n  git add .fluent/expertise/INDEX.md\n  git commit -m 'Seed expertise' >/dev/null\nelif [ ! -f resumed.txt ]; then\n  printf 'resumed\\n' > resumed.txt\n  git add resumed.txt\n  git commit -m 'Add resumed output' >/dev/null\nelse\n  draft=$(printf '%s' \"$*\" | grep -oE '/[^[:space:]]*follow-up-draft.json' | head -1)\n  printf '{\"learning_summary\":\"resumed\",\"follow_ups\":[]}' > \"$draft\"\nfi\n",
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "host-sandbox", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .assert()
+        .failure();
+    let resumed = work_item_value(&main_dir, "host-sandbox");
+    assert_eq!(
+        resumed["attempts"][0]["tasks"][0]["id"],
+        "attempt-1-write-1"
+    );
+    assert_eq!(resumed["attempts"][0]["tasks"][0]["status"], "complete");
+    assert_eq!(
+        resumed["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        1
+    );
+    assert_eq!(
+        resumed["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        1,
+        "resuming a host pause must preserve the original Writer round"
     );
 }
 

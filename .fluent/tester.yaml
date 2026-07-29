@@ -1,7 +1,12 @@
 commands:
-  - command: NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --no-fail-fast --message-format libtest-json 2>&1
+  - command: FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --message-format libtest-json 2>&1
     test_harness: cargo-nextest
   - command: |
+      export FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass
+      cargo build --features test-support
+      test_bin="$(pwd)/target/debug/fluent-test-support"
+      cp target/debug/fluent "$test_bin"
+      export FLUENT_BIN_OVERRIDE="$test_bin"
       exit_code=0
       for script in tests/behaviors/operations/*.sh tests/behaviors/skills/*.sh; do
         [ -f "$script" ] || continue

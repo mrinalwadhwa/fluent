@@ -13,7 +13,7 @@ use crate::os;
 use crate::prep;
 use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
-    ArtifactRef, AttemptKind, AttemptStatus, TaskKind, TaskOutput, TaskStatus, WorkItem,
+    ArtifactRef, AttemptKind, AttemptStatus, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
     resolve_managed_sibling_workspace_path, to_json_pretty, work_artifact_path,
 };
@@ -543,6 +543,36 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             }
         };
 
+    // Render and apply the exact Writer boundary while the Task is still Planned.
+    // All roots below are deterministic from the start plan, including paths the
+    // post-reservation setup creates.  Keep the profile alive and hand it to every
+    // Writer launch so the coder is enclosed by the boundary we just proved the
+    // host can apply.
+    let sandbox_profile = match preflight_write_sandbox_profile(
+        &plan.task,
+        config.project_root,
+        &workspace_path,
+        &prior_reviews,
+        config.resolver,
+        config.no_sandbox,
+        plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?,
+        codex_worker.as_ref().map(|worker| worker.home()),
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_task_failure(&error),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    };
+
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here with a typed
     // StartRejected error and nothing mutated. The fresh coder mapping and the
@@ -612,6 +642,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         reservation.effort.as_deref(),
         &pump_config,
         codex_worker.as_ref(),
+        sandbox_profile.as_ref(),
     );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
@@ -636,6 +667,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             reservation.effort.as_deref(),
             &pump_config,
             codex_worker.as_ref(),
+            sandbox_profile.as_ref(),
         );
     }
 
@@ -908,6 +940,34 @@ fn run_review_task_with_coder(
         }
     };
 
+    let sandbox_profile = match preflight_review_sandbox_profile(
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+        &attempt_kind,
+        &workspace_reads,
+        &input_artifacts,
+        &artifact_dir,
+        config.resolver,
+        config.no_sandbox,
+        plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
+        codex_worker.as_ref().map(|worker| worker.home()),
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_task_failure(&error),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    };
+
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here, leaving prior
     // review.md evidence untouched.
@@ -1020,6 +1080,7 @@ fn run_review_task_with_coder(
         reservation.effort.as_deref(),
         &pump_config,
         codex_worker.as_ref(),
+        sandbox_profile.as_ref(),
         coder_override,
     );
     let mut retries = 0;
@@ -1048,6 +1109,7 @@ fn run_review_task_with_coder(
             reservation.effort.as_deref(),
             &pump_config,
             codex_worker.as_ref(),
+            sandbox_profile.as_ref(),
             coder_override,
         );
     }
@@ -1351,6 +1413,37 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Read-only preflight: resolve the artifact area WITHOUT creating it, so a bad
     // path fails byte-identically before the reservation.
     let artifact_dir = resolve_managed_artifact_area_path(config.project_root, &artifact_area)?;
+    let review_context = plan.task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tester Task {:?} must declare review context",
+            config.task_id
+        )
+    })?;
+    let candidate_workspace = resolve_workspace_path(
+        config.project_root,
+        &review_context.candidate_workspace_path,
+    );
+    let sandbox_profile = match crate::tester::preflight_sandbox_profile(
+        &candidate_workspace,
+        &artifact_dir,
+        config.no_sandbox,
+        config.resolver,
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            lock_mark_task_failed_attempt_needs_user(
+                config.store,
+                config.store_lock,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_task_failure(&error),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    };
 
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here.
@@ -1387,17 +1480,12 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
     let task = &item.attempts[attempt_index].tasks[task_index];
-    let review_context = task.review_context.as_ref().ok_or_else(|| {
+    let _review_context = task.review_context.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Tester Task {:?} must declare review context",
             config.task_id
         )
     })?;
-
-    let candidate_workspace = resolve_workspace_path(
-        config.project_root,
-        &review_context.candidate_workspace_path,
-    );
 
     eprintln!("  Fluent           work task run");
     eprintln!("  Work Item         {}", item.id);
@@ -1408,11 +1496,10 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     let results_path = artifact_dir.join("tester-results.json");
 
-    let mut tester_result = crate::tester::run(
+    let mut tester_result = crate::tester::run_with_sandbox_profile(
         &candidate_workspace,
         &artifact_dir,
-        config.no_sandbox,
-        config.resolver,
+        sandbox_profile.as_ref(),
     );
     let mut retries = 0;
     while tester_result.is_err() && retries < max_task_retries() {
@@ -1422,11 +1509,10 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             retries + 1,
             max_task_retries() + 1
         );
-        tester_result = crate::tester::run(
+        tester_result = crate::tester::run_with_sandbox_profile(
             &candidate_workspace,
             &artifact_dir,
-            config.no_sandbox,
-            config.resolver,
+            sandbox_profile.as_ref(),
         );
     }
 
@@ -1441,7 +1527,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
-                &TaskFailure::Generic,
+                &classify_task_failure(&error),
                 &crate::notify::notify,
             )?;
             return Err(error);
@@ -1775,6 +1861,13 @@ fn is_supervision_sidecar_error(result: &Result<()>) -> bool {
         .map_or(false, |e| e.is::<crate::coder::SupervisionSidecarError>())
 }
 
+fn is_host_sandbox_preflight_error(result: &Result<()>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .map_or(false, |e| e.is::<crate::os::HostSandboxPreflightError>())
+}
+
 /// Whether a failed coder run should be retried through the generic retry
 /// budget. Auth failures, transcript-pump infrastructure failures, and
 /// supervision-sidecar failures are terminal for the Task and must not spawn another
@@ -1784,6 +1877,7 @@ fn should_retry_coder_error(result: &Result<()>) -> bool {
         && !is_auth_error(result)
         && !is_transcript_pump_error(result)
         && !is_supervision_sidecar_error(result)
+        && !is_host_sandbox_preflight_error(result)
 }
 
 /// How a Task's terminal failure should be recorded in durable Attempt state and
@@ -1798,6 +1892,9 @@ enum TaskFailure {
     /// failure is not retried in-process; a supported resume retries after the
     /// operator fixes the transport.
     TranscriptPump(String),
+    /// The enclosing host sandbox rejected Fluent's real production profile
+    /// before a workload launched.
+    HostSandbox(String),
     /// Any other persistent failure (generic coder error at the retry cap, a
     /// tester error, and the like).
     Generic,
@@ -1811,6 +1908,8 @@ fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
         TaskFailure::Auth(auth.to_string())
     } else if let Some(pump) = error.downcast_ref::<crate::transcript_pump::TranscriptPumpError>() {
         TaskFailure::TranscriptPump(pump.message().to_string())
+    } else if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
+        TaskFailure::HostSandbox(host.message().to_string())
     } else {
         TaskFailure::Generic
     }
@@ -1843,7 +1942,9 @@ fn mark_task_failed_attempt_needs_user(
         // distinct from a hard `Failed`, so a supported resume can reopen exactly
         // that Task and reject a mixed hard-Failed/still-live Attempt.
         let task_terminal = match failure {
-            TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) => TaskStatus::NeedsUser,
+            TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) | TaskFailure::HostSandbox(_) => {
+                TaskStatus::NeedsUser
+            }
             TaskFailure::Generic => TaskStatus::Failed,
         };
         crate::work_model::set_task_terminal(
@@ -1853,6 +1954,7 @@ fn mark_task_failed_attempt_needs_user(
         let pause_kind = match failure {
             TaskFailure::Auth(_) => crate::work_model::PauseKind::Auth,
             TaskFailure::TranscriptPump(_) => crate::work_model::PauseKind::TranscriptPump,
+            TaskFailure::HostSandbox(_) => crate::work_model::PauseKind::HostSandbox,
             TaskFailure::Generic => crate::work_model::PauseKind::RoundCap,
         };
         // Route through the precedence boundary so a resumable pause cannot mask
@@ -1880,6 +1982,10 @@ fn mark_task_failed_attempt_needs_user(
             TaskFailure::TranscriptPump(_) => notify_fn(
                 "Fluent",
                 "Transcript capture failed. Fix the console/transcript transport, then 'fluent attempt run' to retry.",
+            ),
+            TaskFailure::HostSandbox(_) => notify_fn(
+                "Fluent",
+                "The enclosing macOS sandbox blocked Fluent's Seatbelt boundary. Restore it, then 'fluent attempt run' to retry the same Task.",
             ),
             TaskFailure::Generic => {}
         }
@@ -1935,6 +2041,28 @@ fn mark_task_failed_attempt_needs_user(
     Ok(())
 }
 
+/// Pause an unlaunched Task when the enclosing macOS sandbox rejects Fluent's
+/// production Seatbelt boundary.  Role-specific planners use this shared
+/// transition so every host-sandbox handoff carries the same Attempt semantics.
+pub(crate) fn pause_task_for_host_sandbox(
+    store: &WorkModelStore,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+    error: &crate::os::HostSandboxPreflightError,
+) -> Result<()> {
+    mark_task_failed_attempt_needs_user(
+        store,
+        project_root,
+        work_item_id,
+        attempt_id,
+        task_id,
+        &TaskFailure::HostSandbox(error.message().to_string()),
+        &|_, _| {},
+    )
+}
+
 fn write_task_error_handoff(
     project_root: &Path,
     work_item_id: &str,
@@ -1956,6 +2084,9 @@ fn write_task_error_handoff(
              transport — may already be on disk. This is not charged against the write-round \
              budget. Fix the transcript/console transport (for example free disk space or an \
              unwritable transcript path), then re-run `fluent attempt run` to retry.\n"
+        ),
+        TaskFailure::HostSandbox(diagnostic) => format!(
+            "# Attempt needs user input\n\nTask {task_id:?} could not start because the enclosing macOS sandbox blocked Fluent's production Seatbelt boundary:\n\n    {diagnostic}\n\nNo coder or Tester process was launched and this did not consume a retry or write round. Restore the enclosing sandbox capability, then run `fluent attempt run {work_item_id}` to resume this same Attempt.\n"
         ),
         TaskFailure::Generic => format!(
             "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \
@@ -2291,6 +2422,59 @@ fn capture_coder_info(coder_kind: CoderKind, model: &str, artifact_dir: &Path) {
     }
 }
 
+/// Render and probe the Writer profile from its immutable start plan.
+///
+/// The profile includes only deterministic paths.  In particular, the candidate
+/// worktree, progress directory, and transcript directory may not exist yet; the
+/// production profile deliberately grants those future paths, so rendering them
+/// does not create a workspace or artifact before the Task reservation.
+#[allow(clippy::too_many_arguments)]
+fn preflight_write_sandbox_profile(
+    task: &Task,
+    project_root: &Path,
+    workspace_path: &Path,
+    prior_reviews: &[PathBuf],
+    resolver: &ContentResolver,
+    no_sandbox: bool,
+    coder_kind: CoderKind,
+    codex_home: Option<&Path>,
+) -> Result<Option<os::SandboxProfile>> {
+    if no_sandbox && codex_home.is_none() {
+        return Ok(None);
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let common_git_dir = worktree::git_common_dir(project_root)?;
+    let mut readable_roots = input_artifact_readable_roots(prior_reviews);
+    readable_roots.push(planning_files_dir(project_root, &task.work_item_id));
+    readable_roots.push(general_expertise_dir(project_root));
+
+    let mut writable_roots = vec![
+        workspace_path.to_path_buf(),
+        common_git_dir,
+        progress_md_dir(
+            project_root,
+            &task.work_item_id,
+            task.attempt_id.as_deref().unwrap_or_default(),
+        ),
+    ];
+    if let Some(artifact_area) = task.artifact_area.as_ref() {
+        writable_roots.push(project_root.join(&artifact_area.path));
+    }
+
+    let profile = os::render_profile_for_access_for_coder_with_codex_home(
+        resolver,
+        &home,
+        &writable_roots,
+        &readable_roots,
+        coder_kind,
+        codex_home,
+    )?;
+    #[cfg(not(test))]
+    os::preflight_profile(&profile)?;
+    Ok(Some(profile))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_task_coder(
     item: &WorkItem,
@@ -2307,6 +2491,7 @@ fn run_task_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    sandbox_profile: Option<&os::SandboxProfile>,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
     // tests inject a recording coder to prove the resolved capture threads through
@@ -2326,6 +2511,7 @@ fn run_task_coder(
         effort,
         pump_config,
         codex_worker,
+        sandbox_profile,
         move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
     )
 }
@@ -2346,6 +2532,7 @@ fn run_task_coder_with_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox || codex_worker.is_some() {
@@ -2419,7 +2606,12 @@ fn run_task_coder_with_coder(
     let system_prompt = workspace_resolver
         .resolve_content("prompts/write-system.md")
         .unwrap_or_default();
-    let (sandbox, _sandbox_profile) = if no_sandbox && codex_worker.is_none() {
+    let (sandbox, _sandbox_profile) = if let Some(profile) = sandbox_profile {
+        (
+            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string()),
+            None,
+        )
+    } else if no_sandbox && codex_worker.is_none() {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
@@ -3249,8 +3441,6 @@ fn run_learner_with_coder_with_codex_worker(
     readable_roots.dedup();
 
     let expertise_dir = workspace_path.join(".fluent/expertise");
-    fs::create_dir_all(&expertise_dir)?;
-    fs::create_dir_all(inputs.handoff_dir)?;
 
     // Only ordinary capture may honor `--no-sandbox`. A no-expertise or post-land
     // run forces the trusted boundary so a candidate cannot be retargeted or the
@@ -3259,6 +3449,22 @@ fn run_learner_with_coder_with_codex_worker(
     // must keep the source-home denial that protects its staged credentials.
     let effectively_sandboxed =
         mode.effectively_sandboxed(inputs.no_sandbox) || codex_worker.is_some();
+
+    // Render and apply the exact production boundary while every launch path is
+    // still read-only. The granted expertise, handoff, and artifact paths may not
+    // exist yet; Seatbelt profiles deliberately support such deterministic future
+    // paths. Keep this profile alive and reuse it below for the actual launch.
+    let (sandbox, _sandbox_profile) = plan_learner_sandbox(
+        &inputs,
+        mode,
+        effectively_sandboxed,
+        codex_worker,
+        &expertise_dir,
+        &mut readable_roots,
+    )?;
+
+    fs::create_dir_all(&expertise_dir)?;
+    fs::create_dir_all(inputs.handoff_dir)?;
 
     // The managed Learner surface is the last trusted host boundary before
     // environment filtering and Seatbelt. When the coder launches effectively
@@ -3269,7 +3475,6 @@ fn run_learner_with_coder_with_codex_worker(
     // draft evidence), and the live project roots all stay non-writable, so a
     // coder tool that needs temporary files uses its own confined scratch.
     let mut extra_env: Vec<(String, String)> = Vec::new();
-    let mut private_temp_roots: Vec<PathBuf> = Vec::new();
     // Held alive until after the coder run so the private temp is not reclaimed
     // while the launch is still using it.
     let mut _private_temp_guard: Option<tempfile::TempDir> = None;
@@ -3283,77 +3488,11 @@ fn run_learner_with_coder_with_codex_worker(
         extra_env.push(("TMPDIR".to_string(), scratch_str.clone()));
         extra_env.push(("TMP".to_string(), scratch_str.clone()));
         extra_env.push(("TEMP".to_string(), scratch_str));
-        private_temp_roots.push(private_temp.path().to_path_buf());
         _private_temp_guard = Some(private_temp);
     }
     if let Some(worker) = &codex_worker {
         extra_env.push(worker.launch_env());
     }
-
-    // Every effectively sandboxed branch renders through the denied-writes
-    // helper, which strips the shared `/private/tmp` and per-user
-    // `/private/var/folders` temp grants. A coder tool that needs temporary
-    // files therefore uses its private launch scratch, never a shared tree.
-    let (sandbox, _sandbox_profile) = if !effectively_sandboxed {
-        (CoderSandbox::None, None)
-    } else {
-        let common_git_dir = worktree::git_common_dir(workspace_path)?;
-        readable_roots.push(workspace_path.to_path_buf());
-        let home = std::env::var("HOME").unwrap_or_default();
-        if mode.expertise_writable() {
-            let mut writable = vec![
-                expertise_dir.clone(),
-                inputs.handoff_dir.to_path_buf(),
-                common_git_dir,
-            ];
-            writable.extend(private_temp_roots.iter().cloned());
-            // No live root is writable here, so the staging directory is the
-            // only writable path beneath the host-owned run surface; the
-            // transcript and submitted-draft evidence are siblings the coder
-            // cannot reach.
-            let profile =
-                os::render_profile_for_access_for_coder_with_denied_writes_and_codex_home(
-                    inputs.resolver,
-                    &home,
-                    &writable,
-                    &readable_roots,
-                    &[],
-                    inputs.coder_kind,
-                    codex_worker.as_ref().map(|worker| worker.home()),
-                )?;
-            let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
-            (sandbox, Some(profile))
-        } else {
-            // No-expertise and post-land handoff-only: deny expertise writes.
-            // Expertise stays readable, but only the isolated staging surface is
-            // writable. Git metadata is readable for the accepted-change diff but
-            // never writable. Both modes run against an isolated snapshot, so
-            // `--no-sandbox` cannot weaken the boundary: they use the trusted
-            // system Seatbelt launcher and fail closed when the host cannot apply
-            // that profile.
-            readable_roots.push(expertise_dir.clone());
-            readable_roots.push(common_git_dir.clone());
-            let mut denied = vec![workspace_path.to_path_buf(), common_git_dir];
-            denied.extend(inputs.denied_write_roots.iter().cloned());
-            denied.sort();
-            denied.dedup();
-            let mut writable = vec![inputs.handoff_dir.to_path_buf()];
-            writable.extend(private_temp_roots.iter().cloned());
-            let profile =
-                os::render_profile_for_access_for_coder_with_denied_writes_and_codex_home(
-                    inputs.resolver,
-                    &home,
-                    &writable,
-                    &readable_roots,
-                    &denied,
-                    inputs.coder_kind,
-                    codex_worker.as_ref().map(|worker| worker.home()),
-                )?;
-            let sandbox =
-                CoderSandbox::TrustedSeatbeltProfile(profile.path.to_string_lossy().to_string());
-            (sandbox, Some(profile))
-        }
-    };
 
     if let Some(parent) = capture.as_ref().and_then(|c| c.path().parent()) {
         fs::create_dir_all(parent)
@@ -3380,6 +3519,102 @@ fn run_learner_with_coder_with_codex_worker(
         bail!("Learner coder exited with code {exit_code}");
     }
 
+    Ok(())
+}
+
+/// Render, probe, and retain the Learner's production sandbox before launch setup.
+///
+/// The profile intentionally grants deterministic paths which do not yet exist;
+/// creating those paths belongs after the enclosing host has accepted the boundary.
+fn plan_learner_sandbox(
+    inputs: &LearnerRunInputs<'_>,
+    mode: LearnerExecutionMode,
+    effectively_sandboxed: bool,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    expertise_dir: &Path,
+    readable_roots: &mut Vec<PathBuf>,
+) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
+    if !effectively_sandboxed {
+        return Ok((CoderSandbox::None, None));
+    }
+
+    let common_git_dir = worktree::git_common_dir(inputs.workspace_path)?;
+    readable_roots.push(inputs.workspace_path.to_path_buf());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let (profile, sandbox) = if mode.expertise_writable() {
+        let writable = vec![
+            expertise_dir.to_path_buf(),
+            inputs.handoff_dir.to_path_buf(),
+            common_git_dir,
+        ];
+        let profile = os::render_profile_for_access_for_coder_with_denied_writes_and_codex_home(
+            inputs.resolver,
+            &home,
+            &writable,
+            readable_roots,
+            &[],
+            inputs.coder_kind,
+            codex_worker.map(|worker| worker.home()),
+        )?;
+        let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
+        (profile, sandbox)
+    } else {
+        readable_roots.push(expertise_dir.to_path_buf());
+        readable_roots.push(common_git_dir.clone());
+        let mut denied = vec![inputs.workspace_path.to_path_buf(), common_git_dir];
+        denied.extend(inputs.denied_write_roots.iter().cloned());
+        denied.sort();
+        denied.dedup();
+        let writable = vec![inputs.handoff_dir.to_path_buf()];
+        let profile = os::render_profile_for_access_for_coder_with_denied_writes_and_codex_home(
+            inputs.resolver,
+            &home,
+            &writable,
+            readable_roots,
+            &denied,
+            inputs.coder_kind,
+            codex_worker.map(|worker| worker.home()),
+        )?;
+        let sandbox =
+            CoderSandbox::TrustedSeatbeltProfile(profile.path.to_string_lossy().to_string());
+        (profile, sandbox)
+    };
+    // Unit launch-route tests exercise profile construction with injected coders
+    // and no Seatbelt launcher. Integration routes retain the production probe and
+    // supply a hermetic launcher through PATH in debug builds.
+    #[cfg(not(test))]
+    os::preflight_profile(&profile)?;
+    Ok((sandbox, Some(profile)))
+}
+
+/// Probe the resolved Learner profile before its Attempt reserves a durable run.
+///
+/// This shares the launch planner, so a genuinely unsandboxed capture performs no
+/// host probe while forced-confinement modes retain the production Seatbelt check.
+pub(crate) fn preflight_learner_host_sandbox(
+    inputs: LearnerRunInputs<'_>,
+    mode: LearnerExecutionMode,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+) -> Result<()> {
+    let effectively_sandboxed =
+        mode.effectively_sandboxed(inputs.no_sandbox) || codex_worker.is_some();
+    let mut readable_roots = inputs
+        .review_artifact_paths
+        .iter()
+        .chain(inputs.tester_artifact_paths.iter())
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    readable_roots.sort();
+    readable_roots.dedup();
+    let expertise_dir = inputs.workspace_path.join(".fluent/expertise");
+    let _ = plan_learner_sandbox(
+        &inputs,
+        mode,
+        effectively_sandboxed,
+        codex_worker,
+        &expertise_dir,
+        &mut readable_roots,
+    )?;
     Ok(())
 }
 
@@ -3752,6 +3987,7 @@ fn run_review_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    sandbox_profile: Option<&os::SandboxProfile>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
@@ -3778,6 +4014,7 @@ fn run_review_coder(
         effort,
         pump_config,
         codex_worker,
+        sandbox_profile,
         move |sandbox| match coder_override {
             Some(make) => make(sandbox),
             None => coder_kind.boxed_with_model(sandbox, model, effort),
@@ -3804,6 +4041,7 @@ fn run_review_coder_with_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox || codex_worker.is_some() {
@@ -3828,7 +4066,12 @@ fn run_review_coder_with_coder(
         review_only,
     })?;
 
-    let (sandbox, _sandbox_profile) = if no_sandbox && codex_worker.is_none() {
+    let (sandbox, _sandbox_profile) = if let Some(profile) = sandbox_profile {
+        (
+            CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string()),
+            None,
+        )
+    } else if no_sandbox && codex_worker.is_none() {
         (CoderSandbox::None, None)
     } else {
         let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
@@ -4491,6 +4734,59 @@ fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<
     Ok(roots)
 }
 
+/// Render and probe the Reviewer profile from the read-only start plan.
+///
+/// `artifact_dir` is intentionally allowed before it exists: Reviewer setup creates
+/// it only after the reservation, while Seatbelt can safely grant its deterministic
+/// future path during this side-effect-free planning phase.
+#[allow(clippy::too_many_arguments)]
+fn preflight_review_sandbox_profile(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    attempt_kind: &AttemptKind,
+    workspace_refs: &[WorkspaceRef],
+    input_artifacts: &[PathBuf],
+    artifact_dir: &Path,
+    resolver: &ContentResolver,
+    no_sandbox: bool,
+    coder_kind: CoderKind,
+    codex_home: Option<&Path>,
+) -> Result<Option<os::SandboxProfile>> {
+    if no_sandbox && codex_home.is_none() {
+        return Ok(None);
+    }
+
+    let readable_workspaces = workspace_refs
+        .iter()
+        .map(|workspace| {
+            resolve_review_readable_workspace_path(
+                project_root,
+                workspace,
+                work_item_id,
+                attempt_id,
+                attempt_kind,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut readable_roots = review_readable_sandbox_roots(&readable_workspaces)?;
+    readable_roots.extend(input_artifact_readable_roots(input_artifacts));
+    readable_roots.push(planning_files_dir(project_root, work_item_id));
+    readable_roots.push(general_expertise_dir(project_root));
+    readable_roots.push(review_skills_dir(project_root));
+    let home = std::env::var("HOME").unwrap_or_default();
+    let profile = os::render_profile_for_access_for_coder_with_codex_home(
+        resolver,
+        &home,
+        &[artifact_dir.to_path_buf()],
+        &readable_roots,
+        coder_kind,
+        codex_home,
+    )?;
+    os::preflight_profile(&profile)?;
+    Ok(Some(profile))
+}
+
 fn build_coder_sandbox_with_writable_and_read_only_roots(
     coder_kind: CoderKind,
     resolver: &ContentResolver,
@@ -4527,6 +4823,8 @@ fn build_coder_sandbox_with_writable_and_read_only_roots_and_codex_home(
         coder_kind,
         codex_home,
     )?;
+    #[cfg(not(test))]
+    os::preflight_profile(&profile)?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
     Ok((sandbox, Some(profile)))
 }
@@ -4546,6 +4844,7 @@ fn build_coder_sandbox_with_read_only_roots(
         readable_roots,
         coder_kind,
     )?;
+    os::preflight_profile(&profile)?;
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
     Ok((sandbox, Some(profile)))
 }
@@ -5484,6 +5783,7 @@ mod tests {
             None,
             &pump_config,
             None,
+            None,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -5567,6 +5867,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
@@ -5693,6 +5994,7 @@ mod tests {
             None,
             &pump_config,
             None,
+            None,
             move |_sandbox| {
                 Box::new(SupervisionReportingCoder {
                     recorded_dir: recorded_for_coder,
@@ -5815,6 +6117,7 @@ mod tests {
             None,
             &pump_config,
             None,
+            None,
             move |_sandbox| {
                 Box::new(CountingSupervisionCoder {
                     launches: Arc::clone(&launches_for_coder),
@@ -5895,6 +6198,7 @@ mod tests {
             None,
             &pump_config,
             None,
+            None,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -5955,6 +6259,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             move |_sandbox| {
                 Box::new(SupervisionReportingCoder {
@@ -6030,6 +6335,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             move |_sandbox| {
                 Box::new(RecordingLearnerCoder {
