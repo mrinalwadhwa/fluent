@@ -28,7 +28,7 @@ fn generate_skill_migrations() {
     let migrations_dir = PathBuf::from("skill-migrations");
     println!("cargo:rerun-if-changed={}", migrations_dir.display());
     let fixture_dir = migrations_dir.join("v0.1.4");
-    let mut entries = Vec::new();
+    let mut manifests = Vec::new();
 
     if fixture_dir.is_dir() {
         let mut skills = fs::read_dir(&fixture_dir)
@@ -45,21 +45,28 @@ fn generate_skill_migrations() {
                 continue;
             }
             let name = skill.file_name().to_string_lossy().to_string();
-            let mut files = Vec::new();
-            collect_migration_files(&skill.path(), &skill.path(), &mut files);
+            let mut entries = Vec::new();
+            collect_migration_entries(&skill.path(), &skill.path(), &mut entries);
             assert!(
-                !files.is_empty(),
+                !entries.is_empty(),
                 "migration fixture {name} must not be empty"
             );
-            files.sort_by(|left, right| left.0.cmp(&right.0));
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
             let mut hasher = Sha256::new();
-            for (path, bytes) in files {
+            for (path, bytes) in entries {
+                hasher.update(if bytes.is_some() {
+                    b"file\0".as_slice()
+                } else {
+                    b"dir\0".as_slice()
+                });
                 hasher.update(path.as_bytes());
                 hasher.update([0]);
-                hasher.update((bytes.len() as u64).to_be_bytes());
-                hasher.update(bytes);
+                if let Some(bytes) = bytes {
+                    hasher.update((bytes.len() as u64).to_be_bytes());
+                    hasher.update(bytes);
+                }
             }
-            entries.push((name, format!("{:x}", hasher.finalize())));
+            manifests.push((name, format!("{:x}", hasher.finalize())));
         }
     }
 
@@ -67,7 +74,7 @@ fn generate_skill_migrations() {
     let dest = out_dir.join("skill_migrations.rs");
     let mut code = String::from("/// Historical skill bundles eligible for exact migration.\n");
     code.push_str("pub const BUNDLED_SKILL_MIGRATION_DIGESTS: &[(&str, &str)] = &[\n");
-    for (skill, digest) in entries {
+    for (skill, digest) in manifests {
         code.push_str("    (");
         write_rust_str_literal(&mut code, &skill);
         code.push_str(", ");
@@ -78,13 +85,17 @@ fn generate_skill_migrations() {
     fs::write(dest, code).expect("failed to write skill_migrations.rs");
 }
 
-fn collect_migration_files(root: &Path, dir: &Path, files: &mut Vec<(String, Vec<u8>)>) {
-    let mut entries = fs::read_dir(dir)
+fn collect_migration_entries(
+    root: &Path,
+    dir: &Path,
+    entries: &mut Vec<(String, Option<Vec<u8>>)>,
+) {
+    let mut dir_entries = fs::read_dir(dir)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|error| panic!("failed to iterate {}: {error}", dir.display()));
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    dir_entries.sort_by_key(|entry| entry.file_name());
+    for entry in dir_entries {
         let path = entry.path();
         let relative = path
             .strip_prefix(root)
@@ -95,11 +106,12 @@ fn collect_migration_files(root: &Path, dir: &Path, files: &mut Vec<(String, Vec
             .file_type()
             .expect("failed to inspect migration entry");
         if file_type.is_dir() {
-            collect_migration_files(root, &path, files);
+            entries.push((relative, None));
+            collect_migration_entries(root, &path, entries);
         } else if file_type.is_file() {
-            files.push((
+            entries.push((
                 relative,
-                fs::read(&path).expect("failed to read migration file"),
+                Some(fs::read(&path).expect("failed to read migration file")),
             ));
         } else {
             panic!(

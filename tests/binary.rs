@@ -18468,7 +18468,7 @@ fn skills_add_migrates_every_public_0_1_4_skill() {
 
 #[test]
 fn skills_add_preserves_changed_public_0_1_4_skill() {
-    for change in ["content", "inventory", "missing"] {
+    for change in ["content", "inventory", "empty-directory", "missing"] {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         install_public_0_1_4_fixture(&home);
@@ -18476,6 +18476,7 @@ fn skills_add_preserves_changed_public_0_1_4_skill() {
         match change {
             "content" => fs::write(changed.join("SKILL.md"), "user edit\n").unwrap(),
             "inventory" => fs::write(changed.join("user-note.md"), "keep me\n").unwrap(),
+            "empty-directory" => fs::create_dir(changed.join("user-empty-dir")).unwrap(),
             "missing" => fs::remove_file(changed.join("SKILL.md")).unwrap(),
             _ => unreachable!(),
         }
@@ -18498,6 +18499,35 @@ fn skills_add_preserves_changed_public_0_1_4_skill() {
         assert!(stderr.contains("remove it manually"));
         assert!(stderr.contains("5 migrated, 1 conflicting"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn skills_add_preserves_public_0_1_4_root_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    install_public_0_1_4_fixture(&home);
+    let changed = home.join(".codex/skills/review-tests");
+    let target = home.join("user-owned-review-tests");
+    fs::rename(&changed, &target).unwrap();
+    symlink(&target, &changed).unwrap();
+    let before = complete_skill_snapshot(&target);
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "codex"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(fs::symlink_metadata(&changed).unwrap().file_type().is_symlink());
+    assert_eq!(complete_skill_snapshot(&target), before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&changed.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+    assert!(stderr.contains("5 migrated, 1 conflicting"));
 }
 
 #[test]
