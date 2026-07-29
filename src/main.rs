@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -1547,6 +1549,10 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 }
 
 fn cmd_init(cwd: &Path) -> Result<()> {
+    require_git_repository_root(cwd)?;
+    let preexisting_changes = git_visible_changes(cwd)?;
+    let instruction_bytes_before = instruction_file_bytes(cwd)?;
+
     let fluent_dir = cwd.join(".fluent");
     if fluent_dir.exists() {
         write_gitignore_if_absent(&fluent_dir)?;
@@ -1567,7 +1573,13 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     if let Err(e) = seed_agent_instructions(cwd) {
         eprintln!("  warning: could not seed agent instructions: {e}");
     }
-    match instruction_files_requiring_git_resolution(cwd) {
+    if !preexisting_changes.is_empty() {
+        eprintln!(
+            "{}",
+            guidance::after_init_preexisting_changes(&preexisting_changes)
+        );
+    }
+    match instruction_files_changed_by_init(cwd, &instruction_bytes_before) {
         Ok(paths) if !paths.is_empty() => {
             eprintln!("{}", guidance::after_init_instruction_changes(&paths));
         }
@@ -1587,6 +1599,53 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn require_git_repository_root(cwd: &Path) -> Result<()> {
+    let root = git::run_raw(cwd, &["rev-parse", "--show-toplevel"])?;
+    if root.status.success() {
+        let root = git_toplevel_path(&root.stdout);
+        let current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let root = root.canonicalize().unwrap_or(root);
+        if current == root {
+            return Ok(());
+        }
+        bail!(
+            "fluent init must run at the Git repository root: {}",
+            root.display()
+        );
+    }
+
+    let nested_main = cwd.join("main");
+    if nested_main.is_dir() {
+        let main_root = git::run_raw(&nested_main, &["rev-parse", "--show-toplevel"])?;
+        if main_root.status.success() {
+            let main_root = git_toplevel_path(&main_root.stdout);
+            let main = nested_main
+                .canonicalize()
+                .unwrap_or_else(|_| nested_main.clone());
+            if main_root.canonicalize().unwrap_or(main_root) == main {
+                bail!(
+                    "fluent init must run at a Git repository root; cd {} && fluent init",
+                    main.display()
+                );
+            }
+        }
+    }
+
+    bail!("fluent init must run at a Git repository root")
+}
+
+#[cfg(unix)]
+fn git_toplevel_path(stdout: &[u8]) -> PathBuf {
+    let path_bytes = stdout.strip_suffix(b"\n").unwrap_or(stdout);
+    PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn git_toplevel_path(stdout: &[u8]) -> PathBuf {
+    let path = String::from_utf8_lossy(stdout);
+    PathBuf::from(path.strip_suffix('\n').unwrap_or(&path))
 }
 
 // -------------------------------------------------------------------------
@@ -1692,30 +1751,45 @@ fn seed_agent_instructions(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn instruction_files_requiring_git_resolution(cwd: &Path) -> Result<Vec<String>> {
-    let inside_worktree = git::run_raw(cwd, &["rev-parse", "--is-inside-work-tree"])?;
-    if !inside_worktree.status.success() {
-        return Ok(Vec::new());
+fn git_visible_changes(cwd: &Path) -> Result<String> {
+    let output = git::run_raw(cwd, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !output.status.success() {
+        bail!(
+            "git status failed while checking pre-existing changes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
+}
 
-    let mut changed = Vec::new();
-    for name in ["AGENTS.md", "CLAUDE.md"] {
-        let output = git::run_raw(
-            cwd,
-            &["status", "--porcelain", "--untracked-files=all", "--", name],
-        )?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "git status failed while checking {}: {}",
-                name,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        if !output.stdout.is_empty() {
-            changed.push(name.to_string());
-        }
+fn instruction_file_bytes(cwd: &Path) -> Result<[Option<Vec<u8>>; 2]> {
+    Ok([
+        read_instruction_file_bytes(&cwd.join("AGENTS.md"))?,
+        read_instruction_file_bytes(&cwd.join("CLAUDE.md"))?,
+    ])
+}
+
+fn read_instruction_file_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(fs::read(path)?)),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
-    Ok(changed)
+}
+
+fn instruction_files_changed_by_init(
+    cwd: &Path,
+    before: &[Option<Vec<u8>>; 2],
+) -> Result<Vec<String>> {
+    let after = instruction_file_bytes(cwd)?;
+    Ok(["AGENTS.md", "CLAUDE.md"]
+        .into_iter()
+        .zip(before.iter().zip(after))
+        .filter_map(|(name, (before, after))| (before != &after).then(|| name.to_string()))
+        .collect())
 }
 
 fn upsert_craft_block(content: &str) -> String {

@@ -24,12 +24,17 @@ LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 # Helpers
 # -------------------------------------------------------------------------
 
+init_git_repo() {
+  git -C "$1" init -q
+}
+
 # -------------------------------------------------------------------------
 # Tests
 # -------------------------------------------------------------------------
 
 test_init_creates_fluent_directory() {
   TEST_DIR="$(mktemp -d -t fluent-test-init-XXXXXX)"
+  init_git_repo "$TEST_DIR"
 
   OUTPUT="$(cd "$TEST_DIR" && "$FLUENT_BIN" init 2>&1)"
 
@@ -49,6 +54,7 @@ test_init_creates_fluent_directory() {
 
 test_init_reports_already_initialized() {
   TEST_DIR="$(mktemp -d -t fluent-test-init-XXXXXX)"
+  init_git_repo "$TEST_DIR"
 
   # First init
   cd "$TEST_DIR" && "$FLUENT_BIN" init > /dev/null 2>&1

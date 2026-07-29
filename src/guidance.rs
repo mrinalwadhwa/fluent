@@ -19,6 +19,10 @@ pub fn after_attempt_create() -> &'static str {
     "\n→ Next: fluent attempt run <work-item-id>"
 }
 
+pub fn after_init_preexisting_changes(status: &str) -> String {
+    format!("\n  Pre-existing Git changes before initialization:\n{status}")
+}
+
 pub fn after_init_instruction_changes(paths: &[String]) -> String {
     let mut lines =
         vec!["\n  Resolve the Fluent instruction changes before running an Attempt:".to_string()];

@@ -903,6 +903,8 @@ Check item {{ITEM_ID}}.
             setup,
             &[
                 "When `.fluent/` does not exist",
+                "Git repository root",
+                "`<project>/main`",
                 "Before running `fluent init`",
                 "(a) propose",
                 "(b) execute",

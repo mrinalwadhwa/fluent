@@ -1388,8 +1388,109 @@ fn dry_run_with_codex_uses_codex_profile_layer() {
 // -------------------------------------------------------------------------
 
 #[test]
+fn init_outside_git_makes_no_changes() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let child = tmp.path().join("child");
+    let descendant = child.join("descendant");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&descendant).unwrap();
+    fs::write(tmp.path().join("ancestor-keep.txt"), "unchanged\n").unwrap();
+    fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
+    fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&child)
+        .arg("init")
+        .assert()
+        .failure();
+
+    assert_eq!(
+        fs::read_to_string(child.join("keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("ancestor-keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(descendant.join("keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert!(!tmp.path().join(".fluent").exists());
+    assert!(!child.join(".fluent").exists());
+    assert!(!descendant.join(".fluent").exists());
+    assert!(!home.join(".local/share/fluent").exists());
+    assert!(!home.join(".claude/skills").exists());
+}
+
+#[test]
+fn init_below_repository_root_makes_no_changes_and_names_root() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    let child = project.join("child");
+    let descendant = child.join("descendant");
+    fs::create_dir_all(&child).unwrap();
+    fs::create_dir_all(&descendant).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    init_git_repo(&project);
+    fs::write(project.join("keep.txt"), "unchanged\n").unwrap();
+    fs::write(child.join("keep.txt"), "unchanged\n").unwrap();
+    fs::write(descendant.join("keep.txt"), "unchanged\n").unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&child)
+        .arg("init")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(project.to_str().unwrap()));
+    assert_eq!(
+        fs::read_to_string(project.join("keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(child.join("keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(descendant.join("keep.txt")).unwrap(),
+        "unchanged\n"
+    );
+    assert!(!project.join(".fluent").exists());
+    assert!(!child.join(".fluent").exists());
+    assert!(!descendant.join(".fluent").exists());
+    assert!(!home.join(".local/share/fluent").exists());
+    assert!(!home.join(".claude/skills").exists());
+}
+
+#[test]
+fn init_accepts_repository_root_with_trailing_whitespace() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project ");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir(&project).unwrap();
+    init_git_repo(&project);
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+
+    assert!(project.join(".fluent").is_dir());
+}
+
+#[test]
 fn init_creates_fluent_structure() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1404,6 +1505,7 @@ fn init_creates_fluent_structure() {
 #[test]
 fn init_is_idempotent() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1422,6 +1524,7 @@ fn init_is_idempotent() {
 #[test]
 fn init_writes_gitignore_when_absent() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1492,6 +1595,7 @@ fn init_gitignore_excludes_working_state_and_tracks_durable() {
 #[test]
 fn init_preserves_existing_gitignore() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
     let fluent_dir = tmp.path().join(".fluent");
     fs::create_dir_all(&fluent_dir).unwrap();
     let gitignore = fluent_dir.join(".gitignore");
@@ -1513,6 +1617,7 @@ fn init_preserves_existing_gitignore() {
 #[test]
 fn init_backfills_gitignore_on_existing_fluent() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     // First init creates .fluent/
     fluent_cmd()
@@ -1542,6 +1647,7 @@ fn init_backfills_gitignore_on_existing_fluent() {
 #[test]
 fn init_gitignore_does_not_allowlist_observations() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1559,6 +1665,7 @@ fn init_gitignore_does_not_allowlist_observations() {
 #[test]
 fn init_output_notes_fluent_tracks_its_state() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     // Fresh init
     fluent_cmd()
@@ -1580,6 +1687,7 @@ fn init_output_notes_fluent_tracks_its_state() {
 #[test]
 fn init_prints_layout_tip_when_dir_not_named_main() {
     let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
 
     fluent_cmd()
         .current_dir(tmp.path())
@@ -1594,6 +1702,7 @@ fn init_no_layout_tip_when_dir_named_main() {
     let tmp = TempDir::new().unwrap();
     let main_dir = tmp.path().join("main");
     fs::create_dir(&main_dir).unwrap();
+    init_git_repo(&main_dir);
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -1614,6 +1723,7 @@ fn init_appends_craft_section_to_existing_agents_md() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     fs::write(project.join("AGENTS.md"), "# My Project\n").unwrap();
 
@@ -1646,6 +1756,7 @@ fn init_creates_agents_md_with_craft_section_when_none() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     assert!(!project.join("AGENTS.md").exists());
     assert!(!project.join("CLAUDE.md").exists());
@@ -1673,6 +1784,7 @@ fn init_seeds_local_preview_operating_boundary() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -1725,6 +1837,7 @@ fn init_updates_craft_section_in_place_idempotently() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     let pre = "# My Project\n\nSome content.\n";
     let post = "\n## Footer\n";
@@ -1813,6 +1926,92 @@ fn init_names_instruction_changes_that_require_git_resolution() {
     assert!(
         stderr.contains("candidate worktrees") && stderr.contains("committed Git state"),
         "init should explain why resolution is required: {stderr}"
+    );
+}
+
+#[test]
+fn init_distinguishes_preexisting_dirt_from_instruction_changes() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = setup_git_project(&tmp);
+    fs::create_dir_all(&home).unwrap();
+    fs::write(project.join("AGENTS.md"), "# Agent instructions\n").unwrap();
+    git::run(&project, &["add", "AGENTS.md"], "stage instructions").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add agent instructions"],
+        "commit instructions",
+    )
+    .unwrap();
+    fs::write(project.join("README.md"), "pre-existing source dirt\n").unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (_, after_preexisting_heading) = stderr
+        .split_once("Pre-existing Git changes before initialization:")
+        .expect("init should report pre-existing dirt");
+    let (preexisting_report, instruction_report) = after_preexisting_heading
+        .split_once("Resolve the Fluent instruction changes before running an Attempt:")
+        .expect("init should separately report instruction changes");
+    assert!(
+        preexisting_report.contains("README.md") && !preexisting_report.contains("AGENTS.md"),
+        "init should report source dirt that predates initialization: {stderr}"
+    );
+    assert!(
+        instruction_report.contains("AGENTS.md") && !instruction_report.contains("README.md"),
+        "init should separately report instructions it changed: {stderr}"
+    );
+}
+
+#[test]
+fn init_does_not_claim_unchanged_dirty_instruction_file() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = setup_git_project(&tmp);
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .assert()
+        .success();
+    git::run(&project, &["add", "AGENTS.md"], "stage instructions").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add Fluent instructions"],
+        "commit instructions",
+    )
+    .unwrap();
+    fs::write(
+        project.join("AGENTS.md"),
+        format!(
+            "{}\nLocal note that Fluent must preserve.\n",
+            fs::read_to_string(project.join("AGENTS.md")).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .current_dir(&project)
+        .arg("init")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Pre-existing Git changes before initialization:"));
+    assert!(
+        !stderr.contains("Resolve the Fluent instruction changes"),
+        "init must not claim an unchanged dirty instruction file as its change: {stderr}"
     );
 }
 
@@ -2165,6 +2364,7 @@ fn craft_section_names_skill_and_lifecycle_stages() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -2200,6 +2400,7 @@ fn craft_section_content(tmp: &TempDir) -> String {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -2302,6 +2503,7 @@ fn init_succeeds_when_craft_section_write_fails() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     // Create a read-only AGENTS.md so the craft section write fails.
     let agents = project.join("AGENTS.md");
@@ -19258,6 +19460,7 @@ fn init_installs_full_fluent_skill() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     fluent_cmd()
         .env("HOME", home.to_str().unwrap())
@@ -19286,6 +19489,7 @@ fn init_succeeds_when_skill_installation_fails() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     // Without HOME, cmd_skills_add fails, but init should still succeed.
     let output = fluent_cmd()
@@ -19317,6 +19521,7 @@ fn init_reinit_installs_skills() {
     fs::create_dir_all(&home).unwrap();
     let project = tmp.path().join("project");
     fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
 
     // First init creates .fluent/
     fluent_cmd()
