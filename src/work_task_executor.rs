@@ -4318,7 +4318,7 @@ fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> 
 
 /// Isolate cache observations from admission policy so tests can drive the real
 /// decision with deterministic totals, capacity, and failures.
-trait ReviewerCacheAdmission {
+trait ReviewerCacheAdmission: Sync {
     fn reclaim_terminal_caches(&self, project_root: &Path, store: &WorkModelStore) -> Result<()>;
     fn managed_cache_total(&self, project_root: &Path, store: &WorkModelStore) -> Result<u64>;
     fn filesystem_free_bytes(&self, artifact_dir: &Path) -> Result<u64>;
@@ -6390,6 +6390,7 @@ mod tests {
     }
 
     struct SyntheticReviewerCacheAdmission {
+        reclaim: Result<()>,
         total: Result<u64>,
         free: Result<u64>,
     }
@@ -6400,7 +6401,10 @@ mod tests {
             _project_root: &Path,
             _store: &WorkModelStore,
         ) -> Result<()> {
-            Ok(())
+            self.reclaim
+                .as_ref()
+                .map(|()| ())
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
         }
 
         fn managed_cache_total(
@@ -6596,6 +6600,7 @@ mod tests {
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(u64::MAX),
         };
@@ -6620,6 +6625,7 @@ mod tests {
             "reviewer-cache:\n  max-project-gib: 0\n  min-free-gib: 0\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(u64::MAX),
         };
@@ -6649,6 +6655,7 @@ mod tests {
         assert_eq!(error.key, "reviewer-cache.max-project-gib");
 
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(u64::MAX),
         };
@@ -6675,6 +6682,7 @@ mod tests {
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 1\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(0),
         };
@@ -6713,6 +6721,7 @@ mod tests {
         )
         .unwrap();
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(u64::MAX),
         };
@@ -6736,6 +6745,7 @@ mod tests {
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Err(anyhow::anyhow!("synthetic accounting failure")),
             free: Ok(u64::MAX),
         };
@@ -6752,11 +6762,39 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_cache_reclamation_failure_starts_cold_without_pausing_review() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Err(anyhow::anyhow!("synthetic reclamation failure")),
+            total: Ok(0),
+            free: Ok(u64::MAX),
+        };
+
+        let (warmed, messages) = fixture.run_with_messages(&admission);
+
+        assert!(!warmed, "failed reclamation must leave the Reviewer cold");
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains("cache admission check failed")
+                && message.contains("synthetic reclamation failure")
+        }));
+        assert_eq!(
+            fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
+            AttemptStatus::Complete,
+            "a cold Reviewer continues when terminal-cache reclamation fails"
+        );
+    }
+
+    #[test]
     fn reviewer_cache_free_space_failure_starts_cold() {
         let fixture = ReviewerCacheRouteFixture::new(
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Err(anyhow::anyhow!("synthetic free-space failure")),
         };
@@ -6855,6 +6893,111 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_reviewer_cache_admissions_serialize_project_budget() {
+        struct ConcurrentAdmission {
+            artifacts: Vec<PathBuf>,
+            observed_totals: Mutex<Vec<u64>>,
+        }
+
+        impl ReviewerCacheAdmission for ConcurrentAdmission {
+            fn reclaim_terminal_caches(
+                &self,
+                _project_root: &Path,
+                _store: &WorkModelStore,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            fn managed_cache_total(
+                &self,
+                _project_root: &Path,
+                _store: &WorkModelStore,
+            ) -> Result<u64> {
+                let total = self.artifacts.iter().try_fold(0_u64, |total, artifact| {
+                    total
+                        .checked_add(prep::managed_cache_bytes(artifact)?)
+                        .ok_or_else(|| anyhow::anyhow!("synthetic cache total overflow"))
+                })?;
+                self.observed_totals.lock().unwrap().push(total);
+                Ok(total)
+            }
+
+            fn filesystem_free_bytes(&self, _artifact_dir: &Path) -> Result<u64> {
+                Ok(u64::MAX)
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let candidate = project.join("candidate");
+        let first_artifact = project.join("first-artifact");
+        let second_artifact = project.join("second-artifact");
+        fs::create_dir_all(candidate.join("target")).unwrap();
+        fs::File::create(candidate.join("target/output"))
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+        fs::create_dir_all(&first_artifact).unwrap();
+        fs::create_dir_all(&second_artifact).unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+
+        let admission = ConcurrentAdmission {
+            artifacts: vec![first_artifact.clone(), second_artifact.clone()],
+            observed_totals: Mutex::new(Vec::new()),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let candidate = candidate.as_path();
+        let admission = &admission;
+        std::thread::scope(|scope| {
+            for (task_id, artifact_dir) in [
+                ("reviewer-one", &first_artifact),
+                ("reviewer-two", &second_artifact),
+            ] {
+                let barrier = Arc::clone(&barrier);
+                let messages = Arc::clone(&messages);
+                scope.spawn(move || {
+                    barrier.wait();
+                    admit_reviewer_build_cache_with_admission(
+                        project,
+                        &candidate,
+                        artifact_dir,
+                        &prep::TOOLCHAINS[0],
+                        task_id,
+                        admission,
+                        &|message| messages.lock().unwrap().push(message.to_string()),
+                    );
+                });
+            }
+        });
+
+        let warmed = [
+            first_artifact.join("target/output"),
+            second_artifact.join("target/output"),
+        ]
+        .into_iter()
+        .filter(|path| path.is_file())
+        .count();
+        assert_eq!(
+            warmed, 1,
+            "only one concurrent Reviewer may consume the 1 GiB budget"
+        );
+        assert_eq!(
+            admission.observed_totals.lock().unwrap().as_slice(),
+            &[0, 1024 * 1024 * 1024],
+            "the second admission must observe the first admitted cache while holding the project lock"
+        );
+        assert!(messages.lock().unwrap().iter().any(|message| {
+            message.contains("starting cold") && message.contains("project cache budget")
+        }));
+    }
+
+    #[test]
     fn reviewer_cache_reclamation_skips_executing_tasks() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
@@ -6948,12 +7091,54 @@ mod tests {
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
         );
         let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
             total: Ok(0),
             free: Ok(u64::MAX),
         };
 
         assert!(fixture.run(&admission));
         assert!(!fixture.artifact_dir.join("target").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.artifact_dir.join("review.md")).unwrap(),
+            "review evidence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_reviewer_reclaims_admitted_custom_hook_cache() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        let hook_dir = fixture.project_root.join(".fluent/hooks");
+        fs::create_dir_all(&hook_dir).unwrap();
+        let hook = hook_dir.join("prepare-pre-review");
+        fs::write(
+            &hook,
+            "#!/bin/sh\nmkdir -p \"$FLUENT_REVIEWER_ARTIFACT_DIR/target\"\nprintf cache > \"$FLUENT_REVIEWER_ARTIFACT_DIR/target/output\"\nprintf hook-output > \"$FLUENT_REVIEWER_ARTIFACT_DIR/hook-note\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+        let admission = SyntheticReviewerCacheAdmission {
+            reclaim: Ok(()),
+            total: Ok(0),
+            free: Ok(u64::MAX),
+        };
+
+        assert!(
+            fixture.run(&admission),
+            "the admitted hook cache reaches the Reviewer"
+        );
+        assert!(
+            !fixture.artifact_dir.join("target").exists(),
+            "terminal settlement must reclaim the hook-created canonical cache"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.artifact_dir.join("hook-note")).unwrap(),
+            "hook-output"
+        );
         assert_eq!(
             fs::read_to_string(fixture.artifact_dir.join("review.md")).unwrap(),
             "review evidence"
