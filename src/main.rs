@@ -1788,14 +1788,11 @@ fn cmd_skills_add(
             .iter()
             .map(|name| install_skill(name, dir, agent_name, scope))
             .collect::<Result<Vec<_>>>()?;
-        if outcomes
-            .iter()
-            .all(|outcome| *outcome == InstallOutcome::Current)
-        {
-            eprintln!("Skills are current in {}", dir.display());
-        } else {
-            eprintln!("Installed {} skills to {}", names.len(), dir.display());
-        }
+        eprintln!(
+            "Skills in {}: {}",
+            dir.display(),
+            format_install_outcomes(&outcomes)
+        );
     }
 
     let mut reported_dirs = install_dirs.clone();
@@ -1833,6 +1830,27 @@ fn cmd_skills_add(
     }
 
     Ok(())
+}
+
+fn format_install_outcomes(outcomes: &[InstallOutcome]) -> String {
+    let categories = [
+        ("installed", InstallOutcome::Installed),
+        ("current", InstallOutcome::Current),
+        ("updated", InstallOutcome::Updated),
+        ("migrated", InstallOutcome::ReplacedLegacy),
+        ("conflicting", InstallOutcome::Conflict),
+    ];
+    categories
+        .into_iter()
+        .filter_map(|(label, category)| {
+            let count = outcomes
+                .iter()
+                .filter(|outcome| **outcome == category)
+                .count();
+            (count > 0).then_some(format!("{count} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn fluent_installation_dirs(cwd: &Path, home: &str) -> Vec<PathBuf> {
