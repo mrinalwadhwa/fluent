@@ -20,6 +20,26 @@ fn fluent_cmd() -> LoggedCommand {
     cmd
 }
 
+fn production_fluent_binary(tmp: &TempDir) -> PathBuf {
+    if let Some(path) = std::env::var_os("FLUENT_PRODUCTION_BIN") {
+        return PathBuf::from(path);
+    }
+
+    let target_dir = tmp.path().join("production-target");
+    let build = Command::new("cargo")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .args(["build", "--bin", "fluent"])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "production build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    target_dir.join("debug/fluent")
+}
+
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
     let output = fluent_cmd()
         .current_dir(project_root)
@@ -21790,10 +21810,7 @@ fn production_binary_ignores_host_sandbox_test_control() {
     write_mock_sandbox_exec(&bin_dir);
     create_completed_work_attempt(&tmp, &main_dir);
 
-    let production = PathBuf::from(
-        std::env::var_os("FLUENT_PRODUCTION_BIN")
-            .expect("tester must provide the copied production Fluent binary"),
-    );
+    let production = production_fluent_binary(&tmp);
     let output = Command::new(&production)
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1"])
