@@ -770,7 +770,16 @@ fn complete_write_task(
 }
 
 fn run_review_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
-    run_review_task_with_coder(config, None, &FilesystemReviewerCacheAdmission)
+    run_review_task_with_coder(
+        config,
+        None,
+        &FilesystemReviewerCacheAdmission,
+        &report_reviewer_cache,
+    )
+}
+
+fn report_reviewer_cache(message: &str) {
+    eprintln!("{message}");
 }
 
 /// Run a Review Task, optionally injecting the reviewer coder factory.
@@ -784,6 +793,7 @@ fn run_review_task_with_coder(
     config: WorkTaskRunConfig<'_>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
     cache_admission: &dyn ReviewerCacheAdmission,
+    cache_reporter: &dyn Fn(&str),
 ) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
@@ -984,6 +994,7 @@ fn run_review_task_with_coder(
             config.attempt_id,
             config.task_id,
             cache_admission,
+            cache_reporter,
         );
     }
 
@@ -4121,6 +4132,7 @@ fn prepare_reviewer_build_cache(
     attempt_id: &str,
     task_id: &str,
     admission: &dyn ReviewerCacheAdmission,
+    reporter: &dyn Fn(&str),
 ) {
     let hook_name = "prepare-pre-review";
     if hooks::find_hook(candidate_workspace, hook_name).is_some() {
@@ -4132,6 +4144,7 @@ fn prepare_reviewer_build_cache(
             attempt_id,
             task_id,
             admission,
+            reporter,
         );
     } else if let Some(toolchain) = prep::detect_toolchain(candidate_workspace) {
         admit_reviewer_build_cache_with_admission(
@@ -4141,6 +4154,7 @@ fn prepare_reviewer_build_cache(
             toolchain,
             task_id,
             admission,
+            reporter,
         );
     }
 }
@@ -4157,6 +4171,7 @@ fn prepare_reviewer_hook_cache(
     attempt_id: &str,
     task_id: &str,
     cache_admission: &dyn ReviewerCacheAdmission,
+    reporter: &dyn Fn(&str),
 ) {
     let admission = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
         Ok(lock) => {
@@ -4164,17 +4179,17 @@ fn prepare_reviewer_hook_cache(
             match cache_admission.reclaim_terminal_caches(project_root, &store) {
                 Ok(()) => Some((lock, store)),
                 Err(error) => {
-                    eprintln!(
+                    reporter(&format!(
                         "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
-                    );
+                    ));
                     None
                 }
             }
         }
         Err(error) => {
-            eprintln!(
+            reporter(&format!(
                 "  Reviewer prep     {task_id} starting cold: cache lock check failed: {error}"
-            );
+            ));
             None
         }
     };
@@ -4218,6 +4233,7 @@ fn prepare_reviewer_hook_cache(
                 task_id,
                 &store,
                 cache_admission,
+                reporter,
             );
         } else {
             remove_unadmitted_hook_cache(artifact_dir);
@@ -4331,13 +4347,14 @@ fn admit_reviewer_build_cache_with_admission(
     toolchain: &prep::Toolchain,
     task_id: &str,
     admission: &dyn ReviewerCacheAdmission,
+    reporter: &dyn Fn(&str),
 ) {
     let lock = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
         Ok(lock) => lock,
         Err(error) => {
-            eprintln!(
+            reporter(&format!(
                 "  Reviewer prep     {task_id} starting cold: cache lock check failed: {error}"
-            );
+            ));
             return;
         }
     };
@@ -4366,16 +4383,16 @@ fn admit_reviewer_build_cache_with_admission(
     })();
     drop(lock);
     match decision {
-        Ok(None) => eprintln!(
+        Ok(None) => reporter(&format!(
             "  Reviewer prep     pre-populated {} build cache from candidate",
             toolchain.name
-        ),
-        Ok(Some(reason)) => {
-            eprintln!("  Reviewer prep     {task_id} starting cold: {reason} would be exceeded")
-        }
-        Err(error) => eprintln!(
+        )),
+        Ok(Some(reason)) => reporter(&format!(
+            "  Reviewer prep     {task_id} starting cold: {reason} would be exceeded"
+        )),
+        Err(error) => reporter(&format!(
             "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
-        ),
+        )),
     }
 }
 
@@ -4388,6 +4405,7 @@ fn admit_hook_reviewer_cache_with_admission(
     task_id: &str,
     store: &WorkModelStore,
     admission: &dyn ReviewerCacheAdmission,
+    reporter: &dyn Fn(&str),
 ) {
     let decision = (|| -> Result<Option<&'static str>> {
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
@@ -4403,7 +4421,7 @@ fn admit_hook_reviewer_cache_with_admission(
         Ok(None)
     })();
     match decision {
-        Ok(None) => eprintln!("  Reviewer prep     admitted prepare-pre-review managed cache"),
+        Ok(None) => reporter("  Reviewer prep     admitted prepare-pre-review managed cache"),
         Ok(Some(reason)) => {
             if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
                 eprintln!(
@@ -4411,7 +4429,9 @@ fn admit_hook_reviewer_cache_with_admission(
                     artifact_dir.display()
                 );
             }
-            eprintln!("  Reviewer prep     {task_id} starting cold: {reason} would be exceeded");
+            reporter(&format!(
+                "  Reviewer prep     {task_id} starting cold: {reason} would be exceeded"
+            ));
         }
         Err(error) => {
             if let Err(cleanup_error) = prep::remove_managed_cache_dirs(artifact_dir) {
@@ -4420,9 +4440,9 @@ fn admit_hook_reviewer_cache_with_admission(
                     artifact_dir.display()
                 );
             }
-            eprintln!(
+            reporter(&format!(
                 "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
-            );
+            ));
         }
     }
 }
@@ -6318,6 +6338,7 @@ mod tests {
             "attempt-1",
             "review-1",
             &FilesystemReviewerCacheAdmission,
+            &report_reviewer_cache,
         );
 
         assert!(artifact.join("hook-note").is_file());
@@ -6354,6 +6375,7 @@ mod tests {
             "attempt-1",
             "review-1",
             &FilesystemReviewerCacheAdmission,
+            &report_reviewer_cache,
         );
 
         assert!(artifact.join("hook-note").is_file());
@@ -6496,8 +6518,14 @@ mod tests {
         }
 
         fn run(&self, admission: &dyn ReviewerCacheAdmission) -> bool {
+            self.run_with_messages(admission).0
+        }
+
+        fn run_with_messages(&self, admission: &dyn ReviewerCacheAdmission) -> (bool, Vec<String>) {
             let saw_warm_cache = Arc::new(Mutex::new(false));
             let saw_warm_cache_for_coder = Arc::clone(&saw_warm_cache);
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            let messages_for_reporter = Arc::clone(&messages);
             let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
                 Box::new(CacheObservingReviewCoder {
                     saw_warm_cache: Arc::clone(&saw_warm_cache_for_coder),
@@ -6518,9 +6546,18 @@ mod tests {
                 },
                 Some(&make_coder),
                 admission,
+                &move |message| {
+                    messages_for_reporter
+                        .lock()
+                        .unwrap()
+                        .push(message.to_string())
+                },
             )
             .unwrap();
-            *saw_warm_cache.lock().unwrap()
+            (
+                *saw_warm_cache.lock().unwrap(),
+                messages.lock().unwrap().clone(),
+            )
         }
     }
 
@@ -6558,10 +6595,13 @@ mod tests {
             free: Ok(u64::MAX),
         };
 
-        assert!(
-            !fixture.run(&admission),
-            "an over-budget Reviewer must start cold"
-        );
+        let (warmed, messages) = fixture.run_with_messages(&admission);
+        assert!(!warmed, "an over-budget Reviewer must start cold");
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains("project cache budget")
+        }));
         assert!(fixture.artifact_dir.join("review.md").is_file());
         assert_eq!(
             fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
@@ -6583,11 +6623,49 @@ mod tests {
             total: Ok(0),
             free: Ok(u64::MAX),
         };
-        assert!(
-            !fixture.run(&admission),
-            "invalid limits must keep the Reviewer cold"
-        );
+        let (warmed, messages) = fixture.run_with_messages(&admission);
+        assert!(!warmed, "invalid limits must keep the Reviewer cold");
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains(
+                    &fixture
+                        .project_root
+                        .join(".fluent/config.yaml")
+                        .display()
+                        .to_string(),
+                )
+                && message.contains("reviewer-cache.max-project-gib")
+        }));
         assert!(fixture.artifact_dir.join("review.md").is_file());
+    }
+
+    #[test]
+    fn reviewer_cache_free_space_floor_starts_cold_without_pausing_review() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 1\n",
+        );
+        let admission = SyntheticReviewerCacheAdmission {
+            total: Ok(0),
+            free: Ok(0),
+        };
+
+        let (warmed, messages) = fixture.run_with_messages(&admission);
+
+        assert!(
+            !warmed,
+            "a Reviewer below the free-space floor must start cold"
+        );
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains("host free-space floor")
+        }));
+        assert_eq!(
+            fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
+            AttemptStatus::Complete,
+            "cold admission must not pause the review"
+        );
     }
 
     #[test]
@@ -6617,6 +6695,7 @@ mod tests {
             &prep::TOOLCHAINS[0],
             "review-1",
             &admission,
+            &report_reviewer_cache,
         );
 
         assert!(artifact.join("target/output").is_file());
@@ -6632,7 +6711,14 @@ mod tests {
             free: Ok(u64::MAX),
         };
 
-        assert!(!fixture.run(&admission));
+        let (warmed, messages) = fixture.run_with_messages(&admission);
+        assert!(!warmed);
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains("cache admission check failed")
+                && message.contains("synthetic accounting failure")
+        }));
         assert!(fixture.artifact_dir.join("review.md").is_file());
     }
 
@@ -6646,10 +6732,17 @@ mod tests {
             free: Err(anyhow::anyhow!("synthetic free-space failure")),
         };
 
+        let (warmed, messages) = fixture.run_with_messages(&admission);
         assert!(
-            !fixture.run(&admission),
+            !warmed,
             "failed free-space inspection must leave the Reviewer cold"
         );
+        assert!(messages.iter().any(|message| {
+            message.contains(&fixture.review_task_id)
+                && message.contains("starting cold")
+                && message.contains("cache admission check failed")
+                && message.contains("synthetic free-space failure")
+        }));
         assert!(fixture.artifact_dir.join("review.md").is_file());
     }
 
@@ -7016,6 +7109,7 @@ mod tests {
             },
             Some(&make_coder),
             &FilesystemReviewerCacheAdmission,
+            &report_reviewer_cache,
         )
         .expect_err("a composite coder+confinement-restore failure must return an error");
 

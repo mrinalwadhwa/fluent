@@ -6056,7 +6056,11 @@ Test: src/work_task_executor.rs (reviewer_cache_admission_warms_within_project_b
 IF cache configuration is invalid, accounting or free-space inspection fails,
 or a prospective warm cache exceeds either limit, THEN THE SYSTEM SHALL name
 the Reviewer and reason, start it cold, and continue the Attempt.
+Test: src/work_task_executor.rs (reviewer_cache_budget_starts_cold_without_pausing_review)
+Test: src/work_task_executor.rs (reviewer_cache_free_space_floor_starts_cold_without_pausing_review)
+Test: src/work_task_executor.rs (invalid_reviewer_cache_limits_start_cold_and_name_config)
 Test: src/work_task_executor.rs (reviewer_cache_accounting_failure_starts_cold)
+Test: src/work_task_executor.rs (reviewer_cache_free_space_failure_starts_cold)
 
 ### B4
 
