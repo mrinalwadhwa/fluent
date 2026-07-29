@@ -4288,12 +4288,54 @@ fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> 
     Ok(total)
 }
 
+/// Isolate cache observations from admission policy so tests can drive the real
+/// decision with deterministic totals, capacity, and failures.
+trait ReviewerCacheAdmission {
+    fn reclaim_terminal_caches(&self, project_root: &Path, store: &WorkModelStore) -> Result<()>;
+    fn managed_cache_total(&self, project_root: &Path, store: &WorkModelStore) -> Result<u64>;
+    fn filesystem_free_bytes(&self, artifact_dir: &Path) -> Result<u64>;
+}
+
+struct FilesystemReviewerCacheAdmission;
+
+impl ReviewerCacheAdmission for FilesystemReviewerCacheAdmission {
+    fn reclaim_terminal_caches(&self, project_root: &Path, store: &WorkModelStore) -> Result<()> {
+        reclaim_terminal_reviewer_caches(project_root, store)
+    }
+
+    fn managed_cache_total(&self, project_root: &Path, store: &WorkModelStore) -> Result<u64> {
+        managed_reviewer_cache_total(project_root, store)
+    }
+
+    fn filesystem_free_bytes(&self, artifact_dir: &Path) -> Result<u64> {
+        prep::filesystem_free_bytes(artifact_dir)
+    }
+}
+
 fn admit_reviewer_build_cache(
     project_root: &Path,
     candidate_workspace: &Path,
     artifact_dir: &Path,
     toolchain: &prep::Toolchain,
     task_id: &str,
+) {
+    admit_reviewer_build_cache_with_admission(
+        project_root,
+        candidate_workspace,
+        artifact_dir,
+        toolchain,
+        task_id,
+        &FilesystemReviewerCacheAdmission,
+    );
+}
+
+fn admit_reviewer_build_cache_with_admission(
+    project_root: &Path,
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    toolchain: &prep::Toolchain,
+    task_id: &str,
+    admission: &dyn ReviewerCacheAdmission,
 ) {
     let lock = match crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root)) {
         Ok(lock) => lock,
@@ -4306,10 +4348,10 @@ fn admit_reviewer_build_cache(
     };
     let store = WorkModelStore::new(project_root);
     let decision = (|| -> Result<Option<&'static str>> {
-        reclaim_terminal_reviewer_caches(project_root, &store)?;
+        admission.reclaim_terminal_caches(project_root, &store)?;
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
-        let current = managed_reviewer_cache_total(project_root, &store)?;
+        let current = admission.managed_cache_total(project_root, &store)?;
         let prospective = prep::toolchain_cache_bytes(candidate_workspace, toolchain)?;
         let total = current
             .checked_add(prospective)
@@ -4317,7 +4359,7 @@ fn admit_reviewer_build_cache(
         if total > limits.max_project_bytes.value {
             return Ok(Some("project cache budget"));
         }
-        let free = prep::filesystem_free_bytes(artifact_dir)?;
+        let free = admission.filesystem_free_bytes(artifact_dir)?;
         let required = prospective
             .checked_add(limits.min_free_bytes.value)
             .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
@@ -4351,14 +4393,30 @@ fn admit_hook_reviewer_cache(
     task_id: &str,
     store: &WorkModelStore,
 ) {
+    admit_hook_reviewer_cache_with_admission(
+        project_root,
+        artifact_dir,
+        task_id,
+        store,
+        &FilesystemReviewerCacheAdmission,
+    );
+}
+
+fn admit_hook_reviewer_cache_with_admission(
+    project_root: &Path,
+    artifact_dir: &Path,
+    task_id: &str,
+    store: &WorkModelStore,
+    admission: &dyn ReviewerCacheAdmission,
+) {
     let decision = (|| -> Result<Option<&'static str>> {
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
-        let current = managed_reviewer_cache_total(project_root, store)?;
+        let current = admission.managed_cache_total(project_root, store)?;
         if current > limits.max_project_bytes.value {
             return Ok(Some("project cache budget"));
         }
-        let free = prep::filesystem_free_bytes(artifact_dir)?;
+        let free = admission.filesystem_free_bytes(artifact_dir)?;
         if free < limits.min_free_bytes.value {
             return Ok(Some("host free-space floor"));
         }
@@ -6308,6 +6366,148 @@ mod tests {
         assert!(
             !artifact.join("target").exists(),
             "a failed hook must not retain an unadmitted managed cache"
+        );
+    }
+
+    struct SyntheticReviewerCacheAdmission {
+        total: Result<u64>,
+        free: Result<u64>,
+    }
+
+    impl ReviewerCacheAdmission for SyntheticReviewerCacheAdmission {
+        fn reclaim_terminal_caches(
+            &self,
+            _project_root: &Path,
+            _store: &WorkModelStore,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn managed_cache_total(
+            &self,
+            _project_root: &Path,
+            _store: &WorkModelStore,
+        ) -> Result<u64> {
+            self.total
+                .as_ref()
+                .map(|value| *value)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+        }
+
+        fn filesystem_free_bytes(&self, _artifact_dir: &Path) -> Result<u64> {
+            self.free
+                .as_ref()
+                .map(|value| *value)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+        }
+    }
+
+    #[test]
+    fn reviewer_cache_admission_warms_within_project_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let candidate = project.join("candidate");
+        let artifact = project.join("artifact");
+        fs::create_dir_all(candidate.join("target")).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+        fs::write(candidate.join("target/output"), "cache").unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+        let admission = SyntheticReviewerCacheAdmission {
+            total: Ok(0),
+            free: Ok(u64::MAX),
+        };
+
+        admit_reviewer_build_cache_with_admission(
+            project,
+            &candidate,
+            &artifact,
+            &prep::TOOLCHAINS[0],
+            "review-1",
+            &admission,
+        );
+
+        assert!(artifact.join("target/output").is_file());
+    }
+
+    #[test]
+    fn reviewer_cache_accounting_failure_starts_cold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let candidate = project.join("candidate");
+        let artifact = project.join("artifact");
+        fs::create_dir_all(candidate.join("target")).unwrap();
+        fs::create_dir_all(&artifact).unwrap();
+        fs::write(candidate.join("target/output"), "cache").unwrap();
+        let admission = SyntheticReviewerCacheAdmission {
+            total: Err(anyhow::anyhow!("synthetic accounting failure")),
+            free: Ok(u64::MAX),
+        };
+
+        admit_reviewer_build_cache_with_admission(
+            project,
+            &candidate,
+            &artifact,
+            &prep::TOOLCHAINS[0],
+            "review-1",
+            &admission,
+        );
+
+        assert!(
+            !artifact.join("target").exists(),
+            "failed accounting must leave the Reviewer cold"
+        );
+    }
+
+    #[test]
+    fn reviewer_cache_admission_reclaims_terminal_caches_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let artifact_relative =
+            crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
+        let artifact = project.join(&artifact_relative);
+        fs::create_dir_all(artifact.join("target")).unwrap();
+        fs::write(artifact.join("target/output"), "cache").unwrap();
+        fs::write(artifact.join("review.md"), "evidence").unwrap();
+
+        let store = WorkModelStore::new(project);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Terminal reviewer cache".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut item.attempts[0].tasks[0];
+        task.id = "review-1".to_string();
+        task.kind = TaskKind::Review;
+        task.status = TaskStatus::Complete;
+        task.workspace_access.writes.clear();
+        task.workspace_access.reads.push(WorkspaceRef {
+            id: "candidate".to_string(),
+            path: "candidate".to_string(),
+        });
+        task.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "candidate".to_string(),
+            source_branch: "main".to_string(),
+            candidate_commit: "abc123".to_string(),
+            base_commit: None,
+        });
+        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: artifact_relative,
+        });
+        store.create_work_item(&item).unwrap();
+
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+
+        assert!(!artifact.join("target").exists());
+        assert_eq!(
+            fs::read_to_string(artifact.join("review.md")).unwrap(),
+            "evidence"
         );
     }
 
