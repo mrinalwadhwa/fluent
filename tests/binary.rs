@@ -18671,6 +18671,38 @@ fn skills_add_preserves_invalid_sidecar_on_shim_marked_installation() {
 }
 
 #[test]
+fn skills_add_preserves_invalid_sidecar_on_scanned_shim_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let skill_dir = home.join(".codex/skills/fluent");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
+    )
+    .unwrap();
+    fs::write(skill_dir.join(".fluent-managed.json"), b"not json\n").unwrap();
+    let before = complete_skill_snapshot(&skill_dir);
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        complete_skill_snapshot(&skill_dir),
+        before,
+        "an invalid sidecar must block scanned shim adoption and preserve every file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&skill_dir.display().to_string()));
+    assert!(stderr.contains("remove it manually"));
+    assert!(!stderr.contains("Replaced fluent shim"));
+}
+
+#[test]
 fn skills_add_does_not_rewrite_current_managed_installation() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");

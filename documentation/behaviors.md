@@ -4988,6 +4988,7 @@ with cleanup guidance, even when it otherwise matches a legacy adoption route.
 Test: tests/binary.rs (skills_add_preserves_edited_added_and_missing_managed_files,
 skills_add_preserves_malformed_and_identity_mismatched_sidecars,
 skills_add_preserves_invalid_sidecar_on_shim_marked_installation,
+skills_add_preserves_invalid_sidecar_on_scanned_shim_installation,
 skills_add_reports_unmarked_conflict_without_modifying_it)
 
 ### B11

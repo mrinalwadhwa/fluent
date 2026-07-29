@@ -1938,8 +1938,9 @@ fn replace_shim_if_present(skills_dir: &Path) -> Result<()> {
         "claude"
     };
     let outcome = install_skill("fluent", skills_dir, agent, "global")?;
-    debug_assert_eq!(outcome, InstallOutcome::ReplacedShim);
-    eprintln!("Replaced fluent shim in {}", skills_dir.display());
+    if outcome == InstallOutcome::ReplacedShim {
+        eprintln!("Replaced fluent shim in {}", skills_dir.display());
+    }
     Ok(())
 }
 
