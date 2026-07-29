@@ -1268,6 +1268,63 @@ both the query and the nudge. Offline check failures are silent.
 | `FLUENT_BINARY_PATH` | `current_exe()` | Override binary path (testing) |
 | `FLUENT_UPDATE_CACHE_PATH` | `~/.config/fluent/update-check.json` | Override cache file path (testing) |
 
+## Clean-room first-run smoke
+
+`scripts/first-run-smoke.sh` is an operator-run release gate that exercises
+Fluent's public first-run journey — install, initialize, create a small Work
+Item, run its Attempt through the Learner, inspect the ready Merge Candidate,
+and land it — inside a fresh repository and an isolated home. It proves a new
+user can complete the released workflow without hidden local state. It is not
+part of the normal test suite: the automated shell test drives it with local
+doubles only, while this script performs the real, model-backed run.
+
+The harness runs in three explicit, resumable phases. Every path is quoted, so
+the smoke root may live anywhere, including a path containing spaces:
+
+```sh
+# 1. Prepare a self-contained smoke root (isolated home, Git repository,
+#    deterministic failing fixture, planning inputs, manifest, evidence).
+scripts/first-run-smoke.sh prepare /path/to/smoke-root
+
+# 2. Install/select Fluent, initialize, create and run the Work Item, and stop
+#    at a ready Merge Candidate. Prints the exact inspection and land commands.
+scripts/first-run-smoke.sh run /path/to/smoke-root
+
+# 3. After you inspect and accept the candidate, land it, verify the fixture
+#    test and a clean target, and record the merged commit.
+scripts/first-run-smoke.sh land /path/to/smoke-root
+```
+
+Choose any empty (or not-yet-existing) directory as the smoke root; `prepare`
+refuses a nonempty directory unless it already holds a compatible harness
+manifest, so re-running `prepare` on the same root is safe. Everything the
+smoke touches — the isolated `HOME`, the repository at `<root>/project/main`,
+the selected binary, phase logs under `<root>/harness/logs`, and evidence under
+`<root>/evidence` — lives beneath the root. The harness never deletes the root,
+on success or failure.
+
+**Install boundary.** By default `prepare` records the public installer at
+`https://fluent.computer/install`, and `run` invokes it under the isolated
+home; it needs `curl` on `PATH` and network access to fluent.computer. Any
+credentials the Attempt's coder requires (for example a provider API key) must
+be present in the isolated home the harness creates — never the operator's own
+home. For pre-release validation, override the boundary without changing the
+phase contract:
+
+```sh
+scripts/first-run-smoke.sh prepare /path/to/smoke-root --installer ./tools/install.sh
+scripts/first-run-smoke.sh prepare /path/to/smoke-root --binary ./target/release/fluent
+```
+
+**Failure and resume.** If any phase fails, the harness exits non-zero,
+preserves the whole root, and prints the failed phase, its log path under
+`<root>/harness/logs`, and the exact command that resumes from the last safe
+phase. Authentication, provider-capacity, `needs-user`, and non-ready
+candidates are preserved nonterminal states: read the named log, resolve the
+cause, and re-run the printed resume command against the same root. Landing is
+gated on a succeeded Learner, so `run` stops with a truthful nonterminal state
+rather than handing off a candidate whose Learner has not yet succeeded.
+
 ## Agents
 
 ### Coder selection
@@ -1750,6 +1807,7 @@ fluent/main/
     review-skills/SKILL.md
     review-tests/SKILL.md
   scripts/
+    first-run-smoke.sh       ← Operator-run clean-room first-run release gate
     release.sh               ← Build, checksum, and publish a GitHub release
   infrastructure/
     cloudformation.yaml
