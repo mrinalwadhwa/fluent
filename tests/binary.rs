@@ -22900,6 +22900,7 @@ fn codex_auth_resume_reopens_same_task_without_new_writer_round() {
     fs::create_dir_all(&source_home).unwrap();
     fs::write(source_home.join("auth.json"), "source authentication").unwrap();
     write_mock_sandbox_exec(&bin_dir);
+    write_mock_executable(&bin_dir, "claude", "#!/bin/bash\nexit 0\n");
     write_mock_executable(
         &bin_dir,
         "codex",
@@ -22993,7 +22994,13 @@ git commit -m "Add resumed writer output" >/dev/null
     let resumed_item = work_item_value(&main_dir, "codex-resume");
     let write_task = &resumed_item["attempts"][0]["tasks"][0];
     assert_eq!(write_task["id"], "attempt-1-write-1");
-    assert_eq!(write_task["status"], "complete");
+    assert_eq!(
+        write_task["status"],
+        "complete",
+        "resumed attempt output: stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
     assert_eq!(
         resumed_item["attempts"][0]["tasks"]
             .as_array()
