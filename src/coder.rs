@@ -1944,7 +1944,11 @@ const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 fn ensure_not_expired_with_refresh() -> Result<(), crate::claude_auth::AuthError> {
     if crate::claude_auth::ensure_not_expired().is_err() {
         eprintln!("  Token expired — refreshing credentials before launch.");
-        let _ = crate::credential::refresh_credentials();
+        crate::credential::refresh_credentials().map_err(|error| {
+            crate::claude_auth::AuthError::RefreshFailed {
+                reason: error.to_string(),
+            }
+        })?;
         if let Err(err) = crate::claude_auth::ensure_not_expired() {
             return Err(err);
         }
@@ -2144,8 +2148,12 @@ pub fn transcript_indicates_rate_limit(transcript_path: &Path) -> bool {
     false
 }
 
-fn real_credential_refresh() {
-    let _ = crate::credential::refresh_credentials();
+fn real_credential_refresh() -> Result<(), crate::claude_auth::AuthError> {
+    crate::credential::refresh_credentials().map_err(|error| {
+        crate::claude_auth::AuthError::RefreshFailed {
+            reason: error.to_string(),
+        }
+    })
 }
 
 /// Preserve the transcript of a just-finished attempt as an immutable sibling
@@ -2272,7 +2280,7 @@ fn run_with_transcript_retrying<F>(
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
     notify_fn: &dyn Fn(&str, &str),
-    refresh_fn: &dyn Fn(),
+    refresh_fn: &dyn Fn() -> Result<(), crate::claude_auth::AuthError>,
 ) -> Result<i32>
 where
     F: Fn() -> Command,
@@ -2289,7 +2297,7 @@ fn run_with_transcript_retrying_reported<F>(
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
     notify_fn: &dyn Fn(&str, &str),
-    refresh_fn: &dyn Fn(),
+    refresh_fn: &dyn Fn() -> Result<(), crate::claude_auth::AuthError>,
 ) -> CoderRunCompletion
 where
     F: Fn() -> Command,
@@ -2313,7 +2321,7 @@ fn run_with_transcript_retrying_using<F>(
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
     notify_fn: &dyn Fn(&str, &str),
-    refresh_fn: &dyn Fn(),
+    refresh_fn: &dyn Fn() -> Result<(), crate::claude_auth::AuthError>,
     run_fn: &dyn Fn(
         Command,
         Option<&Path>,
@@ -2342,7 +2350,7 @@ fn run_with_transcript_retrying_reported_using<F>(
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
     notify_fn: &dyn Fn(&str, &str),
-    refresh_fn: &dyn Fn(),
+    refresh_fn: &dyn Fn() -> Result<(), crate::claude_auth::AuthError>,
     run_fn: &dyn Fn(
         Command,
         Option<&Path>,
@@ -2410,7 +2418,12 @@ where
                         report: aggregate,
                     };
                 }
-                refresh_fn();
+                if let Err(error) = refresh_fn() {
+                    return CoderRunCompletion {
+                        terminal: Err(anyhow::Error::new(error)),
+                        report: aggregate,
+                    };
+                }
                 continue;
             }
             return CoderRunCompletion {
@@ -3780,7 +3793,7 @@ mod pump_supervision_tests {
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
             &run_fn,
         );
         assert_eq!(completion.terminal.unwrap(), 0, "the final retry succeeds");
@@ -4754,7 +4767,7 @@ exit 1"#
             Some(&transcript),
             &capture.config,
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
             &run_fn,
         );
         assert_eq!(result.unwrap(), 0, "the retry recovers");
@@ -4786,6 +4799,7 @@ exit 1"#
         let refresh_clone = Arc::clone(&refresh_count);
         let refresh = move || {
             *refresh_clone.lock().unwrap() += 1;
+            Ok(())
         };
 
         let _ = run_with_transcript_retrying(
@@ -4832,10 +4846,46 @@ exit 1"#
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
         );
 
         assert_eq!(result.unwrap(), 0, "should succeed after retry");
+    }
+
+    #[test]
+    fn failed_refresh_probe_stops_the_auth_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = make_401_script(&counter, Some(2));
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+            &|_, _| {},
+            &|| {
+                Err(crate::claude_auth::AuthError::RefreshFailed {
+                    reason: "refresh timeout".to_string(),
+                })
+            },
+        );
+
+        assert!(matches!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::claude_auth::AuthError>(),
+            Some(crate::claude_auth::AuthError::RefreshFailed { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(counter).unwrap().lines().count(),
+            1,
+            "a failed refresh must not consume a second coder phase"
+        );
     }
 
     #[test]
@@ -4854,7 +4904,7 @@ exit 1"#
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
         );
 
         let err = result.unwrap_err();
@@ -4901,7 +4951,7 @@ exit 1"#
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
         );
         assert_eq!(result.unwrap(), 0, "should recover after refresh");
 
@@ -4986,7 +5036,7 @@ exit 1"#
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
         );
 
         assert_eq!(result.unwrap(), 0, "should recover after refresh");
@@ -5050,7 +5100,7 @@ exit 1"#
             Some(&transcript),
             &crate::transcript_pump::TranscriptPumpConfig::default(),
             &|_, _| {},
-            &|| {},
+            &|| Ok(()),
         );
 
         let err = result.expect_err("a failed phase preservation must surface as an error");
@@ -5081,6 +5131,7 @@ exit 1"#
         let refresh_clone = Arc::clone(&refresh_count);
         let refresh = move || {
             *refresh_clone.lock().unwrap() += 1;
+            Ok(())
         };
 
         let result = run_with_transcript_retrying(

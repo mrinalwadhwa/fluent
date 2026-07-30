@@ -12,6 +12,7 @@ const EXPIRY_MARGIN_MS: i64 = 5 * 60 * 1000;
 pub enum AuthError {
     Expired { expires_at: i64 },
     Rejected { request_id: Option<String> },
+    RefreshFailed { reason: String },
 }
 
 impl std::fmt::Display for AuthError {
@@ -27,6 +28,11 @@ impl AuthError {
         let prefix = match self {
             AuthError::Expired { .. } => "Claude auth token expired.",
             AuthError::Rejected { .. } => "Claude auth token rejected (HTTP 401).",
+            AuthError::RefreshFailed { reason } => {
+                return format!(
+                    "Claude credential refresh failed: {reason}. Run 'claude /login' to re-authenticate, then 'fluent attempt run'."
+                );
+            }
         };
         format!("{prefix} Run 'claude /login' to re-authenticate, then 'fluent attempt run'.")
     }
