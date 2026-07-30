@@ -620,6 +620,20 @@ mod tests {
     }
 
     #[test]
+    fn check_rejects_extractor_that_cannot_read_empty_commands() {
+        let workspace = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: echo hello\n    test_harness: shell-harness\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\nexit 1\n");
+
+        let error = check(workspace.path(), true, &resolver()).unwrap_err();
+        assert!(format!("{error:#}").contains("invalid empty artifact"));
+    }
+
+    #[test]
     fn tester_results_command_entry_shape() {
         let workspace = TempDir::new().unwrap();
         let artifact_dir = TempDir::new().unwrap();
