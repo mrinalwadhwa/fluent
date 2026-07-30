@@ -57,10 +57,13 @@ learning_status() {
 
 # When set, emit malformed JSON for these commands (exit 0) so the caller's
 # jq parse step fails rather than the command itself.
-# FAKE_ATTEMPT_SHOW_MALFORMED=1   — attempt show returns invalid JSON
-# FAKE_CANDIDATE_SHOW_MALFORMED=1 — merge-candidate show returns invalid JSON
-# FAKE_LANDED_SHOW_MALFORMED=1    — merge-candidate show returns invalid JSON
-#                                   only when stage=landed (post-land show)
+# FAKE_ATTEMPT_SHOW_MALFORMED=1        — attempt show returns invalid JSON
+# FAKE_CANDIDATE_SHOW_MALFORMED=1      — merge-candidate show returns invalid JSON
+# FAKE_LANDED_SHOW_MALFORMED=1         — merge-candidate show returns invalid JSON
+#                                        only when stage=landed (post-land show)
+# FAKE_CANDIDATE_SHOW_UNKNOWN_STATUS=1 — merge-candidate show returns valid JSON
+#                                        but with an unrecognised merge_state.status
+#                                        (not "pending" or "merged"), only at stage=ran
 
 record() {
   [ -n "${FAKE_CMD_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_CMD_LOG"
@@ -167,6 +170,13 @@ JSON
         # precheck (still stage=ran) unaffected.
         if [ "${FAKE_LANDED_SHOW_MALFORMED:-0}" = "1" ] && [ "$(stage)" = "landed" ]; then
           printf '{bad json\n'
+          exit 0
+        fi
+        # Return syntactically valid JSON with an unrecognised merge_state.status
+        # so the harness receives a well-formed document but must reject the
+        # unknown state rather than treating it as permission to land.
+        if [ "${FAKE_CANDIDATE_SHOW_UNKNOWN_STATUS:-0}" = "1" ] && [ "$(stage)" = "ran" ]; then
+          jq '.merge_state.status = "unknown_state"' "$rec"
           exit 0
         fi
         cat "$rec"
@@ -1244,6 +1254,50 @@ test_land_precheck_failure_does_not_replay_land() {
   return $rc
 }
 
+test_land_precheck_unknown_state_does_not_replay_land() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # The precheck returns valid JSON with an unrecognised merge_state.status.
+  # The harness must reject it through fail_phase rather than treating any
+  # non-"merged" value as permission to call merge-candidate land.
+  local before
+  before="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_CANDIDATE_SHOW_UNKNOWN_STATUS=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when precheck returns unknown status\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land.out")"
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/land-precheck.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+
+  local after
+  after="$(grep -c '^merge-candidate land$' "$FAKE_CMD_LOG" || true)"
+  [ "$after" -eq "$before" ] \
+    || { printf '    FAIL: unknown precheck status triggered merge-candidate land (%s -> %s)\n' "$before" "$after"; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past an unknown precheck status\n'; rc=1; }
+  # No merge happened: the fixture still fails on main.
+  if ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: main carries the fix despite an unknown precheck status\n'; rc=1
+  fi
+
+  # Clear the injected failure; the resume sees pending and lands normally.
+  run_harness land "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: clean land resume did not complete\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: clean resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
 test_relative_installer_override_is_durable() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -1525,6 +1579,8 @@ run_test "interrupted manifest update keeps prior manifest" \
   test_interrupted_manifest_update_keeps_prior_manifest
 run_test "land precheck failure does not replay land" \
   test_land_precheck_failure_does_not_replay_land
+run_test "land precheck unknown state does not replay land" \
+  test_land_precheck_unknown_state_does_not_replay_land
 run_test "relative installer override is durable" \
   test_relative_installer_override_is_durable
 run_test "land replay safe after post-land failure" \

@@ -663,10 +663,16 @@ phase_land() {
   merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json" 2>>"$logs/land-precheck.log")" \
     || fail_phase "$root" "land" "$logs/land-precheck.log" "land"
 
-  if [ "$merge_status" != "merged" ]; then
+  if [ "$merge_status" = "pending" ]; then
     # Land only the accepted candidate through Fluent.
     run_fluent "$land_log" merge-candidate land "$wi" "$cand" \
       || fail_phase "$root" "land" "$land_log" "land"
+  elif [ "$merge_status" != "merged" ]; then
+    # Any status other than the expected pending or already-merged is unknown;
+    # replaying a non-idempotent land against an unknown state is unsafe.
+    printf 'unexpected merge candidate status: %s\n' "$merge_status" \
+      >> "$logs/land-precheck.log"
+    fail_phase "$root" "land" "$logs/land-precheck.log" "land"
   fi
 
   # The fixture's executable test must now pass on the target.
