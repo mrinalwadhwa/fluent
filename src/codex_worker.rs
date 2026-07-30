@@ -4,6 +4,197 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A Codex command selected once before an autonomous role reserves work.
+#[derive(Clone, Debug)]
+pub struct ResolvedCodexLauncher {
+    executable: PathBuf,
+    readable_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+pub struct CodexLauncherError {
+    message: String,
+}
+
+impl std::fmt::Display for CodexLauncherError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CodexLauncherError {}
+
+#[derive(Debug)]
+pub enum CodexWorkerPreparationError {
+    Launcher(CodexLauncherError),
+    Authentication(CodexAuthError),
+}
+
+impl std::fmt::Display for CodexWorkerPreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Launcher(error) => error.fmt(formatter),
+            Self::Authentication(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CodexWorkerPreparationError {}
+
+impl From<CodexLauncherError> for CodexWorkerPreparationError {
+    fn from(error: CodexLauncherError) -> Self {
+        Self::Launcher(error)
+    }
+}
+
+impl From<CodexAuthError> for CodexWorkerPreparationError {
+    fn from(error: CodexAuthError) -> Self {
+        Self::Authentication(error)
+    }
+}
+
+impl ResolvedCodexLauncher {
+    pub fn resolve() -> std::result::Result<Self, CodexLauncherError> {
+        let path = env::var_os("PATH").ok_or_else(|| CodexLauncherError {
+            message: "cannot resolve `codex` from PATH: PATH is not set".to_string(),
+        })?;
+        Self::resolve_from_paths(env::split_paths(&path))
+    }
+
+    fn resolve_from_path(path: &Path) -> std::result::Result<Self, CodexLauncherError> {
+        Self::resolve_from_paths(std::iter::once(path.to_path_buf()))
+    }
+
+    fn resolve_from_paths(
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> std::result::Result<Self, CodexLauncherError> {
+        for directory in paths {
+            let absolute_directory = if directory.is_absolute() {
+                directory
+            } else {
+                env::current_dir()
+                    .map_err(|error| CodexLauncherError {
+                        message: format!(
+                            "cannot resolve `codex` from PATH: cannot resolve current directory: {error}"
+                        ),
+                    })?
+                    .join(directory)
+            };
+            let candidate = absolute_directory.join("codex");
+            if !candidate.is_file() || !is_executable(&candidate) {
+                continue;
+            }
+
+            let parent = candidate.parent().ok_or_else(|| CodexLauncherError {
+                message: format!(
+                    "cannot resolve Codex launcher {} safely: it has no parent",
+                    candidate.display()
+                ),
+            })?;
+            let lexical_parent = fs::canonicalize(parent).map_err(|error| CodexLauncherError {
+                message: format!(
+                    "cannot resolve Codex launcher parent {}: {error}",
+                    parent.display()
+                ),
+            })?;
+            let file_name = candidate.file_name().ok_or_else(|| CodexLauncherError {
+                message: format!(
+                    "cannot resolve Codex launcher {} safely: it has no file name",
+                    candidate.display()
+                ),
+            })?;
+            let executable = lexical_parent.join(file_name);
+            let canonical_target =
+                fs::canonicalize(&executable).map_err(|error| CodexLauncherError {
+                    message: format!(
+                        "cannot resolve Codex launcher target {}: {error}",
+                        executable.display()
+                    ),
+                })?;
+            if !canonical_target.is_file() {
+                return Err(CodexLauncherError {
+                    message: format!(
+                        "cannot resolve Codex launcher {} safely: target {} is not a file",
+                        executable.display(),
+                        canonical_target.display()
+                    ),
+                });
+            }
+
+            let mut readable_roots = vec![executable.clone()];
+            if canonical_target != executable {
+                readable_roots.push(packaged_launcher_root(&canonical_target)?);
+            }
+            readable_roots.sort();
+            readable_roots.dedup();
+            return Ok(Self {
+                executable,
+                readable_roots,
+            });
+        }
+
+        Err(CodexLauncherError {
+            message: "cannot resolve `codex` from PATH: no executable command was found"
+                .to_string(),
+        })
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn readable_roots(&self) -> &[PathBuf] {
+        &self.readable_roots
+    }
+}
+
+fn packaged_launcher_root(target: &Path) -> std::result::Result<PathBuf, CodexLauncherError> {
+    let target_parent = target.parent().ok_or_else(|| CodexLauncherError {
+        message: format!(
+            "cannot derive a readable closure for Codex launcher target {}",
+            target.display()
+        ),
+    })?;
+    for ancestor in target_parent.ancestors().take(8) {
+        if ancestor.join("package.json").is_file() {
+            return fs::canonicalize(ancestor).map_err(|error| CodexLauncherError {
+                message: format!(
+                    "cannot resolve Codex package root {}: {error}",
+                    ancestor.display()
+                ),
+            });
+        }
+    }
+    if target_parent.parent().is_none() {
+        return Err(CodexLauncherError {
+            message: format!(
+                "cannot derive a bounded readable closure for Codex launcher target {}",
+                target.display()
+            ),
+        });
+    }
+    fs::canonicalize(target_parent).map_err(|error| CodexLauncherError {
+        message: format!(
+            "cannot resolve Codex launcher directory {}: {error}",
+            target_parent.display()
+        ),
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Authentication failures that a user can recover by logging Codex in again.
 #[derive(Debug)]
 pub struct CodexAuthError {
@@ -36,84 +227,101 @@ impl CodexAuthError {
 pub struct CodexWorkerEnvironment {
     home_guard: tempfile::TempDir,
     home: PathBuf,
+    launcher: ResolvedCodexLauncher,
 }
 
 impl CodexWorkerEnvironment {
     /// Prepare a private worker home from the effective source `CODEX_HOME`.
-    pub fn prepare() -> std::result::Result<Self, CodexAuthError> {
+    pub fn prepare() -> std::result::Result<Self, CodexWorkerPreparationError> {
+        let launcher = test_or_resolved_launcher()?;
         #[cfg(feature = "test-support")]
         if env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some() {
             if let Some(source_home) = env::var_os("CODEX_HOME") {
-                return Self::prepare_from_with_environment_auth(
+                return Ok(Self::prepare_from_with_environment_auth(
                     &canonical_existing_path(PathBuf::from(source_home)),
                     has_environment_auth(),
-                );
+                    launcher,
+                )?);
             }
             if let Some(source_home) = env::var_os("FLUENT_TEST_FIXTURE_CODEX_HOME") {
-                return Self::prepare_from_with_environment_auth(
+                return Ok(Self::prepare_from_with_environment_auth(
                     &canonical_existing_path(PathBuf::from(source_home)),
                     has_environment_auth(),
-                );
+                    launcher,
+                )?);
             }
             if has_environment_auth() {
-                return Self::prepare_hermetic_fixture_worker_with_environment_auth();
+                return Ok(Self::prepare_hermetic_fixture_worker_with_environment_auth(
+                    launcher,
+                )?);
             }
-            return Self::prepare_hermetic_fixture_worker();
+            return Ok(Self::prepare_hermetic_fixture_worker(launcher)?);
         }
 
         #[cfg(test)]
         {
-            return Self::prepare_test_worker();
+            return Ok(Self::prepare_test_worker(launcher)?);
         }
 
         #[cfg(not(test))]
-        Self::prepare_from_with_environment_auth(&effective_source_home(), has_environment_auth())
+        Ok(Self::prepare_from_with_environment_auth(
+            &effective_source_home(),
+            has_environment_auth(),
+            launcher,
+        )?)
     }
 
     /// Give launch-route unit tests a private, authenticated worker home without
     /// reading the developer's interactive Codex state. External tests exercise
     /// the public production entry point with an explicit authentication source.
     #[cfg(test)]
-    fn prepare_test_worker() -> std::result::Result<Self, CodexAuthError> {
-        Self::prepare_hermetic_fixture_worker()
+    fn prepare_test_worker(
+        launcher: ResolvedCodexLauncher,
+    ) -> std::result::Result<Self, CodexAuthError> {
+        Self::prepare_hermetic_fixture_worker(launcher)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn prepare_hermetic_fixture_worker() -> std::result::Result<Self, CodexAuthError> {
+    fn prepare_hermetic_fixture_worker(
+        launcher: ResolvedCodexLauncher,
+    ) -> std::result::Result<Self, CodexAuthError> {
         let source = tempfile::tempdir().map_err(|error| {
             CodexAuthError::new(format!("cannot create test authentication source: {error}"))
         })?;
         fs::write(source.path().join("auth.json"), "test authentication").map_err(|error| {
             CodexAuthError::new(format!("cannot write test authentication source: {error}"))
         })?;
-        Self::prepare_from_with_environment_auth(source.path(), false)
+        Self::prepare_from_with_environment_auth(source.path(), false, launcher)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn prepare_hermetic_fixture_worker_with_environment_auth()
-    -> std::result::Result<Self, CodexAuthError> {
+    fn prepare_hermetic_fixture_worker_with_environment_auth(
+        launcher: ResolvedCodexLauncher,
+    ) -> std::result::Result<Self, CodexAuthError> {
         let source = tempfile::tempdir().map_err(|error| {
             CodexAuthError::new(format!("cannot create test authentication source: {error}"))
         })?;
-        Self::prepare_from_with_environment_auth(source.path(), true)
+        Self::prepare_from_with_environment_auth(source.path(), true, launcher)
     }
 
     #[cfg(test)]
     fn prepare_from(source_home: &Path) -> std::result::Result<Self, CodexAuthError> {
-        Self::prepare_from_with_environment_auth(source_home, false)
+        Self::prepare_from_with_environment_auth(source_home, false, test_launcher())
     }
 
     fn prepare_from_with_environment_auth(
         source_home: &Path,
         environment_auth: bool,
+        launcher: ResolvedCodexLauncher,
     ) -> std::result::Result<Self, CodexAuthError> {
-        Self::prepare_from_with_environment_auth_in(source_home, environment_auth, None)
+        Self::prepare_from_with_environment_auth_in(source_home, environment_auth, None, launcher)
     }
 
     fn prepare_from_with_environment_auth_in(
         source_home: &Path,
         environment_auth: bool,
         temporary_root: Option<&Path>,
+        launcher: ResolvedCodexLauncher,
     ) -> std::result::Result<Self, CodexAuthError> {
         let mut builder = tempfile::Builder::new();
         builder.prefix("fluent-codex-worker-");
@@ -145,7 +353,11 @@ impl CodexWorkerEnvironment {
             })?;
         }
 
-        Ok(Self { home_guard, home })
+        Ok(Self {
+            home_guard,
+            home,
+            launcher,
+        })
     }
 
     /// The only Codex state directory an autonomous launch may use.
@@ -161,6 +373,10 @@ impl CodexWorkerEnvironment {
         )
     }
 
+    pub fn launcher(&self) -> &ResolvedCodexLauncher {
+        &self.launcher
+    }
+
     /// Ask Codex itself whether this worker home is authenticated.
     pub fn preflight(&self) -> std::result::Result<(), CodexAuthError> {
         #[cfg(test)]
@@ -172,10 +388,10 @@ impl CodexWorkerEnvironment {
         }
 
         #[cfg(not(test))]
-        self.preflight_with("codex")
+        self.preflight_with(self.launcher.executable())
     }
 
-    fn preflight_with(&self, binary: &str) -> std::result::Result<(), CodexAuthError> {
+    fn preflight_with(&self, binary: &Path) -> std::result::Result<(), CodexAuthError> {
         let status = Command::new(binary)
             // The private worker home contains authentication only, so login
             // status cannot load interactive configuration or hooks. Keep
@@ -194,6 +410,26 @@ impl CodexWorkerEnvironment {
                 "`codex login status` reports no valid login",
             ))
         }
+    }
+}
+
+fn test_or_resolved_launcher() -> std::result::Result<ResolvedCodexLauncher, CodexLauncherError> {
+    #[cfg(test)]
+    {
+        Ok(test_launcher())
+    }
+    #[cfg(not(test))]
+    {
+        ResolvedCodexLauncher::resolve()
+    }
+}
+
+#[cfg(test)]
+fn test_launcher() -> ResolvedCodexLauncher {
+    let executable = env::current_exe().expect("test executable path");
+    ResolvedCodexLauncher {
+        readable_roots: vec![executable.clone()],
+        executable,
     }
 }
 
@@ -244,6 +480,47 @@ fn set_private_mode(_path: &Path, _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_launcher_retains_absolute_symlink_and_package_root() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        let package = fixture.path().join("lib/node_modules/@openai/codex");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::write(package.join("package.json"), "{}").unwrap();
+        let target = package.join("bin/codex.js");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let lexical = bin.join("codex");
+        symlink(&target, &lexical).unwrap();
+
+        let launcher = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap();
+
+        let lexical = fs::canonicalize(&bin).unwrap().join("codex");
+        assert_eq!(launcher.executable(), lexical);
+        assert_eq!(
+            launcher.readable_roots(),
+            &[lexical, fs::canonicalize(package).unwrap()]
+        );
+    }
+
+    #[test]
+    fn resolved_launcher_rejects_a_missing_codex_command() {
+        let empty = tempfile::tempdir().unwrap();
+
+        let error = ResolvedCodexLauncher::resolve_from_path(empty.path()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve `codex` from PATH"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn worker_home_stages_only_auth_from_effective_codex_home() {
@@ -304,6 +581,7 @@ mod tests {
             source.path(),
             false,
             Some(&alias),
+            test_launcher(),
         )
         .unwrap();
 
@@ -348,9 +626,7 @@ mod tests {
         #[cfg(unix)]
         set_private_mode(fake.path(), 0o700).unwrap();
 
-        worker
-            .preflight_with(&fake.path().to_string_lossy())
-            .unwrap();
+        worker.preflight_with(fake.path()).unwrap();
     }
 
     #[test]
@@ -363,9 +639,7 @@ mod tests {
         #[cfg(unix)]
         set_private_mode(fake.path(), 0o700).unwrap();
 
-        let error = worker
-            .preflight_with(&fake.path().to_string_lossy())
-            .unwrap_err();
+        let error = worker.preflight_with(fake.path()).unwrap_err();
         assert!(error.to_string().contains("codex login"));
         assert!(error.to_string().contains("fluent attempt run"));
     }
@@ -373,9 +647,12 @@ mod tests {
     #[test]
     fn environment_auth_does_not_require_source_auth_file() {
         let source = tempfile::tempdir().unwrap();
-        let worker =
-            CodexWorkerEnvironment::prepare_from_with_environment_auth(source.path(), true)
-                .unwrap();
+        let worker = CodexWorkerEnvironment::prepare_from_with_environment_auth(
+            source.path(),
+            true,
+            test_launcher(),
+        )
+        .unwrap();
         assert!(!worker.home().join("auth.json").exists());
     }
 }

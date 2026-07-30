@@ -20,7 +20,7 @@ pub enum ProviderReadinessError {
         provider: CoderKind,
         condition: String,
     },
-    Codex(crate::codex_worker::CodexAuthError),
+    Codex(crate::codex_worker::CodexWorkerPreparationError),
 }
 
 impl std::fmt::Display for ProviderReadinessError {
@@ -66,7 +66,11 @@ impl ProviderReadiness {
             CoderKind::Codex => {
                 let worker = crate::codex_worker::CodexWorkerEnvironment::prepare()
                     .map_err(ProviderReadinessError::Codex)?;
-                worker.preflight().map_err(ProviderReadinessError::Codex)?;
+                worker.preflight().map_err(|error| {
+                    ProviderReadinessError::Codex(
+                        crate::codex_worker::CodexWorkerPreparationError::Authentication(error),
+                    )
+                })?;
                 Ok(Self {
                     codex_worker: Some(worker),
                 })
@@ -130,7 +134,11 @@ struct ClaudeAuthStatus {
 
 impl ProviderReadinessError {
     pub fn is_authentication_error(&self) -> bool {
-        matches!(self, Self::ClaudeAuthentication(_) | Self::Codex(_))
+        matches!(
+            self,
+            Self::ClaudeAuthentication(_)
+                | Self::Codex(crate::codex_worker::CodexWorkerPreparationError::Authentication(_))
+        )
     }
 }
 
