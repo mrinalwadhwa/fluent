@@ -3116,6 +3116,7 @@ THE SYSTEM SHALL pass `--safe-mode` so user, project, and local
 customizations, including SessionStart and Stop hooks, do not run. The worker
 retains built-in tools, authentication, selected model, and Fluent's sandbox.
 Test: src/coder.rs (autonomous_claude_commands_use_safe_mode)
+Test: tests/binary.rs (autonomous_claude_roles_do_not_invoke_user_hooks)
 
 ### B2
 
@@ -3167,7 +3168,7 @@ surfaces through the recovery layer.
 Test: src/claude_auth.rs (tests::check_token_expiry_returns_ok_when_no_creds)
 Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_claude_ai_oauth)
 
-### B5
+### B2
 
 WHEN the keychain entry's `claudeAiOauth.refreshToken` field is
 absent or null,
@@ -3176,7 +3177,7 @@ only) and skip the expiry check.
 Test: src/claude_auth.rs (tests::check_token_expiry_returns_ok_when_no_refresh_token)
 Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_refresh_token)
 
-### B6
+### B3
 
 WHEN `src/coder.rs::run_with_transcript_retrying` observes the
 coder process exit non-zero AND the transcript's most recent
@@ -3242,36 +3243,36 @@ IF the refresh probe exceeds its deadline,
 THEN THE SYSTEM SHALL terminate and reap its process tree and return a typed
 authentication failure that preserves the same Attempt for recovery.
 Test: src/credential.rs (refresh_probe_timeout_terminates_process_tree)
-Test: src/coder.rs (failed_refresh_probe_stops_the_auth_retry)
+Test: tests/binary.rs (refresh_timeout_preserves_auth_paused_attempt)
 
-### B7
+### B4
 
 IF the refresh probe exits unsuccessfully,
 THEN THE SYSTEM SHALL report refresh failure and SHALL NOT reread credentials as
 though refresh had succeeded.
 Test: src/credential.rs (refresh_probe_nonzero_exit_is_failure)
 
-### B8
+### B5
 
 WHERE the refresh probe succeeds before its deadline,
 THE SYSTEM SHALL reread credentials and continue the existing single-retry flow.
 Test: src/credential.rs (successful_refresh_probe_rereads_credentials)
 
-### B2
+### B6
 
 WHERE the refresh resolves the credential (the re-run session no
 longer returns a 401),
 THE SYSTEM SHALL continue the task normally, with no pause.
 Test: src/coder.rs (coder_succeeds_on_retry_when_refresh_fixes_auth)
 
-### B3
+### B7
 
 WHERE the session still returns a 401 after the refresh and retry,
 THE SYSTEM SHALL fail the task and pause the Attempt to `needs-user`
 marked with the `auth` pause kind.
 Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
 
-### B4
+### B8
 
 WHEN refresh-on-401-retry recovers a session (B2),
 THE SYSTEM SHALL post a local notification that it recovered after

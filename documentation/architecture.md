@@ -953,9 +953,7 @@ string `bail!`, so callers can recover the type via
 executor recognize `AuthError`, skip retries entirely, and escalate
 immediately to `needs-user` with the auth-specific handoff message
 from `AuthError::user_message()`. Other coder errors still retry up
-to `FLUENT_MAX_TASK_RETRIES`. A follow-up Work Item will tackle
-OAuth refresh once the correct request format for the Claude.ai
-subscription OAuth endpoint is known.
+to `FLUENT_MAX_TASK_RETRIES`.
 
 `fluent cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
@@ -1728,7 +1726,7 @@ command exits zero with a message saying nothing needed teardown.
 
 | Credential | Source | Method |
 |---|---|---|
-| Claude OAuth | macOS Keychain | Extract, pass as env var. Refresh via unsandboxed `claude -p "ok" --max-turns 1` at session boundaries. |
+| Claude OAuth | macOS Keychain | Extract and pass as an env var. Refresh with a safe-mode host probe at session boundaries; it has a configurable deadline and rereads Keychain only after a successful exit. |
 | AWS | SSO profile | `aws configure export-credentials` resolves to STS temps, passed as env vars. |
 | Brave Search | macOS Keychain | Extract, pass as env var. |
 

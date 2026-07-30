@@ -13198,6 +13198,7 @@ COUNTER='{counter}'
 count=$(cat "$COUNTER" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s' "$count" > "$COUNTER"
+if [ "$3" = "ok" ]; then exit 0; fi
 echo '{{"type":"result","api_error_status":401,"request_id":"req-test-401"}}'
 exit 1
 "##,
@@ -13245,6 +13246,116 @@ exit 1
     assert!(
         handoff.contains("re-authenticate"),
         "handoff should instruct user to re-authenticate: {handoff}"
+    );
+}
+
+#[test]
+fn autonomous_claude_roles_do_not_invoke_user_hooks() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-safe-mode");
+    let hook_marker = tmp.path().join("user-hook-ran");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+safe_mode=0
+for arg in "$@"; do
+  [ "$arg" = "--safe-mode" ] && safe_mode=1
+done
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$safe_mode" != 1 ]; then
+  printf '%s\n' "$@" > '{marker}'
+  sleep 2
+fi
+printf 'Verdict: pass\n' > review.md
+"##,
+            marker = hook_marker.display()
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
+
+    assert!(
+        !hook_marker.exists(),
+        "an autonomous Claude route must prevent user hooks from running: {}",
+        fs::read_to_string(&hook_marker).unwrap_or_default()
+    );
+}
+
+#[test]
+fn refresh_timeout_preserves_auth_paused_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["review", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let bin_dir = tmp.path().join("bin-refresh-timeout");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "--safe-mode" ] && [ "$2" = "-p" ] && [ "$3" = "ok" ]; then
+  sleep 2
+  exit 0
+fi
+echo '{"type":"result","api_error_status":401,"request_id":"req-refresh-timeout"}'
+exit 1
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-review-tests",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_CLAUDE_REFRESH_DEADLINE_SECS", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("timed out"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let attempt = &value["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["pause_kind"], "auth");
+    assert_eq!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        1,
+        "timeout must pause the existing Attempt before a new Writer round is planned"
     );
 }
 
@@ -13710,6 +13821,7 @@ COUNTER='{counter}'
 count=$(cat "$COUNTER" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s' "$count" > "$COUNTER"
+if [ "$3" = "ok" ]; then exit 0; fi
 echo '{{"type":"result","api_error_status":401,"request_id":"req-test-401"}}'
 exit 1
 "##,

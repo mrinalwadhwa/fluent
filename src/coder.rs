@@ -1884,6 +1884,19 @@ impl CoderSupervisor {
     }
 }
 
+/// Terminate a separately spawned Claude process through the same identity-safe
+/// process-group owner used by autonomous coder launches.  This is deliberately
+/// crate-private: credential refresh is the only host-side launch that needs the
+/// cleanup boundary without a transcript pump.
+pub(crate) fn terminate_owned_process_tree(child: Child) -> Result<(), String> {
+    let child_id = child.id();
+    let mut managed = ManagedChild::new(Box::new(SystemLeader::new(child, child_id)));
+    managed
+        .terminate_and_reap()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Compose a pump terminal outcome with a cleanup outcome. A pump failure is the
 /// primary cause; a cleanup failure that follows it is attached as context. When
 /// the pump succeeded, a cleanup failure is itself the terminal error — a coder that

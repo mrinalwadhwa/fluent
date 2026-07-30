@@ -10,6 +10,7 @@ pub enum CredentialRefreshError {
     InvalidDeadline(String),
     Spawn(String),
     Timeout(Duration),
+    Cleanup(String),
     Failed(i32),
 }
 
@@ -27,6 +28,10 @@ impl std::fmt::Display for CredentialRefreshError {
                 f,
                 "Claude credential refresh timed out after {} seconds",
                 deadline.as_secs_f64()
+            ),
+            Self::Cleanup(message) => write!(
+                f,
+                "could not terminate Claude credential refresh: {message}"
             ),
             Self::Failed(status) => write!(
                 f,
@@ -56,19 +61,27 @@ pub fn inject_credentials() -> Result<()> {
 
 /// Refresh credentials before a new session.
 ///
-/// Runs `claude -p "ok" --max-turns 1` outside the sandbox to trigger
-/// OAuth token refresh, then re-reads credentials from Keychain.
+/// Runs a safe-mode host-side Claude probe outside the sandbox to trigger OAuth
+/// token refresh, then re-reads credentials from Keychain after a successful exit.
 /// Called between sessions in sandboxed mode because the sandbox blocks
 /// Keychain access — the agent cannot refresh tokens itself.
 pub fn refresh_credentials() -> Result<()> {
     eprintln!("  Refreshing credentials...");
 
     let deadline = configured_refresh_deadline()?;
-    run_refresh_probe(refresh_probe_command(), deadline)?;
+    refresh_credentials_with(refresh_probe_command(), deadline, refresh_oauth_token)
+}
 
-    // Re-read OAuth token from Keychain (force refresh)
-    refresh_oauth_token()?;
-    Ok(())
+fn refresh_credentials_with<F>(
+    command: Command,
+    deadline: Duration,
+    reread_oauth_token: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    run_refresh_probe(command, deadline)?;
+    reread_oauth_token()
 }
 
 fn configured_refresh_deadline() -> std::result::Result<Duration, CredentialRefreshError> {
@@ -118,15 +131,7 @@ fn run_refresh_probe(
         use std::os::unix::process::CommandExt;
         // The probe owns its process group. On timeout, the group is signalled while
         // its leader remains waitable, so descendants cannot outlive the refresh.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setpgid(0, 0) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
+        command.process_group(0);
     }
 
     let mut child = command
@@ -140,29 +145,14 @@ fn run_refresh_probe(
                 return Err(CredentialRefreshError::Failed(status.code().unwrap_or(1)));
             }
             Ok(None) if started.elapsed() >= deadline => {
-                terminate_refresh_probe_tree(&mut child);
-                return Err(CredentialRefreshError::Timeout(deadline));
+                return crate::coder::terminate_owned_process_tree(child)
+                    .map_err(CredentialRefreshError::Cleanup)
+                    .and(Err(CredentialRefreshError::Timeout(deadline)));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => return Err(CredentialRefreshError::Spawn(error.to_string())),
         }
     }
-}
-
-fn terminate_refresh_probe_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let Ok(process_group) = i32::try_from(child.id()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return;
-        };
-        // The child has not been reaped, so its PID still identifies the group.
-        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    }
-    #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// Read the OAuth token from Keychain via `security find-generic-password`.
@@ -406,7 +396,16 @@ mod tests {
     fn successful_refresh_probe_rereads_credentials() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "exit 0"]);
-        assert!(run_refresh_probe(command, Duration::from_secs(1)).is_ok());
+        let reread = std::cell::Cell::new(false);
+        refresh_credentials_with(command, Duration::from_secs(1), || {
+            reread.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            reread.get(),
+            "a successful probe must reread Keychain credentials"
+        );
     }
 
     #[test]
