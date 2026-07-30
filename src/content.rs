@@ -921,7 +921,11 @@ Check item {{ITEM_ID}}.
             .split_once("## First-time project setup")
             .map(|(_, section)| section)
             .expect("the bundled skill must have first-time setup guidance");
-        assert!(setup.contains("(a) codex-balanced") && setup.contains("(b) codex-stronger") && setup.contains("(c) custom"));
+        assert!(
+            setup.contains("(a) codex-balanced")
+                && setup.contains("(b) codex-stronger")
+                && setup.contains("(c) custom")
+        );
     }
 
     #[test]
@@ -936,14 +940,27 @@ Check item {{ITEM_ID}}.
     fn bundled_fluent_skill_explains_roles_before_custom_profile() {
         let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
         let setup = skill.split_once("## First-time project setup").unwrap().1;
-        assert_ordered(setup, &["If the user chooses `custom`, explain", "the writer\n   implements the change", "Ask separately for the\n   coder, model, and effort for each role"]);
+        assert_ordered(
+            setup,
+            &[
+                "If the user chooses `custom`, explain",
+                "the writer\n   implements the change",
+                "Ask separately for the\n   coder, model, and effort for each role",
+            ],
+        );
     }
 
     #[test]
     fn bundled_fluent_skill_orders_profile_preflight_before_init() {
         let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
         let setup = skill.split_once("## First-time project setup").unwrap().1;
-        assert_ordered(setup, &["After the user completes both choices, run one configured command", "The command preflights each distinct provider before it initializes the\n   project"]);
+        assert_ordered(
+            setup,
+            &[
+                "After the user completes both choices, run one configured command",
+                "The command preflights each distinct provider before it initializes the\n   project",
+            ],
+        );
     }
 
     #[test]

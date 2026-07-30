@@ -4274,17 +4274,17 @@ exit 0
     .to_string()
 }
 
-fn write_readiness_counting_learner_mock(
-    bin_dir: &Path,
-    provider: &str,
-    learner_script: &str,
-) {
+fn write_readiness_counting_learner_mock(bin_dir: &Path, provider: &str, learner_script: &str) {
     let learner_body = learner_script
         .strip_prefix("#!/bin/bash\n")
         .unwrap_or(learner_script);
     let readiness = match provider {
-        "claude" => "if [ \"$1 $2 $3\" = \"auth status --json\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; printf '{\\\"loggedIn\\\":true}\\n'; exit 0; fi",
-        "pi" => "if [ \"$1\" = \"--version\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; exit 0; fi",
+        "claude" => {
+            "if [ \"$1 $2 $3\" = \"auth status --json\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; printf '{\\\"loggedIn\\\":true}\\n'; exit 0; fi"
+        }
+        "pi" => {
+            "if [ \"$1\" = \"--version\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; exit 0; fi"
+        }
         _ => panic!("unsupported readiness-counting provider: {provider}"),
     };
     write_mock_executable(
@@ -4292,7 +4292,9 @@ fn write_readiness_counting_learner_mock(
         provider,
         &format!(
             "#!/bin/bash\n{readiness}\n{}{}",
-            BEHAVIOR_TESTS_MOCK_PRELUDE.strip_prefix("#!/bin/bash\n").unwrap(),
+            BEHAVIOR_TESTS_MOCK_PRELUDE
+                .strip_prefix("#!/bin/bash\n")
+                .unwrap(),
             learner_body
         ),
     );
@@ -4303,11 +4305,7 @@ fn assert_learner_readiness_is_not_rechecked_after_reservation(provider: &str) {
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join(format!("bin-learner-{provider}-readiness"));
     let readiness_log = tmp.path().join("readiness.log");
-    write_readiness_counting_learner_mock(
-        &bin_dir,
-        provider,
-        &learner_failing_mock_script(),
-    );
+    write_readiness_counting_learner_mock(&bin_dir, provider, &learner_failing_mock_script());
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -4334,10 +4332,7 @@ fn assert_learner_readiness_is_not_rechecked_after_reservation(provider: &str) {
         .assert()
         .success();
 
-    let readiness_before_retry = fs::read_to_string(&readiness_log)
-        .unwrap()
-        .lines()
-        .count();
+    let readiness_before_retry = fs::read_to_string(&readiness_log).unwrap().lines().count();
     write_readiness_counting_learner_mock(
         &bin_dir,
         provider,
@@ -4351,10 +4346,7 @@ fn assert_learner_readiness_is_not_rechecked_after_reservation(provider: &str) {
         .assert()
         .success();
 
-    let readiness_after_retry = fs::read_to_string(&readiness_log)
-        .unwrap()
-        .lines()
-        .count();
+    let readiness_after_retry = fs::read_to_string(&readiness_log).unwrap().lines().count();
     assert_eq!(
         readiness_after_retry - readiness_before_retry,
         1,

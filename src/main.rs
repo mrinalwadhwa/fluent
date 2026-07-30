@@ -1614,8 +1614,9 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
         eprintln!("  warning: could not seed agent instructions: {e}");
     }
     if let Some(setup) = configured_setup {
-        let saved = fluent::config::apply_project_coder_profile(cwd, &setup.mapping, setup.follow_up_mode)
-            .context("first-time setup is incomplete")?;
+        let saved =
+            fluent::config::apply_project_coder_profile(cwd, &setup.mapping, setup.follow_up_mode)
+                .context("first-time setup is incomplete")?;
         eprintln!("  Saved coder profile:");
         for (role, pair) in [
             ("writer", &saved.write),
@@ -1629,7 +1630,9 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
                 pair.effort.as_deref().unwrap_or("default")
             );
         }
-        eprintln!("  Each new Attempt stores this effective mapping unless you supply Attempt overrides.");
+        eprintln!(
+            "  Each new Attempt stores this effective mapping unless you supply Attempt overrides."
+        );
     }
     match instruction_files_requiring_git_resolution(cwd) {
         Ok(paths) if !paths.is_empty() => {
@@ -1667,8 +1670,8 @@ fn require_git_repository_root(cwd: &Path) -> Result<()> {
     .context("configured init requires a Git repository root")?;
     let canonical_cwd = fs::canonicalize(cwd)
         .with_context(|| format!("canonicalize configured init directory {}", cwd.display()))?;
-    let canonical_root = fs::canonicalize(&root)
-        .with_context(|| format!("canonicalize repository root {root}"))?;
+    let canonical_root =
+        fs::canonicalize(&root).with_context(|| format!("canonicalize repository root {root}"))?;
     if canonical_cwd != canonical_root {
         bail!(
             "configured init requires the repository root; run it from {}",
