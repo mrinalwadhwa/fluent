@@ -1,5 +1,42 @@
 use anyhow::Result;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const DEFAULT_CLAUDE_REFRESH_DEADLINE_SECS: u64 = 30;
+const CLAUDE_REFRESH_DEADLINE_ENV: &str = "FLUENT_CLAUDE_REFRESH_DEADLINE_SECS";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialRefreshError {
+    InvalidDeadline(String),
+    Spawn(String),
+    Timeout(Duration),
+    Failed(i32),
+}
+
+impl std::fmt::Display for CredentialRefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDeadline(value) => write!(
+                f,
+                "invalid {CLAUDE_REFRESH_DEADLINE_ENV} value {value:?}; use a positive number of seconds"
+            ),
+            Self::Spawn(message) => {
+                write!(f, "could not start Claude credential refresh: {message}")
+            }
+            Self::Timeout(deadline) => write!(
+                f,
+                "Claude credential refresh timed out after {} seconds",
+                deadline.as_secs_f64()
+            ),
+            Self::Failed(status) => write!(
+                f,
+                "Claude credential refresh probe exited unsuccessfully with status {status}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CredentialRefreshError {}
 
 /// Safety: We only call set_env_var from the main thread when no child
 /// processes are running — both during initial setup and between sessions.
@@ -26,17 +63,106 @@ pub fn inject_credentials() -> Result<()> {
 pub fn refresh_credentials() -> Result<()> {
     eprintln!("  Refreshing credentials...");
 
-    // Trigger Claude Code's internal token refresh
-    Command::new("claude")
-        .args(["-p", "ok", "--max-turns", "1"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok();
+    let deadline = configured_refresh_deadline()?;
+    run_refresh_probe(refresh_probe_command(), deadline)?;
 
     // Re-read OAuth token from Keychain (force refresh)
     refresh_oauth_token()?;
     Ok(())
+}
+
+fn configured_refresh_deadline() -> std::result::Result<Duration, CredentialRefreshError> {
+    configured_refresh_deadline_from(
+        match std::env::var(CLAUDE_REFRESH_DEADLINE_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(CredentialRefreshError::InvalidDeadline(
+                    "non-Unicode value".to_string(),
+                ));
+            }
+        }
+        .as_deref(),
+    )
+}
+
+fn configured_refresh_deadline_from(
+    value: Option<&str>,
+) -> std::result::Result<Duration, CredentialRefreshError> {
+    let Some(value) = value else {
+        return Ok(Duration::from_secs(DEFAULT_CLAUDE_REFRESH_DEADLINE_SECS));
+    };
+    let seconds = value
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| CredentialRefreshError::InvalidDeadline(value.to_string()))?;
+    Ok(Duration::from_secs(seconds))
+}
+
+fn refresh_probe_command() -> Command {
+    let mut command = Command::new("claude");
+    command
+        .args(["--safe-mode", "-p", "ok"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+fn run_refresh_probe(
+    mut command: Command,
+    deadline: Duration,
+) -> std::result::Result<(), CredentialRefreshError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // The probe owns its process group. On timeout, the group is signalled while
+        // its leader remains waitable, so descendants cannot outlive the refresh.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| CredentialRefreshError::Spawn(error.to_string()))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(CredentialRefreshError::Failed(status.code().unwrap_or(1)));
+            }
+            Ok(None) if started.elapsed() >= deadline => {
+                terminate_refresh_probe_tree(&mut child);
+                return Err(CredentialRefreshError::Timeout(deadline));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(CredentialRefreshError::Spawn(error.to_string())),
+        }
+    }
+}
+
+fn terminate_refresh_probe_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let Ok(process_group) = i32::try_from(child.id()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        };
+        // The child has not been reaped, so its PID still identifies the group.
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read the OAuth token from Keychain via `security find-generic-password`.
@@ -232,6 +358,64 @@ fn which(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn refresh_probe_honors_configured_deadline() {
+        assert_eq!(
+            configured_refresh_deadline_from(Some("7")).unwrap(),
+            Duration::from_secs(7)
+        );
+        assert!(configured_refresh_deadline_from(Some("0")).is_err());
+        assert!(configured_refresh_deadline_from(Some("not-a-duration")).is_err());
+    }
+
+    #[test]
+    fn refresh_probe_nonzero_exit_is_failure() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 23"]);
+
+        assert_eq!(
+            run_refresh_probe(command, Duration::from_secs(1)).unwrap_err(),
+            CredentialRefreshError::Failed(23)
+        );
+    }
+
+    #[test]
+    fn refresh_probe_timeout_terminates_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("descendant-survived");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!("(sleep 1; touch '{}') & sleep 60", marker.display()),
+        ]);
+
+        assert!(matches!(
+            run_refresh_probe(command, Duration::from_millis(30)),
+            Err(CredentialRefreshError::Timeout(_))
+        ));
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !marker.exists(),
+            "the refresh probe descendant survived the timeout cleanup"
+        );
+    }
+
+    #[test]
+    fn successful_refresh_probe_rereads_credentials() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        assert!(run_refresh_probe(command, Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn refresh_probe_uses_safe_mode_without_max_turns() {
+        let command = refresh_probe_command();
+        let args = command.get_args().collect::<Vec<_>>();
+        assert!(args.contains(&OsStr::new("--safe-mode")));
+        assert!(!args.contains(&OsStr::new("--max-turns")));
+    }
 
     #[test]
     fn test_extract_oauth_token_valid() {
