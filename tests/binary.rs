@@ -9657,6 +9657,65 @@ fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
 }
 
 #[test]
+fn tester_check_reports_all_structural_problems_before_commands() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let sentinel = tmp.path().join("tester-command-ran");
+    fs::write(
+        main_dir.join(".fluent/tester.yaml"),
+        format!("commands: [this is malformed: {}]", sentinel.display()),
+    )
+    .unwrap();
+    fs::remove_file(main_dir.join(".fluent/extract-tester-results")).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("tester.yaml"))
+        .stderr(predicate::str::contains("extract-tester-results"));
+    assert!(
+        !sentinel.exists(),
+        "readiness must not run declared commands"
+    );
+}
+
+#[test]
+fn review_codebase_rejects_structurally_unready_tester_without_work_state() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+        ])
+        .assert()
+        .success();
+    let item_path = main_dir.join(".fluent/work/items/work-1.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+    fs::write(main_dir.join(".fluent/tester.yaml"), "commands: []\n").unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Tester is not ready"));
+    assert_eq!(fs::read_to_string(item_path).unwrap(), before);
+}
+
+#[test]
 fn work_review_codebase_missing_or_duplicate_leaves_state_unchanged() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

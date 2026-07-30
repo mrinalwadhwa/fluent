@@ -54,6 +54,14 @@ pub struct TesterError {
     pub details: String,
 }
 
+/// The trustworthy result of executing the Tester boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TesterOutcome {
+    Passed,
+    TestFailures,
+    HarnessError,
+}
+
 #[derive(Debug, Deserialize)]
 struct TesterConfig {
     commands: Vec<TesterCommand>,
@@ -99,10 +107,36 @@ pub fn run(
     artifact_dir: &Path,
     no_sandbox: bool,
     resolver: &ContentResolver,
-) -> Result<()> {
+) -> Result<TesterOutcome> {
     let profile =
         preflight_sandbox_profile(candidate_workspace, artifact_dir, no_sandbox, resolver)?;
     run_with_sandbox_profile(candidate_workspace, artifact_dir, profile.as_ref())
+}
+
+/// Validate the selected checkout without running its declared test commands.
+/// This invokes the extractor with a production-shaped, empty commands artifact
+/// through the same sandbox boundary used for a real Tester Task.
+pub fn check(
+    candidate_workspace: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<()> {
+    let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
+    let profile =
+        preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), profile.as_ref());
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Tester is not structurally ready:\n{}",
+            problems
+                .into_iter()
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 }
 
 /// Render and apply the Tester production boundary without creating artifacts or
@@ -140,40 +174,28 @@ pub fn run_with_sandbox_profile(
     candidate_workspace: &Path,
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
-) -> Result<()> {
+) -> Result<TesterOutcome> {
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
-
+    let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
     let config = match read_tester_config(&tester_yaml_path) {
         Ok(config) => config,
         Err(error) => {
-            let results = TesterResults {
-                commands: Vec::new(),
-                tests: Vec::new(),
-                summary: Summary {
-                    total: 0,
-                    pass: 0,
-                    fail: 0,
-                    skipped: 0,
-                },
-                error: Some(TesterError {
-                    kind: "tester_yaml_problem".to_string(),
-                    message: format!("Failed to read {TESTER_YAML_PATH}"),
-                    details: format!("{error:#}"),
-                }),
-            };
-            write_results(artifact_dir, &results)?;
-            return Ok(());
+            return persist_harness_error(
+                artifact_dir,
+                "tester_yaml_problem",
+                format!("Failed to read {TESTER_YAML_PATH}"),
+                format!("{error:#}"),
+            );
         }
     };
-
-    let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
-    let extractor_missing = if !extractor_path.exists() {
-        Some("not found")
-    } else if !is_executable(&extractor_path) {
-        Some("not executable")
-    } else {
-        None
-    };
+    if !extractor_path.is_file() || !is_executable(&extractor_path) {
+        return persist_harness_error(
+            artifact_dir,
+            "extractor_missing",
+            format!("{EXTRACTOR_PATH} missing or not executable"),
+            String::new(),
+        );
+    }
 
     let commands_dir = artifact_dir.join("commands");
     fs::create_dir_all(&commands_dir)?;
@@ -205,68 +227,42 @@ pub fn run_with_sandbox_profile(
     let commands_json = serde_json::to_string_pretty(&command_results)?;
     fs::write(artifact_dir.join("commands.json"), &commands_json)?;
 
-    if let Some(reason) = extractor_missing {
-        let results = TesterResults {
-            commands: command_results,
-            tests: Vec::new(),
-            summary: Summary {
-                total: 0,
-                pass: 0,
-                fail: 0,
-                skipped: 0,
-            },
-            error: Some(TesterError {
-                kind: "extractor_missing".to_string(),
-                message: format!("{EXTRACTOR_PATH} {reason}"),
-                details: String::new(),
-            }),
-        };
-        write_results(artifact_dir, &results)?;
-        return Ok(());
+    if let Some(result) = command_results.iter().find(|result| {
+        fs::read_to_string(artifact_dir.join(&result.stderr_log))
+            .ok()
+            .is_some_and(|stderr| is_nested_swiftpm_sandbox_failure(&result.command, &stderr))
+    }) {
+        return persist_harness_error(
+            artifact_dir,
+            "nested_swiftpm_sandbox",
+            "Swift Package Manager could not create its inner sandbox".to_string(),
+            format!(
+                "The Tester sandbox already confines `{}`. Disable SwiftPM's inner sandbox (for example, pass --disable-sandbox) and configure writable project-local cache paths before retrying. Fluent did not modify .fluent/tester.yaml or project scripts.",
+                result.command
+            ),
+        );
     }
 
     let tests = match run_extractor(&extractor_path, artifact_dir, sandbox_path) {
         Ok(tests) => tests,
         Err(error) => {
-            let results = TesterResults {
-                commands: command_results,
-                tests: Vec::new(),
-                summary: Summary {
-                    total: 0,
-                    pass: 0,
-                    fail: 0,
-                    skipped: 0,
-                },
-                error: Some(TesterError {
-                    kind: "extractor_failure".to_string(),
-                    message: "extract-tester-results failed".to_string(),
-                    details: truncate_tail(&format!("{error:#}"), FAILURE_EXCERPT_MAX),
-                }),
-            };
-            write_results(artifact_dir, &results)?;
-            return Ok(());
+            return persist_harness_error(
+                artifact_dir,
+                "extractor_failure",
+                "extract-tester-results failed".to_string(),
+                truncate_tail(&format!("{error:#}"), FAILURE_EXCERPT_MAX),
+            );
         }
     };
 
     let duplicate_ids = find_duplicate_ids(&tests);
     if !duplicate_ids.is_empty() {
-        let results = TesterResults {
-            commands: command_results,
-            tests: Vec::new(),
-            summary: Summary {
-                total: 0,
-                pass: 0,
-                fail: 0,
-                skipped: 0,
-            },
-            error: Some(TesterError {
-                kind: "duplicate_test_ids".to_string(),
-                message: format!("Duplicate test ids: {}", duplicate_ids.join(", ")),
-                details: String::new(),
-            }),
-        };
-        write_results(artifact_dir, &results)?;
-        return Ok(());
+        return persist_harness_error(
+            artifact_dir,
+            "duplicate_test_ids",
+            format!("Duplicate test ids: {}", duplicate_ids.join(", ")),
+            String::new(),
+        );
     }
 
     let mut tests = cap_failure_excerpts(tests);
@@ -286,7 +282,65 @@ pub fn run_with_sandbox_profile(
     };
 
     write_results(artifact_dir, &results)?;
-    Ok(())
+    Ok(if results.summary.fail == 0 {
+        TesterOutcome::Passed
+    } else {
+        TesterOutcome::TestFailures
+    })
+}
+
+fn persist_harness_error(
+    artifact_dir: &Path,
+    kind: &str,
+    message: String,
+    details: String,
+) -> Result<TesterOutcome> {
+    write_results(
+        artifact_dir,
+        &TesterResults {
+            commands: Vec::new(),
+            tests: Vec::new(),
+            summary: Summary {
+                total: 0,
+                pass: 0,
+                fail: 0,
+                skipped: 0,
+            },
+            error: Some(TesterError {
+                kind: kind.to_string(),
+                message,
+                details,
+            }),
+        },
+    )?;
+    Ok(TesterOutcome::HarnessError)
+}
+
+fn structural_problems(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    profile: Option<&os::SandboxProfile>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Err(error) = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH)) {
+        problems.push(format!("{TESTER_YAML_PATH}: {error:#}"));
+    }
+    let extractor = candidate_workspace.join(EXTRACTOR_PATH);
+    if !extractor.is_file() {
+        problems.push(format!("{EXTRACTOR_PATH}: not found"));
+    } else if !is_executable(&extractor) {
+        problems.push(format!("{EXTRACTOR_PATH}: not executable"));
+    } else {
+        if let Err(error) = fs::write(artifact_dir.join("commands.json"), "[]") {
+            problems.push(format!("readiness artifact: {error}"));
+        } else if let Err(error) = run_extractor(&extractor, artifact_dir, profile.map(|p| &p.path))
+        {
+            problems.push(format!(
+                "{EXTRACTOR_PATH}: invalid empty artifact: {error:#}"
+            ));
+        }
+    }
+    problems
 }
 
 fn read_tester_config(path: &Path) -> Result<TesterConfig> {
@@ -453,6 +507,14 @@ fn truncate_tail(s: &str, max: usize) -> String {
     }
 }
 
+fn is_nested_swiftpm_sandbox_failure(command: &str, stderr: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    let stderr = stderr.to_ascii_lowercase();
+    (command.contains("swift") || stderr.contains("swift package manager"))
+        && stderr.contains("sandbox-exec")
+        && (stderr.contains("sandbox_apply") || stderr.contains("operation not permitted"))
+}
+
 fn write_results(artifact_dir: &Path, results: &TesterResults) -> Result<()> {
     let json = serde_json::to_string_pretty(results)?;
     let path = artifact_dir.join("tester-results.json");
@@ -543,6 +605,18 @@ mod tests {
         assert!(!results.commands.is_empty());
         assert!(results.tests.is_empty());
         assert_eq!(results.summary.total, 0);
+    }
+
+    #[test]
+    fn tester_diagnoses_nested_swiftpm_sandbox_failure() {
+        assert!(is_nested_swiftpm_sandbox_failure(
+            "swift test",
+            "sandbox-exec: sandbox_apply: Operation not permitted"
+        ));
+        assert!(!is_nested_swiftpm_sandbox_failure(
+            "cargo test",
+            "sandbox-exec: sandbox_apply: Operation not permitted"
+        ));
     }
 
     #[test]
@@ -851,7 +925,7 @@ echo '[
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_missing");
-        assert!(!results.commands.is_empty());
+        assert!(results.commands.is_empty());
         assert!(results.tests.is_empty());
     }
 
@@ -937,7 +1011,7 @@ echo '[
                 .details
                 .contains("error detail")
         );
-        assert!(!results.commands.is_empty());
+        assert!(results.commands.is_empty());
         assert!(results.tests.is_empty());
     }
 

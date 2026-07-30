@@ -1087,6 +1087,10 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
     let store = WorkModelStore::new(project_root);
     let resolver = ContentResolver::new(Some(project_root));
     match command {
+        TesterCommands::Check { no_sandbox } => {
+            fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)?;
+            println!("Tester is structurally ready");
+        }
         TesterCommands::Run {
             work_item_id,
             attempt_id,
@@ -1156,6 +1160,9 @@ fn cmd_review(
             };
             let source_ref = current_ref(project_root)?;
             let source_commit = head_commit(project_root)?;
+            let resolver = ContentResolver::new(Some(project_root));
+            fluent::tester::check(project_root, false, &resolver)
+                .context("Tester is not ready; review state was not created")?;
             let task_ids = item.add_review_only_attempt(
                 attempt_id.clone(),
                 review::REVIEWERS,

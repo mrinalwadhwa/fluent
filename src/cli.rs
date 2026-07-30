@@ -670,6 +670,12 @@ pub enum QueueCommands {
 
 #[derive(Subcommand)]
 pub enum TesterCommands {
+    /// Validate Tester configuration and extractor without running tests
+    Check {
+        /// Disable sandbox
+        #[arg(long)]
+        no_sandbox: bool,
+    },
     /// Run the Tester subcommand for a specific Task
     Run {
         /// Work Item ID
