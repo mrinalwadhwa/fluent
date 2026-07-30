@@ -22953,6 +22953,7 @@ git commit -m "Add resumed writer output" >/dev/null
         .env("CODEX_HOME", &source_home)
         .env("FLUENT_TEST_CODEX_AUTHENTICATED", &authenticated)
         .env("FLUENT_TEST_CODEX_EXEC_LOG", &exec_log)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
         .assert()
         .failure()
         .stderr(predicates::str::contains("codex login"));
@@ -22985,6 +22986,7 @@ git commit -m "Add resumed writer output" >/dev/null
         .env("CODEX_HOME", &source_home)
         .env("FLUENT_TEST_CODEX_AUTHENTICATED", &authenticated)
         .env("FLUENT_TEST_CODEX_EXEC_LOG", &exec_log)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
         .output()
         .unwrap();
 
