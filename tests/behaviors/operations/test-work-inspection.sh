@@ -12,6 +12,9 @@ LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 HOLDER_PID=""
 
 setup_test_project() {
+  # Each case runs in the harness subshell. Register the cleanup there so a
+  # failing case reaps its lock holder before the harness records the result.
+  trap cleanup_test_project EXIT
   TEST_DIR="$(mktemp -d -t fluent-work-inspection-XXXXXX)"
   mkdir -p "$TEST_DIR/project"
   cd "$TEST_DIR/project"

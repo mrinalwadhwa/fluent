@@ -49,6 +49,12 @@ impl CodexWorkerEnvironment {
                     has_environment_auth(),
                 );
             }
+            if let Some(source_home) = env::var_os("FLUENT_TEST_FIXTURE_CODEX_HOME") {
+                return Self::prepare_from_with_environment_auth(
+                    &canonical_existing_path(PathBuf::from(source_home)),
+                    has_environment_auth(),
+                );
+            }
             if has_environment_auth() {
                 return Self::prepare_hermetic_fixture_worker_with_environment_auth();
             }

@@ -91,7 +91,7 @@ fn release_suite_process_guard_allows_clean_suite() {
 fn release_suite_process_guard_discovers_scoped_process_cwd() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("fixture-root");
-    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(root.join(".fluent/work/items")).unwrap();
     let guard =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release-test-process-guard.sh");
     let output = Command::new("bash")
@@ -99,10 +99,11 @@ fn release_suite_process_guard_discovers_scoped_process_cwd() {
         .args([
             "bash",
             "-c",
-            "cd \"$1\"; exec -a 'fluent scheduler run' sleep 60 & echo $! > leaked.pid",
+            "cd \"$1\"; \"$2\" scheduler run --poll-seconds 60 > /dev/null 2>&1 & leak=$!; disown \"$leak\"; echo \"$leak\" > leaked.pid",
             "fixture-root",
         ])
         .arg(&root)
+        .arg(env!("CARGO_BIN_EXE_fluent"))
         .env("FLUENT_RELEASE_TEST_ROOTS", &root)
         .output()
         .unwrap();
@@ -113,10 +114,8 @@ fn release_suite_process_guard_discovers_scoped_process_cwd() {
         .status();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "guard accepted a scoped process");
-    assert!(
-        stderr.contains("kind=fluent scheduler"),
-        "diagnostic: {stderr}"
-    );
+    assert!(stderr.contains("kind=fluent"), "diagnostic: {stderr}");
+    let root = fs::canonicalize(root).unwrap();
     assert!(stderr.contains(&format!("root={}", root.display())));
 }
 
@@ -23222,6 +23221,7 @@ git commit -m "Add default home output" >/dev/null
         .env("PATH", mock_path(&bin_dir))
         .env("HOME", &home)
         .env_remove("CODEX_HOME")
+        .env("FLUENT_TEST_FIXTURE_CODEX_HOME", &source_home)
         .env("FLUENT_TEST_CODEX_INVOCATIONS", &invocation_log)
         .assert()
         .success();

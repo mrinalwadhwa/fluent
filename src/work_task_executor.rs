@@ -2481,7 +2481,10 @@ fn preflight_write_sandbox_profile(
     coder_kind: CoderKind,
     codex_home: Option<&Path>,
 ) -> Result<Option<os::SandboxProfile>> {
-    if no_sandbox && codex_home.is_none() {
+    // Test-support may exercise a nested Codex route without applying a
+    // Seatbelt profile. Keep that exception explicit and feature-gated: the
+    // production Codex worker continues to require its source-home boundary.
+    if no_sandbox && (codex_home.is_none() || test_hermetic_no_sandbox()) {
         return Ok(None);
     }
 
