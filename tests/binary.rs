@@ -9851,6 +9851,37 @@ exit 0
 }
 
 #[test]
+fn test_support_binary_controls_host_sandbox_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-test-support-host-sandbox");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"controlled","follow_ups":[]}"#),
+    );
+    write_mock_sandbox_exec(&bin_dir);
+    create_completed_work_attempt(&tmp, &main_dir);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "test host sandbox preflight failure",
+        ));
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .assert()
+        .success();
+}
+
+#[test]
 fn tester_check_distinguishes_test_failures_from_harness_errors() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
