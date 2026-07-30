@@ -790,6 +790,64 @@ test_prepare_directory_failure_preserves_evidence_and_resume() {
   return $rc
 }
 
+test_prepare_initial_manifest_write_failure_is_durable() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A fake jq that fails for `jq -n` — the initial manifest build form — while
+  # passing all other jq calls through. This models an interrupted manifest
+  # write (jq crash or full disk) after seeding has fully succeeded.
+  local crash_bin="$WORK/crashing-initial-jq-bin"
+  mkdir -p "$crash_bin"
+  local real_jq
+  real_jq="$(command -v jq)"
+  cat > "$crash_bin/jq" <<JQ
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-n" ]; then
+  printf '{ "schema_version": 1, "smoke_'
+  exit 1
+fi
+exec "$real_jq" "\$@"
+JQ
+  chmod +x "$crash_bin/jq"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$crash_bin:$PATH" \
+    bash "$HARNESS" prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare.out" 2>&1; then
+    printf '    FAIL: prepare should exit non-zero when initial manifest write fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/prepare.out")"
+  # The partial root keeps the .prepare-incomplete marker and the log.
+  # No manifest must exist: the atomic temp was discarded before renaming.
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    || { printf '    FAIL: no incomplete-prepare marker retained\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    && { printf '    FAIL: a partial manifest was written despite the failure\n'; rc=1; }
+  [ -f "$ROOT/harness/logs/prepare.log" ] \
+    || { printf '    FAIL: no prepare log retained\n'; rc=1; }
+  # The failure names the prepare phase, its log, and the exact resume command.
+  assert_contains "$out" 'phase "prepare" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/prepare.log" || rc=1
+  assert_contains "$out" "prepare $ROOT" || rc=1
+
+  # Execute the exact printed resume with a working jq. The marked partial root
+  # (with no manifest) is accepted and prepares to completion.
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare-resume.out" 2>&1 \
+    || { printf '    FAIL: prepare resume did not complete\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    || { printf '    FAIL: resume did not write a manifest\n'; rc=1; }
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    && { printf '    FAIL: incomplete marker left after a completed prepare\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: resumed prepare did not reach the prepared phase\n'; rc=1; }
+  # The rebuilt fixture is sound: run reaches a ready candidate.
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: run after a resumed prepare did not reach ready\n'; rc=1; }
+  return $rc
+}
+
 test_interrupted_manifest_update_keeps_prior_manifest() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -1152,6 +1210,8 @@ run_test "prepare failure preserves evidence and resume" \
   test_prepare_failure_preserves_evidence_and_resume
 run_test "prepare directory failure preserves evidence and resume" \
   test_prepare_directory_failure_preserves_evidence_and_resume
+run_test "prepare initial manifest write failure is durable" \
+  test_prepare_initial_manifest_write_failure_is_durable
 run_test "interrupted manifest update keeps prior manifest" \
   test_interrupted_manifest_update_keeps_prior_manifest
 run_test "land precheck failure does not replay land" \

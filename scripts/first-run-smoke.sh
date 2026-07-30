@@ -252,9 +252,14 @@ phase_prepare() {
   # incomplete-prepare marker. A prior prepare that failed mid-seed leaves the
   # marker and no manifest, so the printed `prepare` resume can rebuild the
   # harness-owned partial state instead of tripping the nonempty guard.
+  # Check the incomplete marker BEFORE the manifest: an interrupted initial
+  # manifest write can leave both the marker and a partial or empty manifest
+  # file. The marker takes precedence so the printed prepare resume always works.
   local resuming=0
   if [ -e "$root" ]; then
-    if [ -f "$(manifest_path "$root")" ]; then
+    if [ -f "$root/harness/.prepare-incomplete" ]; then
+      resuming=1
+    elif [ -f "$(manifest_path "$root")" ]; then
       local existing
       existing="$(manifest_get "$root" '.schema_version')"
       [ "$existing" = "$SCHEMA_VERSION" ] \
@@ -262,9 +267,6 @@ phase_prepare() {
       verify_manifest_root "$root"
       info "Reusing existing smoke root: $root"
       return 0
-    fi
-    if [ -f "$root/harness/.prepare-incomplete" ]; then
-      resuming=1
     elif [ -n "$(ls -A -- "$root" 2>/dev/null)" ]; then
       die "smoke root $root is not empty and has no harness manifest"
     fi
@@ -307,11 +309,14 @@ phase_prepare() {
       "$(workitem_dir "$root")"; } >> "$prepare_log" 2>&1 \
     || fail_phase "$root" "prepare" "$prepare_log" "prepare"
 
-  # A resume re-seeds from scratch: discard the harness-owned partial repository
-  # and planning inputs so the rebuild does not inherit a broken half-state.
+  # A resume re-seeds from scratch: discard the harness-owned partial repository,
+  # planning inputs, and any partial manifest so the rebuild does not inherit
+  # a broken half-state. The manifest is removed here so a later atomic write
+  # cannot race against a file left by a prior interrupted attempt.
   if [ "$resuming" = "1" ]; then
     info "Resuming an incomplete prepare: $root"
     rm -rf "$(project_dir "$root")" "$(workitem_dir "$root")"
+    rm -f "$(manifest_path "$root")"
     mkdir -p "$(workitem_dir "$root")"
   fi
 
@@ -328,25 +333,35 @@ phase_prepare() {
   # Build the manifest with jq so a root, boundary, or binary path containing
   # JSON-significant characters (quotes, backslashes) is encoded, not
   # interpolated. A raw heredoc would emit invalid JSON for such paths.
-  jq -n \
-    --argjson schema "$SCHEMA_VERSION" \
-    --arg root "$root" \
-    --arg boundary "$install_boundary" \
-    --arg bin "$fluent_bin" \
-    --arg wi "$WORK_ITEM_ID" \
-    --arg attempt "$ATTEMPT_ID" \
-    '{
-      schema_version: $schema,
-      smoke_root: $root,
-      safe_phase: "prepared",
-      run_stage: null,
-      install_boundary: $boundary,
-      fluent_bin: $bin,
-      work_item_id: $wi,
-      attempt_id: $attempt,
-      merge_candidate_id: null,
-      merged_commit: null
-    }' > "$(manifest_path "$root")"
+  # Write through a root-local temp and rename atomically: if jq crashes or
+  # the disk is full, the manifest file is never created, the
+  # .prepare-incomplete marker stays visible, and the printed prepare resume
+  # can rebuild rather than failing to parse a partial or empty manifest.
+  local manifest_tmp
+  manifest_tmp="$(mktemp "$(manifest_path "$root").XXXXXX")"
+  if ! jq -n \
+      --argjson schema "$SCHEMA_VERSION" \
+      --arg root "$root" \
+      --arg boundary "$install_boundary" \
+      --arg bin "$fluent_bin" \
+      --arg wi "$WORK_ITEM_ID" \
+      --arg attempt "$ATTEMPT_ID" \
+      '{
+        schema_version: $schema,
+        smoke_root: $root,
+        safe_phase: "prepared",
+        run_stage: null,
+        install_boundary: $boundary,
+        fluent_bin: $bin,
+        work_item_id: $wi,
+        attempt_id: $attempt,
+        merge_candidate_id: null,
+        merged_commit: null
+      }' > "$manifest_tmp" 2>>"$prepare_log"; then
+    rm -f "$manifest_tmp"
+    fail_phase "$root" "prepare" "$prepare_log" "prepare"
+  fi
+  mv "$manifest_tmp" "$(manifest_path "$root")"
 
   # The manifest is the durable completion marker; drop the incomplete flag.
   rm -f "$root/harness/.prepare-incomplete"
