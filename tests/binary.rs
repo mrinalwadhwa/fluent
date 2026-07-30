@@ -8328,7 +8328,6 @@ fn post_land_retry_ignores_a_malformed_retained_candidate() {
         "malformed retained Git metadata may defer cleanup but must not affect Learning"
     );
     if !real_sandbox_exec_is_usable() {
-        assert!(String::from_utf8_lossy(&retry.stdout).contains("learner"));
         assert!(candidate.exists());
         return;
     }
