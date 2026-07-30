@@ -1323,7 +1323,9 @@ the smoke root may live anywhere, including a path containing spaces:
 ```sh
 # 1. Prepare a self-contained smoke root (isolated home, Git repository,
 #    deterministic failing fixture, planning inputs, manifest, evidence).
-scripts/first-run-smoke.sh prepare /path/to/smoke-root
+#    Supply an existing authenticated Codex home for the model-backed run.
+scripts/first-run-smoke.sh prepare /path/to/smoke-root \
+  --codex-home /path/to/authenticated/codex-home
 
 # 2. Install/select Fluent, initialize, create and run the Work Item, and stop
 #    at a ready Merge Candidate. Prints the exact inspection and land commands.
@@ -1346,13 +1348,20 @@ the selected binary, phase logs under `<root>/harness/logs`, and evidence under
 `<root>/evidence` — lives beneath the root. The harness never deletes the root,
 on success or failure.
 
+**Codex authentication.** For a model-backed Codex smoke, pass an existing
+authenticated Codex home with `prepare --codex-home`. The harness records that
+absolute path in its manifest and sets it as `CODEX_HOME` for Fluent commands;
+it does not copy credentials into the smoke root, logs, evidence, or fixture
+repository. The smoke `HOME` remains isolated under the root. The `run` phase
+initializes Fluent with the `codex-balanced` coder profile and `propose`
+follow-up mode, then writes the fixture Tester configuration and commits all
+initialization changes before creating the Attempt.
+
 **Install boundary.** By default `prepare` records the public installer at
 `https://fluent.computer/install`, and `run` invokes it under the isolated
-home; it needs `curl` on `PATH` and network access to fluent.computer. Any
-credentials the Attempt's coder requires (for example a provider API key) must
-be present in the isolated home the harness creates — never the operator's own
-home. For pre-release validation, override the boundary without changing the
-phase contract:
+home; it needs `curl` on `PATH` and network access to fluent.computer. For
+pre-release validation, override the boundary without changing the phase
+contract:
 
 ```sh
 scripts/first-run-smoke.sh prepare /path/to/smoke-root --installer ./tools/install.sh
