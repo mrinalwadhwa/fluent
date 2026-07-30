@@ -1342,11 +1342,13 @@ manifest or an incomplete-prepare marker left by an earlier interrupted
 `prepare`, so both re-running `prepare` on a finished root and resuming one that
 failed mid-seed are safe. A relative `--installer` or `--binary` override is
 resolved to an absolute path during `prepare`, so `run` selects the same
-boundary even when invoked from a different working directory. Everything the
-smoke touches — the isolated `HOME`, the repository at `<root>/project/main`,
-the selected binary, phase logs under `<root>/harness/logs`, and evidence under
-`<root>/evidence` — lives beneath the root. The harness never deletes the root,
-on success or failure.
+boundary even when invoked from a different working directory. The harness
+creates and preserves its isolated `HOME`, repository at
+`<root>/project/main`, selected binary, phase logs under
+`<root>/harness/logs`, and evidence under `<root>/evidence` beneath the root.
+An operator-supplied Codex authentication home remains outside the root and is
+only referenced; the harness never copies it there. The harness never deletes
+the root, on success or failure.
 
 **Codex authentication.** For a model-backed Codex smoke, pass an existing
 authenticated Codex home with `prepare --codex-home`. The harness records that
