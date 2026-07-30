@@ -371,6 +371,37 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: Credential tests serialize environment mutation and restore the
+            // previous value when their scoped guard is dropped.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: Credential tests serialize environment mutation and restore the
+            // previous value when their scoped guard is dropped.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn refresh_probe_honors_configured_deadline() {
         assert_eq!(
@@ -450,6 +481,41 @@ mod tests {
         assert!(
             reread.get(),
             "a successful probe must reread Keychain credentials"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn successful_refresh_probe_replaces_oauth_token_from_keychain() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let claude = bin_dir.path().join("claude");
+        let security = bin_dir.path().join("security");
+        std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf '%s\\n' '{\"claudeAiOauth\":{\"accessToken\":\"refreshed-token\"}}'\n",
+        )
+        .unwrap();
+        for executable in [&claude, &security] {
+            let mut permissions = std::fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(executable, permissions).unwrap();
+        }
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut path_entries = vec![bin_dir.path().to_path_buf()];
+        path_entries.extend(std::env::split_paths(&original_path));
+        let test_path = std::env::join_paths(path_entries).unwrap();
+        let _path = ScopedEnv::set("PATH", test_path);
+        let _token = ScopedEnv::set("CLAUDE_CODE_OAUTH_TOKEN", "stale-token");
+
+        refresh_credentials().unwrap();
+
+        assert_eq!(
+            std::env::var("CLAUDE_CODE_OAUTH_TOKEN").unwrap(),
+            "refreshed-token",
+            "a successful probe must replace the process token with the Keychain reread"
         );
     }
 
