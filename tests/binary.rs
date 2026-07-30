@@ -16,7 +16,17 @@ fn fluent_cmd() -> LoggedCommand {
     let mut cmd = LoggedCommand::cargo_bin("fluent");
     cmd.env_remove("FLUENT_TASK_KIND");
     cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
+    cmd.env("FLUENT_TEST_HERMETIC_PROVIDERS", "1");
+    cmd.env_remove("ANTHROPIC_API_KEY");
+    cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+    cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+    cmd.env_remove("OPENAI_API_KEY");
+    cmd.env_remove("PI_API_KEY");
     cmd
+}
+
+fn provider_double_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-doubles")
 }
 
 fn work_item_value(project_root: &Path, id: &str) -> serde_json::Value {
@@ -139,6 +149,170 @@ fn merge_candidate_land_help_lists_model_and_effort_options() {
         stdout.contains("--effort"),
         "help should list --effort: {stdout}"
     );
+}
+
+#[test]
+fn nested_work_routes_use_only_fixture_coders() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let path = format!(
+        "{}:{}",
+        provider_double_path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    for coder in ["claude"] {
+        let work_item_id = format!("fixture-{coder}");
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "work-item",
+                "create",
+                &work_item_id,
+                "--title",
+                "Fixture coder",
+            ])
+            .env("PATH", &path)
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "attempt",
+                "create",
+                &work_item_id,
+                "attempt-1",
+                "--write-coder",
+                coder,
+            ])
+            .env("PATH", &path)
+            .assert()
+            .success();
+
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "run", &work_item_id, "attempt-1", "--no-sandbox"])
+            .env("PATH", &path)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "test provider double blocked {coder} invocation"
+            )));
+    }
+}
+
+#[test]
+fn fixture_coders_fail_closed_on_unknown_invocations() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let path = format!(
+        "{}:{}",
+        provider_double_path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "work-item",
+            "create",
+            "unknown-coder",
+            "--title",
+            "Unknown coder",
+        ])
+        .env("PATH", &path)
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "create",
+            "unknown-coder",
+            "attempt-1",
+            "--write-coder",
+            "claude",
+        ])
+        .env("PATH", &path)
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "run",
+            "unknown-coder",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", &path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "test provider double blocked claude invocation",
+        ));
+}
+
+#[test]
+fn nested_work_routes_do_not_inherit_live_provider_credentials() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("credential-checking-double");
+    let invocation = tmp.path().join("credential-checking-double.log");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+set -euo pipefail
+test -z "${ANTHROPIC_API_KEY:-}"
+test -z "${ANTHROPIC_AUTH_TOKEN:-}"
+test -z "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+test -z "${OPENAI_API_KEY:-}"
+test -z "${PI_API_KEY:-}"
+if [[ "${1-} ${2-} ${3-}" == "auth status --json" ]]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
+printf 'clean\n' > "$FLUENT_TEST_CREDENTIAL_LOG"
+exit 70
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "work-item",
+            "create",
+            "credential-check",
+            "--title",
+            "Credentials",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "create", "credential-check", "attempt-1"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "run",
+            "credential-check",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("ANTHROPIC_API_KEY", "live-credential")
+        .env("ANTHROPIC_AUTH_TOKEN", "live-credential")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "live-credential")
+        .env("OPENAI_API_KEY", "live-credential")
+        .env("PI_API_KEY", "live-credential")
+        .env("FLUENT_TEST_CREDENTIAL_LOG", &invocation)
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read_to_string(invocation).unwrap(), "clean\n");
 }
 
 #[test]
@@ -16347,7 +16521,12 @@ fn write_mock_sandbox_exec(bin_dir: &Path) {
 }
 
 fn mock_path(bin_dir: &Path) -> String {
-    format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap())
+    format!(
+        "{}:{}:{}",
+        bin_dir.display(),
+        provider_double_path().display(),
+        std::env::var("PATH").unwrap()
+    )
 }
 
 fn write_post_merge_review_queue_entry(

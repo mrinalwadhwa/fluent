@@ -1099,6 +1099,7 @@ fn run_with_transcript_reported(
     transcript_file: Option<&Path>,
     config: &crate::transcript_pump::TranscriptPumpConfig,
 ) -> CoderRunCompletion {
+    restrict_test_provider_credentials(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1172,6 +1173,28 @@ fn run_with_transcript_reported(
         }
     }
 }
+
+/// Keep release fixtures from passing operator credentials through a test-owned
+/// coder process. The opt-in marker makes this seam inert in production builds
+/// and in tests that intentionally exercise provider readiness wiring.
+#[cfg(feature = "test-support")]
+fn restrict_test_provider_credentials(cmd: &mut Command) {
+    if std::env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_none() {
+        return;
+    }
+    for name in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "PI_API_KEY",
+    ] {
+        cmd.env_remove(name);
+    }
+}
+
+#[cfg(not(feature = "test-support"))]
+fn restrict_test_provider_credentials(_: &mut Command) {}
 
 /// A failed process operation, retaining WHICH syscall failed, the OS [`ErrorKind`],
 /// the errno, and the ORIGINAL OS message, so a cleanup diagnostic is lossless — it

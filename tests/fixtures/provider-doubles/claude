@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1-} ${2-} ${3-}" == "auth status --json" ]]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
+
+printf '%s\n' "test provider double blocked claude invocation: $*" >&2
+exit 70
