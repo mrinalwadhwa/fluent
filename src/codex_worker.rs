@@ -127,7 +127,7 @@ impl ResolvedCodexLauncher {
                 readable_roots.push(executable.clone());
                 readable_roots.push(match package_root {
                     Some(package_root) => package_root,
-                    None => canonical_launcher_directory(&canonical_target)?,
+                    None => canonical_target,
                 });
             } else if let Some(package_root) = package_root {
                 readable_roots.push(package_root);
@@ -167,7 +167,9 @@ fn canonical_package_root(
         ),
     })?;
     for ancestor in target_parent.ancestors().take(8) {
-        if ancestor.join("package.json").is_file() {
+        let manifest = ancestor.join("package.json");
+        if manifest.is_file() && has_codex_package_layout(ancestor) {
+            validate_codex_package_root(ancestor, &manifest)?;
             return fs::canonicalize(ancestor)
                 .map(Some)
                 .map_err(|error| CodexLauncherError {
@@ -181,27 +183,49 @@ fn canonical_package_root(
     Ok(None)
 }
 
-fn canonical_launcher_directory(target: &Path) -> std::result::Result<PathBuf, CodexLauncherError> {
-    let target_parent = target.parent().ok_or_else(|| CodexLauncherError {
-        message: format!(
-            "cannot derive a readable closure for Codex launcher target {}",
-            target.display()
-        ),
-    })?;
-    if target_parent.parent().is_none() {
+fn has_codex_package_layout(package_root: &Path) -> bool {
+    package_root.file_name().and_then(|name| name.to_str()) == Some("codex")
+        && package_root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("@openai")
+        && package_root
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("node_modules")
+}
+
+fn validate_codex_package_root(
+    package_root: &Path,
+    manifest: &Path,
+) -> std::result::Result<(), CodexLauncherError> {
+    let package: serde_json::Value =
+        serde_json::from_slice(&fs::read(manifest).map_err(|error| CodexLauncherError {
+            message: format!(
+                "cannot read Codex package manifest {}: {error}",
+                manifest.display()
+            ),
+        })?)
+        .map_err(|error| CodexLauncherError {
+            message: format!(
+                "cannot parse Codex package manifest {}: {error}",
+                manifest.display()
+            ),
+        })?;
+    if !has_codex_package_layout(package_root)
+        || package.get("name").and_then(serde_json::Value::as_str) != Some("@openai/codex")
+    {
         return Err(CodexLauncherError {
             message: format!(
-                "cannot derive a bounded readable closure for Codex launcher target {}",
-                target.display()
+                "cannot derive a bounded readable closure from unrecognized Codex package root {}",
+                package_root.display()
             ),
         });
     }
-    fs::canonicalize(target_parent).map_err(|error| CodexLauncherError {
-        message: format!(
-            "cannot resolve Codex launcher directory {}: {error}",
-            target_parent.display()
-        ),
-    })
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -514,7 +538,7 @@ mod tests {
         let package = fixture.path().join("lib/node_modules/@openai/codex");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(package.join("bin")).unwrap();
-        fs::write(package.join("package.json"), "{}").unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#).unwrap();
         let target = package.join("bin/codex.js");
         fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
@@ -540,7 +564,7 @@ mod tests {
         let package = fixture.path().join("lib/node_modules/@openai/codex");
         let bin = package.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        fs::write(package.join("package.json"), "{}").unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"@openai/codex"}"#).unwrap();
         let executable = bin.join("codex");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -572,6 +596,80 @@ mod tests {
         let executable = fs::canonicalize(executable).unwrap();
         assert_eq!(launcher.executable(), executable);
         assert_eq!(launcher.readable_roots(), &[executable]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_symlinked_standalone_launcher_retains_only_launcher_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        let standalone = fixture.path().join("standalone");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&standalone).unwrap();
+        let target = standalone.join("codex-runtime");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let lexical = bin.join("codex");
+        symlink(&target, &lexical).unwrap();
+
+        let launcher = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap();
+
+        let lexical = fs::canonicalize(&bin).unwrap().join("codex");
+        let target = fs::canonicalize(target).unwrap();
+        assert_eq!(launcher.executable(), lexical);
+        assert_eq!(launcher.readable_roots(), &[lexical, target]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_launcher_does_not_grant_unrecognized_package_ancestor() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let operator_home = fixture.path().join("operator-home");
+        let bin = operator_home.join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(operator_home.join("package.json"), "{}").unwrap();
+        let target = operator_home.join("codex");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let lexical = bin.join("codex");
+        symlink(&target, &lexical).unwrap();
+
+        let launcher = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap();
+
+        let lexical = fs::canonicalize(&bin).unwrap().join("codex");
+        let target = fs::canonicalize(target).unwrap();
+        assert_eq!(launcher.readable_roots(), &[lexical, target]);
+        assert!(!launcher.readable_roots().contains(&operator_home));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_launcher_rejects_unrecognized_codex_package_identity() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        let package = fixture.path().join("node_modules/@openai/codex");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(package.join("bin")).unwrap();
+        fs::write(package.join("package.json"), r#"{"name":"other"}"#).unwrap();
+        let target = package.join("bin/codex");
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&target, bin.join("codex")).unwrap();
+
+        let error = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unrecognized Codex package root"),
+            "{error}"
+        );
     }
 
     #[test]

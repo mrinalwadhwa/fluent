@@ -27,7 +27,7 @@ setup_project() {
     "${PACKAGE_ROOT}/bin" "${PACKAGE_ROOT}/runtime" "$CODEX_HOME_FIXTURE"
   printf 'secret outside launcher closure\n' > "${OPERATOR_HOME}/secret.txt"
   printf 'fixture authentication\n' > "${CODEX_HOME_FIXTURE}/auth.json"
-  printf '{}\n' > "${PACKAGE_ROOT}/package.json"
+  printf '{"name":"@openai/codex"}\n' > "${PACKAGE_ROOT}/package.json"
 
   cd "$PROJECT"
   git init -b main > /dev/null 2>&1
@@ -182,7 +182,44 @@ test_missing_launcher_pauses_before_coder_launch() {
   return "$result"
 }
 
+test_unsafe_launcher_closure_pauses_before_coder_launch() {
+  setup_project
+  printf '{"name":"other"}\n' > "${PACKAGE_ROOT}/package.json"
+  cat > "${PACKAGE_ROOT}/bin/codex" <<'LAUNCHER'
+#!/usr/bin/env sh
+exit 0
+LAUNCHER
+  chmod +x "${PACKAGE_ROOT}/bin/codex"
+  ln -s "${PACKAGE_ROOT}/bin/codex" "${EXTERNAL_BIN}/codex"
+
+  local result=0
+  if env -u OPENAI_API_KEY -u CODEX_API_KEY -u CODEX_ACCESS_TOKEN -u CODEX_AUTH_JSON \
+    HOME="$ISOLATED_HOME" \
+    CODEX_HOME="$CODEX_HOME_FIXTURE" \
+    PATH="${EXTERNAL_BIN}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$FLUENT_BIN" task run --coder codex \
+      work-1 attempt-1 attempt-1-write-1 \
+      > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr"; then
+    result=1
+  fi
+
+  local state
+  state="$("$FLUENT_BIN" work-item show work-1)"
+  [[ "$(jq -r '.attempts[0].status' <<< "$state")" == "needs-user" ]] || result=1
+  [[ "$(jq -r '.attempts[0].tasks[0].started_at' <<< "$state")" == "null" ]] || result=1
+  [[ "$(cat "$TEST_DIR/stderr")" == *"unrecognized Codex package root"* ]] || result=1
+
+  if ((result != 0)); then
+    printf '    Stderr:\n%s\n' "$(cat "$TEST_DIR/stderr")"
+    printf '    State:\n%s\n' "$state"
+  fi
+  cleanup_project
+  return "$result"
+}
+
 run_test "external package launcher runs with isolated HOME" \
   test_external_package_launcher_runs_with_isolated_home
 run_test "missing launcher pauses before coder launch" \
   test_missing_launcher_pauses_before_coder_launch
+run_test "unsafe launcher closure pauses before coder launch" \
+  test_unsafe_launcher_closure_pauses_before_coder_launch
