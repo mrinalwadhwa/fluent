@@ -35,6 +35,10 @@ write_mock_claude() {
   local verdict="$1"
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
 #!/usr/bin/env bash
+if [ "\$1 \$2 \$3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 for arg in "\$@"; do
   if [ "\$arg" = "-p" ]; then
     printf 'Verdict: ${verdict}\n\nReview-only result.\n' > review.md
@@ -49,6 +53,10 @@ MOCK_SCRIPT
 write_dirty_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+if [ "$1 $2 $3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 for arg in "$@"; do
   if [ "$arg" = "-p" ]; then
     printf 'reviewer edit\n' >> ../../../../../README.md

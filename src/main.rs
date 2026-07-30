@@ -1590,6 +1590,7 @@ fn cmd_status(search_root: &Path) -> Result<()> {
 fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
     let configured_setup = fluent::setup::ConfiguredSetup::from_inputs(inputs)?;
     if let Some(setup) = configured_setup.as_ref() {
+        require_git_repository_root(cwd)?;
         fluent::setup::preflight_providers(&setup.mapping)?;
     }
     let fluent_dir = cwd.join(".fluent");
@@ -1649,6 +1650,31 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
         eprintln!("  parent directory.");
     }
 
+    Ok(())
+}
+
+/// Require configured setup to run from the root of a Git worktree.
+///
+/// Keep legacy bare `fluent init` available outside repositories for existing
+/// automation, while preventing configured setup from probing providers or
+/// creating project state in an arbitrary nested directory.
+fn require_git_repository_root(cwd: &Path) -> Result<()> {
+    let root = git::run_stdout(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        "resolve the repository root for configured init",
+    )
+    .context("configured init requires a Git repository root")?;
+    let canonical_cwd = fs::canonicalize(cwd)
+        .with_context(|| format!("canonicalize configured init directory {}", cwd.display()))?;
+    let canonical_root = fs::canonicalize(&root)
+        .with_context(|| format!("canonicalize repository root {root}"))?;
+    if canonical_cwd != canonical_root {
+        bail!(
+            "configured init requires the repository root; run it from {}",
+            canonical_root.display()
+        );
+    }
     Ok(())
 }
 

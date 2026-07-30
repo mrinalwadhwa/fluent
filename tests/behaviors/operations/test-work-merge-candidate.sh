@@ -41,6 +41,10 @@ cleanup_test_project() {
 write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+if [ "$1 $2 $3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 # Skip side effects for --version probes from capture_coder_info()
 if [ "$1" = "--version" ]; then
   exit 0

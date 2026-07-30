@@ -46,6 +46,10 @@ write_mock_claude() {
   printf '0\n' > "$write_count_file"
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
 #!/usr/bin/env bash
+if [ "\$1 \$2 \$3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 if [ "\$1" = "--version" ]; then
   exit 0
 fi

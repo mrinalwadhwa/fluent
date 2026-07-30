@@ -1565,10 +1565,49 @@ fn init_no_layout_tip_when_dir_named_main() {
 }
 
 #[test]
+fn configured_init_requires_repository_root_before_provider_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let nested = tmp.path().join("nested");
+    let preflight_log = tmp.path().join("preflight.log");
+    init_git_repo(tmp.path());
+    fs::create_dir(&nested).unwrap();
+    write_mock_codex(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'called\\n' >> \"${PREFLIGHT_LOG:?}\"\nexit 0\n",
+    );
+
+    fluent_cmd()
+        .current_dir(&nested)
+        .env("PATH", mock_path(&bin_dir))
+        .env("PREFLIGHT_LOG", &preflight_log)
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("repository root"));
+
+    assert!(
+        !preflight_log.exists(),
+        "configured init must not invoke providers before validating the repository root"
+    );
+    assert!(
+        !nested.join(".fluent").exists(),
+        "configured init must not initialize a nested directory"
+    );
+}
+
+#[test]
 fn coder_profile_apply_merges_all_roles_and_preserves_unrelated_config() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
+    init_git_repo(tmp.path());
     fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
@@ -1610,6 +1649,7 @@ fn coder_profile_apply_propose_writes_only_coder_mapping() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
+    init_git_repo(tmp.path());
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
@@ -1640,6 +1680,7 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
     let log = tmp.path().join("providers.log");
+    init_git_repo(tmp.path());
     fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
     fs::write(
         tmp.path().join(".fluent/config.yaml"),
@@ -1720,6 +1761,7 @@ fn coder_profile_preflight_does_not_invoke_model() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
+    init_git_repo(tmp.path());
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(
@@ -1745,6 +1787,7 @@ fn coder_profile_preflight_does_not_invoke_model() {
 fn coder_profile_preflight_rejects_unauthenticated_claude_status() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
+    init_git_repo(tmp.path());
     write_mock_executable(
         &bin_dir,
         "claude",
@@ -1791,6 +1834,7 @@ fn coder_profile_preflight_rejects_unauthenticated_claude_status() {
 fn coder_profile_preflight_failure_preserves_uninitialized_project() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
+    init_git_repo(tmp.path());
     write_mock_codex(&bin_dir, "#!/bin/bash\nexit 1\n");
     let output = fluent_cmd()
         .current_dir(tmp.path())
@@ -1814,6 +1858,7 @@ fn coder_profile_preflight_reports_every_failed_provider_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let fluent_dir = tmp.path().join(".fluent");
+    init_git_repo(tmp.path());
     fs::create_dir_all(&fluent_dir).unwrap();
     let config_path = fluent_dir.join("config.yaml");
     let original_config = "unrelated: retained\n";
@@ -1878,6 +1923,7 @@ fn coder_profile_apply_execute_merges_profile_and_follow_up_mode() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
+    init_git_repo(tmp.path());
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
@@ -1909,6 +1955,7 @@ fn coder_profile_apply_failure_never_leaves_partial_mapping() {
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
     let fluent_dir = tmp.path().join(".fluent");
+    init_git_repo(tmp.path());
     fs::create_dir(&fluent_dir).unwrap();
     fs::write(fluent_dir.join(".gitignore"), "work/\n").unwrap();
     let config_path = fluent_dir.join("config.yaml");

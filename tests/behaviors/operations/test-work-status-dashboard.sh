@@ -128,6 +128,10 @@ create_planned_work_item() {
 write_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+if [ "$1 $2 $3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 if printf '%s' "$*" | grep -q 'follow-up draft as JSON'; then
   DRAFT_PATH="$(printf '%s' "$*" | grep -oE '/[^[:space:]]*follow-up-draft\.json' | head -1)"
   if [ -n "$DRAFT_PATH" ]; then
@@ -154,6 +158,10 @@ MOCK_SCRIPT
 write_uncertain_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK_SCRIPT'
 #!/usr/bin/env bash
+if [ "$1 $2 $3" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
 case "$PWD" in
   */work-15-work-needs-user-attempt-needs-user)
     printf 'status dashboard uncertain output\n' > status-dashboard-uncertain.txt
