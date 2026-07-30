@@ -4881,33 +4881,33 @@ Test: tests/binary.rs (coder_profile_apply_execute_merges_profile_and_follow_up_
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute authorizes Work.
-Test: skills/fluent.full/fluent.md
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B25a
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute queues Work.
-Test: skills/fluent.full/fluent.md
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B25b
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute does not start Work.
-Test: skills/fluent.full/fluent.md
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B26
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that a separately started scheduler executes the
 queued Work.
-Test: skills/fluent.full/fluent.md
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ### B27
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that the resulting candidate still requires human
 inspection and landing.
-Test: skills/fluent.full/fluent.md
+Test: src/content.rs (bundled_fluent_skill_documents_local_preview_boundary)
 
 ---
 
