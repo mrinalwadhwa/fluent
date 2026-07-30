@@ -381,7 +381,7 @@ impl Coder for SandboxedClaudeCode {
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         run_with_transcript_retrying_reported(
             || {
-                let mut cmd = self.build_command(working_dir);
+                let mut cmd = self.build_command(working_dir, true);
                 apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
@@ -405,7 +405,7 @@ impl Coder for SandboxedClaudeCode {
         extra_args: &[String],
         extra_env: &[(String, String)],
     ) -> Result<i32> {
-        let mut cmd = self.build_command(working_dir);
+        let mut cmd = self.build_command(working_dir, false);
         apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--append-system-prompt", system_prompt]);
         cmd.args(extra_args);
@@ -420,7 +420,7 @@ impl SandboxedClaudeCode {
         self.model_override.clone().or_else(claude_model)
     }
 
-    fn build_command(&self, working_dir: &Path) -> Command {
+    fn build_command(&self, working_dir: &Path, autonomous: bool) -> Command {
         let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
             let mut cmd = Command::new(if self.trusted_sandbox {
@@ -434,6 +434,9 @@ impl SandboxedClaudeCode {
             cmd.args(["-f", profile]);
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
+            if autonomous {
+                cmd.arg("--safe-mode");
+            }
             if let Some(ref m) = model {
                 cmd.args(["--model", m]);
             }
@@ -444,6 +447,9 @@ impl SandboxedClaudeCode {
             cmd
         } else {
             let mut cmd = Command::new("claude");
+            if autonomous {
+                cmd.arg("--safe-mode");
+            }
             cmd.current_dir(working_dir);
             cmd
         }
@@ -459,6 +465,15 @@ pub struct BareClaudeCode {
 impl BareClaudeCode {
     fn effective_model(&self) -> Option<String> {
         self.model_override.clone().or_else(claude_model)
+    }
+
+    fn build_command(&self, working_dir: &Path, autonomous: bool) -> Command {
+        let mut cmd = Command::new("claude");
+        cmd.current_dir(working_dir);
+        if autonomous {
+            cmd.arg("--safe-mode");
+        }
+        cmd
     }
 }
 
@@ -523,8 +538,7 @@ impl Coder for BareClaudeCode {
         let effort = self.effort.clone();
         run_with_transcript_retrying_reported(
             || {
-                let mut cmd = Command::new("claude");
-                cmd.current_dir(working_dir);
+                let mut cmd = self.build_command(working_dir, true);
                 apply_coder_env(&mut cmd, extra_env);
                 cmd.args(["--dangerously-skip-permissions"]);
                 if let Some(ref m) = model {
@@ -555,8 +569,7 @@ impl Coder for BareClaudeCode {
         extra_args: &[String],
         extra_env: &[(String, String)],
     ) -> Result<i32> {
-        let mut cmd = Command::new("claude");
-        cmd.current_dir(working_dir);
+        let mut cmd = self.build_command(working_dir, false);
         apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--dangerously-skip-permissions"]);
         cmd.args(["--append-system-prompt", system_prompt]);
@@ -4443,7 +4456,7 @@ mod model_default_tests {
             effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
-        let cmd = coder.build_command(dir.path());
+        let cmd = coder.build_command(dir.path(), true);
         assert!(
             !cmd_has_arg(&cmd, "--model"),
             "should not pass --model when no model is configured"
@@ -4459,7 +4472,7 @@ mod model_default_tests {
             effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
-        let cmd = coder.build_command(dir.path());
+        let cmd = coder.build_command(dir.path(), true);
         assert!(
             cmd_has_arg(&cmd, "--model"),
             "should pass --model when model is configured"
@@ -4480,7 +4493,7 @@ mod model_default_tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let cmd = coder.build_command(dir.path());
+        let cmd = coder.build_command(dir.path(), true);
 
         assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/sandbox-exec"));
     }
@@ -4495,6 +4508,54 @@ mod model_default_tests {
             coder.effective_model().is_none(),
             "effective_model should be None when no model is configured"
         );
+    }
+
+    #[test]
+    fn autonomous_claude_commands_use_safe_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandboxed = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+        };
+        let bare = BareClaudeCode {
+            model_override: None,
+            effort: None,
+        };
+
+        assert!(cmd_has_arg(
+            &sandboxed.build_command(dir.path(), true),
+            "--safe-mode"
+        ));
+        assert!(cmd_has_arg(
+            &bare.build_command(dir.path(), true),
+            "--safe-mode"
+        ));
+    }
+
+    #[test]
+    fn interactive_claude_commands_preserve_user_customizations() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandboxed = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+        };
+        let bare = BareClaudeCode {
+            model_override: None,
+            effort: None,
+        };
+
+        assert!(!cmd_has_arg(
+            &sandboxed.build_command(dir.path(), false),
+            "--safe-mode"
+        ));
+        assert!(!cmd_has_arg(
+            &bare.build_command(dir.path(), false),
+            "--safe-mode"
+        ));
     }
 
     #[test]
@@ -4578,7 +4639,7 @@ mod model_default_tests {
             effort: Some("high".to_string()),
         };
         let dir = tempfile::tempdir().unwrap();
-        let cmd = coder.build_command(dir.path());
+        let cmd = coder.build_command(dir.path(), true);
         assert!(cmd_has_arg(&cmd, "--effort"), "should pass --effort flag");
         assert!(cmd_has_arg(&cmd, "high"), "should pass effort value");
     }
@@ -4592,7 +4653,7 @@ mod model_default_tests {
             effort: None,
         };
         let dir = tempfile::tempdir().unwrap();
-        let cmd = coder.build_command(dir.path());
+        let cmd = coder.build_command(dir.path(), true);
         assert!(
             !cmd_has_arg(&cmd, "--effort"),
             "should not pass --effort when unset"
