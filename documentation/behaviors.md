@@ -3168,7 +3168,7 @@ surfaces through the recovery layer.
 Test: src/claude_auth.rs (tests::check_token_expiry_returns_ok_when_no_creds)
 Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_claude_ai_oauth)
 
-### B2
+### B5
 
 WHEN the keychain entry's `claudeAiOauth.refreshToken` field is
 absent or null,
@@ -3177,7 +3177,7 @@ only) and skip the expiry check.
 Test: src/claude_auth.rs (tests::check_token_expiry_returns_ok_when_no_refresh_token)
 Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_refresh_token)
 
-### B3
+### B6
 
 WHEN `src/coder.rs::run_with_transcript_retrying` observes the
 coder process exit non-zero AND the transcript's most recent
@@ -3230,14 +3230,14 @@ and re-run the coder session before treating the 401 as a task
 failure.
 Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
 
-### B5
+### B2
 
 WHEN Fluent starts the Claude refresh probe,
 THE SYSTEM SHALL run it in safe mode and finish it within
 `FLUENT_CLAUDE_REFRESH_DEADLINE_SECS` (default 30 seconds).
 Test: src/credential.rs (refresh_probe_honors_configured_deadline)
 
-### B6
+### B3
 
 IF the refresh probe exceeds its deadline,
 THEN THE SYSTEM SHALL terminate and reap its process tree and return a typed
