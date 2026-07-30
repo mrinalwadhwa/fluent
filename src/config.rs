@@ -117,15 +117,20 @@ pub fn apply_project_coder_profile(
         mapping_at_mut(root_map, "follow-up")?.insert("mode".into(), "execute".into());
     }
     let rendered = serde_yaml::to_string(&document).context("serialize project configuration")?;
-    atomic_write(&path, rendered.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+    atomic_write(&path, rendered.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(mapping.clone())
 }
 
-fn mapping_at_mut<'a>(map: &'a mut serde_yaml::Mapping, key: &str) -> Result<&'a mut serde_yaml::Mapping> {
+fn mapping_at_mut<'a>(
+    map: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> Result<&'a mut serde_yaml::Mapping> {
     let value = map
         .entry(key.into())
         .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
-    value.as_mapping_mut()
+    value
+        .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("configuration key {key:?} must be a mapping"))
 }
 
@@ -133,7 +138,10 @@ fn write_role(coders: &mut serde_yaml::Mapping, name: &str, pair: &CoderModelPai
     let role = mapping_at_mut(coders, name)?;
     role.insert("coder".into(), pair.coder.as_str().into());
     role.insert("model".into(), pair.model.clone().into());
-    role.insert("effort".into(), pair.effort.clone().unwrap_or_default().into());
+    role.insert(
+        "effort".into(),
+        pair.effort.clone().unwrap_or_default().into(),
+    );
     Ok(())
 }
 
