@@ -9,6 +9,7 @@ FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"
 
 source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
+HOLDER_PID=""
 
 setup_test_project() {
   TEST_DIR="$(mktemp -d -t fluent-work-inspection-XXXXXX)"
@@ -23,9 +24,18 @@ setup_test_project() {
 }
 
 cleanup_test_project() {
+  if [ -n "${HOLDER_PID:-}" ]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
+  fi
   cd /
-  rm -rf "$TEST_DIR"
+  if [ -n "${TEST_DIR:-}" ]; then
+    rm -rf "$TEST_DIR"
+  fi
 }
+
+trap cleanup_test_project EXIT
 
 write_work_item() {
   ITEM_ID="$1"
@@ -377,9 +387,6 @@ time.sleep(60)
   ERROR_OUTPUT="$(cat "$TEST_DIR/stderr")"
   assert_contains "$ERROR_OUTPUT" "cannot be abandoned" || RESULT=1
   assert_not_contains "$(cat .fluent/work/items/work-active.json)" "abandonment" || RESULT=1
-
-  kill "$HOLDER_PID" 2>/dev/null || true
-  wait "$HOLDER_PID" 2>/dev/null || true
 
   cleanup_test_project
   return $RESULT

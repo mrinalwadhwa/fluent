@@ -414,6 +414,7 @@ exit 70
 #[cfg(unix)]
 struct OwnedFixtureProcess {
     child: Option<Child>,
+    group: i32,
 }
 
 #[cfg(unix)]
@@ -422,8 +423,11 @@ impl OwnedFixtureProcess {
         use std::os::unix::process::CommandExt;
 
         command.process_group(0);
+        let child = command.spawn().unwrap();
+        let group = i32::try_from(child.id()).unwrap();
         Self {
-            child: Some(command.spawn().unwrap()),
+            child: Some(child),
+            group,
         }
     }
 
@@ -435,28 +439,41 @@ impl OwnedFixtureProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child
+        let result = self
+            .child
             .as_mut()
             .expect("fixture child is available")
-            .wait()
+            .wait();
+        self.terminate_and_wait();
+        result
     }
 
     fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
-        self.child
+        let result = self
+            .child
             .take()
             .expect("fixture child is available")
-            .wait_with_output()
+            .wait_with_output();
+        self.terminate_and_wait();
+        result
+    }
+
+    fn terminate_and_wait(&mut self) {
+        let _ = unsafe { libc::kill(-self.group, libc::SIGTERM) };
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.wait();
+        }
+        let _ = poll_until(std::time::Duration::from_secs(2), || {
+            (unsafe { libc::kill(-self.group, 0) }) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        });
     }
 }
 
 #[cfg(unix)]
 impl Drop for OwnedFixtureProcess {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let group = i32::try_from(child.id()).unwrap();
-            let _ = unsafe { libc::kill(-group, libc::SIGTERM) };
-            let _ = child.wait();
-        }
+        self.terminate_and_wait();
     }
 }
 
@@ -495,6 +512,32 @@ fn long_lived_fixture_reaps_its_process_group() {
             "fixture process {pid} must be reaped with its process group"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_fixture_process_reaps_remaining_group() {
+    let pid_file = TempDir::new().unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        "sleep 60 & echo $! > \"$1\"",
+        "fixture-process-group",
+        &pid_file.path().join("descendant.pid").to_string_lossy(),
+    ]);
+    let mut process = OwnedFixtureProcess::spawn(&mut command);
+    let output = process.wait_with_output().unwrap();
+    assert!(output.status.success());
+
+    let descendant: i32 = fs::read_to_string(pid_file.path().join("descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(poll_until(std::time::Duration::from_secs(2), || {
+        (unsafe { libc::kill(descendant, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }));
 }
 
 #[test]
