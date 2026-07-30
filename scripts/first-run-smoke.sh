@@ -361,10 +361,14 @@ phase_prepare() {
     rm -f "$manifest_tmp"
     fail_phase "$root" "prepare" "$prepare_log" "prepare"
   fi
-  mv "$manifest_tmp" "$(manifest_path "$root")"
+  if ! mv "$manifest_tmp" "$(manifest_path "$root")" >> "$prepare_log" 2>&1; then
+    rm -f "$manifest_tmp"
+    fail_phase "$root" "prepare" "$prepare_log" "prepare"
+  fi
 
   # The manifest is the durable completion marker; drop the incomplete flag.
-  rm -f "$root/harness/.prepare-incomplete"
+  rm -f "$root/harness/.prepare-incomplete" >> "$prepare_log" 2>&1 \
+    || fail_phase "$root" "prepare" "$prepare_log" "prepare"
 
   info "Prepared clean-room smoke root: $root"
   info "  isolated home:  $(home_dir "$root")"
@@ -549,8 +553,10 @@ phase_run() {
     capture_fluent "$attempt_show_log" attempt show "$wi" "$ATTEMPT_ID" \
       > "$logs/attempt.json" 2>/dev/null \
       || fail_phase "$root" "run" "$attempt_show_log" "run"
-    learning="$(jq -r '.learning.status // "none"' "$logs/attempt.json")"
-    attempt_status="$(jq -r '.status // "none"' "$logs/attempt.json")"
+    learning="$(jq -r '.learning.status // "none"' "$logs/attempt.json" 2>>"$attempt_show_log")" \
+      || fail_phase "$root" "run" "$attempt_show_log" "run"
+    attempt_status="$(jq -r '.status // "none"' "$logs/attempt.json" 2>>"$attempt_show_log")" \
+      || fail_phase "$root" "run" "$attempt_show_log" "run"
     case "$learning" in
       succeeded) break ;;
       failed) fail_phase "$root" "run" "$attempt_show_log" "run" ;;
@@ -571,7 +577,8 @@ phase_run() {
     > "$logs/candidate.json" 2>/dev/null \
     || fail_phase "$root" "run" "$show_log" "run"
   local status
-  status="$(jq -r '.merge_state.status' "$logs/candidate.json")"
+  status="$(jq -r '.merge_state.status' "$logs/candidate.json" 2>>"$show_log")" \
+    || fail_phase "$root" "run" "$show_log" "run"
   case "$status" in
     pending)
       : # ready to inspect
@@ -653,7 +660,8 @@ phase_land() {
     > "$logs/precandidate.json" 2>/dev/null \
     || fail_phase "$root" "land" "$logs/land-precheck.log" "land"
   local merge_status
-  merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json")"
+  merge_status="$(jq -r '.merge_state.status' "$logs/precandidate.json" 2>>"$logs/land-precheck.log")" \
+    || fail_phase "$root" "land" "$logs/land-precheck.log" "land"
 
   if [ "$merge_status" != "merged" ]; then
     # Land only the accepted candidate through Fluent.
@@ -678,7 +686,8 @@ phase_land() {
   capture_fluent "$logs/landed-show.log" merge-candidate show "$wi" "$cand" \
     > "$logs/landed-candidate.json" \
     || fail_phase "$root" "land" "$logs/landed-show.log" "land"
-  merged="$(jq -r '.merge_state.merged_commit' "$logs/landed-candidate.json")"
+  merged="$(jq -r '.merge_state.merged_commit' "$logs/landed-candidate.json" 2>>"$logs/landed-show.log")" \
+    || fail_phase "$root" "land" "$logs/landed-show.log" "land"
   if [ -z "$merged" ] || [ "$merged" = "null" ]; then
     fail_phase "$root" "land" "$logs/landed-show.log" "land"
   fi

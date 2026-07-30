@@ -55,6 +55,13 @@ learning_status() {
   fi
 }
 
+# When set, emit malformed JSON for these commands (exit 0) so the caller's
+# jq parse step fails rather than the command itself.
+# FAKE_ATTEMPT_SHOW_MALFORMED=1   — attempt show returns invalid JSON
+# FAKE_CANDIDATE_SHOW_MALFORMED=1 — merge-candidate show returns invalid JSON
+# FAKE_LANDED_SHOW_MALFORMED=1    — merge-candidate show returns invalid JSON
+#                                   only when stage=landed (post-land show)
+
 record() {
   [ -n "${FAKE_CMD_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_CMD_LOG"
   return 0
@@ -118,6 +125,10 @@ JSON
         fi
         ;;
       show)
+        if [ "${FAKE_ATTEMPT_SHOW_MALFORMED:-0}" = "1" ]; then
+          printf '{bad json\n'
+          exit 0
+        fi
         # Expose the stored Attempt as JSON, including its Learner state.
         LEARN="$(learning_status)"
         ASTATUS="executing"
@@ -145,6 +156,18 @@ JSON
         # resume with this flag cleared must complete without re-landing.
         if [ "${FAKE_POST_LAND_SHOW_FAILS:-0}" = "1" ] && [ "$(stage)" = "landed" ]; then
           reject "simulated post-land show failure"
+        fi
+        # Model a malformed-JSON response: the command exits 0 but the content
+        # is not valid JSON, so any jq parse on it will fail.
+        if [ "${FAKE_CANDIDATE_SHOW_MALFORMED:-0}" = "1" ]; then
+          printf '{bad json\n'
+          exit 0
+        fi
+        # Same but only for the post-land show (stage=landed), leaving the
+        # precheck (still stage=ran) unaffected.
+        if [ "${FAKE_LANDED_SHOW_MALFORMED:-0}" = "1" ] && [ "$(stage)" = "landed" ]; then
+          printf '{bad json\n'
+          exit 0
         fi
         cat "$rec"
         ;;
@@ -252,6 +275,51 @@ fi
 exec "$real_cp" "\$@"
 CP
   chmod +x "$dir/cp"
+}
+
+# Write a fake `mv` that fails when the destination arg matches $FAILING_MV_DEST,
+# into <dir>/mv. Placed first on PATH, it makes one atomic manifest rename fail
+# so the manifest-finalization failure-and-resume contract can be exercised.
+write_failing_mv() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_mv
+  real_mv="$(command -v mv)"
+  cat > "$dir/mv" <<MV
+#!/usr/bin/env bash
+last=''
+for a in "\$@"; do last="\$a"; done
+if [ "\${FAILING_MV_DEST:-}" != "" ] && [ "\$last" = "\${FAILING_MV_DEST}" ]; then
+  printf 'mv: simulated rename failure to: %s\n' "\$last" >&2
+  exit 1
+fi
+exec "$real_mv" "\$@"
+MV
+  chmod +x "$dir/mv"
+}
+
+# Write a fake `rm` that fails when any non-flag argument matches $FAILING_RM_TARGET,
+# into <dir>/rm. Placed first on PATH, it makes one marker-removal call fail so
+# the prepare-marker-cleanup failure-and-resume contract can be exercised.
+write_failing_rm() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_rm
+  real_rm="$(command -v rm)"
+  cat > "$dir/rm" <<RM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    -*) continue ;;
+  esac
+  if [ "\${FAILING_RM_TARGET:-}" != "" ] && [ "\$a" = "\${FAILING_RM_TARGET}" ]; then
+    printf 'rm: simulated removal failure: %s\n' "\$a" >&2
+    exit 1
+  fi
+done
+exec "$real_rm" "\$@"
+RM
+  chmod +x "$dir/rm"
 }
 
 # Write a fake `jq` that crashes mid-write for a manifest update, into <dir>/jq.
@@ -848,6 +916,235 @@ JQ
   return $rc
 }
 
+test_prepare_manifest_mv_failure_is_durable() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A fake `mv` that fails when the destination is the manifest path, modelling
+  # an I/O error during the atomic temp→manifest rename at the end of prepare.
+  local trap_bin="$WORK/failing-mv-bin"
+  write_failing_mv "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    FAILING_MV_DEST="$ROOT/harness/manifest.json" \
+    bash "$HARNESS" prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare.out" 2>&1; then
+    printf '    FAIL: prepare should exit non-zero when manifest rename fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/prepare.out")"
+  # The partial root keeps the .prepare-incomplete marker and no valid manifest.
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    || { printf '    FAIL: no incomplete-prepare marker retained\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    && { printf '    FAIL: a partial manifest was written despite the failed rename\n'; rc=1; }
+  [ -f "$ROOT/harness/logs/prepare.log" ] \
+    || { printf '    FAIL: no prepare log retained\n'; rc=1; }
+  # The failure names the prepare phase, its log, and the exact resume command.
+  assert_contains "$out" 'phase "prepare" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/prepare.log" || rc=1
+  assert_contains "$out" "prepare $ROOT" || rc=1
+
+  # Execute the printed resume with a working mv. The marked partial root is
+  # accepted and prepares to completion.
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare-resume.out" 2>&1 \
+    || { printf '    FAIL: prepare resume did not complete\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    || { printf '    FAIL: resume did not write a manifest\n'; rc=1; }
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    && { printf '    FAIL: incomplete marker left after a completed prepare\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: resumed prepare did not reach the prepared phase\n'; rc=1; }
+  # The rebuilt fixture is sound: run reaches a ready candidate.
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: run after a resumed prepare did not reach ready\n'; rc=1; }
+  return $rc
+}
+
+test_prepare_marker_rm_failure_is_durable() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  # A fake `rm` that fails when asked to remove the .prepare-incomplete marker,
+  # modelling a permissions error during the marker-cleanup step that follows a
+  # successful manifest write.
+  local trap_bin="$WORK/failing-rm-bin"
+  write_failing_rm "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    FAILING_RM_TARGET="$ROOT/harness/.prepare-incomplete" \
+    bash "$HARNESS" prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare.out" 2>&1; then
+    printf '    FAIL: prepare should exit non-zero when marker removal fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/prepare.out")"
+  # The manifest was written but the .prepare-incomplete marker persists, so
+  # the root is resumable: prepare reuse sees the marker and rebuilds from scratch.
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    || { printf '    FAIL: no incomplete-prepare marker retained\n'; rc=1; }
+  [ -f "$ROOT/harness/logs/prepare.log" ] \
+    || { printf '    FAIL: no prepare log retained\n'; rc=1; }
+  # The failure names the prepare phase, its log, and the exact resume command.
+  assert_contains "$out" 'phase "prepare" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/prepare.log" || rc=1
+  assert_contains "$out" "prepare $ROOT" || rc=1
+
+  # Execute the printed resume with a working rm. The marker takes precedence
+  # over any existing manifest and prepare rebuilds to completion.
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    > "$WORK/prepare-resume.out" 2>&1 \
+    || { printf '    FAIL: prepare resume did not complete\n'; rc=1; }
+  [ -f "$ROOT/harness/manifest.json" ] \
+    || { printf '    FAIL: resume did not write a manifest\n'; rc=1; }
+  [ -f "$ROOT/harness/.prepare-incomplete" ] \
+    && { printf '    FAIL: incomplete marker left after a completed prepare\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: resumed prepare did not reach the prepared phase\n'; rc=1; }
+  run_harness run "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: run after a resumed prepare did not reach ready\n'; rc=1; }
+  return $rc
+}
+
+test_malformed_attempt_show_routes_through_b5() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # The fake returns malformed JSON for attempt show (exit 0). The harness
+  # must route the jq parse failure through fail_phase, not exit bare under set -e.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_ATTEMPT_SHOW_MALFORMED=1 \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should exit non-zero when attempt show returns malformed JSON\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The smoke root is preserved with the failed phase, its log, and a resume.
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/attempt-show.log" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
+  # The safe phase stays at prepared.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the malformed JSON failure\n'; rc=1; }
+
+  # Clear the injected failure and resume. It must reach a ready candidate.
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
+  assert_contains "$(cat "$WORK/resume.out")" "ready Merge Candidate" || rc=1
+  return $rc
+}
+
+test_malformed_candidate_show_routes_through_b5() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  local rc=0
+  # The fake returns malformed JSON for merge-candidate show (exit 0) while the
+  # Learner succeeds normally. The jq parse on the candidate status must route
+  # through fail_phase rather than exiting bare under set -e.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_CANDIDATE_SHOW_MALFORMED=1 \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should exit non-zero when candidate show returns malformed JSON\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The smoke root is preserved with the failed phase, its log, and a resume.
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/candidate-show.log" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the malformed JSON failure\n'; rc=1; }
+
+  # Clear the injected failure and resume to a ready candidate.
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
+  return $rc
+}
+
+test_malformed_land_precheck_routes_through_b5() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # The fake returns malformed JSON for merge-candidate show during the land
+  # precheck (exit 0). The jq parse on the merge status must route through
+  # fail_phase rather than exiting bare under set -e.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_CANDIDATE_SHOW_MALFORMED=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when precheck returns malformed JSON\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land.out")"
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/land-precheck.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past the malformed precheck failure\n'; rc=1; }
+  # No merge happened: main does not carry the fix.
+  if ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null; then
+    printf '    FAIL: main carries the fix despite a failed precheck\n'; rc=1
+  fi
+
+  # Clear the injected failure and resume to a landed candidate.
+  run_harness land "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: land resume did not complete\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: land resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
+test_malformed_landed_show_routes_through_b5() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  local rc=0
+  # The fake returns malformed JSON for the post-land merge-candidate show
+  # (exit 0, only when stage=landed). The merge itself succeeds first; the
+  # jq parse on the merged commit must route through fail_phase.
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" FAKE_LANDED_SHOW_MALFORMED=1 \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when post-land show returns malformed JSON\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land.out")"
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/landed-show.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+  # safe_phase stays ran even though the merge happened.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past the malformed post-land failure\n'; rc=1; }
+  # The merge did happen: the fixture passes on main.
+  ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null \
+    || { printf '    FAIL: candidate was not actually merged\n'; rc=1; }
+
+  # Clear the injected failure and resume. The precheck sees the already-merged
+  # candidate, skips re-landing, and completes verification.
+  run_harness land "$ROOT" > /dev/null 2>&1 \
+    || { printf '    FAIL: land resume did not complete\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: land resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
 test_interrupted_manifest_update_keeps_prior_manifest() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -1212,6 +1509,18 @@ run_test "prepare directory failure preserves evidence and resume" \
   test_prepare_directory_failure_preserves_evidence_and_resume
 run_test "prepare initial manifest write failure is durable" \
   test_prepare_initial_manifest_write_failure_is_durable
+run_test "prepare manifest mv failure is durable" \
+  test_prepare_manifest_mv_failure_is_durable
+run_test "prepare marker rm failure is durable" \
+  test_prepare_marker_rm_failure_is_durable
+run_test "malformed attempt show routes through b5" \
+  test_malformed_attempt_show_routes_through_b5
+run_test "malformed candidate show routes through b5" \
+  test_malformed_candidate_show_routes_through_b5
+run_test "malformed land precheck routes through b5" \
+  test_malformed_land_precheck_routes_through_b5
+run_test "malformed landed show routes through b5" \
+  test_malformed_landed_show_routes_through_b5
 run_test "interrupted manifest update keeps prior manifest" \
   test_interrupted_manifest_update_keeps_prior_manifest
 run_test "land precheck failure does not replay land" \
