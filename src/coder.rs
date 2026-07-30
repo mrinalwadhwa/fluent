@@ -4393,8 +4393,7 @@ mod model_default_tests {
         // A killed process may linger as a zombie while init reaps it. Poll
         // until the process table entry is gone rather than racing init.
         let gone = {
-            let deadline =
-                std::time::Instant::now() + Duration::from_millis(500);
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
             let mut cleared = false;
             while std::time::Instant::now() < deadline {
                 let s = Command::new("/bin/kill")
