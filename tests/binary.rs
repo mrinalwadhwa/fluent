@@ -4183,20 +4183,24 @@ exit 0
     );
 }
 
-/// Wait for a child up to `timeout`, killing it on expiry so a capture
-/// regression that blocks the writer cannot hang the whole suite.
+/// Wait for a fixture process up to `timeout`, tearing down its complete
+/// process group on either outcome so a capture regression cannot hang the
+/// suite or leave a writer descendant behind.
+#[cfg(unix)]
 fn wait_with_timeout(
-    child: &mut std::process::Child,
+    process: &mut OwnedFixtureProcess,
     timeout: std::time::Duration,
 ) -> Option<std::process::ExitStatus> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        match child.try_wait().unwrap() {
-            Some(status) => return Some(status),
+        match process.try_wait().unwrap() {
+            Some(status) => {
+                process.terminate_and_wait();
+                return Some(status);
+            }
             None => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    process.terminate_and_wait();
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4205,6 +4209,7 @@ fn wait_with_timeout(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn writer_completes_when_oversized_transcript_record_cannot_be_mirrored() {
     // Reproduce the original failure comfortably above any plausible host pipe
@@ -4244,7 +4249,8 @@ exit 0
     // drained, so the console sink cannot be emptied while the coder streams its
     // oversized record. stdout is drained on a thread: it carries unrelated
     // inherited coder output and is not the console path under test.
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"));
+    command
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4259,11 +4265,10 @@ exit 0
         .env("FLUENT_MAX_TASK_RETRIES", "0")
         .env_remove("FLUENT_TASK_KIND")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::piped());
+    let mut child = OwnedFixtureProcess::spawn(&mut command);
 
-    let mut stdout = child.stdout.take().unwrap();
+    let mut stdout = child.child.as_mut().unwrap().stdout.take().unwrap();
     let drain_stdout = std::thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = std::io::Read::read_to_end(&mut stdout, &mut sink);
@@ -4301,6 +4306,7 @@ exit 0
     assert_eq!(status_json["schema_version"], 3);
 }
 
+#[cfg(unix)]
 #[test]
 fn writer_completes_under_sustained_previews_on_an_unread_console() {
     // A sustained flood of records — several MiB of bounded previews, far more
@@ -4345,7 +4351,8 @@ exit 0
 
     // Pipe stderr and never drain it: that is the saturated-console condition.
     // stdout is drained on a thread; it carries unrelated inherited output.
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"))
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_fluent"));
+    command
         .current_dir(&main_dir)
         .args([
             "task",
@@ -4360,11 +4367,10 @@ exit 0
         .env("FLUENT_MAX_TASK_RETRIES", "0")
         .env_remove("FLUENT_TASK_KIND")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(std::process::Stdio::piped());
+    let mut child = OwnedFixtureProcess::spawn(&mut command);
 
-    let mut stdout = child.stdout.take().unwrap();
+    let mut stdout = child.child.as_mut().unwrap().stdout.take().unwrap();
     let drain_stdout = std::thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = std::io::Read::read_to_end(&mut stdout, &mut sink);
