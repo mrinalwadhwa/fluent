@@ -22786,13 +22786,15 @@ test -f "$CODEX_HOME/auth.json"
 test "$(cat "$CODEX_HOME/auth.json")" = "source authentication"
 test ! -e "$CODEX_HOME/config.toml"
 test ! -e "$CODEX_HOME/sessions"
+test "$0" = "{expected_launcher}"
 if [[ "${{1:-}}" == "login" && "${{2:-}}" == "status" && -z "${{3:-}}" ]]; then
   printf 'preflight=%s\n' "$CODEX_HOME" >> "$FLUENT_TEST_CODEX_INVOCATIONS"
   exit 0
 fi
 printf 'exec=%s\n' "$CODEX_HOME" >> "$FLUENT_TEST_CODEX_INVOCATIONS"
 {exec_body}
-"##
+"##,
+            expected_launcher = fs::canonicalize(&bin_dir).unwrap().join("codex").display(),
         ),
     );
     (source_home, bin_dir, invocation_log)
@@ -22831,7 +22833,8 @@ fn prepare_strict_codex_worker_home_fixture(
         r##"#!/bin/bash
 set -euo pipefail
 trap 'printf "strict-failed=%s\\n" "$BASH_COMMAND" >> "$FLUENT_TEST_CODEX_INVOCATIONS"' ERR
-if [ "$#" -lt 4 ] || [ "$1" != "-f" ] || [ "$3" != "codex" ]; then
+EXPECTED_LAUNCHER=$(cd "$(dirname "$0")" && pwd -P)/codex
+if [ "$#" -lt 4 ] || [ "$1" != "-f" ] || [ "$3" != "$EXPECTED_LAUNCHER" ]; then
   echo "unexpected sandbox-exec invocation: $*" >&2
   exit 64
 fi
@@ -22842,6 +22845,7 @@ test "$CODEX_HOME" = "$CANONICAL_WORKER_HOME"
 grep -Fq "(allow file-write* (subpath \"$CODEX_HOME\"))" "$PROFILE"
 grep -Fq "(deny file-read* (subpath \"$CANONICAL_SOURCE_HOME\"))" "$PROFILE"
 grep -Fq "(deny file-write* (subpath \"$CANONICAL_SOURCE_HOME\"))" "$PROFILE"
+grep -Fq "(allow file-read*  (subpath \"$EXPECTED_LAUNCHER\"))" "$PROFILE"
 if grep -Fq '(allow file-write* (subpath "/private/var/folders"))' "$PROFILE" || \
    grep -Fq '(allow file-write* (subpath "/private/tmp"))' "$PROFILE"; then
   echo "strict profile restores shared temporary-directory writes" >&2
