@@ -123,9 +123,26 @@ fn refresh_probe_command() -> Command {
 }
 
 fn run_refresh_probe(
-    mut command: Command,
+    command: Command,
     deadline: Duration,
 ) -> std::result::Result<(), CredentialRefreshError> {
+    run_refresh_probe_with_cleanup(
+        command,
+        deadline,
+        crate::coder::terminate_owned_process_tree,
+    )
+}
+
+fn run_refresh_probe_with_cleanup<F>(
+    mut command: Command,
+    deadline: Duration,
+    cleanup: F,
+) -> std::result::Result<(), CredentialRefreshError>
+where
+    F: FnOnce(
+        std::process::Child,
+    ) -> std::result::Result<crate::coder::GroupSweepDisposition, String>,
+{
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -145,9 +162,13 @@ fn run_refresh_probe(
                 return Err(CredentialRefreshError::Failed(status.code().unwrap_or(1)));
             }
             Ok(None) if started.elapsed() >= deadline => {
-                return crate::coder::terminate_owned_process_tree(child)
-                    .map_err(CredentialRefreshError::Cleanup)
-                    .and(Err(CredentialRefreshError::Timeout(deadline)));
+                let disposition = cleanup(child).map_err(CredentialRefreshError::Cleanup)?;
+                if disposition.is_verified_swept() {
+                    return Err(CredentialRefreshError::Timeout(deadline));
+                }
+                return Err(CredentialRefreshError::Cleanup(format!(
+                    "process group cleanup was not confirmed: {disposition:?}"
+                )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => return Err(CredentialRefreshError::Spawn(error.to_string())),
@@ -389,6 +410,30 @@ mod tests {
         assert!(
             !marker.exists(),
             "the refresh probe descendant survived the timeout cleanup"
+        );
+    }
+
+    #[test]
+    fn refresh_probe_timeout_with_unconfirmed_group_sweep_is_cleanup_failure() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 60"]);
+
+        let result =
+            run_refresh_probe_with_cleanup(command, Duration::from_millis(30), |mut child| {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                Ok(crate::coder::GroupSweepDisposition::Unconfirmed(
+                    crate::coder::ProcessOpDiagnostic {
+                        operation: "kill process group".to_string(),
+                        kind: Some("PermissionDenied".to_string()),
+                        errno: Some(libc::EPERM),
+                        message: Some("operation not permitted".to_string()),
+                    },
+                ))
+            });
+
+        assert!(
+            matches!(result, Err(CredentialRefreshError::Cleanup(message)) if message.contains("process group cleanup was not confirmed"))
         );
     }
 

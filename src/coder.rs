@@ -915,6 +915,14 @@ impl GroupSweepDisposition {
             Self::Delivered | Self::AlreadyGone | Self::NotAttempted
         )
     }
+
+    /// Whether cleanup positively established that the process group and every
+    /// descendant are gone. Unlike a normal coder finalization, a refresh probe
+    /// cannot proceed with an unconfirmed group because it has no durable
+    /// supervision report to preserve that uncertainty.
+    pub fn is_verified_swept(&self) -> bool {
+        matches!(self, Self::Delivered | Self::AlreadyGone)
+    }
 }
 
 /// One launch's supervision outcome: its reaped exit code (when reaped) and its
@@ -1888,12 +1896,12 @@ impl CoderSupervisor {
 /// process-group owner used by autonomous coder launches.  This is deliberately
 /// crate-private: credential refresh is the only host-side launch that needs the
 /// cleanup boundary without a transcript pump.
-pub(crate) fn terminate_owned_process_tree(child: Child) -> Result<(), String> {
+pub(crate) fn terminate_owned_process_tree(child: Child) -> Result<GroupSweepDisposition, String> {
     let child_id = child.id();
     let mut managed = ManagedChild::new(Box::new(SystemLeader::new(child, child_id)));
     managed
         .terminate_and_reap()
-        .map(|_| ())
+        .map(|_| managed.group_sweep_disposition())
         .map_err(|error| error.to_string())
 }
 
