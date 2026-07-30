@@ -8271,6 +8271,81 @@ mod tests {
     }
 
     #[test]
+    fn tester_harness_pause_replans_only_tester() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            status: AttemptStatus::NeedsUser,
+            pause_kind: Some(PauseKind::TesterHarness),
+            tasks: vec![
+                Task {
+                    id: "attempt-1-write-1".to_string(),
+                    kind: TaskKind::Write,
+                    status: TaskStatus::Complete,
+                    role: "author".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+                Task {
+                    id: "attempt-1-tester".to_string(),
+                    kind: TaskKind::Tester,
+                    status: TaskStatus::NeedsUser,
+                    role: "tester".to_string(),
+                    instructions: None,
+                    work_item_id: "work-1".to_string(),
+                    attempt_id: Some("attempt-1".to_string()),
+                    workspace_access: WorkspaceAccess {
+                        reads: Vec::new(),
+                        writes: Vec::new(),
+                    },
+                    artifact_area: None,
+                    review_context: None,
+                    input_artifacts: Vec::new(),
+                    depends_on: None,
+                    output: None,
+                    created_at: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+            ],
+            completed_at: Some("2026-07-30T12:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            reject_terminal_attempt(&attempt).unwrap(),
+            TerminalCheck::Reopen
+        ));
+
+        crate::work_model::reopen_attempt(&mut attempt);
+
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert!(attempt.pause_kind.is_none());
+        assert_eq!(
+            attempt.tasks[0].status,
+            TaskStatus::Complete,
+            "recovery must retain the completed Writer task"
+        );
+        assert_eq!(
+            attempt.tasks[1].status,
+            TaskStatus::Planned,
+            "recovery must replan the paused Tester task"
+        );
+    }
+
+    #[test]
     fn transcript_pump_pause_with_mixed_state_is_not_auto_resumed() {
         // A resumable pause that also carries a hard-Failed or still-live peer
         // Task is a mixed state: resuming could discard a hard failure or race a
