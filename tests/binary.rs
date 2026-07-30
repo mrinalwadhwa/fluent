@@ -88,6 +88,37 @@ fn release_suite_process_guard_allows_clean_suite() {
 
 #[cfg(unix)]
 #[test]
+fn release_suite_process_guard_reports_scoped_pi_processes() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("fixture-root");
+    fs::create_dir_all(&root).unwrap();
+    let guard =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release-test-process-guard.sh");
+    let inventory = tmp.path().join("processes.tsv");
+    let leak = format!("4243\tpi\t{}\n", root.display());
+    let output = Command::new("bash")
+        .arg(&guard)
+        .args([
+            "bash",
+            "-c",
+            "printf '%s' \"$FLUENT_TEST_GUARD_LEAK\" > \"$FLUENT_TEST_PROCESS_INVENTORY\"",
+        ])
+        .env("FLUENT_RELEASE_TEST_ROOTS", &root)
+        .env("FLUENT_TEST_PROCESS_INVENTORY", &inventory)
+        .env("FLUENT_TEST_GUARD_LEAK", leak)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "guard accepted a scoped Pi process"
+    );
+    assert!(stderr.contains("kind=pi"), "diagnostic: {stderr}");
+}
+
+#[cfg(unix)]
+#[test]
 fn release_suite_process_guard_discovers_scoped_process_cwd() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("fixture-root");
@@ -457,15 +488,72 @@ impl OwnedFixtureProcess {
         result
     }
 
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("fixture child is available")
+            .try_wait()
+    }
+
     fn terminate_and_wait(&mut self) {
-        let _ = unsafe { libc::kill(-self.group, libc::SIGTERM) };
+        self.terminate_and_wait_result()
+            .expect("fixture process group must terminate and be reaped");
+    }
+
+    fn terminate_and_wait_result(&mut self) -> std::io::Result<()> {
+        signal_fixture_group(self.group, libc::SIGTERM)?;
         if let Some(child) = self.child.as_mut() {
-            let _ = child.wait();
+            wait_for_fixture_child(child, std::time::Duration::from_secs(2))?;
         }
-        let _ = poll_until(std::time::Duration::from_secs(2), || {
-            (unsafe { libc::kill(-self.group, 0) }) == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        });
+        if fixture_group_is_gone(self.group, std::time::Duration::from_secs(2)) {
+            if let Some(child) = self.child.as_mut() {
+                child.wait()?;
+            }
+            return Ok(());
+        }
+
+        signal_fixture_group(self.group, libc::SIGKILL)?;
+        if let Some(child) = self.child.as_mut() {
+            child.wait()?;
+        }
+        if fixture_group_is_gone(self.group, std::time::Duration::from_secs(2)) {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "fixture process group {} survived SIGTERM and SIGKILL",
+                self.group
+            )))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_fixture_group(group: i32, signal: i32) -> std::io::Result<()> {
+    if unsafe { libc::kill(-group, signal) } == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fixture_group_is_gone(group: i32, timeout: std::time::Duration) -> bool {
+    poll_until(timeout, || {
+        (unsafe { libc::kill(-group, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    })
+}
+
+#[cfg(unix)]
+fn wait_for_fixture_child(child: &mut Child, timeout: std::time::Duration) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() || std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -511,6 +599,32 @@ fn long_lived_fixture_reaps_its_process_group() {
             "fixture process {pid} must be reaped with its process group"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn long_lived_fixture_escalates_when_group_ignores_term() {
+    let pid_file = TempDir::new().unwrap();
+    let process = {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' TERM; (sleep 60) & echo $! > \"$1\"; wait",
+            "fixture-process-group",
+            &pid_file.path().join("descendant.pid").to_string_lossy(),
+        ]);
+        OwnedFixtureProcess::spawn(&mut command)
+    };
+    let leader = process.id();
+    assert!(poll_until(std::time::Duration::from_secs(2), || {
+        pid_file.path().join("descendant.pid").exists()
+    }));
+    drop(process);
+
+    assert!(fixture_group_is_gone(
+        i32::try_from(leader).unwrap(),
+        std::time::Duration::from_secs(2)
+    ));
 }
 
 #[cfg(unix)]
@@ -8202,14 +8316,16 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
 
     create_and_run_failed_learner_attempt(&main_dir, &bin_dir);
 
-    let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut retry = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main_dir)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .env("PATH", mock_path(&bin_dir))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     for _ in 0..500 {
         if retry_started.exists() {
             break;
@@ -8221,21 +8337,23 @@ fn concurrent_learner_retry_and_land_never_mutate_after_merge() {
         "learner retry reached its dirty window"
     );
 
-    let mut land = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(&main_dir)
-        .args([
-            "merge-candidate",
-            "land",
-            "work-1",
-            "attempt-1-merge-candidate",
-            "--no-sandbox",
-            "--no-post-merge-review",
-        ])
-        .env("PATH", mock_path(&bin_dir))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut land = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main_dir)
+            .args([
+                "merge-candidate",
+                "land",
+                "work-1",
+                "attempt-1-merge-candidate",
+                "--no-sandbox",
+                "--no-post-merge-review",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     let land_lock_path = fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
     let land_pid = land.id().to_string();
     let land_lock_text = land_lock_path.to_string_lossy().into_owned();
@@ -8340,15 +8458,17 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         return;
     }
     write_mock_sandbox_exec(&bin_dir);
-    let retry = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(&main_dir)
-        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
-        .env("PATH", mock_path(&bin_dir))
-        .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut retry = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main_dir)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .env("PATH", mock_path(&bin_dir))
+            .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     // The sandboxed retry cannot write shared temp, so it announces its
     // mutation window on stdout, which the host captures in the durable
     // transcript.
@@ -8363,13 +8483,15 @@ fn cleanup_waits_for_recovery_then_rereads_the_completed_origin() {
         "recovery reached its serialized mutation window"
     );
 
-    let mut cleanup = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(&main_dir)
-        .args(["cleanup", "--apply"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut cleanup = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main_dir)
+            .args(["cleanup", "--apply"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     let lock_path = fs::canonicalize(main_dir.join(".fluent/work/locks/land.lock")).unwrap();
     let lock_text = lock_path.to_string_lossy().into_owned();
     let cleanup_pid = cleanup.id().to_string();
@@ -9164,18 +9286,18 @@ fn concurrent_post_land_retries_run_the_learner_once() {
     write_mock_sandbox_exec(&bin_dir);
 
     let spawn_retry = || {
-        std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
             .current_dir(&main_dir)
             .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
             .env("PATH", mock_path(&bin_dir))
             .env("SANDBOX_EXEC_LOG", bin_dir.join("sandbox-exec.log"))
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap()
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
     };
-    let first = spawn_retry();
-    let second = spawn_retry();
+    let mut first = spawn_retry();
+    let mut second = spawn_retry();
     let first_output = first.wait_with_output().unwrap();
     let second_output = second.wait_with_output().unwrap();
     if !real_sandbox_exec_is_usable() {

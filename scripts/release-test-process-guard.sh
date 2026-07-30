@@ -28,7 +28,7 @@ snapshot() {
       command="$(/usr/sbin/lsof -p "$pid" 2>/dev/null | awk 'NR == 2 { print $1 }')"
     fi
     case "$command" in
-      *fluent*|*claude*|*codex*|*" pi "*) ;;
+      *fluent*|*claude*|*codex*|*/pi\ *|pi\ *|*/pi|pi) ;;
       *) continue ;;
     esac
     IFS=: read -r -a root_list <<< "$roots"
@@ -45,7 +45,7 @@ snapshot() {
         *"fluent post-merge-review"*) kind="fluent post-merge-review" ;;
         *claude*) kind="claude" ;;
         *codex*) kind="codex" ;;
-        *" pi "*) kind="pi" ;;
+        */pi\ *|pi\ *|*/pi|pi) kind="pi" ;;
         *) kind="fluent" ;;
       esac
       printf '%s\t%s\t%s\n' "$pid" "$kind" "$root"
