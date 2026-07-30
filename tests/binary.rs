@@ -10,6 +10,7 @@ use serial_test::serial;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use tempfile::TempDir;
 
 fn fluent_cmd() -> LoggedCommand {
@@ -313,6 +314,69 @@ exit 70
         .failure();
 
     assert_eq!(fs::read_to_string(invocation).unwrap(), "clean\n");
+}
+
+#[cfg(unix)]
+struct OwnedFixtureProcess {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl OwnedFixtureProcess {
+    fn spawn(command: &mut Command) -> Self {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+        Self {
+            child: command.spawn().unwrap(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OwnedFixtureProcess {
+    fn drop(&mut self) {
+        let group = i32::try_from(self.child.id()).unwrap();
+        let _ = unsafe { libc::kill(-group, libc::SIGTERM) };
+        self.child.wait().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn long_lived_fixture_reaps_its_process_group() {
+    let pid_file = TempDir::new().unwrap();
+    let leader = {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "sleep 60 & echo $! > \"$1\"; wait",
+            "fixture-process-group",
+            &pid_file.path().join("descendant.pid").to_string_lossy(),
+        ]);
+        let process = OwnedFixtureProcess::spawn(&mut command);
+        let leader = process.child.id();
+        assert!(poll_until(std::time::Duration::from_secs(2), || {
+            pid_file.path().join("descendant.pid").exists()
+        }));
+        drop(process);
+        leader
+    };
+
+    let descendant: i32 = fs::read_to_string(pid_file.path().join("descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for pid in [leader as i32, descendant] {
+        assert!(
+            poll_until(std::time::Duration::from_secs(2), || {
+                (unsafe { libc::kill(pid, 0) }) == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }),
+            "fixture process {pid} must be reaped with its process group"
+        );
+    }
 }
 
 #[test]
