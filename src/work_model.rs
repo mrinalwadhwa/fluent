@@ -2780,6 +2780,9 @@ pub enum PauseKind {
     /// workload started. This is host infrastructure, so retrying the same Task
     /// after the enclosing sandbox recovers must not consume a work round.
     HostSandbox,
+    /// The Tester could not produce trustworthy normalized evidence. Retrying
+    /// resumes this same Tester Task after the project repairs its harness.
+    TesterHarness,
 }
 
 /// Coarse attempt lifecycle state.
@@ -3318,7 +3321,8 @@ fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
         AttemptStatus::NeedsUser => match pause {
             Some(PauseKind::Auth)
             | Some(PauseKind::TranscriptPump)
-            | Some(PauseKind::HostSandbox) => 3,
+            | Some(PauseKind::HostSandbox)
+            | Some(PauseKind::TesterHarness) => 3,
             // RoundCap, Uncertain, or an unclassified pause is non-resumable.
             _ => 4,
         },

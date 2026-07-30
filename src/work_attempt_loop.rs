@@ -745,7 +745,8 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
         AttemptStatus::NeedsUser => match attempt.pause_kind {
             Some(PauseKind::Auth)
             | Some(PauseKind::TranscriptPump)
-            | Some(PauseKind::HostSandbox) => {
+            | Some(PauseKind::HostSandbox)
+            | Some(PauseKind::TesterHarness) => {
                 // Resume only a cleanly resumable Attempt: a hard-Failed or
                 // still-live peer Task means resuming could discard a hard
                 // failure or race a running Task. Such a mixed state needs the

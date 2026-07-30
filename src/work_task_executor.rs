@@ -1137,7 +1137,7 @@ fn run_review_task_with_coder(
 fn is_resumable_task_failure(error: &anyhow::Error) -> bool {
     matches!(
         classify_task_failure(error),
-        TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_)
+        TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) | TaskFailure::TesterHarness
     )
 }
 
@@ -1517,7 +1517,21 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     match tester_result {
-        Ok(()) => {}
+        Ok(crate::tester::TesterOutcome::Passed | crate::tester::TesterOutcome::TestFailures) => {}
+        Ok(crate::tester::TesterOutcome::HarnessError) => {
+            let error = anyhow::anyhow!("Tester harness could not produce trustworthy evidence");
+            lock_mark_task_failed_attempt_needs_user(
+                config.store,
+                config.store_lock,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &TaskFailure::TesterHarness,
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
         Err(error) => {
             eprintln!("  Tester error: {error:#}");
             lock_mark_task_failed_attempt_needs_user(
@@ -1895,6 +1909,8 @@ enum TaskFailure {
     /// The enclosing host sandbox rejected Fluent's real production profile
     /// before a workload launched.
     HostSandbox(String),
+    /// Tester configuration, sandbox, extraction, or result persistence failed.
+    TesterHarness,
     /// Any other persistent failure (generic coder error at the retry cap, a
     /// tester error, and the like).
     Generic,
@@ -1942,9 +1958,10 @@ fn mark_task_failed_attempt_needs_user(
         // distinct from a hard `Failed`, so a supported resume can reopen exactly
         // that Task and reject a mixed hard-Failed/still-live Attempt.
         let task_terminal = match failure {
-            TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) | TaskFailure::HostSandbox(_) => {
-                TaskStatus::NeedsUser
-            }
+            TaskFailure::Auth(_)
+            | TaskFailure::TranscriptPump(_)
+            | TaskFailure::HostSandbox(_)
+            | TaskFailure::TesterHarness => TaskStatus::NeedsUser,
             TaskFailure::Generic => TaskStatus::Failed,
         };
         crate::work_model::set_task_terminal(
@@ -1955,6 +1972,7 @@ fn mark_task_failed_attempt_needs_user(
             TaskFailure::Auth(_) => crate::work_model::PauseKind::Auth,
             TaskFailure::TranscriptPump(_) => crate::work_model::PauseKind::TranscriptPump,
             TaskFailure::HostSandbox(_) => crate::work_model::PauseKind::HostSandbox,
+            TaskFailure::TesterHarness => crate::work_model::PauseKind::TesterHarness,
             TaskFailure::Generic => crate::work_model::PauseKind::RoundCap,
         };
         // Route through the precedence boundary so a resumable pause cannot mask
@@ -1986,6 +2004,10 @@ fn mark_task_failed_attempt_needs_user(
             TaskFailure::HostSandbox(_) => notify_fn(
                 "Fluent",
                 "The enclosing macOS sandbox blocked Fluent's Seatbelt boundary. Restore it, then 'fluent attempt run' to retry the same Task.",
+            ),
+            TaskFailure::TesterHarness => notify_fn(
+                "Fluent",
+                "Tester harness failed. Repair the project Tester, then 'fluent attempt run' to retry the same Tester Task.",
             ),
             TaskFailure::Generic => {}
         }
@@ -2087,6 +2109,9 @@ fn write_task_error_handoff(
         ),
         TaskFailure::HostSandbox(diagnostic) => format!(
             "# Attempt needs user input\n\nTask {task_id:?} could not start because the enclosing macOS sandbox blocked Fluent's production Seatbelt boundary:\n\n    {diagnostic}\n\nNo coder or Tester process was launched and this did not consume a retry or write round. Restore the enclosing sandbox capability, then run `fluent attempt run {work_item_id}` to resume this same Attempt.\n"
+        ),
+        TaskFailure::TesterHarness => format!(
+            "# Tester needs repair\n\nTester Task {task_id:?} could not produce trustworthy test evidence. Repair the Tester configuration, extractor, sandbox, or result persistence, then retry this Attempt.\n"
         ),
         TaskFailure::Generic => format!(
             "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \
