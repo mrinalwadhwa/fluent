@@ -3245,8 +3245,10 @@ Test: src/credential.rs (refresh_probe_honors_configured_deadline)
 ### B3
 
 IF the refresh probe exceeds its deadline,
-THEN THE SYSTEM SHALL terminate and reap its process tree and return a typed
-authentication failure that preserves the same Attempt for recovery.
+THEN THE SYSTEM SHALL attempt to terminate and reap its owned process group. If
+Fluent confirms the sweep, it SHALL return a typed timeout authentication
+failure that preserves the same Attempt for recovery; otherwise it SHALL return
+a typed cleanup failure that retains the unconfirmed-sweep diagnostic.
 Test: src/credential.rs (refresh_probe_timeout_terminates_process_tree)
 Test: tests/binary.rs (refresh_timeout_preserves_auth_paused_attempt)
 

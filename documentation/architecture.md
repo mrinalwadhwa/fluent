@@ -941,9 +941,11 @@ When that expiry check or a transcript 401 requires a refresh,
 `credential::refresh_credentials()` runs a minimal host-side Claude probe in
 safe mode. `FLUENT_CLAUDE_REFRESH_DEADLINE_SECS` configures its wall-clock
 deadline (30 seconds by default and must be positive). The probe owns a process
-group; a deadline expires by terminating and reaping that group, including its
-descendants. Fluent rereads the Keychain only after a successful zero exit. A
-timeout or nonzero exit becomes a typed authentication failure, so the existing
+group; on deadline expiry, Fluent attempts to terminate and reap the owned group,
+including its descendants. A verified sweep returns a timeout, while an
+unconfirmed sweep returns a cleanup failure that retains its diagnostic. Fluent
+rereads the Keychain only after a successful zero exit. A timeout, cleanup
+failure, or nonzero exit becomes a typed authentication failure, so the existing
 same-Attempt `needs-user` pause directs the operator to `claude /login` without
 consuming a Writer round.
 

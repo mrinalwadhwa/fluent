@@ -146,8 +146,9 @@ where
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // The probe owns its process group. On timeout, the group is signalled while
-        // its leader remains waitable, so descendants cannot outlive the refresh.
+        // The probe owns its process group. On timeout, cleanup signals the group while
+        // its leader remains waitable, then reports a cleanup failure if it cannot
+        // confirm the sweep.
         command.process_group(0);
     }
 
