@@ -670,7 +670,7 @@ pub enum QueueCommands {
 
 #[derive(Subcommand)]
 pub enum TesterCommands {
-    /// Validate Tester configuration and extractor without running tests
+    /// Validate Tester readiness and run declared test commands
     Check {
         /// Disable sandbox
         #[arg(long)]

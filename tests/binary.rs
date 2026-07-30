@@ -9670,7 +9670,7 @@ fn tester_check_reports_all_structural_problems_before_commands() {
 
     fluent_cmd()
         .current_dir(&main_dir)
-        .args(["tester", "check", "--no-sandbox"])
+        .args(["tester", "check"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("tester.yaml"))
@@ -9686,6 +9686,7 @@ fn tester_check_uses_production_tester_boundary() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let sentinel = tmp.path().join("tester-command-ran");
+    let boundary_log = tmp.path().join("tester-boundary.log");
     fs::write(
         main_dir.join(".fluent/tester.yaml"),
         format!(
@@ -9698,10 +9699,156 @@ fn tester_check_uses_production_tester_boundary() {
     fluent_cmd()
         .current_dir(&main_dir)
         .args(["tester", "check", "--no-sandbox"])
+        .env("FLUENT_TEST_TESTER_BOUNDARY_LOG", &boundary_log)
         .assert()
         .success()
         .stdout(predicate::str::contains("Tester passed"));
     assert!(sentinel.exists(), "tester check must run declared commands");
+    assert_eq!(
+        fs::read_to_string(&boundary_log).unwrap(),
+        "run_with_sandbox_profile sandboxed=false\n",
+        "tester check must enter the production runner that owns command execution and normalization"
+    );
+}
+
+#[test]
+fn tester_recovery_reruns_same_tester_without_writer() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-tester-recovery");
+    let writer_counter = tmp.path().join("writer-count");
+    write_mock_claude(
+        &bin_dir,
+        &format!(
+            r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if printf '%s' "$PROMPT" | grep -q "seeding fluent"; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"none","follow_ups":[]}}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-*-work-1-attempt-1)
+    count=$(cat '{counter}' 2>/dev/null || echo 0)
+    count=$((count + 1))
+    echo "$count" > '{counter}'
+    printf 'writer output\n' > writer-output.txt
+    git add writer-output.txt
+    git commit -m "Add writer output" >/dev/null 2>&1
+    ;;
+  *) printf 'Verdict: pass\n\nLooks good.\n' > review.md ;;
+esac
+exit 0
+"##,
+            counter = writer_counter.display()
+        ),
+    );
+
+    fs::write(
+        main_dir.join(".fluent/extract-tester-results"),
+        "#!/bin/sh\necho not-json\n",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["add", ".fluent/extract-tester-results"],
+        "stage broken Tester fixture",
+    )
+    .unwrap();
+    git::run(
+        &main_dir,
+        &["commit", "-m", "Configure broken Tester fixture"],
+        "commit broken Tester fixture",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Tester recovery",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let _first = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .output()
+        .unwrap();
+    let paused = work_item_value(&main_dir, "work-1");
+    assert_eq!(
+        paused["attempts"][0]["status"],
+        "needs-user",
+        "broken extractor must pause the Attempt: stdout={} stderr={} state={paused}",
+        String::from_utf8_lossy(&_first.stdout),
+        String::from_utf8_lossy(&_first.stderr),
+    );
+    assert_eq!(paused["attempts"][0]["pause_kind"], "tester-harness");
+    assert_eq!(fs::read_to_string(&writer_counter).unwrap().trim(), "1");
+
+    let candidate_workspace = main_dir.join(
+        paused["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["kind"] == "tester")
+            .unwrap()["review_context"]["candidate_workspace_path"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::write(
+        candidate_workspace.join(".fluent/extract-tester-results"),
+        "#!/bin/sh\necho '[]'\n",
+    )
+    .unwrap();
+    git::run(
+        &candidate_workspace,
+        &["add", ".fluent/extract-tester-results"],
+        "stage repaired Tester fixture",
+    )
+    .unwrap();
+    git::run(
+        &candidate_workspace,
+        &["commit", "-m", "Repair Tester fixture"],
+        "commit repaired Tester fixture",
+    )
+    .unwrap();
+    let resumed = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "repairing the Tester must resume the same Attempt: stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&writer_counter).unwrap().trim(),
+        "1",
+        "resuming a Tester harness pause must not rerun the completed Writer"
+    );
 }
 
 #[test]

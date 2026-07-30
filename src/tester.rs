@@ -54,6 +54,20 @@ pub struct TesterError {
     pub details: String,
 }
 
+#[derive(Debug)]
+struct NormalizationError {
+    kind: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for NormalizationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NormalizationError {}
+
 /// The trustworthy result of executing the Tester boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TesterOutcome {
@@ -210,6 +224,7 @@ pub fn run_with_sandbox_profile(
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
 ) -> Result<TesterOutcome> {
+    record_test_boundary(sandbox_profile.is_some());
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
     let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
     let config = match read_tester_config(&tester_yaml_path) {
@@ -284,10 +299,19 @@ pub fn run_with_sandbox_profile(
     {
         Ok(normalized) => normalized,
         Err(error) => {
+            let (kind, message) =
+                if let Some(normalization) = error.downcast_ref::<NormalizationError>() {
+                    (normalization.kind, normalization.message.clone())
+                } else {
+                    (
+                        "extractor_failure",
+                        "extract-tester-results failed".to_string(),
+                    )
+                };
             return persist_harness_error(
                 artifact_dir,
-                "extractor_failure",
-                "extract-tester-results failed".to_string(),
+                kind,
+                message,
                 truncate_tail(&format!("{error:#}"), FAILURE_EXCERPT_MAX),
             );
         }
@@ -307,6 +331,20 @@ pub fn run_with_sandbox_profile(
         TesterOutcome::TestFailures
     })
 }
+
+#[cfg(feature = "test-support")]
+fn record_test_boundary(sandboxed: bool) {
+    let Ok(path) = std::env::var("FLUENT_TEST_TESTER_BOUNDARY_LOG") else {
+        return;
+    };
+    let _ = fs::write(
+        path,
+        format!("run_with_sandbox_profile sandboxed={sandboxed}\n"),
+    );
+}
+
+#[cfg(not(feature = "test-support"))]
+fn record_test_boundary(_: bool) {}
 
 fn persist_harness_error(
     artifact_dir: &Path,
@@ -371,7 +409,11 @@ fn extract_and_normalize(
     let tests = run_extractor(extractor_path, artifact_dir, sandbox_path)?;
     let duplicate_ids = find_duplicate_ids(&tests);
     if !duplicate_ids.is_empty() {
-        anyhow::bail!("Duplicate test ids: {}", duplicate_ids.join(", "));
+        return Err(NormalizationError {
+            kind: "duplicate_test_ids",
+            message: format!("Duplicate test ids: {}", duplicate_ids.join(", ")),
+        }
+        .into());
     }
     let mut tests = cap_failure_excerpts(tests);
     tests.sort_by(|a, b| {
