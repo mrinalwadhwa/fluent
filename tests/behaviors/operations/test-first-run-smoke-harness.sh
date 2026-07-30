@@ -358,6 +358,25 @@ JQ
   chmod +x "$dir/jq"
 }
 
+# Fail only the init-stage checkpoint after configured init has generated and
+# committed its files. The resumed run must repeat that idempotent stage without
+# creating a second initialization commit, Work Item, or Attempt.
+write_init_checkpoint_crashing_jq() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_jq
+  real_jq="$(command -v jq)"
+  cat > "$dir/jq" <<JQ
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--arg" ] && [ "\${2:-}" = "v" ] && [ "\${3:-}" = "init" ]; then
+  printf '{ "schema_version": 1, "run_stage": '
+  exit 1
+fi
+exec "$real_jq" "\$@"
+JQ
+  chmod +x "$dir/jq"
+}
+
 # Write a fake installer that always fails without producing a binary.
 write_failing_installer() {
   local installer_path="$1"
@@ -800,6 +819,37 @@ test_failure_preserves_evidence_and_resume() {
   [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
     || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
   assert_contains "$(cat "$WORK/resume.out")" "ready Merge Candidate" || rc=1
+  return $rc
+}
+
+test_run_resume_after_init_commit_does_not_duplicate_work_state() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  local crash_bin="$WORK/crashing-init-checkpoint-jq-bin"
+  write_init_checkpoint_crashing_jq "$crash_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$crash_bin:$PATH" \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should fail at the init checkpoint\n'; rc=1
+  fi
+  [ "$(jq -r '.run_stage' "$ROOT/harness/manifest.json")" = "installed" ] \
+    || { printf '    FAIL: init checkpoint advanced despite its write failure\n'; rc=1; }
+  [ "$(git -C "$ROOT/project/main" log --format=%s | grep -Fc 'Initialize Fluent smoke fixture')" -eq 1 ] \
+    || { printf '    FAIL: init did not commit exactly once before the checkpoint failure\n'; rc=1; }
+
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: run resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(grep -c '^work-item create$' "$FAKE_CMD_LOG")" -eq 1 ] \
+    || { printf '    FAIL: resume duplicated the Work Item\n'; rc=1; }
+  [ "$(grep -c '^attempt create$' "$FAKE_CMD_LOG")" -eq 1 ] \
+    || { printf '    FAIL: resume duplicated the Attempt\n'; rc=1; }
+  [ "$(git -C "$ROOT/project/main" log --format=%s | grep -Fc 'Initialize Fluent smoke fixture')" -eq 1 ] \
+    || { printf '    FAIL: resume duplicated the initialization commit\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
   return $rc
 }
 
@@ -1620,6 +1670,8 @@ run_test "land failure preserves evidence and resume" \
   test_land_failure_preserves_evidence_and_resume
 run_test "failure preserves evidence and resume" \
   test_failure_preserves_evidence_and_resume
+run_test "run resume after init commit does not duplicate work state" \
+  test_run_resume_after_init_commit_does_not_duplicate_work_state
 run_test "installer failure preserves evidence and resume" \
   test_installer_failure_preserves_evidence_and_resume
 run_test "prepare failure preserves evidence and resume" \
