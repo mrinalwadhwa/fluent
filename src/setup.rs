@@ -105,7 +105,9 @@ fn provider_ready(provider: CoderKind) -> Result<()> {
     let mut command = Command::new(program);
     match provider {
         CoderKind::Claude => { command.args(["auth", "status", "--json"]); }
-        CoderKind::Pi => {}
+        CoderKind::Pi => {
+            command.arg("--version");
+        }
         CoderKind::Codex => unreachable!("Codex returns above"),
     }
     let status = command.status().with_context(|| format!("{program}: command is not installed"))?;

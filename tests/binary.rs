@@ -1628,7 +1628,7 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\nprintf 'codex %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2\" = \"login status\" ]\n");
     write_mock_executable(&bin_dir, "claude", "#!/bin/bash\nprintf 'claude %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2 $3\" = \"auth status --json\" ]\n");
-    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\nprintf 'pi\\n' >> \"${PREFLIGHT_LOG:?}\"\nexit 0\n");
+    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\n[ \"$#\" -gt 0 ] || { printf 'bare pi\\n' >> \"${PREFLIGHT_LOG:?}\"; exit 77; }\nprintf 'pi %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1\" = \"--version\" ]\n");
 
     fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home).env("PREFLIGHT_LOG", &log)
         .args(["init", "--coder-profile", "custom", "--follow-up-mode", "propose",
@@ -1639,7 +1639,8 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     let calls = fs::read_to_string(log).unwrap();
     assert!(calls.contains("codex login status"));
     assert!(calls.contains("claude auth status --json"));
-    assert!(calls.contains("pi"));
+    assert!(calls.contains("pi --version"));
+    assert!(!calls.contains("bare pi"));
 }
 
 #[test]
