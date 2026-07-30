@@ -41,6 +41,11 @@ pub struct CodexWorkerEnvironment {
 impl CodexWorkerEnvironment {
     /// Prepare a private worker home from the effective source `CODEX_HOME`.
     pub fn prepare() -> std::result::Result<Self, CodexAuthError> {
+        #[cfg(feature = "test-support")]
+        if env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some() {
+            return Self::prepare_hermetic_fixture_worker();
+        }
+
         #[cfg(test)]
         {
             return Self::prepare_test_worker();
@@ -55,6 +60,11 @@ impl CodexWorkerEnvironment {
     /// the public production entry point with an explicit authentication source.
     #[cfg(test)]
     fn prepare_test_worker() -> std::result::Result<Self, CodexAuthError> {
+        Self::prepare_hermetic_fixture_worker()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn prepare_hermetic_fixture_worker() -> std::result::Result<Self, CodexAuthError> {
         let source = tempfile::tempdir().map_err(|error| {
             CodexAuthError::new(format!("cannot create test authentication source: {error}"))
         })?;
