@@ -567,8 +567,10 @@ phase_run() {
   esac
 
   checkpoint "$root" "run" "$manifest_log" "merge_candidate_id" "$cand"
+  cp "$logs/candidate.json" "$(evidence_dir "$root")/merge-candidate.json" \
+    >> "$manifest_log" 2>&1 \
+    || fail_phase "$root" "run" "$manifest_log" "run"
   checkpoint "$root" "run" "$manifest_log" "safe_phase" "ran"
-  cp "$logs/candidate.json" "$(evidence_dir "$root")/merge-candidate.json"
 
   print_ready_handoff "$root" "$wi" "$cand"
 }
@@ -667,8 +669,10 @@ phase_land() {
   fi
 
   checkpoint "$root" "land" "$manifest_log" "merged_commit" "$merged"
+  cp "$logs/landed-candidate.json" "$(evidence_dir "$root")/merged-candidate.json" \
+    >> "$manifest_log" 2>&1 \
+    || fail_phase "$root" "land" "$manifest_log" "land"
   checkpoint "$root" "land" "$manifest_log" "safe_phase" "landed"
-  cp "$logs/landed-candidate.json" "$(evidence_dir "$root")/merged-candidate.json"
 
   info "Landed Merge Candidate $cand"
   info "  merged commit: $merged"

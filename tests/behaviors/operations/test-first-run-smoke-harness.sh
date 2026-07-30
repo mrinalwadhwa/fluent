@@ -233,6 +233,27 @@ MKDIR
   chmod +x "$dir/mkdir"
 }
 
+# Write a fake `cp` that fails when the destination matches $FAILING_CP_DEST,
+# into <dir>/cp. Placed first on PATH, it makes one evidence-copy call fail
+# so the durable failure-and-resume contract can be exercised.
+write_failing_cp() {
+  local dir="$1"
+  mkdir -p "$dir"
+  local real_cp
+  real_cp="$(command -v cp)"
+  cat > "$dir/cp" <<CP
+#!/usr/bin/env bash
+last=''
+for a in "\$@"; do last="\$a"; done
+if [ "\${FAILING_CP_DEST:-}" != "" ] && [ "\$last" = "\$FAILING_CP_DEST" ]; then
+  printf 'cp: simulated copy failure to: %s\n' "\$last" >&2
+  exit 1
+fi
+exec "$real_cp" "\$@"
+CP
+  chmod +x "$dir/cp"
+}
+
 # Write a fake `jq` that crashes mid-write for a manifest update, into <dir>/jq.
 # manifest_set invokes `jq --arg v <value> ...`; the fake emits a partial JSON
 # document to stdout and exits non-zero for exactly that form, modelling a crash
@@ -1028,6 +1049,84 @@ test_automated_test_uses_only_local_doubles() {
   return $rc
 }
 
+test_run_evidence_copy_fails_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+
+  # Inject a cp failure for the run-phase evidence copy that occurs before
+  # safe_phase is advanced to "ran".
+  local trap_bin="$WORK/failing-cp-bin"
+  write_failing_cp "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    FAILING_CP_DEST="$ROOT/evidence/merge-candidate.json" \
+    bash "$HARNESS" run "$ROOT" > "$WORK/run.out" 2>&1; then
+    printf '    FAIL: run should exit non-zero when the evidence copy fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/run.out")"
+  # The smoke root is preserved with the failed phase, its log, and a resume.
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "run" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/manifest.log" || rc=1
+  assert_contains "$out" "run $ROOT" || rc=1
+  # The safe phase must not advance to "ran" when the evidence copy fails.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "prepared" ] \
+    || { printf '    FAIL: safe_phase advanced past the evidence copy failure\n'; rc=1; }
+
+  # Clear the injected failure and resume. It must reach a ready candidate.
+  run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
+    || { printf '    FAIL: run resume did not reach a ready candidate\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: resume did not reach the ready phase\n'; rc=1; }
+  assert_contains "$(cat "$WORK/resume.out")" "ready Merge Candidate" || rc=1
+  return $rc
+}
+
+test_land_evidence_copy_fails_preserves_evidence_and_resume() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
+  run_harness run "$ROOT" > /dev/null 2>&1
+
+  # Inject a cp failure for the land-phase evidence copy that occurs before
+  # safe_phase is advanced to "landed".
+  local trap_bin="$WORK/failing-cp-bin"
+  write_failing_cp "$trap_bin"
+
+  local rc=0
+  if HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" PATH="$trap_bin:$PATH" \
+    FAILING_CP_DEST="$ROOT/evidence/merged-candidate.json" \
+    bash "$HARNESS" land "$ROOT" > "$WORK/land.out" 2>&1; then
+    printf '    FAIL: land should exit non-zero when the evidence copy fails\n'; rc=1
+  fi
+  local out; out="$(cat "$WORK/land.out")"
+  # The smoke root is preserved with the failed phase, its log, and a resume.
+  [ -d "$ROOT/project/main/.git" ] \
+    || { printf '    FAIL: smoke root not preserved\n'; rc=1; }
+  assert_contains "$out" 'phase "land" failed' || rc=1
+  assert_contains "$out" "$ROOT/harness/logs/manifest.log" || rc=1
+  assert_contains "$out" "land $ROOT" || rc=1
+  # The safe phase must not advance to "landed" when the evidence copy fails.
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "ran" ] \
+    || { printf '    FAIL: safe_phase advanced past the evidence copy failure\n'; rc=1; }
+  # The merge itself completed; the fixture test passes on main.
+  ( cd "$ROOT/project/main" && ./check.sh ) 2>/dev/null \
+    || { printf '    FAIL: candidate was not actually merged before the copy failure\n'; rc=1; }
+
+  # Clear the injected failure and resume. The precheck sees the already-merged
+  # candidate, skips re-landing, and completes verification.
+  run_harness land "$ROOT" > "$WORK/land-resume.out" 2>&1 \
+    || { printf '    FAIL: land resume did not complete\n'; rc=1; }
+  [ "$(jq -r '.safe_phase' "$ROOT/harness/manifest.json")" = "landed" ] \
+    || { printf '    FAIL: resume did not reach the landed phase\n'; rc=1; }
+  return $rc
+}
+
 printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
@@ -1064,5 +1163,9 @@ run_test "land replay safe after post-land failure" \
 run_test "moved smoke root is rejected" test_moved_smoke_root_is_rejected
 run_test "automated test uses only local doubles" \
   test_automated_test_uses_only_local_doubles
+run_test "run evidence copy fails preserves evidence and resume" \
+  test_run_evidence_copy_fails_preserves_evidence_and_resume
+run_test "land evidence copy fails preserves evidence and resume" \
+  test_land_evidence_copy_fails_preserves_evidence_and_resume
 
 summarize_and_exit

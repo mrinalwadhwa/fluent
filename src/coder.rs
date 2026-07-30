@@ -4390,16 +4390,28 @@ mod model_default_tests {
             "hostile descendant actually executed"
         );
         let pid = std::fs::read_to_string(pid_path).unwrap();
-        let status = Command::new("/bin/kill")
-            .args(["-0", pid.trim()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(
-            !status.success(),
-            "background descendant survived coder return"
-        );
+        // A killed process may linger as a zombie while init reaps it. Poll
+        // until the process table entry is gone rather than racing init.
+        let gone = {
+            let deadline =
+                std::time::Instant::now() + Duration::from_millis(500);
+            let mut cleared = false;
+            while std::time::Instant::now() < deadline {
+                let s = Command::new("/bin/kill")
+                    .args(["-0", pid.trim()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap();
+                if !s.success() {
+                    cleared = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cleared
+        };
+        assert!(gone, "background descendant survived coder return");
         std::thread::sleep(Duration::from_millis(300));
         assert!(
             !denied_path.exists(),
