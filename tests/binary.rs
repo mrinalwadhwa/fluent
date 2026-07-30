@@ -23117,6 +23117,7 @@ git commit -m "Add environment auth output" >/dev/null
         .env("HOME", &home)
         .env_remove("CODEX_HOME")
         .env("OPENAI_API_KEY", "environment-test-key")
+        .env("FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL", "OPENAI_API_KEY")
         .env("FLUENT_TEST_CODEX_INVOCATIONS", &invocation_log)
         .assert()
         .success();

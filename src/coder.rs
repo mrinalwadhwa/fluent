@@ -1182,6 +1182,18 @@ fn restrict_test_provider_credentials(cmd: &mut Command) {
     if std::env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_none() {
         return;
     }
+    let permitted = std::env::var("FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL")
+        .ok()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "ANTHROPIC_API_KEY"
+                    | "ANTHROPIC_AUTH_TOKEN"
+                    | "CLAUDE_CODE_OAUTH_TOKEN"
+                    | "OPENAI_API_KEY"
+                    | "PI_API_KEY"
+            )
+        });
     for name in [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
@@ -1189,7 +1201,9 @@ fn restrict_test_provider_credentials(cmd: &mut Command) {
         "OPENAI_API_KEY",
         "PI_API_KEY",
     ] {
-        cmd.env_remove(name);
+        if permitted.as_deref() != Some(name) {
+            cmd.env_remove(name);
+        }
     }
 }
 
