@@ -7065,16 +7065,18 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
     assert_eq!(dispatch_count(&main_dir, DERIVED_FU1), 1);
     assert_eq!(latest_dispatch_status(&main_dir, DERIVED_FU1), "queued");
 
-    let scheduler = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(&main_dir)
-        .env("PATH", mock_path(&bin_dir))
-        .env("FLUENT_NO_UPDATE_CHECK", "1")
-        .env_remove("FLUENT_TASK_KIND")
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let scheduler = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main_dir)
+            .env("PATH", mock_path(&bin_dir))
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .env_remove("FLUENT_TASK_KIND")
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     let reached_terminal = poll_until(std::time::Duration::from_secs(60), || {
         matches!(
             latest_dispatch_status(&main_dir, DERIVED_FU1).as_str(),
@@ -7082,8 +7084,8 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
         )
     });
     let terminal_status = latest_dispatch_status(&main_dir, DERIVED_FU1);
-    send_signal(scheduler.id(), "TERM");
-    let scheduler_output = scheduler.wait_with_output().unwrap();
+    send_signal(scheduler.child.id(), "TERM");
+    let scheduler_output = scheduler.child.wait_with_output().unwrap();
     assert!(
         reached_terminal,
         "scheduler did not reach a terminal dispatch within 60 seconds; status={terminal_status}"
@@ -17592,17 +17594,19 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
     )
     .unwrap();
 
-    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(tmp.path())
-        .args(["auto-merge", "wi-skip", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(tmp.path())
+            .args(["auto-merge", "wi-skip", "--poll-seconds", "1"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    send_signal(child.id(), "INT");
-    let output = child.wait_with_output().unwrap();
+    send_signal(child.child.id(), "INT");
+    let output = child.child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("[auto-merge] merged"),
@@ -17627,17 +17631,19 @@ fn auto_merge_exits_clean_on_sigterm() {
         .output()
         .unwrap();
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(tmp.path())
-        .args(["auto-merge", "wi-sig", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(tmp.path())
+            .args(["auto-merge", "wi-sig", "--poll-seconds", "1"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    send_signal(child.id(), "TERM");
-    let status = child.wait().unwrap();
+    send_signal(child.child.id(), "TERM");
+    let status = child.child.wait().unwrap();
     assert!(
         status.success(),
         "auto-merge should exit cleanly on SIGTERM"
@@ -18373,16 +18379,18 @@ fn work_scheduler_run_exits_clean_on_sigterm_when_idle() {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
 
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(tmp.path())
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(tmp.path())
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    send_signal(child.id(), "TERM");
-    let status = child.wait().unwrap();
+    send_signal(child.child.id(), "TERM");
+    let status = child.child.wait().unwrap();
     assert!(
         status.success(),
         "scheduler should exit cleanly on SIGTERM when idle"
