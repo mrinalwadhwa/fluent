@@ -271,6 +271,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                         &LearnerConfig {
                             run_coder: &run_coder,
                             codex_worker: None,
+                            #[cfg(not(test))]
+                            provider_readiness: None,
                             no_sandbox: config.no_sandbox,
                         },
                     )?;
@@ -481,6 +483,8 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                 Some(LearnerConfig {
                     run_coder: &run_coder,
                     codex_worker: None,
+                    #[cfg(not(test))]
+                    provider_readiness: None,
                     no_sandbox: config.no_sandbox,
                 }),
             )?;
@@ -526,10 +530,14 @@ fn default_learner_run_coder(
     // LearnerRunInputs; the public constructor never names the private pump config.
     let capture =
         crate::coder::TranscriptCapture::new(request.transcript_path, config.project_root);
+    #[cfg(not(test))]
+    let prepared_provider_readiness = request.provider_readiness;
+    #[cfg(test)]
+    let prepared_provider_readiness = None;
     // The public `handoff_only` Boolean only distinguishes capture from post-land;
     // the internal mode is passed explicitly so a pre-land no-expertise run selects
     // its confinement without a contradictory Boolean.
-    work_task_executor::run_learner_captured_in_mode_with_codex_worker(
+    work_task_executor::run_learner_captured_in_mode_with_provider_readiness(
         work_task_executor::LearnerRunInputs {
             workspace_path: request.workspace_path,
             resolver: config.resolver,
@@ -549,6 +557,7 @@ fn default_learner_run_coder(
         request.mode,
         Some(capture),
         request.codex_worker,
+        prepared_provider_readiness,
         request.prepared_sandbox,
     )
 }
@@ -949,6 +958,8 @@ pub(crate) struct LearnerCoderRequest<'a> {
     effort: Option<&'a str>,
     mode: work_task_executor::LearnerExecutionMode,
     codex_worker: Option<&'a crate::codex_worker::CodexWorkerEnvironment>,
+    #[cfg(not(test))]
+    provider_readiness: Option<&'a crate::provider_readiness::ProviderReadiness>,
     /// When set, a bounded schema repair rather than a fresh audit.
     repair: Option<work_task_executor::SchemaRepairInput<'a>>,
     prepared_sandbox: Option<&'a work_task_executor::PreparedLearnerSandbox>,
@@ -960,6 +971,8 @@ pub(crate) struct LearnerCoderRequest<'a> {
 struct LearnerConfig<'a> {
     run_coder: &'a dyn Fn(&LearnerCoderRequest<'_>) -> Result<()>,
     codex_worker: Option<&'a crate::codex_worker::CodexWorkerEnvironment>,
+    #[cfg(not(test))]
+    provider_readiness: Option<&'a crate::provider_readiness::ProviderReadiness>,
     no_sandbox: bool,
 }
 
@@ -1127,6 +1140,8 @@ fn run_learner_step(
     let config = LearnerConfig {
         run_coder: config.run_coder,
         codex_worker: provider_readiness.codex_worker(),
+        #[cfg(not(test))]
+        provider_readiness: Some(&provider_readiness),
         no_sandbox: config.no_sandbox,
     };
 
@@ -2074,6 +2089,8 @@ fn try_learn(
         effort: effort.as_deref(),
         mode,
         codex_worker: config.codex_worker,
+        #[cfg(not(test))]
+        provider_readiness: config.provider_readiness,
         repair: None,
         prepared_sandbox: prepared_run.sandbox.as_ref(),
     });
@@ -2179,6 +2196,8 @@ fn try_learn(
                     effort: effort.as_deref(),
                     mode,
                     codex_worker: config.codex_worker,
+                    #[cfg(not(test))]
+                    provider_readiness: config.provider_readiness,
                     repair: Some(work_task_executor::SchemaRepairInput {
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,
@@ -2289,6 +2308,8 @@ fn run_pre_land_learner(
         effort: ctx.effort,
         mode: work_task_executor::LearnerExecutionMode::Capture,
         codex_worker: config.codex_worker,
+        #[cfg(not(test))]
+        provider_readiness: config.provider_readiness,
         repair: None,
         prepared_sandbox: ctx.prepared_sandbox,
     });
@@ -2344,6 +2365,8 @@ fn run_pre_land_learner(
                     effort: ctx.effort,
                     mode: work_task_executor::LearnerExecutionMode::Capture,
                     codex_worker: config.codex_worker,
+                    #[cfg(not(test))]
+                    provider_readiness: config.provider_readiness,
                     repair: Some(work_task_executor::SchemaRepairInput {
                         rejected_draft: &rejected_draft,
                         validation_error: &validation_error,

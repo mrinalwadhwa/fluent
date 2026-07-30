@@ -3325,23 +3325,25 @@ pub(crate) fn run_learner_captured_in_mode(
     )
 }
 
-/// Run a Learner with a Codex worker environment prepared before its durable
-/// reservation. The caller retains the guard until this launch returns.
-pub(crate) fn run_learner_captured_in_mode_with_codex_worker(
+/// Run a Learner with provider readiness prepared before its durable reservation.
+/// The caller retains the readiness state until this launch returns.
+pub(crate) fn run_learner_captured_in_mode_with_provider_readiness(
     inputs: LearnerRunInputs<'_>,
     mode: LearnerExecutionMode,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    prepared_provider_readiness: Option<&crate::provider_readiness::ProviderReadiness>,
     prepared_sandbox: Option<&PreparedLearnerSandbox>,
 ) -> Result<()> {
     let coder_kind = inputs.coder_kind;
     let model = inputs.model.map(|s| s.to_string());
     let effort = inputs.effort.map(|s| s.to_string());
-    run_learner_with_coder_with_codex_worker(
+    run_learner_with_coder_with_provider_readiness(
         inputs,
         mode,
         capture,
         codex_worker,
+        prepared_provider_readiness,
         prepared_sandbox,
         HostPreparation::Production,
         move |sandbox| coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref()),
@@ -3415,10 +3417,11 @@ fn run_learner_with_coder(
     mut host_preparation: HostPreparation<'_>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
-    run_learner_with_coder_with_codex_worker(
+    run_learner_with_coder_with_provider_readiness(
         inputs,
         mode,
         capture,
+        None,
         None,
         None,
         host_preparation,
@@ -3426,11 +3429,12 @@ fn run_learner_with_coder(
     )
 }
 
-fn run_learner_with_coder_with_codex_worker(
+fn run_learner_with_coder_with_provider_readiness(
     inputs: LearnerRunInputs<'_>,
     mode: LearnerExecutionMode,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
     prepared_codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    prepared_provider_readiness: Option<&crate::provider_readiness::ProviderReadiness>,
     prepared_sandbox: Option<&PreparedLearnerSandbox>,
     mut host_preparation: HostPreparation<'_>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
@@ -3439,7 +3443,7 @@ fn run_learner_with_coder_with_codex_worker(
 
     // The guard survives until the process has completed, reclaiming the
     // isolated authentication copy even when launch or execution fails.
-    let local_provider_readiness = if prepared_codex_worker.is_none() && !cfg!(test) {
+    let local_provider_readiness = if prepared_provider_readiness.is_none() && !cfg!(test) {
         Some(
             crate::provider_readiness::ProviderReadiness::prepare(inputs.coder_kind)
                 .map_err(anyhow::Error::new)?,
@@ -3447,9 +3451,11 @@ fn run_learner_with_coder_with_codex_worker(
     } else {
         None
     };
-    let codex_worker = prepared_codex_worker.or(local_provider_readiness
-        .as_ref()
-        .and_then(|readiness| readiness.codex_worker()));
+    let codex_worker = prepared_codex_worker
+        .or(prepared_provider_readiness.and_then(|readiness| readiness.codex_worker()))
+        .or(local_provider_readiness
+            .as_ref()
+            .and_then(|readiness| readiness.codex_worker()));
 
     let workspace_path = inputs.workspace_path;
     let workspace_resolver = ContentResolver::new(Some(workspace_path));

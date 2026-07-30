@@ -4227,6 +4227,104 @@ exit 0
     .to_string()
 }
 
+fn write_readiness_counting_learner_mock(
+    bin_dir: &Path,
+    provider: &str,
+    learner_script: &str,
+) {
+    let learner_body = learner_script
+        .strip_prefix("#!/bin/bash\n")
+        .unwrap_or(learner_script);
+    let readiness = match provider {
+        "claude" => "if [ \"$1 $2 $3\" = \"auth status --json\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; printf '{\\\"loggedIn\\\":true}\\n'; exit 0; fi",
+        "pi" => "if [ \"$1\" = \"--version\" ]; then printf 'ready\\n' >> \"${READINESS_LOG:?}\"; exit 0; fi",
+        _ => panic!("unsupported readiness-counting provider: {provider}"),
+    };
+    write_mock_executable(
+        bin_dir,
+        provider,
+        &format!(
+            "#!/bin/bash\n{readiness}\n{}{}",
+            BEHAVIOR_TESTS_MOCK_PRELUDE.strip_prefix("#!/bin/bash\n").unwrap(),
+            learner_body
+        ),
+    );
+}
+
+fn assert_learner_readiness_is_not_rechecked_after_reservation(provider: &str) {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join(format!("bin-learner-{provider}-readiness"));
+    let readiness_log = tmp.path().join("readiness.log");
+    write_readiness_counting_learner_mock(
+        &bin_dir,
+        provider,
+        &learner_failing_mock_script(),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Learner"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "create",
+            "work-1",
+            "attempt-1",
+            "--coder",
+            provider,
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("READINESS_LOG", &readiness_log)
+        .assert()
+        .success();
+
+    let readiness_before_retry = fs::read_to_string(&readiness_log)
+        .unwrap()
+        .lines()
+        .count();
+    write_readiness_counting_learner_mock(
+        &bin_dir,
+        provider,
+        &learner_mock_script(r#"{"learning_summary":"learned","follow_ups":[]}"#),
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("READINESS_LOG", &readiness_log)
+        .assert()
+        .success();
+
+    let readiness_after_retry = fs::read_to_string(&readiness_log)
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(
+        readiness_after_retry - readiness_before_retry,
+        1,
+        "the {provider} Learner must use its pre-reservation readiness check rather than run a second one after reserving"
+    );
+}
+
+#[test]
+fn claude_learner_uses_one_readiness_check_per_reserved_run() {
+    assert_learner_readiness_is_not_rechecked_after_reservation("claude");
+}
+
+#[test]
+fn pi_learner_uses_one_readiness_check_per_reserved_run() {
+    assert_learner_readiness_is_not_rechecked_after_reservation("pi");
+}
+
 #[test]
 fn learner_failure_blocks_candidate_readiness() {
     let tmp = TempDir::new().unwrap();
