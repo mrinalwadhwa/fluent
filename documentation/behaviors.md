@@ -3226,8 +3226,10 @@ Untestable: Structural absence verified by code inspection — `CodexCode::run` 
 WHEN a coder session fails with an auth 401, or the pre-launch
 expiry check finds the token expired,
 THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
-and re-run the coder session before treating the 401 as a task
-failure.
+and re-run the coder session only after the probe succeeds and Fluent rereads
+credentials. If the probe times out or exits unsuccessfully, THE SYSTEM SHALL
+pause the existing Attempt for authentication recovery before a Writer round is
+consumed.
 Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
 
 ### B2
@@ -3274,7 +3276,7 @@ Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
 
 ### B8
 
-WHEN refresh-on-401-retry recovers a session (B2),
+WHEN refresh-on-401-retry recovers a session (B5/B6),
 THE SYSTEM SHALL post a local notification that it recovered after
 a credential refresh, mirroring the rate-limit resume notification.
 Test: src/coder.rs (recovered_after_refresh_posts_notification)
