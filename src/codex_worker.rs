@@ -121,9 +121,18 @@ impl ResolvedCodexLauncher {
                 });
             }
 
-            let mut readable_roots = vec![executable.clone()];
+            let package_root = canonical_package_root(&canonical_target)?;
+            let mut readable_roots = Vec::new();
             if canonical_target != executable {
-                readable_roots.push(packaged_launcher_root(&canonical_target)?);
+                readable_roots.push(executable.clone());
+                readable_roots.push(match package_root {
+                    Some(package_root) => package_root,
+                    None => canonical_launcher_directory(&canonical_target)?,
+                });
+            } else if let Some(package_root) = package_root {
+                readable_roots.push(package_root);
+            } else {
+                readable_roots.push(executable.clone());
             }
             readable_roots.sort();
             readable_roots.dedup();
@@ -148,7 +157,9 @@ impl ResolvedCodexLauncher {
     }
 }
 
-fn packaged_launcher_root(target: &Path) -> std::result::Result<PathBuf, CodexLauncherError> {
+fn canonical_package_root(
+    target: &Path,
+) -> std::result::Result<Option<PathBuf>, CodexLauncherError> {
     let target_parent = target.parent().ok_or_else(|| CodexLauncherError {
         message: format!(
             "cannot derive a readable closure for Codex launcher target {}",
@@ -157,14 +168,26 @@ fn packaged_launcher_root(target: &Path) -> std::result::Result<PathBuf, CodexLa
     })?;
     for ancestor in target_parent.ancestors().take(8) {
         if ancestor.join("package.json").is_file() {
-            return fs::canonicalize(ancestor).map_err(|error| CodexLauncherError {
-                message: format!(
-                    "cannot resolve Codex package root {}: {error}",
-                    ancestor.display()
-                ),
-            });
+            return fs::canonicalize(ancestor)
+                .map(Some)
+                .map_err(|error| CodexLauncherError {
+                    message: format!(
+                        "cannot resolve Codex package root {}: {error}",
+                        ancestor.display()
+                    ),
+                });
         }
     }
+    Ok(None)
+}
+
+fn canonical_launcher_directory(target: &Path) -> std::result::Result<PathBuf, CodexLauncherError> {
+    let target_parent = target.parent().ok_or_else(|| CodexLauncherError {
+        message: format!(
+            "cannot derive a readable closure for Codex launcher target {}",
+            target.display()
+        ),
+    })?;
     if target_parent.parent().is_none() {
         return Err(CodexLauncherError {
             message: format!(
@@ -506,6 +529,49 @@ mod tests {
             launcher.readable_roots(),
             &[lexical, fs::canonicalize(package).unwrap()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_direct_packaged_launcher_retains_package_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let package = fixture.path().join("lib/node_modules/@openai/codex");
+        let bin = package.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(package.join("package.json"), "{}").unwrap();
+        let executable = bin.join("codex");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let launcher = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap();
+
+        let executable = fs::canonicalize(executable).unwrap();
+        assert_eq!(launcher.executable(), executable);
+        assert_eq!(
+            launcher.readable_roots(),
+            &[fs::canonicalize(package).unwrap()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_direct_standalone_launcher_retains_only_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("codex");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let launcher = ResolvedCodexLauncher::resolve_from_path(&bin).unwrap();
+
+        let executable = fs::canonicalize(executable).unwrap();
+        assert_eq!(launcher.executable(), executable);
+        assert_eq!(launcher.readable_roots(), &[executable]);
     }
 
     #[test]
