@@ -1208,6 +1208,7 @@ impl Drop for RebaseCoderOverrideGuard {
 fn build_rebase_coder(
     config: &WorkMergeConfig<'_>,
     sandbox: CoderSandbox,
+    executable: Option<&Path>,
 ) -> Box<dyn crate::coder::Coder> {
     if let Some(coder) = REBASE_CODER_OVERRIDE.with(|slot| {
         slot.borrow().as_ref().map(|f| {
@@ -1220,19 +1221,26 @@ fn build_rebase_coder(
     }) {
         return coder;
     }
-    config
-        .coder_kind
-        .boxed_with_model(sandbox, config.model, config.effort)
+    config.coder_kind.boxed_with_model_and_executable(
+        sandbox,
+        config.model,
+        config.effort,
+        executable,
+    )
 }
 
 #[cfg(not(test))]
 fn build_rebase_coder(
     config: &WorkMergeConfig<'_>,
     sandbox: CoderSandbox,
+    executable: Option<&Path>,
 ) -> Box<dyn crate::coder::Coder> {
-    config
-        .coder_kind
-        .boxed_with_model(sandbox, config.model, config.effort)
+    config.coder_kind.boxed_with_model_and_executable(
+        sandbox,
+        config.model,
+        config.effort,
+        executable,
+    )
 }
 
 fn execute_merge(
@@ -1252,7 +1260,7 @@ fn execute_merge(
         target_workspace,
         artifact_dir,
         &mut base_commit,
-        |sandbox| build_rebase_coder(config, sandbox),
+        |sandbox, executable| build_rebase_coder(config, sandbox, executable),
     );
     MergeExecution {
         result,
@@ -1275,7 +1283,7 @@ fn execute_merge_with_coder(
     target_workspace: &Path,
     artifact_dir: &Path,
     base_commit: &mut Option<String>,
-    make_rebase_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_rebase_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<WorkMergeOutcome> {
     ensure_same_git_repository(config.project_root, source_workspace)?;
     ensure_same_git_repository(config.project_root, target_workspace)?;
@@ -1876,7 +1884,7 @@ fn rebase_candidate_with_coder(
     source_workspace: &Path,
     target_branch: &str,
     artifact_dir: &Path,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
     // A provider readiness failure must not create an executing Rebase Task.
     // Keep a prepared Codex home alive through the eventual sandboxed launch.
@@ -2009,7 +2017,7 @@ fn run_reserved_rebase(
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox: CoderSandbox,
     _sandbox_profile: Option<os::SandboxProfile>,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
     let system_prompt = workspace_resolver
@@ -2032,7 +2040,11 @@ fn run_reserved_rebase(
     let transcript_path = rebase_artifact_dir.join("transcript.jsonl");
 
     if !config.no_sandbox || codex_worker.is_some() {
-        os::check_prerequisites_for(config.coder_kind)?;
+        if codex_worker.is_some() {
+            os::check_sandbox_prerequisite()?;
+        } else {
+            os::check_prerequisites_for(config.coder_kind)?;
+        }
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
@@ -2049,7 +2061,10 @@ fn run_reserved_rebase(
     let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
-    let coder = make_coder(sandbox);
+    let coder = make_coder(
+        sandbox,
+        codex_worker.map(|worker| worker.launcher().executable()),
+    );
     // Persist the coder's supervision report in the rebase artifact directory, then
     // take its terminal outcome, so a group-sweep diagnostic is durable rather than
     // dropped with the ManagedChild.
@@ -2202,10 +2217,14 @@ fn preflight_rebase_sandbox(
         config.resolver,
         source_workspace,
         &[common_git_dir, rebase_artifact_dir.to_path_buf()],
-        codex_worker.map(|worker| worker.home()),
+        codex_worker,
     )?;
     if let Some(profile) = profile.as_ref() {
-        os::preflight_profile(profile)?;
+        if let Some(worker) = codex_worker {
+            os::preflight_codex_launcher(profile, worker)?;
+        } else {
+            os::preflight_profile(profile)?;
+        }
     }
     Ok((sandbox, profile))
 }
@@ -2617,23 +2636,32 @@ fn build_coder_sandbox_with_codex_home(
     resolver: &ContentResolver,
     working_dir: &Path,
     additional_writable_roots: &[PathBuf],
-    codex_home: Option<&Path>,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
 ) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut roots = vec![working_dir.to_path_buf()];
     roots.extend(additional_writable_roots.iter().cloned());
-    let profile = if let Some(codex_home) = codex_home {
+    let readable_roots = codex_worker
+        .map(|worker| worker.launcher().readable_roots())
+        .unwrap_or_default();
+    let profile = if let Some(worker) = codex_worker {
         os::render_profile_for_access_for_coder_with_denied_writes_and_codex_home(
             resolver,
             &home,
             &roots,
-            &[],
+            readable_roots,
             &[],
             coder_kind,
-            Some(codex_home),
+            Some(worker.home()),
         )?
     } else {
-        os::render_profile_for_access_for_coder(resolver, &home, &roots, &[], coder_kind)?
+        os::render_profile_for_access_for_coder(
+            resolver,
+            &home,
+            &roots,
+            readable_roots,
+            coder_kind,
+        )?
     };
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
     Ok((sandbox, Some(profile)))
@@ -3019,7 +3047,7 @@ mod tests {
             &source_workspace,
             "main",
             &artifact_dir,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingRebaseCoder {
                     recorded: recorded_for_coder,
                     outcome: FakeOutcome::GenericError(
@@ -3153,7 +3181,7 @@ mod tests {
             &source_workspace,
             "main",
             &artifact_dir,
-            move |_sandbox| Box::new(SupervisionRebaseCoder),
+            move |_sandbox, _executable| Box::new(SupervisionRebaseCoder),
         );
         assert!(
             artifact_dir
@@ -3207,7 +3235,7 @@ mod tests {
             &source_workspace,
             "main",
             &artifact_dir,
-            |_sandbox| {
+            |_sandbox, _executable| {
                 Box::new(RecordingRebaseCoder {
                     recorded: std::sync::Arc::new(std::sync::Mutex::new(None)),
                     outcome: FakeOutcome::PumpError(
@@ -3692,7 +3720,7 @@ mod tests {
             &target_workspace,
             &artifact_dir,
             &mut base_commit,
-            |_sandbox| {
+            |_sandbox, _executable| {
                 Box::new(RecordingRebaseCoder {
                     recorded: std::sync::Arc::new(std::sync::Mutex::new(None)),
                     outcome: FakeOutcome::PumpError(

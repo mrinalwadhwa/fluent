@@ -553,9 +553,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.resolver,
         config.no_sandbox,
         plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?,
-        provider_readiness
-            .codex_worker()
-            .map(|worker| worker.home()),
+        provider_readiness.codex_worker(),
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -950,9 +948,7 @@ fn run_review_task_with_coder(
         config.resolver,
         config.no_sandbox,
         plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
-        provider_readiness
-            .codex_worker()
-            .map(|worker| worker.home()),
+        provider_readiness.codex_worker(),
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -2479,12 +2475,12 @@ fn preflight_write_sandbox_profile(
     resolver: &ContentResolver,
     no_sandbox: bool,
     coder_kind: CoderKind,
-    codex_home: Option<&Path>,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
 ) -> Result<Option<os::SandboxProfile>> {
     // Test-support may exercise a nested Codex route without applying a
     // Seatbelt profile. Keep that exception explicit and feature-gated: the
     // production Codex worker continues to require its source-home boundary.
-    if no_sandbox && (codex_home.is_none() || test_hermetic_no_sandbox()) {
+    if no_sandbox && (codex_worker.is_none() || test_hermetic_no_sandbox()) {
         return Ok(None);
     }
 
@@ -2493,6 +2489,9 @@ fn preflight_write_sandbox_profile(
     let mut readable_roots = input_artifact_readable_roots(prior_reviews);
     readable_roots.push(planning_files_dir(project_root, &task.work_item_id));
     readable_roots.push(general_expertise_dir(project_root));
+    if let Some(worker) = codex_worker {
+        readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
+    }
 
     let mut writable_roots = vec![
         workspace_path.to_path_buf(),
@@ -2513,10 +2512,14 @@ fn preflight_write_sandbox_profile(
         &writable_roots,
         &readable_roots,
         coder_kind,
-        codex_home,
+        codex_worker.map(|worker| worker.home()),
     )?;
     #[cfg(not(test))]
-    os::preflight_profile(&profile)?;
+    if let Some(worker) = codex_worker {
+        os::preflight_codex_launcher(&profile, worker)?;
+    } else {
+        os::preflight_profile(&profile)?;
+    }
     Ok(Some(profile))
 }
 
@@ -2557,7 +2560,14 @@ fn run_task_coder(
         pump_config,
         codex_worker,
         sandbox_profile,
-        move |sandbox| coder_kind.boxed_with_model(sandbox, model, effort),
+        move |sandbox, _executable| {
+            coder_kind.boxed_with_model_and_executable(
+                sandbox,
+                model,
+                effort,
+                codex_worker.map(|worker| worker.launcher().executable()),
+            )
+        },
     )
 }
 
@@ -2578,10 +2588,14 @@ fn run_task_coder_with_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox_profile: Option<&os::SandboxProfile>,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox || (codex_worker.is_some() && !test_hermetic_no_sandbox()) {
-        os::check_prerequisites_for(coder_kind)?;
+        if codex_worker.is_some() {
+            os::check_sandbox_prerequisite()?;
+        } else {
+            os::check_prerequisites_for(coder_kind)?;
+        }
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
@@ -2663,6 +2677,9 @@ fn run_task_coder_with_coder(
         let mut readable_roots = input_artifact_readable_roots(prior_reviews);
         readable_roots.push(planning_files_dir(project_root, &item.id));
         readable_roots.push(general_expertise_dir(project_root));
+        if let Some(worker) = codex_worker {
+            readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
+        }
         let mut additional_writable = vec![common_git_dir, progress_dir.clone()];
         if let Some(ref tp) = transcript_path {
             if let Some(artifact_dir) = tp.parent() {
@@ -2700,7 +2717,10 @@ fn run_task_coder_with_coder(
         }
     }
 
-    let coder = make_coder(sandbox);
+    let coder = make_coder(
+        sandbox,
+        codex_worker.map(|worker| worker.launcher().executable()),
+    );
     // Use the capture config the caller resolved once per logical role run, so every
     // outer retry threads the SAME immutable config — a config change or a concurrent
     // launch between attempts can never hand this role a different capture mid-run.
@@ -3334,7 +3354,14 @@ pub(crate) fn run_learner_captured_in_mode(
         mode,
         capture,
         HostPreparation::Production,
-        move |sandbox| coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref()),
+        move |sandbox, executable| {
+            coder_kind.boxed_with_model_and_executable(
+                sandbox,
+                model.as_deref(),
+                effort.as_deref(),
+                executable,
+            )
+        },
     )
 }
 
@@ -3359,7 +3386,14 @@ pub(crate) fn run_learner_captured_in_mode_with_provider_readiness(
         prepared_provider_readiness,
         prepared_sandbox,
         HostPreparation::Production,
-        move |sandbox| coder_kind.boxed_with_model(sandbox, model.as_deref(), effort.as_deref()),
+        move |sandbox, executable| {
+            coder_kind.boxed_with_model_and_executable(
+                sandbox,
+                model.as_deref(),
+                effort.as_deref(),
+                executable,
+            )
+        },
     )
 }
 
@@ -3396,10 +3430,14 @@ impl HostPreparation<'_> {
     /// Run the sandboxed-host preparation for a launch. Production runs the fixed
     /// prerequisite, credential-injection, and Git-signing sequence; an injected
     /// preparation defers entirely to the recording test closure.
-    fn prepare(&mut self, coder_kind: CoderKind) -> Result<()> {
+    fn prepare(&mut self, coder_kind: CoderKind, coder_is_prepared: bool) -> Result<()> {
         match self {
             HostPreparation::Production => {
-                os::check_prerequisites_for(coder_kind)?;
+                if coder_is_prepared {
+                    os::check_sandbox_prerequisite()?;
+                } else {
+                    os::check_prerequisites_for(coder_kind)?;
+                }
                 credential::inject_credentials()?;
                 credential::setup_git_signing();
                 Ok(())
@@ -3428,7 +3466,7 @@ fn run_learner_with_coder(
     mode: LearnerExecutionMode,
     capture: Option<crate::coder::TranscriptCapture<'_>>,
     mut host_preparation: HostPreparation<'_>,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     run_learner_with_coder_with_provider_readiness(
         inputs,
@@ -3450,7 +3488,7 @@ fn run_learner_with_coder_with_provider_readiness(
     prepared_provider_readiness: Option<&crate::provider_readiness::ProviderReadiness>,
     prepared_sandbox: Option<&PreparedLearnerSandbox>,
     mut host_preparation: HostPreparation<'_>,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     eprintln!("  Running the Learner after passing reviews…");
 
@@ -3566,7 +3604,7 @@ fn run_learner_with_coder_with_provider_readiness(
     if effectively_sandboxed {
         // Prepare the trusted host boundary before any confinement profile is built
         // or coder constructed, so a preparation failure stops the launch here.
-        host_preparation.prepare(inputs.coder_kind)?;
+        host_preparation.prepare(inputs.coder_kind, codex_worker.is_some())?;
 
         let private_temp = create_private_launch_temp(inputs.handoff_dir)?;
         let scratch_str = private_temp.path().to_string_lossy().to_string();
@@ -3584,7 +3622,10 @@ fn run_learner_with_coder_with_provider_readiness(
             .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
 
-    let coder = make_coder(sandbox);
+    let coder = make_coder(
+        sandbox,
+        codex_worker.map(|worker| worker.launcher().executable()),
+    );
     // Persist the coder's supervision report at the Learner artifact boundary, then
     // take its terminal outcome, so a group-sweep diagnostic is durable rather than
     // dropped with the ManagedChild.
@@ -3625,6 +3666,9 @@ fn plan_learner_sandbox(
 
     let common_git_dir = worktree::git_common_dir(inputs.workspace_path)?;
     readable_roots.push(inputs.workspace_path.to_path_buf());
+    if let Some(worker) = codex_worker {
+        readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     let (profile, sandbox) = if mode.expertise_writable() {
         let writable = vec![
@@ -3668,7 +3712,11 @@ fn plan_learner_sandbox(
     // and no Seatbelt launcher. Integration routes retain the production probe and
     // supply a hermetic launcher through PATH in debug builds.
     #[cfg(not(test))]
-    os::preflight_profile(&profile)?;
+    if let Some(worker) = codex_worker {
+        os::preflight_codex_launcher(&profile, worker)?;
+    } else {
+        os::preflight_profile(&profile)?;
+    }
     Ok((sandbox, Some(profile)))
 }
 
@@ -4104,9 +4152,14 @@ fn run_review_coder(
         pump_config,
         codex_worker,
         sandbox_profile,
-        move |sandbox| match coder_override {
+        move |sandbox, _executable| match coder_override {
             Some(make) => make(sandbox),
-            None => coder_kind.boxed_with_model(sandbox, model, effort),
+            None => coder_kind.boxed_with_model_and_executable(
+                sandbox,
+                model,
+                effort,
+                codex_worker.map(|worker| worker.launcher().executable()),
+            ),
         },
     )
 }
@@ -4131,10 +4184,14 @@ fn run_review_coder_with_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox_profile: Option<&os::SandboxProfile>,
-    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+    make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox || codex_worker.is_some() {
-        os::check_prerequisites_for(coder_kind)?;
+        if codex_worker.is_some() {
+            os::check_sandbox_prerequisite()?;
+        } else {
+            os::check_prerequisites_for(coder_kind)?;
+        }
         credential::inject_credentials()?;
         credential::setup_git_signing();
     }
@@ -4168,6 +4225,9 @@ fn run_review_coder_with_coder(
         readable_roots.push(planning_files_dir(project_root, &item.id));
         readable_roots.push(general_expertise_dir(project_root));
         readable_roots.push(review_skills_dir(project_root));
+        if let Some(worker) = codex_worker {
+            readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
+        }
         build_coder_sandbox_with_writable_and_read_only_roots_and_codex_home(
             coder_kind,
             resolver,
@@ -4193,7 +4253,10 @@ fn run_review_coder_with_coder(
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = make_coder(sandbox);
+    let coder = make_coder(
+        sandbox,
+        codex_worker.map(|worker| worker.launcher().executable()),
+    );
     let launch_env = codex_worker
         .map(|worker| vec![worker.launch_env()])
         .unwrap_or_default();
@@ -4840,9 +4903,9 @@ fn preflight_review_sandbox_profile(
     resolver: &ContentResolver,
     no_sandbox: bool,
     coder_kind: CoderKind,
-    codex_home: Option<&Path>,
+    codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
 ) -> Result<Option<os::SandboxProfile>> {
-    if no_sandbox && codex_home.is_none() {
+    if no_sandbox && codex_worker.is_none() {
         return Ok(None);
     }
 
@@ -4863,6 +4926,9 @@ fn preflight_review_sandbox_profile(
     readable_roots.push(planning_files_dir(project_root, work_item_id));
     readable_roots.push(general_expertise_dir(project_root));
     readable_roots.push(review_skills_dir(project_root));
+    if let Some(worker) = codex_worker {
+        readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     let profile = os::render_profile_for_access_for_coder_with_codex_home(
         resolver,
@@ -4870,9 +4936,13 @@ fn preflight_review_sandbox_profile(
         &[artifact_dir.to_path_buf()],
         &readable_roots,
         coder_kind,
-        codex_home,
+        codex_worker.map(|worker| worker.home()),
     )?;
-    os::preflight_profile(&profile)?;
+    if let Some(worker) = codex_worker {
+        os::preflight_codex_launcher(&profile, worker)?;
+    } else {
+        os::preflight_profile(&profile)?;
+    }
     Ok(Some(profile))
 }
 
@@ -5738,7 +5808,7 @@ mod tests {
             LearnerExecutionMode::Capture,
             Some(capture),
             HostPreparation::Production,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
                 })
@@ -5795,7 +5865,7 @@ mod tests {
             LearnerExecutionMode::Capture,
             Some(capture),
             HostPreparation::Production,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(SupervisionReportingCoder {
                     recorded_dir: recorded_for_coder,
                 })
@@ -5873,7 +5943,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
                 })
@@ -5958,7 +6028,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
                 })
@@ -6084,7 +6154,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(SupervisionReportingCoder {
                     recorded_dir: recorded_for_coder,
                 })
@@ -6207,7 +6277,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(CountingSupervisionCoder {
                     launches: Arc::clone(&launches_for_coder),
                 })
@@ -6288,7 +6358,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
                 })
@@ -6350,7 +6420,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(SupervisionReportingCoder {
                     recorded_dir: recorded_for_coder,
                 })
@@ -6426,7 +6496,7 @@ mod tests {
             &pump_config,
             None,
             None,
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
                 })
@@ -10756,7 +10826,7 @@ mod tests {
                     mode,
                     None,
                     HostPreparation::Injected(&mut recording_prepare),
-                    move |_sandbox| {
+                    move |_sandbox, _executable| {
                         factory_for_run.fetch_add(1, AtomicOrdering::SeqCst);
                         Box::new(PromptRecordingCoder {
                             launches: launches_for_run,
@@ -10878,7 +10948,7 @@ mod tests {
                 LearnerExecutionMode::Capture,
                 None,
                 HostPreparation::Production,
-                move |_sandbox| {
+                move |_sandbox, _executable| {
                     factory_for_run.fetch_add(1, AtomicOrdering::SeqCst);
                     Box::new(PromptRecordingCoder {
                         launches: launches_for_run,
@@ -11004,7 +11074,7 @@ mod tests {
             LearnerExecutionMode::PreLandNoExpertise,
             None,
             HostPreparation::Injected(&mut failing_prepare),
-            move |_sandbox| {
+            move |_sandbox, _executable| {
                 factory_for_run.fetch_add(1, AtomicOrdering::SeqCst);
                 Box::new(PromptRecordingCoder {
                     launches: launches_for_run,

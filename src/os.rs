@@ -64,6 +64,49 @@ pub fn preflight_profile(profile: &SandboxProfile) -> Result<()> {
     }
 }
 
+/// Authenticate through the prepared Codex launcher inside the exact profile
+/// that the autonomous role will retain for its model launch.
+pub fn preflight_codex_launcher(
+    profile: &SandboxProfile,
+    worker: &crate::codex_worker::CodexWorkerEnvironment,
+) -> Result<()> {
+    #[cfg(feature = "test-support")]
+    if let Some(result) = test_preflight_result() {
+        return result;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new(sandbox_exec_program())
+            .arg("-f")
+            .arg(&profile.path)
+            .arg(worker.launcher().executable())
+            .args(["login", "status"])
+            .env("CODEX_HOME", worker.home())
+            .output()
+            .map_err(|error| HostSandboxPreflightError {
+                message: format!(
+                    "could not execute prepared Codex launcher {}: {error}",
+                    worker.launcher().executable().display()
+                ),
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if stderr.is_empty() {
+                format!("prepared Codex launcher exited with {}", output.status)
+            } else {
+                stderr
+            };
+            return Err(HostSandboxPreflightError { message: detail }.into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (profile, worker);
+        Ok(())
+    }
+}
+
 /// Enable a deterministic probe outcome only for test-support binaries.
 ///
 /// Production builds always execute the system-owned Seatbelt launcher. The
@@ -352,6 +395,19 @@ fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
 }
 
 fn render_root_rules(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> String {
+    let mut traversal_roots = writable_roots
+        .iter()
+        .chain(readable_roots)
+        .flat_map(|root| root.ancestors().skip(1))
+        .filter(|ancestor| ancestor.parent().is_some())
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    traversal_roots.sort();
+    traversal_roots.dedup();
+    let traversal_rules = traversal_roots
+        .iter()
+        .map(|root| format!("(allow file-read-metadata (literal {}))", sbpl_string(root)))
+        .collect::<Vec<_>>();
     let writable_rules = writable_roots
         .iter()
         .map(|root| {
@@ -366,8 +422,9 @@ fn render_root_rules(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> 
             format!("(allow file-read*  (subpath {root}))")
         })
         .collect::<Vec<_>>();
-    writable_rules
+    traversal_rules
         .into_iter()
+        .chain(writable_rules)
         .chain(readable_rules)
         .collect::<Vec<_>>()
         .join("\n")
@@ -388,10 +445,15 @@ pub fn check_prerequisites() -> Result<()> {
 
 /// Check that sandbox prerequisites and the selected coder are available.
 pub fn check_prerequisites_for(coder_kind: CoderKind) -> Result<()> {
+    check_sandbox_prerequisite()?;
+    check_coder_prerequisite(coder_kind)?;
+    Ok(())
+}
+
+pub fn check_sandbox_prerequisite() -> Result<()> {
     if !command_exists("sandbox-exec") {
         bail!("sandbox-exec not found (macOS only)");
     }
-    check_coder_prerequisite(coder_kind)?;
     Ok(())
 }
 
@@ -525,6 +587,36 @@ mod tests {
             !content.contains("(allow file-write* (subpath \"/Users/test/workspace/candidate\"))"),
             "{content}"
         );
+    }
+
+    #[test]
+    fn external_launcher_root_grants_only_metadata_to_enclosing_home() {
+        let resolver = ContentResolver::new(None);
+        let operator_home = PathBuf::from("/Users/operator");
+        let launcher_root = operator_home.join(".nvm/versions/node/lib/node_modules/@openai/codex");
+        let profile = render_profile_for_access_for_coder(
+            &resolver,
+            "/isolated/home",
+            &[PathBuf::from("/workspace")],
+            &[launcher_root.clone()],
+            CoderKind::Codex,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+
+        assert!(content.contains(&format!(
+            "(allow file-read*  (subpath {}))",
+            sbpl_string(&launcher_root)
+        )));
+        assert!(content.contains(&format!(
+            "(allow file-read-metadata (literal {}))",
+            sbpl_string(&operator_home)
+        )));
+        assert!(!content.contains(&format!(
+            "(allow file-read*  (subpath {}))",
+            sbpl_string(&operator_home)
+        )));
     }
 
     #[test]

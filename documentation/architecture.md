@@ -1756,16 +1756,21 @@ automatic token refresh using the task's IAM identity.
 
 Autonomous Codex launches cross a provider-specific boundary in
 `codex_worker`. The boundary resolves the effective interactive `CODEX_HOME`,
-stages only supported authentication into a mode-private temporary home, and
-runs `codex login status` before useful work starts. The launch keeps that
-temporary directory alive through sandbox construction and process completion,
-then removes it by RAII cleanup.
+selects one absolute `codex` launcher from `PATH`, derives its bounded package
+read closure, stages only supported authentication into a mode-private
+temporary home, and runs `codex login status` through that launcher before
+useful work starts. The launch keeps that prepared capability alive through
+sandbox construction and process completion, then removes the temporary home
+by RAII cleanup.
 
 The autonomous command disables hooks, ignores user configuration, and uses an
 ephemeral session. Its Seatbelt profile receives the staged home as its only
-writable Codex-state root; it does not receive the interactive home. Interactive
-Codex deliberately remains outside this boundary and retains user configuration,
-hooks, and home access.
+writable Codex-state root plus read-only access to the resolved launcher's
+package closure; it does not receive the interactive home or the launcher's
+enclosing operator home. Writer, Reviewer, Learner, and rebase routes execute
+the retained absolute launcher instead of searching `PATH` again. Interactive
+Codex deliberately remains outside this boundary and retains user
+configuration, hooks, and home access.
 
 Writer and Reviewer routes preflight before reserving their planned Tasks. An
 authentication failure pauses the existing Attempt for `codex login` recovery,

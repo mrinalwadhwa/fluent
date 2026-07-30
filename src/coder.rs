@@ -150,6 +150,16 @@ impl CoderKind {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Box<dyn Coder> {
+        self.boxed_with_model_and_executable(sandbox, model, effort, None)
+    }
+
+    pub(crate) fn boxed_with_model_and_executable(
+        &self,
+        sandbox: CoderSandbox,
+        model: Option<&str>,
+        effort: Option<&str>,
+        executable: Option<&Path>,
+    ) -> Box<dyn Coder> {
         match self {
             Self::Claude => match sandbox {
                 CoderSandbox::SeatbeltProfile(profile) => Box::new(SandboxedClaudeCode {
@@ -178,6 +188,9 @@ impl CoderKind {
                 trusted_sandbox: matches!(sandbox, CoderSandbox::TrustedSeatbeltProfile(_)),
                 model_override: model.map(str::to_string),
                 effort: effort.map(str::to_string),
+                executable: executable
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("codex")),
             }),
             Self::Pi => Box::new(PiCode {
                 sandbox_profile: match &sandbox {
@@ -586,6 +599,7 @@ pub struct CodexCode {
     pub trusted_sandbox: bool,
     pub model_override: Option<String>,
     pub effort: Option<String>,
+    pub executable: PathBuf,
 }
 
 impl Coder for CodexCode {
@@ -694,13 +708,13 @@ impl CodexCode {
                 restrict_trusted_coder_env(&mut cmd);
             }
             cmd.args(["-f", profile]);
-            cmd.arg("codex");
+            cmd.arg(&self.executable);
             if let Some(ca_bundle) = codex_ca_bundle() {
                 cmd.env("SSL_CERT_FILE", ca_bundle);
             }
             cmd
         } else {
-            Command::new("codex")
+            Command::new(&self.executable)
         };
 
         // --ask-for-approval is a top-level option, not an exec subcommand
@@ -4636,6 +4650,7 @@ mod model_default_tests {
             trusted_sandbox: false,
             model_override: None,
             effort: None,
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -4646,12 +4661,48 @@ mod model_default_tests {
     }
 
     #[test]
+    fn bare_codex_command_uses_prepared_absolute_executable() {
+        let executable = PathBuf::from("/external/codex/bin/codex");
+        let coder = CodexCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+            executable: executable.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let command = coder.build_command(dir.path(), true);
+
+        assert_eq!(command.get_program(), executable);
+    }
+
+    #[test]
+    fn sandboxed_codex_command_passes_prepared_absolute_executable() {
+        let executable = PathBuf::from("/external/codex/bin/codex");
+        let coder = CodexCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+            executable: executable.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let command = coder.build_command(dir.path(), true);
+
+        assert_eq!(command.get_program(), "sandbox-exec");
+        assert!(command.get_args().any(|argument| argument == executable));
+    }
+
+    #[test]
     fn autonomous_codex_command_isolated_from_user_hooks_config_and_sessions() {
         let coder = CodexCode {
             sandbox_profile: None,
             trusted_sandbox: false,
             model_override: Some("gpt-5".to_string()),
             effort: Some("high".to_string()),
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -4672,6 +4723,7 @@ mod model_default_tests {
             trusted_sandbox: false,
             model_override: None,
             effort: None,
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), false);
@@ -4688,6 +4740,7 @@ mod model_default_tests {
             trusted_sandbox: false,
             model_override: Some("gpt-4o".to_string()),
             effort: None,
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -4738,6 +4791,7 @@ mod model_default_tests {
             trusted_sandbox: false,
             model_override: None,
             effort: Some("medium".to_string()),
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
@@ -4754,6 +4808,7 @@ mod model_default_tests {
             trusted_sandbox: false,
             model_override: None,
             effort: None,
+            executable: PathBuf::from("codex"),
         };
         let dir = tempfile::tempdir().unwrap();
         let cmd = coder.build_command(dir.path(), true);
