@@ -34,3 +34,4 @@ tests/output/
 /.cargo
 .cargo-home/
 cargo-home/
+.cargo-cache/
