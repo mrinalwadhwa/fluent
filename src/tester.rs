@@ -235,6 +235,7 @@ pub fn run_with_sandbox_profile(
                 "tester_yaml_problem",
                 format!("Failed to read {TESTER_YAML_PATH}"),
                 format!("{error:#}"),
+                Vec::new(),
             );
         }
     };
@@ -244,6 +245,7 @@ pub fn run_with_sandbox_profile(
             "extractor_missing",
             format!("{EXTRACTOR_PATH} missing or not executable"),
             String::new(),
+            Vec::new(),
         );
     }
 
@@ -292,6 +294,7 @@ pub fn run_with_sandbox_profile(
             "nested_swiftpm_sandbox",
             "Swift Package Manager could not create its inner sandbox".to_string(),
             details,
+            command_results,
         );
     }
 
@@ -313,6 +316,7 @@ pub fn run_with_sandbox_profile(
                 kind,
                 message,
                 truncate_tail(&format!("{error:#}"), FAILURE_EXCERPT_MAX),
+                command_results,
             );
         }
     };
@@ -351,11 +355,12 @@ fn persist_harness_error(
     kind: &str,
     message: String,
     details: String,
+    commands: Vec<CommandResult>,
 ) -> Result<TesterOutcome> {
     write_results(
         artifact_dir,
         &TesterResults {
-            commands: Vec::new(),
+            commands,
             tests: Vec::new(),
             summary: Summary {
                 total: 0,
@@ -1124,7 +1129,9 @@ echo '[
                 .details
                 .contains("error detail")
         );
-        assert!(results.commands.is_empty());
+        assert_eq!(results.commands.len(), 1);
+        assert_eq!(results.commands[0].command, "echo hi");
+        assert_eq!(results.commands[0].exit_code, 0);
         assert!(results.tests.is_empty());
     }
 
