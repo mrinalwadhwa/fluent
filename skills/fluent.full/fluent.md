@@ -167,17 +167,44 @@ When `.fluent/` does not exist:
    (b) execute — corrective findings are authorized and queued automatically
    ```
 
-2. After the user chooses, run `fluent init`.
+2. After the user chooses, ask:
 
-3. If the user chose `propose`, leave `.fluent/config.yaml` unchanged.
+   ```text
+   Which coder profile should Fluent save for this project?
 
-4. If the user chose `execute`, write this nested mapping to
-   `.fluent/config.yaml` after init:
-
-   ```yaml
-   follow-up:
-     mode: execute
+   (a) codex-balanced — Codex, gpt-5.6-terra, medium effort for the writer,
+       reviewers, and behavior-test coder
+       (recommended: balanced capability and speed)
+   (b) codex-stronger — Codex, gpt-5.6-sol, medium effort for the writer,
+       reviewers, and behavior-test coder
+       (stronger reasoning when the extra time is worthwhile)
+   (c) custom — choose a coder, model, and effort for each role
    ```
+
+3. If the user chooses `custom`, explain before collecting values: the writer
+   implements the change, reviewers evaluate it from independent perspectives,
+   and the behavior-test coder writes or updates tests. Ask separately for the
+   coder, model, and effort for each role.
+
+4. After the user completes both choices, run one configured command. For a
+   curated choice, use the selected profile identifier:
+
+   ```sh
+   fluent init --coder-profile codex-balanced --follow-up-mode propose
+   ```
+
+   For `custom`, use `--coder-profile custom` and pass every `--write-*`,
+   `--review-*`, and `--behavior-tests-*` value the user chose.
+
+5. The command preflights each distinct provider before it initializes the
+   project. If it reports a failure, name the failed provider and condition,
+   then offer the user a retry or a different profile. A successful check only
+   verifies the local command and authentication readiness; it does not promise
+   future provider capacity.
+
+6. After success, show the saved coder, model, and effort for the writer,
+   reviewers, and behavior-test coder. Explain that every new Attempt stores
+   the effective mapping unless the user supplies explicit Attempt overrides.
 
 `execute` authorizes and queues trusted corrective Work. It does not start
 execution. A human must separately run `fluent scheduler run`; any resulting

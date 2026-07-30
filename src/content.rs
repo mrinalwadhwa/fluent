@@ -891,7 +891,7 @@ Check item {{ITEM_ID}}.
     }
 
     #[test]
-    fn bundled_fluent_skill_orders_first_init_choice() {
+    fn bundled_fluent_skill_offers_coder_profiles_before_init() {
         let skill = bundled_skill_content("fluent/SKILL.md")
             .expect("bundled fluent skill must have SKILL.md");
         let setup = skill
@@ -905,40 +905,66 @@ Check item {{ITEM_ID}}.
                 "Before running `fluent init`",
                 "(a) propose",
                 "(b) execute",
-                "After the user chooses, run `fluent init`",
-                "If the user chose `propose`",
-                "If the user chose `execute`",
+                "Which coder profile should Fluent save",
+                "After the user completes both choices, run one configured command",
+                "fluent init --coder-profile codex-balanced --follow-up-mode propose",
             ],
         );
         assert!(setup.contains("recommended"));
     }
 
     #[test]
-    fn bundled_fluent_skill_writes_nested_execute_mode() {
+    fn bundled_fluent_skill_offers_curated_and_custom_profiles() {
         let skill = bundled_skill_content("fluent/SKILL.md")
             .expect("bundled fluent skill must have SKILL.md");
         let setup = skill
             .split_once("## First-time project setup")
             .map(|(_, section)| section)
             .expect("the bundled skill must have first-time setup guidance");
+        assert!(setup.contains("(a) codex-balanced") && setup.contains("(b) codex-stronger") && setup.contains("(c) custom"));
+    }
+
+    #[test]
+    fn bundled_fluent_skill_names_complete_curated_profiles() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
+        let setup = skill.split_once("## First-time project setup").unwrap().1;
+        assert!(setup.contains("Codex, gpt-5.6-terra, medium effort for the writer,\n       reviewers, and behavior-test coder"));
+        assert!(setup.contains("Codex, gpt-5.6-sol, medium effort for the writer,\n       reviewers, and behavior-test coder"));
+    }
+
+    #[test]
+    fn bundled_fluent_skill_explains_roles_before_custom_profile() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
+        let setup = skill.split_once("## First-time project setup").unwrap().1;
+        assert_ordered(setup, &["If the user chooses `custom`, explain", "the writer\n   implements the change", "Ask separately for the\n   coder, model, and effort for each role"]);
+    }
+
+    #[test]
+    fn bundled_fluent_skill_orders_profile_preflight_before_init() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
+        let setup = skill.split_once("## First-time project setup").unwrap().1;
+        assert_ordered(setup, &["After the user completes both choices, run one configured command", "The command preflights each distinct provider before it initializes the\n   project"]);
+    }
+
+    #[test]
+    fn bundled_fluent_skill_offers_preflight_retry_or_reselection() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
+        assert!(skill.contains("offer the user a retry or a different profile"));
+    }
+
+    #[test]
+    fn bundled_fluent_skill_bounds_provider_preflight_claim() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
+        assert!(skill.contains("does not promise\n   future provider capacity"));
+    }
+
+    #[test]
+    fn bundled_fluent_skill_reports_saved_profile_and_attempt_boundary() {
+        let skill = bundled_skill_content("fluent/SKILL.md").unwrap();
         assert!(
-            setup.contains("leave `.fluent/config.yaml` unchanged"),
-            "propose must leave project configuration unchanged"
-        );
-        assert!(
-            setup.contains("follow-up:\n     mode: execute"),
-            "execute must use the exact nested YAML mapping"
-        );
-        assert!(
-            !skill.contains("follow-up.mode: execute"),
-            "the invalid flat execute spelling must be absent"
-        );
-        assert!(
-            setup.contains("authorizes and queues")
-                && setup.contains("does not start")
-                && setup.contains("fluent scheduler run")
-                && setup.contains("human inspection and landing"),
-            "execute must distinguish queue authorization, scheduler execution, and landing"
+            skill.contains("show the saved coder, model, and effort")
+                && skill.contains("every new Attempt stores\n   the effective mapping unless the user supplies explicit Attempt overrides"),
+            "setup must explain saved profile and Attempt freezing"
         );
     }
 
