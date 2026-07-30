@@ -106,6 +106,25 @@ The Tester is a deterministic runner, not a coding agent. It reads one or more t
 
 Before starting review work, run `fluent tester check` to validate the Tester and run it through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun `fluent tester check`. If a production Tester Task pauses an existing Attempt for a harness problem, repair it and resume with `fluent attempt run <work-item-id> [<attempt-id>]`; Fluent retries the same Tester without repeating a completed Writer. For a SwiftPM nested-sandbox diagnostic, disable SwiftPM's inner sandbox and configure writable project-local cache paths. Fluent never rewrites project test configuration or scripts.
 
+### Release-test containment
+
+Fluent's declared release suites run nested provider routes through the
+fixture-controlled executables in `tests/fixtures/provider-doubles`. The
+`FLUENT_TEST_HERMETIC_PROVIDERS` test marker makes the provider boundary remove
+Claude, Codex, and Pi credentials from child processes. A fixture that must
+exercise one credential path names that credential explicitly with
+`FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL`; no other provider credential crosses
+the boundary. The doubles accept only their readiness probes and fail every
+other invocation, so an incomplete fixture cannot start an operator's provider.
+
+Long-lived release fixtures start Fluent and provider commands in a fixture-owned
+process group. Their cleanup always signals and waits for the whole group,
+including during unwinding. The release-command boundary also compares scoped
+process state before and after each suite and reports a newly surviving Fluent or
+provider process with its PID, kind, and temporary-project root. Keep new
+launch-capable fixtures behind these two boundaries; the integration coverage in
+`tests/binary.rs` verifies the provider routes, group cleanup, and suite guard.
+
 Once the Tester completes, Fluent runs independent Reviewers in parallel. Every Reviewer reads the approved planning documents, the Writer’s `progress.md` checklist, the candidate changes, the Tester evidence, and recorded decisions. The checklist tracks any Implementation Plan steps and review follow-ups across rounds, recording completion evidence, divergences, and notes for what comes next. Each Reviewer also loads relevant general and project Expertise, so its judgment reflects both Fluent’s review methods and what the project has learned. The built-in Reviewers include:
 
 - The Behavior Reviewer checks both the Behavior Specifications and whether the candidate delivers them. It looks for statements that combine multiple effects, prescribe implementation, have more than one interpretation, contradict one another, omit intended or failure behavior, or lack a passing test.
