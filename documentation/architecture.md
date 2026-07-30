@@ -909,6 +909,12 @@ behavior without further plumbing.
 | `FLUENT_RATE_LIMIT_RETRY_AFTER_SECS` | 1800 | Fallback wait when no structured timing is available |
 | `FLUENT_RATE_LIMIT_JITTER_MAX_SECONDS` | 30 | Maximum per-run jitter added to the retry wait |
 
+Autonomous Claude workers run with Claude's `--safe-mode` flag. This disables
+user, project, and local customizations, including SessionStart and Stop hooks,
+while preserving the selected model, subscription authentication, built-in
+tools, and Fluent's Seatbelt sandbox. Intentionally interactive Claude sessions
+do not receive that flag and retain user customizations.
+
 `claude_auth.rs` detects Claude auth token expiry before and during
 coder invocations, failing the Task with a clear recovery message
 instead of letting the coder fail mid-Task with a cold 401. Two layers:
@@ -931,8 +937,17 @@ instead of letting the coder fail mid-Task with a cold 401. Two layers:
   rate-limit detection so 401 wins when both match. The caller bails
   with the same recovery message.
 
-Automatic OAuth refresh is explicitly out of scope. The coder returns
-a typed `AuthError` (via `anyhow::Error::new`) instead of a plain
+When that expiry check or a transcript 401 requires a refresh,
+`credential::refresh_credentials()` runs a minimal host-side Claude probe in
+safe mode. `FLUENT_CLAUDE_REFRESH_DEADLINE_SECS` configures its wall-clock
+deadline (30 seconds by default and must be positive). The probe owns a process
+group; a deadline expires by terminating and reaping that group, including its
+descendants. Fluent rereads the Keychain only after a successful zero exit. A
+timeout or nonzero exit becomes a typed authentication failure, so the existing
+same-Attempt `needs-user` pause directs the operator to `claude /login` without
+consuming a Writer round.
+
+The coder returns a typed `AuthError` (via `anyhow::Error::new`) instead of a plain
 string `bail!`, so callers can recover the type via
 `downcast_ref::<AuthError>()`. Both task retry loops in the task
 executor recognize `AuthError`, skip retries entirely, and escalate

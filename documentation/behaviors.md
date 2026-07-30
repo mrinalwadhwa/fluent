@@ -3107,6 +3107,22 @@ WHERE `--post-merge-review` is passed to `fluent auto-merge`,
 THE SYSTEM SHALL invoke each fresh land with post-merge review enabled.
 Test: src/auto_merge.rs (auto_merge_post_merge_review_policy_honors_opt_in)
 
+## Autonomous Claude startup
+
+### B1
+
+WHEN Fluent launches an autonomous Claude worker,
+THE SYSTEM SHALL pass `--safe-mode` so user, project, and local
+customizations, including SessionStart and Stop hooks, do not run. The worker
+retains built-in tools, authentication, selected model, and Fluent's sandbox.
+Test: src/coder.rs (autonomous_claude_commands_use_safe_mode)
+
+### B2
+
+WHEN Fluent launches an intentionally interactive Claude session,
+THE SYSTEM SHALL NOT pass `--safe-mode`, so user customizations remain enabled.
+Test: src/coder.rs (interactive_claude_commands_preserve_user_customizations)
+
 ## Claude auth token expiry detection
 
 ### B1
@@ -3116,7 +3132,7 @@ WHEN any Claude coder variant (`SandboxedClaudeCode`,
 THE SYSTEM SHALL call `ensure_not_expired_with_refresh()` first,
 which checks `claude_auth::ensure_not_expired()` and, on failure,
 attempts `credential::refresh_credentials()` once and rechecks.
-The Task fails only if the recheck still returns an error.
+The Task also fails if the refresh probe times out or exits unsuccessfully.
 Untestable: Structural integration verified by code inspection — `ensure_not_expired_with_refresh()` is the first call in both `SandboxedClaudeCode::run` and `BareClaudeCode::run`
 
 ### B2
@@ -3175,6 +3191,7 @@ Test: src/claude_auth.rs (tests::classify_transcript_401_extracts_request_id_whe
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_with_none_request_id_when_missing)
 Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
 Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
+Test: src/coder.rs (failed_refresh_probe_stops_the_auth_retry)
 
 ### B7
 
@@ -3187,7 +3204,7 @@ Untestable: Structural ordering verified by code inspection — `classify_transc
 ### B8
 
 WHEN the user-facing error message is constructed for either
-`AuthError::Expired` or `AuthError::Rejected`,
+`AuthError::Expired`, `AuthError::Rejected`, or `AuthError::RefreshFailed`,
 THE SYSTEM SHALL name the recovery action explicitly, mentioning
 `claude /login` and `fluent attempt run` in the message.
 Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
@@ -3211,6 +3228,34 @@ THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
 and re-run the coder session before treating the 401 as a task
 failure.
 Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
+
+### B5
+
+WHEN Fluent starts the Claude refresh probe,
+THE SYSTEM SHALL run it in safe mode and finish it within
+`FLUENT_CLAUDE_REFRESH_DEADLINE_SECS` (default 30 seconds).
+Test: src/credential.rs (refresh_probe_honors_configured_deadline)
+
+### B6
+
+IF the refresh probe exceeds its deadline,
+THEN THE SYSTEM SHALL terminate and reap its process tree and return a typed
+authentication failure that preserves the same Attempt for recovery.
+Test: src/credential.rs (refresh_probe_timeout_terminates_process_tree)
+Test: src/coder.rs (failed_refresh_probe_stops_the_auth_retry)
+
+### B7
+
+IF the refresh probe exits unsuccessfully,
+THEN THE SYSTEM SHALL report refresh failure and SHALL NOT reread credentials as
+though refresh had succeeded.
+Test: src/credential.rs (refresh_probe_nonzero_exit_is_failure)
+
+### B8
+
+WHERE the refresh probe succeeds before its deadline,
+THE SYSTEM SHALL reread credentials and continue the existing single-retry flow.
+Test: src/credential.rs (successful_refresh_probe_rereads_credentials)
 
 ### B2
 
