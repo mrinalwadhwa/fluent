@@ -11,6 +11,7 @@
 # evidence at every safety boundary:
 #
 #   first-run-smoke.sh prepare <root> [--installer <url|path>] [--binary <path>]
+#                              [--codex-home <path>]
 #   first-run-smoke.sh run     <root>
 #   first-run-smoke.sh land    <root>
 #
@@ -188,13 +189,6 @@ CHECK
   # the target repository stays clean around a land.
   printf '/.fluent/work/\n' > "$project/.gitignore"
 
-  mkdir -p "$project/.fluent"
-  cat > "$project/.fluent/tester.yaml" <<'TESTER'
-commands:
-  - command: ./check.sh
-    test_harness: shell-harness
-TESTER
-
   git -C "$project" add -A
   git -C "$project" commit -q -m "Seed failing greeting fixture"
 }
@@ -234,11 +228,12 @@ INSTRUCTIONS
 }
 
 phase_prepare() {
-  local root="" installer="$DEFAULT_INSTALLER" binary=""
+  local root="" installer="$DEFAULT_INSTALLER" binary="" codex_home=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --installer) installer="${2-}"; shift 2 ;;
       --binary)    binary="${2-}"; shift 2 ;;
+      --codex-home) codex_home="${2-}"; shift 2 ;;
       --*)         die "unknown prepare option: $1" ;;
       *)
         [ -z "$root" ] || die "prepare takes a single smoke root"
@@ -247,6 +242,11 @@ phase_prepare() {
   done
   [ -n "$root" ] || die "prepare requires a smoke root path"
   root="$(absolute_path "$root")"
+
+  if [ -n "$codex_home" ]; then
+    [ -d "$codex_home" ] || die "Codex authentication home is not a directory: $codex_home"
+    codex_home="$(cd "$codex_home" && pwd -P)"
+  fi
 
   # Reject a nonempty root unless it already holds a compatible manifest or an
   # incomplete-prepare marker. A prior prepare that failed mid-seed leaves the
@@ -344,6 +344,7 @@ phase_prepare() {
       --arg root "$root" \
       --arg boundary "$install_boundary" \
       --arg bin "$fluent_bin" \
+      --arg codex_home "$codex_home" \
       --arg wi "$WORK_ITEM_ID" \
       --arg attempt "$ATTEMPT_ID" \
       '{
@@ -353,6 +354,7 @@ phase_prepare() {
         run_stage: null,
         install_boundary: $boundary,
         fluent_bin: $bin,
+        codex_home: $codex_home,
         work_item_id: $wi,
         attempt_id: $attempt,
         merge_candidate_id: null,
@@ -720,6 +722,7 @@ usage: first-run-smoke.sh <phase> <root> [options]
 
 phases:
   prepare <root> [--installer <url|path>] [--binary <path>]
+                  [--codex-home <path>]
   run     <root>
   land    <root>
 USAGE

@@ -451,6 +451,30 @@ test_prepare_is_isolated() {
   return $rc
 }
 
+test_prepare_leaves_fluent_uninitialized_and_records_codex_home() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  local codex_home="$WORK/codex-home"
+  mkdir -p "$codex_home"
+  printf 'secret credential\n' > "$codex_home/auth.json"
+
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    --codex-home "$codex_home" > "$WORK/prepare.out" 2>&1
+
+  local rc=0
+  local recorded_codex_home
+  recorded_codex_home="$(cd "$codex_home" && pwd -P)"
+  [ ! -e "$ROOT/project/main/.fluent" ] \
+    || { printf '    FAIL: prepare initialized .fluent before run\n'; rc=1; }
+  [ "$(jq -r '.codex_home' "$ROOT/harness/manifest.json")" = "$recorded_codex_home" ] \
+    || { printf '    FAIL: manifest did not record the Codex home\n'; rc=1; }
+  if grep -R -Fq -- 'secret credential' "$ROOT"; then
+    printf '    FAIL: prepare copied Codex credentials into the smoke root\n'; rc=1
+  fi
+  return $rc
+}
+
 test_prepare_rejects_nonempty_root() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -1539,6 +1563,8 @@ test_land_evidence_copy_fails_preserves_evidence_and_resume() {
 printf 'test-first-run-smoke-harness\n\n'
 
 run_test "prepare is isolated" test_prepare_is_isolated
+run_test "prepare leaves Fluent uninitialized and records Codex home" \
+  test_prepare_leaves_fluent_uninitialized_and_records_codex_home
 run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
 run_test "prepare encodes json significant root" \
   test_prepare_encodes_json_significant_root
