@@ -1878,15 +1878,15 @@ fn rebase_candidate_with_coder(
     artifact_dir: &Path,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
-    // A Codex login problem must not create an executing Rebase Task. Keep the
-    // prepared home alive through the eventual sandboxed launch.
-    let codex_worker = if config.coder_kind == CoderKind::Codex && !cfg!(test) {
-        let worker =
-            crate::codex_worker::CodexWorkerEnvironment::prepare().map_err(anyhow::Error::new)?;
-        worker.preflight().map_err(anyhow::Error::new)?;
-        Some(worker)
-    } else {
+    // A provider readiness failure must not create an executing Rebase Task.
+    // Keep a prepared Codex home alive through the eventual sandboxed launch.
+    let provider_readiness = if cfg!(test) {
         None
+    } else {
+        Some(
+            crate::provider_readiness::ProviderReadiness::prepare(config.coder_kind)
+                .map_err(anyhow::Error::new)?,
+        )
     };
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);
     let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
@@ -1898,7 +1898,9 @@ fn rebase_candidate_with_coder(
         config,
         source_workspace,
         &rebase_artifact_dir,
-        codex_worker.as_ref(),
+        provider_readiness
+            .as_ref()
+            .and_then(|readiness| readiness.codex_worker()),
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -1946,7 +1948,9 @@ fn rebase_candidate_with_coder(
         target_branch,
         &rebase_artifact_dir,
         &rebase_task_id,
-        codex_worker.as_ref(),
+        provider_readiness
+            .as_ref()
+            .and_then(|readiness| readiness.codex_worker()),
         sandbox,
         sandbox_profile,
         make_coder,

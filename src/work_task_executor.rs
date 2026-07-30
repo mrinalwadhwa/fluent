@@ -130,16 +130,10 @@ fn plan_coder_kind(item: &WorkItem, attempt_id: &str, task_kind: TaskKind) -> Re
         .ok_or_else(|| anyhow::anyhow!("Attempt {attempt_id:?} not found"))
 }
 
-fn prepare_codex_worker(
+fn prepare_provider_readiness(
     coder_kind: CoderKind,
-) -> Result<Option<crate::codex_worker::CodexWorkerEnvironment>> {
-    if coder_kind != CoderKind::Codex {
-        return Ok(None);
-    }
-    let worker =
-        crate::codex_worker::CodexWorkerEnvironment::prepare().map_err(anyhow::Error::new)?;
-    worker.preflight().map_err(anyhow::Error::new)?;
-    Ok(Some(worker))
+) -> Result<crate::provider_readiness::ProviderReadiness> {
+    crate::provider_readiness::ProviderReadiness::prepare(coder_kind).map_err(anyhow::Error::new)
 }
 
 /// Plan a Task start WITHOUT any durable write: validate identity, kind, and
@@ -524,24 +518,27 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         resolve_input_artifact_paths(config.project_root, &plan.task.input_artifacts)?;
     preflight_write_worktree(config.project_root, &workspace_path, &branch_name)?;
 
-    // Authenticate autonomous Codex before reserving execution.  A login failure
+    // Verify the selected provider before reserving execution. A readiness failure
     // leaves this Task unstarted and pauses the existing Attempt for recovery.
-    let codex_worker =
-        match prepare_codex_worker(plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?) {
-            Ok(worker) => worker,
-            Err(error) => {
-                mark_task_failed_attempt_needs_user(
-                    config.store,
-                    config.project_root,
-                    config.work_item_id,
-                    config.attempt_id,
-                    config.task_id,
-                    &classify_task_failure(&error),
-                    &crate::notify::notify,
-                )?;
-                return Err(error);
-            }
-        };
+    let provider_readiness = match prepare_provider_readiness(plan_coder_kind(
+        &item,
+        config.attempt_id,
+        TaskKind::Write,
+    )?) {
+        Ok(worker) => worker,
+        Err(error) => {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_task_failure(&error),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    };
 
     // Render and apply the exact Writer boundary while the Task is still Planned.
     // All roots below are deterministic from the start plan, including paths the
@@ -556,7 +553,9 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.resolver,
         config.no_sandbox,
         plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?,
-        codex_worker.as_ref().map(|worker| worker.home()),
+        provider_readiness
+            .codex_worker()
+            .map(|worker| worker.home()),
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -641,7 +640,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         reservation.model.as_deref(),
         reservation.effort.as_deref(),
         &pump_config,
-        codex_worker.as_ref(),
+        provider_readiness.codex_worker(),
         sandbox_profile.as_ref(),
     );
     let mut retries = 0;
@@ -666,7 +665,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
             &pump_config,
-            codex_worker.as_ref(),
+            provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
         );
     }
@@ -920,7 +919,7 @@ fn run_review_task_with_coder(
     }
 
     let planned_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-    let codex_worker = match prepare_codex_worker(plan_coder_kind(
+    let provider_readiness = match prepare_provider_readiness(plan_coder_kind(
         &planned_item,
         config.attempt_id,
         TaskKind::Review,
@@ -951,7 +950,9 @@ fn run_review_task_with_coder(
         config.resolver,
         config.no_sandbox,
         plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
-        codex_worker.as_ref().map(|worker| worker.home()),
+        provider_readiness
+            .codex_worker()
+            .map(|worker| worker.home()),
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -1079,7 +1080,7 @@ fn run_review_task_with_coder(
         reservation.model.as_deref(),
         reservation.effort.as_deref(),
         &pump_config,
-        codex_worker.as_ref(),
+        provider_readiness.codex_worker(),
         sandbox_profile.as_ref(),
         coder_override,
     );
@@ -1108,7 +1109,7 @@ fn run_review_task_with_coder(
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
             &pump_config,
-            codex_worker.as_ref(),
+            provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
             coder_override,
         );
@@ -1858,7 +1859,12 @@ fn mark_task_failed(
 
 fn is_auth_error(result: &Result<()>) -> bool {
     result.as_ref().err().map_or(false, |e| {
-        e.is::<crate::claude_auth::AuthError>() || e.is::<crate::codex_worker::CodexAuthError>()
+        e.is::<crate::claude_auth::AuthError>()
+            || e.is::<crate::codex_worker::CodexAuthError>()
+            || e.downcast_ref::<crate::provider_readiness::ProviderReadinessError>()
+                .is_some_and(
+                    crate::provider_readiness::ProviderReadinessError::is_authentication_error,
+                )
     })
 }
 
@@ -1928,6 +1934,11 @@ fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
         TaskFailure::Auth(auth.user_message())
     } else if let Some(auth) = error.downcast_ref::<crate::codex_worker::CodexAuthError>() {
         TaskFailure::Auth(auth.to_string())
+    } else if let Some(readiness) =
+        error.downcast_ref::<crate::provider_readiness::ProviderReadinessError>()
+        && readiness.is_authentication_error()
+    {
+        TaskFailure::Auth(readiness.to_string())
     } else if let Some(pump) = error.downcast_ref::<crate::transcript_pump::TranscriptPumpError>() {
         TaskFailure::TranscriptPump(pump.message().to_string())
     } else if let Some(host) = error.downcast_ref::<crate::os::HostSandboxPreflightError>() {
@@ -3428,18 +3439,17 @@ fn run_learner_with_coder_with_codex_worker(
 
     // The guard survives until the process has completed, reclaiming the
     // isolated authentication copy even when launch or execution fails.
-    let local_codex_worker = if inputs.coder_kind == CoderKind::Codex
-        && prepared_codex_worker.is_none()
-        && !cfg!(test)
-    {
-        let worker =
-            crate::codex_worker::CodexWorkerEnvironment::prepare().map_err(anyhow::Error::new)?;
-        worker.preflight().map_err(anyhow::Error::new)?;
-        Some(worker)
+    let local_provider_readiness = if prepared_codex_worker.is_none() && !cfg!(test) {
+        Some(
+            crate::provider_readiness::ProviderReadiness::prepare(inputs.coder_kind)
+                .map_err(anyhow::Error::new)?,
+        )
     } else {
         None
     };
-    let codex_worker = prepared_codex_worker.or(local_codex_worker.as_ref());
+    let codex_worker = prepared_codex_worker.or(local_provider_readiness
+        .as_ref()
+        .and_then(|readiness| readiness.codex_worker()));
 
     let workspace_path = inputs.workspace_path;
     let workspace_resolver = ContentResolver::new(Some(workspace_path));

@@ -25,6 +25,7 @@ pub mod os;
 pub mod plan;
 pub mod post_merge_review;
 pub mod prep;
+pub mod provider_readiness;
 pub mod review;
 pub mod review_diff_command;
 pub mod review_only_worktree;

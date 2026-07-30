@@ -1572,20 +1572,30 @@ fn coder_profile_apply_merges_all_roles_and_preserves_unrelated_config() {
     fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
-    fs::write(tmp.path().join(".fluent/config.yaml"), "unrelated: retained\n").unwrap();
+    fs::write(
+        tmp.path().join(".fluent/config.yaml"),
+        "unrelated: retained\n",
+    )
+    .unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
 
     fluent_cmd()
         .current_dir(tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("CODEX_HOME", &codex_home)
-        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
         .assert()
         .success();
 
-    let config: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
-    ).unwrap();
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap())
+            .unwrap();
     assert_eq!(config["unrelated"], "retained");
     assert!(config.get("follow-up").is_none());
     for role in ["writer", "reviewer", "behavior-tests"] {
@@ -1608,12 +1618,18 @@ fn coder_profile_apply_propose_writes_only_coder_mapping() {
         .current_dir(tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("CODEX_HOME", &codex_home)
-        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
         .assert()
         .success();
-    let config: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
-    ).unwrap();
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap())
+            .unwrap();
     assert!(config.get("follow-up").is_none());
     assert!(config.get("coders").is_some());
 }
@@ -1625,28 +1641,68 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     let codex_home = tmp.path().join("codex-home");
     let log = tmp.path().join("providers.log");
     fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
-    fs::write(tmp.path().join(".fluent/config.yaml"), "unrelated: retained\n").unwrap();
+    fs::write(
+        tmp.path().join(".fluent/config.yaml"),
+        "unrelated: retained\n",
+    )
+    .unwrap();
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
-    write_mock_codex(&bin_dir, "#!/bin/bash\nprintf 'codex %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2\" = \"login status\" ]\n");
-    write_mock_executable(&bin_dir, "claude", "#!/bin/bash\nprintf 'claude %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2 $3\" = \"auth status --json\" ]\n");
-    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\n[ \"$#\" -gt 0 ] || { printf 'bare pi\\n' >> \"${PREFLIGHT_LOG:?}\"; exit 77; }\nprintf 'pi %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1\" = \"--version\" ]\n");
+    write_mock_codex(
+        &bin_dir,
+        "#!/bin/bash\nprintf 'codex %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2\" = \"login status\" ]\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        "#!/bin/bash\nprintf 'claude %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 1\nprintf '{\"loggedIn\":true}\\n'\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "pi",
+        "#!/bin/bash\n[ \"$#\" -gt 0 ] || { printf 'bare pi\\n' >> \"${PREFLIGHT_LOG:?}\"; exit 77; }\nprintf 'pi %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1\" = \"--version\" ]\n",
+    );
 
-    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home).env("PREFLIGHT_LOG", &log)
-        .args(["init", "--coder-profile", "custom", "--follow-up-mode", "propose",
-            "--write-coder", "codex", "--write-model", "test-codex", "--write-effort", "medium",
-            "--review-coder", "claude", "--review-model", "test-claude", "--review-effort", "high",
-            "--behavior-tests-coder", "pi", "--behavior-tests-model", "test-pi", "--behavior-tests-effort", "low"])
-        .assert().success();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .env("PREFLIGHT_LOG", &log)
+        .args([
+            "init",
+            "--coder-profile",
+            "custom",
+            "--follow-up-mode",
+            "propose",
+            "--write-coder",
+            "codex",
+            "--write-model",
+            "test-codex",
+            "--write-effort",
+            "medium",
+            "--review-coder",
+            "claude",
+            "--review-model",
+            "test-claude",
+            "--review-effort",
+            "high",
+            "--behavior-tests-coder",
+            "pi",
+            "--behavior-tests-model",
+            "test-pi",
+            "--behavior-tests-effort",
+            "low",
+        ])
+        .assert()
+        .success();
     let calls = fs::read_to_string(log).unwrap();
     assert!(calls.contains("codex login status"));
     assert!(calls.contains("claude auth status --json"));
     assert!(calls.contains("pi --version"));
     assert!(!calls.contains("bare pi"));
-    let config: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
-    )
-    .unwrap();
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap())
+            .unwrap();
     assert_eq!(config["unrelated"], "retained");
     for (role, coder, model, effort) in [
         ("writer", "codex", "test-codex", "medium"),
@@ -1666,10 +1722,69 @@ fn coder_profile_preflight_does_not_invoke_model() {
     let codex_home = tmp.path().join("codex-home");
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
-    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ] || exit 99\n");
-    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home)
-        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
-        .assert().success();
+    write_mock_codex(
+        &bin_dir,
+        "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ] || exit 99\n",
+    );
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn coder_profile_preflight_rejects_unauthenticated_claude_status() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        "#!/bin/bash\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 1\nprintf '{\"loggedIn\":false}\\n'\n",
+    );
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .args([
+            "init",
+            "--coder-profile",
+            "custom",
+            "--follow-up-mode",
+            "propose",
+            "--write-coder",
+            "claude",
+            "--write-model",
+            "test-claude",
+            "--write-effort",
+            "medium",
+            "--review-coder",
+            "claude",
+            "--review-model",
+            "test-claude",
+            "--review-effort",
+            "medium",
+            "--behavior-tests-coder",
+            "claude",
+            "--behavior-tests-model",
+            "test-claude",
+            "--behavior-tests-effort",
+            "medium",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "claude: authentication is unavailable",
+        ));
+    assert!(!tmp.path().join(".fluent").exists());
 }
 
 #[test]
@@ -1677,9 +1792,18 @@ fn coder_profile_preflight_failure_preserves_uninitialized_project() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     write_mock_codex(&bin_dir, "#!/bin/bash\nexit 1\n");
-    let output = fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir))
-        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
-        .output().unwrap();
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     assert!(!tmp.path().join(".fluent").exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("codex"));
@@ -1694,25 +1818,58 @@ fn coder_profile_preflight_reports_every_failed_provider_without_mutation() {
     let config_path = fluent_dir.join("config.yaml");
     let original_config = "unrelated: retained\n";
     fs::write(&config_path, original_config).unwrap();
-    write_mock_executable(&bin_dir, "claude", "#!/bin/bash\n[ \"$1 $2 $3\" = \"auth status --json\" ]\nexit 1\n");
-    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\n[ \"$1\" = \"--version\" ]\nexit 1\n");
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        "#!/bin/bash\n[ \"$1 $2 $3\" = \"auth status --json\" ]\nexit 1\n",
+    );
+    write_mock_executable(
+        &bin_dir,
+        "pi",
+        "#!/bin/bash\n[ \"$1\" = \"--version\" ]\nexit 1\n",
+    );
 
     let output = fluent_cmd()
         .current_dir(tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .args([
-            "init", "--coder-profile", "custom", "--follow-up-mode", "propose",
-            "--write-coder", "claude", "--write-model", "write-model", "--write-effort", "medium",
-            "--review-coder", "pi", "--review-model", "review-model", "--review-effort", "medium",
-            "--behavior-tests-coder", "claude", "--behavior-tests-model", "behavior-model", "--behavior-tests-effort", "medium",
+            "init",
+            "--coder-profile",
+            "custom",
+            "--follow-up-mode",
+            "propose",
+            "--write-coder",
+            "claude",
+            "--write-model",
+            "write-model",
+            "--write-effort",
+            "medium",
+            "--review-coder",
+            "pi",
+            "--review-model",
+            "review-model",
+            "--review-effort",
+            "medium",
+            "--behavior-tests-coder",
+            "claude",
+            "--behavior-tests-model",
+            "behavior-model",
+            "--behavior-tests-effort",
+            "medium",
         ])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("claude: authentication is unavailable"), "{stderr}");
-    assert!(stderr.contains("pi: command readiness check failed"), "{stderr}");
+    assert!(
+        stderr.contains("claude: authentication is unavailable"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pi: command readiness check failed"),
+        "{stderr}"
+    );
     assert_eq!(fs::read_to_string(config_path).unwrap(), original_config);
 }
 
@@ -1724,10 +1881,22 @@ fn coder_profile_apply_execute_merges_profile_and_follow_up_mode() {
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
-    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home)
-        .args(["init", "--coder-profile", "codex-stronger", "--follow-up-mode", "execute"])
-        .assert().success();
-    let config: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap()).unwrap();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-stronger",
+            "--follow-up-mode",
+            "execute",
+        ])
+        .assert()
+        .success();
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap())
+            .unwrap();
     assert_eq!(config["follow-up"]["mode"], "execute");
     assert_eq!(config["coders"]["writer"]["model"], "gpt-5.6-sol");
 }
@@ -1754,7 +1923,13 @@ fn coder_profile_apply_failure_never_leaves_partial_mapping() {
         .current_dir(tmp.path())
         .env("PATH", mock_path(&bin_dir))
         .env("CODEX_HOME", &codex_home)
-        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .args([
+            "init",
+            "--coder-profile",
+            "codex-balanced",
+            "--follow-up-mode",
+            "propose",
+        ])
         .output()
         .unwrap();
 
@@ -1875,7 +2050,9 @@ fn init_seeds_local_preview_operating_boundary() {
     assert!(managed.contains("outside this path"));
     assert!(managed.contains("explicit\n  coder profile before running configured `fluent init`"));
     assert!(managed.contains("Bare `fluent init` remains available"));
-    assert!(managed.contains("preflights\n  providers, and saves the three-role mapping atomically"));
+    assert!(
+        managed.contains("preflights\n  providers, and saves the three-role mapping atomically")
+    );
     assert!(!managed.contains("autonomous execute → review → land"));
     assert!(!managed.contains("policy allows autonomous merging"));
 }
@@ -15792,6 +15969,11 @@ fn commit_file(repo: &Path, path: &str, content: &str, message: &str) {
 
 const BEHAVIOR_TESTS_MOCK_PRELUDE: &str = r##"#!/bin/bash
 
+if [ "$1 $2 $3" = "auth status --json" ]; then
+    printf '{"loggedIn":true}\n'
+    exit 0
+fi
+
 if [ "${FLUENT_TASK_KIND:-}" = "behavior-tests" ]; then
     args_blob=""
     for arg in "$@"; do
@@ -21521,6 +21703,75 @@ fn codex_auth_failure_pauses_planned_task_before_reservation() {
     assert!(
         !launch_marker.exists(),
         "a failed authentication preflight must not launch the coder"
+    );
+}
+
+#[test]
+fn claude_readiness_failure_pauses_planned_task_before_reservation() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-claude-auth-failure");
+    let launch_marker = tmp.path().join("coder-launched");
+    write_mock_executable(
+        &bin_dir,
+        "claude",
+        &format!(
+            "#!/bin/bash\nif [ \"$1 $2 $3\" = \"auth status --json\" ]; then printf '{{\"loggedIn\":false}}\\n'; exit 0; fi\ntouch '{}'\n",
+            launch_marker.display()
+        ),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "claude-auth",
+            "--title",
+            "Claude auth",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "create",
+            "claude-auth",
+            "attempt-1",
+            "--write-coder",
+            "claude",
+        ])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "claude-auth",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "claude: authentication is unavailable",
+        ));
+
+    let item = work_item_value(&main_dir, "claude-auth");
+    let attempt = &item["attempts"][0];
+    let task = &attempt["tasks"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["pause_kind"], "auth");
+    assert_eq!(task["status"], "needs-user");
+    assert!(task["started_at"].is_null());
+    assert!(
+        !launch_marker.exists(),
+        "a failed readiness check must not launch Claude"
     );
 }
 

@@ -1062,21 +1062,15 @@ fn run_learner_step(
         }
     };
 
-    // Authenticate Codex before the reservation records an in-progress Learner
-    // run. The same guard is passed to the launch route and remains alive through
-    // process completion, so no second post-reservation preflight is possible.
+    // Verify the selected provider before the reservation records an in-progress
+    // Learner run. The Codex worker guard remains alive through process completion,
+    // so no second post-reservation readiness check is possible.
     let learner_coder = item.attempts[attempt_index]
         .coder_mapping
         .for_task_kind(TaskKind::Write)
         .coder;
-    let codex_worker = if learner_coder == CoderKind::Codex {
-        let worker =
-            crate::codex_worker::CodexWorkerEnvironment::prepare().map_err(anyhow::Error::new)?;
-        worker.preflight().map_err(anyhow::Error::new)?;
-        Some(worker)
-    } else {
-        None
-    };
+    let provider_readiness = crate::provider_readiness::ProviderReadiness::prepare(learner_coder)
+        .map_err(anyhow::Error::new)?;
 
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain
@@ -1088,7 +1082,7 @@ fn run_learner_step(
         candidate_id,
         mode,
         config.no_sandbox,
-        codex_worker.as_ref(),
+        provider_readiness.codex_worker(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1132,7 +1126,7 @@ fn run_learner_step(
     *item = store.read_work_item(&work_item_id)?;
     let config = LearnerConfig {
         run_coder: config.run_coder,
-        codex_worker: codex_worker.as_ref(),
+        codex_worker: provider_readiness.codex_worker(),
         no_sandbox: config.no_sandbox,
     };
 
