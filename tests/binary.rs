@@ -9682,6 +9682,77 @@ fn tester_check_reports_all_structural_problems_before_commands() {
 }
 
 #[test]
+fn tester_check_uses_production_tester_boundary() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let sentinel = tmp.path().join("tester-command-ran");
+    fs::write(
+        main_dir.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tester passed"));
+    assert!(sentinel.exists(), "tester check must run declared commands");
+}
+
+#[test]
+fn tester_check_distinguishes_test_failures_from_harness_errors() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::write(
+        main_dir.join(".fluent/extract-tester-results"),
+        "#!/bin/sh\necho '[{\"id\":\"suite::fails\",\"test_harness\":\"shell-harness\",\"status\":\"fail\",\"duration_ms\":null,\"failure_excerpt\":\"expected failure\"}]'\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("test-suite failures"))
+        .stderr(predicate::str::contains("harness could not").not());
+}
+
+#[test]
+fn tester_nested_sandbox_diagnosis_does_not_rewrite_project() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::write(
+        main_dir.join(".fluent/tester.yaml"),
+        "commands:\n  - command: \"printf 'sandbox-exec: sandbox_apply: Operation not permitted\\n' >&2; exit 1 # swift test\"\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    let tester_before = fs::read(main_dir.join(".fluent/tester.yaml")).unwrap();
+    let extractor_before = fs::read(main_dir.join(".fluent/extract-tester-results")).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Disable SwiftPM's inner sandbox"))
+        .stderr(predicate::str::contains("project-local cache paths"));
+    assert_eq!(
+        fs::read(main_dir.join(".fluent/tester.yaml")).unwrap(),
+        tester_before
+    );
+    assert_eq!(
+        fs::read(main_dir.join(".fluent/extract-tester-results")).unwrap(),
+        extractor_before
+    );
+}
+
+#[test]
 fn review_codebase_rejects_structurally_unready_tester_without_work_state() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -13009,7 +13080,7 @@ exit 1
 }
 
 #[test]
-fn work_task_run_tester_persistent_error_pauses_attempt_at_needs_user() {
+fn tester_error_pauses_same_attempt_before_reviewers() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -13054,7 +13125,21 @@ fn work_task_run_tester_persistent_error_pauses_attempt_at_needs_user() {
         value["attempts"][0]["status"], "needs-user",
         "attempt should pause at needs-user after persistent tester error"
     );
-    assert_eq!(tester_task["status"], "failed");
+    assert_eq!(tester_task["status"], "needs-user");
+    assert_eq!(
+        value["attempts"][0]["pause_kind"], "tester-harness",
+        "persistent Tester errors must remain resumable"
+    );
+    assert!(
+        value["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "review")
+            .all(|task| task["status"] != "executing" && task["status"] != "complete"),
+        "no dependent Reviewer may start after a Tester harness error: {}",
+        value["attempts"][0]["tasks"]
+    );
 }
 
 #[test]

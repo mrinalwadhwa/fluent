@@ -113,10 +113,34 @@ pub fn run(
     run_with_sandbox_profile(candidate_workspace, artifact_dir, profile.as_ref())
 }
 
-/// Validate the selected checkout without running its declared test commands.
-/// This invokes the extractor with a production-shaped, empty commands artifact
-/// through the same sandbox boundary used for a real Tester Task.
+/// Run the selected checkout through the production Tester boundary after first
+/// collecting every independent structural readiness problem.
 pub fn check(
+    candidate_workspace: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+) -> Result<TesterOutcome> {
+    let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
+    let profile =
+        preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), profile.as_ref());
+    if !problems.is_empty() {
+        anyhow::bail!(
+            "Tester is not structurally ready:\n{}",
+            problems
+                .into_iter()
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    run_with_sandbox_profile(candidate_workspace, artifact.path(), profile.as_ref())
+}
+
+/// Validate Tester configuration and empty-artifact extraction without running
+/// declared commands. Review-only setup uses this gate before it creates Work
+/// state; `check` adds the production command run above this common validation.
+pub fn check_structural(
     candidate_workspace: &Path,
     no_sandbox: bool,
     resolver: &ContentResolver,
@@ -150,6 +174,17 @@ pub fn preflight_sandbox_profile(
     resolver: &ContentResolver,
 ) -> Result<Option<os::SandboxProfile>> {
     if no_sandbox {
+        return Ok(None);
+    }
+    // Test-support can force the host preflight result while macOS test runners
+    // remain unable to apply a nested Seatbelt profile. Production never takes
+    // this branch and always returns the profile it preflighted.
+    #[cfg(feature = "test-support")]
+    if std::env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT")
+        .ok()
+        .as_deref()
+        == Some("pass")
+    {
         return Ok(None);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -232,19 +267,22 @@ pub fn run_with_sandbox_profile(
             .ok()
             .is_some_and(|stderr| is_nested_swiftpm_sandbox_failure(&result.command, &stderr))
     }) {
+        let details = format!(
+            "The Tester sandbox already confines `{}`. Disable SwiftPM's inner sandbox (for example, pass --disable-sandbox) and configure writable project-local cache paths before retrying. Fluent did not modify .fluent/tester.yaml or project scripts.",
+            result.command
+        );
+        eprintln!("  Tester guidance: {details}");
         return persist_harness_error(
             artifact_dir,
             "nested_swiftpm_sandbox",
             "Swift Package Manager could not create its inner sandbox".to_string(),
-            format!(
-                "The Tester sandbox already confines `{}`. Disable SwiftPM's inner sandbox (for example, pass --disable-sandbox) and configure writable project-local cache paths before retrying. Fluent did not modify .fluent/tester.yaml or project scripts.",
-                result.command
-            ),
+            details,
         );
     }
 
-    let tests = match run_extractor(&extractor_path, artifact_dir, sandbox_path) {
-        Ok(tests) => tests,
+    let (tests, summary) = match extract_and_normalize(&extractor_path, artifact_dir, sandbox_path)
+    {
+        Ok(normalized) => normalized,
         Err(error) => {
             return persist_harness_error(
                 artifact_dir,
@@ -254,25 +292,6 @@ pub fn run_with_sandbox_profile(
             );
         }
     };
-
-    let duplicate_ids = find_duplicate_ids(&tests);
-    if !duplicate_ids.is_empty() {
-        return persist_harness_error(
-            artifact_dir,
-            "duplicate_test_ids",
-            format!("Duplicate test ids: {}", duplicate_ids.join(", ")),
-            String::new(),
-        );
-    }
-
-    let mut tests = cap_failure_excerpts(tests);
-    tests.sort_by(|a, b| {
-        a.test_harness
-            .cmp(&b.test_harness)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    let summary = compute_summary(&tests);
 
     let results = TesterResults {
         commands: command_results,
@@ -333,7 +352,8 @@ fn structural_problems(
     } else {
         if let Err(error) = fs::write(artifact_dir.join("commands.json"), "[]") {
             problems.push(format!("readiness artifact: {error}"));
-        } else if let Err(error) = run_extractor(&extractor, artifact_dir, profile.map(|p| &p.path))
+        } else if let Err(error) =
+            extract_and_normalize(&extractor, artifact_dir, profile.map(|p| &p.path))
         {
             problems.push(format!(
                 "{EXTRACTOR_PATH}: invalid empty artifact: {error:#}"
@@ -341,6 +361,26 @@ fn structural_problems(
         }
     }
     problems
+}
+
+fn extract_and_normalize(
+    extractor_path: &Path,
+    artifact_dir: &Path,
+    sandbox_path: Option<&PathBuf>,
+) -> Result<(Vec<TestResult>, Summary)> {
+    let tests = run_extractor(extractor_path, artifact_dir, sandbox_path)?;
+    let duplicate_ids = find_duplicate_ids(&tests);
+    if !duplicate_ids.is_empty() {
+        anyhow::bail!("Duplicate test ids: {}", duplicate_ids.join(", "));
+    }
+    let mut tests = cap_failure_excerpts(tests);
+    tests.sort_by(|a, b| {
+        a.test_harness
+            .cmp(&b.test_harness)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let summary = compute_summary(&tests);
+    Ok((tests, summary))
 }
 
 fn read_tester_config(path: &Path) -> Result<TesterConfig> {
@@ -629,8 +669,25 @@ mod tests {
         );
         write_extractor(workspace.path(), "#!/bin/sh\nexit 1\n");
 
-        let error = check(workspace.path(), true, &resolver()).unwrap_err();
+        let error = check_structural(workspace.path(), true, &resolver()).unwrap_err();
         assert!(format!("{error:#}").contains("invalid empty artifact"));
+    }
+
+    #[test]
+    fn structural_check_rejects_duplicate_empty_artifact_ids() {
+        let workspace = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: echo hello\n    test_harness: shell-harness\n",
+        );
+        write_extractor(
+            workspace.path(),
+            "#!/bin/sh\necho '[{\"id\":\"duplicate\",\"test_harness\":\"shell-harness\",\"status\":\"pass\",\"duration_ms\":null,\"failure_excerpt\":null},{\"id\":\"duplicate\",\"test_harness\":\"shell-harness\",\"status\":\"pass\",\"duration_ms\":null,\"failure_excerpt\":null}]'\n",
+        );
+
+        let error = check_structural(workspace.path(), true, &resolver()).unwrap_err();
+        assert!(format!("{error:#}").contains("Duplicate test ids: duplicate"));
     }
 
     #[test]

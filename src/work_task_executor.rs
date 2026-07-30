@@ -1541,7 +1541,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
-                &classify_task_failure(&error),
+                &TaskFailure::TesterHarness,
                 &crate::notify::notify,
             )?;
             return Err(error);
@@ -1549,12 +1549,15 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     }
 
     if !results_path.is_file() {
-        lock_mark_task_failed(
+        lock_mark_task_failed_attempt_needs_user(
             config.store,
             config.store_lock,
+            config.project_root,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
+            &TaskFailure::TesterHarness,
+            &crate::notify::notify,
         )?;
         bail!(
             "Tester Task {:?} completed without writing {}",
@@ -1569,12 +1572,15 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     match complete_tester_task(&config, &results_path) {
         Ok(result) => Ok(result),
         Err(error) => {
-            lock_mark_task_failed(
+            lock_mark_task_failed_attempt_needs_user(
                 config.store,
                 config.store_lock,
+                config.project_root,
                 config.work_item_id,
                 config.attempt_id,
                 config.task_id,
+                &TaskFailure::TesterHarness,
+                &crate::notify::notify,
             )?;
             Err(error)
         }

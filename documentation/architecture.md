@@ -178,6 +178,13 @@ scheduler blocks all reviewers until the Tester completes. The Tester
 does not spawn a Coder process or write a transcript — it is a
 deterministic subprocess, not an LLM agent.
 
+`fluent tester check` first validates the project's Tester structure and then
+runs the same sandboxed command and normalization boundary used by a Tester
+Task. It reports ordinary normalized failures as test-suite failures, while
+configuration, extraction, sandbox, execution, and result-persistence failures
+become resumable Tester harness pauses. Operators repair the reported Tester
+problem and resume the same Attempt; completed Writer work remains complete.
+
 The `behaviors.md` format supports two markers on EARS statements:
 - `Test:` — names a test that verifies the behavior.
 - `Untestable:` — marks a behavior as genuinely untestable with a reason.
