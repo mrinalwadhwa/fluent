@@ -1613,7 +1613,7 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
         eprintln!("  warning: could not seed agent instructions: {e}");
     }
     if let Some(setup) = configured_setup {
-        let saved = fluent::setup::apply_project_config(cwd, &setup.mapping, setup.follow_up_mode)
+        let saved = fluent::config::apply_project_coder_profile(cwd, &setup.mapping, setup.follow_up_mode)
             .context("first-time setup is incomplete")?;
         eprintln!("  Saved coder profile:");
         for (role, pair) in [

@@ -1,9 +1,11 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::work_model::CoderMappingInputs;
+use crate::atomic_write::atomic_write;
+use crate::work_model::{CoderMapping, CoderMappingInputs, CoderModelPair};
 
 // -------------------------------------------------------------------------
 // Layered follow-up and scheduler policy
@@ -85,6 +87,54 @@ impl fmt::Display for FollowUpMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Atomically merge a configured setup profile into project configuration.
+pub fn apply_project_coder_profile(
+    root: &Path,
+    mapping: &CoderMapping,
+    mode: FollowUpMode,
+) -> Result<CoderMapping> {
+    let path = root.join(".fluent/config.yaml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let mut document = if text.trim().is_empty() {
+        serde_yaml::Value::Mapping(Default::default())
+    } else {
+        serde_yaml::from_str(&text).context("parse existing project configuration")?
+    };
+    let root_map = document
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("project configuration must be a YAML mapping"))?;
+    let coders = mapping_at_mut(root_map, "coders")?;
+    write_role(coders, "writer", &mapping.write)?;
+    write_role(coders, "reviewer", &mapping.review)?;
+    write_role(coders, "behavior-tests", &mapping.behavior_tests)?;
+    if mode == FollowUpMode::Execute {
+        mapping_at_mut(root_map, "follow-up")?.insert("mode".into(), "execute".into());
+    }
+    let rendered = serde_yaml::to_string(&document).context("serialize project configuration")?;
+    atomic_write(&path, rendered.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+    Ok(mapping.clone())
+}
+
+fn mapping_at_mut<'a>(map: &'a mut serde_yaml::Mapping, key: &str) -> Result<&'a mut serde_yaml::Mapping> {
+    let value = map
+        .entry(key.into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    value.as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("configuration key {key:?} must be a mapping"))
+}
+
+fn write_role(coders: &mut serde_yaml::Mapping, name: &str, pair: &CoderModelPair) -> Result<()> {
+    let role = mapping_at_mut(coders, name)?;
+    role.insert("coder".into(), pair.coder.as_str().into());
+    role.insert("model".into(), pair.model.clone().into());
+    role.insert("effort".into(), pair.effort.clone().unwrap_or_default().into());
+    Ok(())
 }
 
 /// A resolved configuration value paired with the layer that supplied it.

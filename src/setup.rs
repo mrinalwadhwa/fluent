@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, bail};
-use std::path::Path;
 use std::process::Command;
 
-use crate::atomic_write::atomic_write;
 use crate::coder::CoderKind;
 use crate::config::FollowUpMode;
 use crate::work_model::{CoderMapping, CoderMappingInputs, CoderModelPair, resolve_coder_mapping};
@@ -114,39 +112,6 @@ fn provider_ready(provider: CoderKind) -> Result<()> {
     if status.success() { Ok(()) } else { bail!("{program}: authentication is unavailable") }
 }
 
-/// Atomically update only setup-owned configuration leaves and return the saved mapping.
-pub fn apply_project_config(root: &Path, mapping: &CoderMapping, mode: FollowUpMode) -> Result<CoderMapping> {
-    let path = root.join(".fluent/config.yaml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-    };
-    let mut document = if text.trim().is_empty() { serde_yaml::Value::Mapping(Default::default()) } else { serde_yaml::from_str(&text).context("parse existing project configuration")? };
-    let root_map = document.as_mapping_mut().ok_or_else(|| anyhow::anyhow!("project configuration must be a YAML mapping"))?;
-    let coders = mapping_at_mut(root_map, "coders")?;
-    write_role(coders, "writer", &mapping.write)?;
-    write_role(coders, "reviewer", &mapping.review)?;
-    write_role(coders, "behavior-tests", &mapping.behavior_tests)?;
-    if mode == FollowUpMode::Execute { mapping_at_mut(root_map, "follow-up")?.insert("mode".into(), "execute".into()); }
-    let rendered = serde_yaml::to_string(&document).context("serialize project configuration")?;
-    atomic_write(&path, rendered.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-    Ok(mapping.clone())
-}
-
-fn mapping_at_mut<'a>(map: &'a mut serde_yaml::Mapping, key: &str) -> Result<&'a mut serde_yaml::Mapping> {
-    let value = map.entry(key.into()).or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
-    value.as_mapping_mut().ok_or_else(|| anyhow::anyhow!("configuration key {key:?} must be a mapping"))
-}
-
-fn write_role(coders: &mut serde_yaml::Mapping, name: &str, pair: &CoderModelPair) -> Result<()> {
-    let role = mapping_at_mut(coders, name)?;
-    role.insert("coder".into(), pair.coder.as_str().into());
-    role.insert("model".into(), pair.model.clone().into());
-    role.insert("effort".into(), pair.effort.clone().unwrap_or_default().into());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,7 +121,7 @@ mod tests {
         std::fs::create_dir(directory.path().join(".fluent")).unwrap();
         std::fs::write(directory.path().join(".fluent/config.yaml"), "unrelated: retained\n").unwrap();
         let setup = ConfiguredSetup::from_inputs(InitSetupInputs { coder_profile: Some("codex-balanced".into()), follow_up_mode: Some("propose".into()), ..Default::default() }).unwrap().unwrap();
-        apply_project_config(directory.path(), &setup.mapping, setup.follow_up_mode).unwrap();
+        crate::config::apply_project_coder_profile(directory.path(), &setup.mapping, setup.follow_up_mode).unwrap();
         let value: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(directory.path().join(".fluent/config.yaml")).unwrap()).unwrap();
         assert_eq!(value["unrelated"], "retained");
         assert!(value.get("follow-up").is_none());

@@ -1696,7 +1696,7 @@ fn coder_profile_apply_failure_never_leaves_partial_mapping() {
     }).unwrap().unwrap();
     // A non-mapping existing `coders` value fails before atomic replacement.
     fs::write(fluent_dir.join("config.yaml"), "coders: invalid\nunrelated: retained\n").unwrap();
-    assert!(fluent::setup::apply_project_config(tmp.path(), &profile.mapping, profile.follow_up_mode).is_err());
+    assert!(fluent::config::apply_project_coder_profile(tmp.path(), &profile.mapping, profile.follow_up_mode).is_err());
     let config = fs::read_to_string(fluent_dir.join("config.yaml")).unwrap();
     assert_eq!(config, "coders: invalid\nunrelated: retained\n");
 }
