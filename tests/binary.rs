@@ -1734,18 +1734,34 @@ fn coder_profile_apply_execute_merges_profile_and_follow_up_mode() {
 
 #[test]
 fn coder_profile_apply_failure_never_leaves_partial_mapping() {
+    use std::os::unix::fs::PermissionsExt;
+
     let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
     let fluent_dir = tmp.path().join(".fluent");
     fs::create_dir(&fluent_dir).unwrap();
-    fs::write(fluent_dir.join("config.yaml"), "unrelated: retained\n").unwrap();
-    let profile = fluent::setup::ConfiguredSetup::from_inputs(fluent::setup::InitSetupInputs {
-        coder_profile: Some("codex-balanced".into()), follow_up_mode: Some("propose".into()), ..Default::default()
-    }).unwrap().unwrap();
-    // A non-mapping existing `coders` value fails before atomic replacement.
-    fs::write(fluent_dir.join("config.yaml"), "coders: invalid\nunrelated: retained\n").unwrap();
-    assert!(fluent::config::apply_project_coder_profile(tmp.path(), &profile.mapping, profile.follow_up_mode).is_err());
-    let config = fs::read_to_string(fluent_dir.join("config.yaml")).unwrap();
-    assert_eq!(config, "coders: invalid\nunrelated: retained\n");
+    fs::write(fluent_dir.join(".gitignore"), "work/\n").unwrap();
+    let config_path = fluent_dir.join("config.yaml");
+    let original_config = "unrelated: retained\n";
+    fs::write(&config_path, original_config).unwrap();
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
+    fs::set_permissions(&fluent_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .output()
+        .unwrap();
+
+    fs::set_permissions(&fluent_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("first-time setup is incomplete"));
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original_config);
 }
 
 // -------------------------------------------------------------------------
