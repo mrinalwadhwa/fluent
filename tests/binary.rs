@@ -86,6 +86,40 @@ fn release_suite_process_guard_allows_clean_suite() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn release_suite_process_guard_discovers_scoped_process_cwd() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("fixture-root");
+    fs::create_dir_all(&root).unwrap();
+    let guard =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release-test-process-guard.sh");
+    let output = Command::new("bash")
+        .arg(guard)
+        .args([
+            "bash",
+            "-c",
+            "cd \"$1\"; exec -a 'fluent scheduler run' sleep 60 & echo $! > leaked.pid",
+            "fixture-root",
+        ])
+        .arg(&root)
+        .env("FLUENT_RELEASE_TEST_ROOTS", &root)
+        .output()
+        .unwrap();
+
+    let leaked_pid = fs::read_to_string(root.join("leaked.pid")).unwrap();
+    let _ = Command::new("kill")
+        .args(["-TERM", leaked_pid.trim()])
+        .status();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "guard accepted a scoped process");
+    assert!(
+        stderr.contains("kind=fluent scheduler"),
+        "diagnostic: {stderr}"
+    );
+    assert!(stderr.contains(&format!("root={}", root.display())));
+}
+
 fn provider_double_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-doubles")
 }

@@ -8,7 +8,10 @@ commands:
       export FLUENT_BIN_OVERRIDE="$(pwd)/target/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
-      export FLUENT_RELEASE_TEST_ROOTS="${TMPDIR:-/tmp}"
+      release_tmp="$(mktemp -d)"
+      trap 'rm -rf "$release_tmp"' EXIT
+      export TMPDIR="$release_tmp"
+      export FLUENT_RELEASE_TEST_ROOTS="$release_tmp"
       FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 bash scripts/release-test-process-guard.sh cargo nextest run --features test-support --no-fail-fast --message-format libtest-json 2>&1
     test_harness: cargo-nextest
   - command: |
@@ -17,7 +20,10 @@ commands:
       export FLUENT_BIN_OVERRIDE="$(pwd)/target/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
-      export FLUENT_RELEASE_TEST_ROOTS="${TMPDIR:-/tmp}"
+      release_tmp="$(mktemp -d)"
+      trap 'rm -rf "$release_tmp"' EXIT
+      export TMPDIR="$release_tmp"
+      export FLUENT_RELEASE_TEST_ROOTS="$release_tmp"
       bash scripts/release-test-process-guard.sh bash -c '
         exit_code=0
         for script in tests/behaviors/operations/*.sh tests/behaviors/skills/*.sh; do

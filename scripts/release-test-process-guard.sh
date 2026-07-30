@@ -13,18 +13,29 @@ snapshot() {
     return 0
   fi
 
-  { /bin/ps -axo pid=,command= 2>/dev/null || true; } | while IFS= read -r line; do
-    pid="${line%% *}"
-    command="${line#"$pid"}"
+  { /bin/ps -axo pid=,command= 2>/dev/null || true; } | while read -r pid command; do
     case "$command" in
       *fluent*|*claude*|*codex*|*" pi "*) ;;
       *) continue ;;
     esac
     IFS=: read -r -a root_list <<< "$roots"
     for root in "${root_list[@]}"; do
-      case "$command" in
-        *"$root"*) printf '%s\t%s\t%s\n' "$pid" "process" "$root"; break ;;
+      cwd="$(/usr/sbin/lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+      case "$cwd/" in
+        "$root"/*) ;;
+        *) continue ;;
       esac
+      case "$command" in
+        *"fluent scheduler"*) kind="fluent scheduler" ;;
+        *"fluent auto-merge"*) kind="fluent auto-merge" ;;
+        *"fluent post-merge-review"*) kind="fluent post-merge-review" ;;
+        *claude*) kind="claude" ;;
+        *codex*) kind="codex" ;;
+        *" pi "*) kind="pi" ;;
+        *) kind="fluent" ;;
+      esac
+      printf '%s\t%s\t%s\n' "$pid" "$kind" "$root"
+      break
     done
   done
 }
