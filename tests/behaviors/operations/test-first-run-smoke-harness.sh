@@ -523,8 +523,15 @@ test_run_configures_init_and_commits_before_attempt() {
     || { printf '    FAIL: attempt started from a dirty checkout\n'; rc=1; }
   git -C "$ROOT/project/main" log --format=%s | grep -Fxq 'Initialize Fluent smoke fixture' \
     || { printf '    FAIL: initialization changes were not committed\n'; rc=1; }
-  [ "$(head -1 "$codex_home_log")" = "$(cd "$codex_home" && pwd -P)" ] \
-    || { printf '    FAIL: Fluent did not receive the recorded Codex home\n'; rc=1; }
+  local recorded_codex_home
+  recorded_codex_home="$(cd "$codex_home" && pwd -P)"
+  [ -s "$codex_home_log" ] \
+    || { printf '    FAIL: run did not invoke Fluent with CODEX_HOME\n'; rc=1; }
+  if ! awk -v expected="$recorded_codex_home" '$0 != expected { exit 1 }' \
+    "$codex_home_log"; then
+    printf '    FAIL: run did not pass the recorded Codex home to every Fluent invocation\n'
+    rc=1
+  fi
   if grep -R -Fq -- 'secret credential' "$ROOT"; then
     printf '    FAIL: run copied Codex credentials into the smoke root\n'; rc=1
   fi
@@ -712,9 +719,15 @@ test_land_verifies_target() {
   new_workspace
   trap cleanup_workspace RETURN
 
-  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" > /dev/null 2>&1
-  run_harness run "$ROOT" > /dev/null 2>&1
-  run_harness land "$ROOT" > "$WORK/land.out" 2>&1
+  local codex_home="$WORK/codex-home"
+  mkdir -p "$codex_home"
+  printf 'secret credential\n' > "$codex_home/auth.json"
+  local codex_home_log="$WORK/codex-home-log"
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    --codex-home "$codex_home" > /dev/null 2>&1
+  FAKE_CODEX_HOME_LOG="$codex_home_log" run_harness run "$ROOT" > /dev/null 2>&1
+  : > "$codex_home_log"
+  FAKE_CODEX_HOME_LOG="$codex_home_log" run_harness land "$ROOT" > "$WORK/land.out" 2>&1
 
   local rc=0
   # The candidate lands and the fixture test now passes on main.
@@ -735,6 +748,18 @@ test_land_verifies_target() {
   # The land command is the only path that reached land.
   grep -q 'merge-candidate land' "$FAKE_CMD_LOG" \
     || { printf '    FAIL: land was never invoked\n'; rc=1; }
+  local recorded_codex_home
+  recorded_codex_home="$(cd "$codex_home" && pwd -P)"
+  [ -s "$codex_home_log" ] \
+    || { printf '    FAIL: land did not invoke Fluent with CODEX_HOME\n'; rc=1; }
+  if ! awk -v expected="$recorded_codex_home" '$0 != expected { exit 1 }' \
+    "$codex_home_log"; then
+    printf '    FAIL: land did not pass the recorded Codex home to every Fluent invocation\n'
+    rc=1
+  fi
+  if grep -R -Fq -- 'secret credential' "$ROOT"; then
+    printf '    FAIL: land copied Codex credentials into the smoke root\n'; rc=1
+  fi
   return $rc
 }
 
