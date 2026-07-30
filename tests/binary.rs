@@ -161,7 +161,7 @@ fn nested_work_routes_use_only_fixture_coders() {
         provider_double_path().display(),
         std::env::var("PATH").unwrap()
     );
-    for coder in ["claude"] {
+    for coder in ["claude", "codex", "pi"] {
         let work_item_id = format!("fixture-{coder}");
         fluent_cmd()
             .current_dir(&project)
