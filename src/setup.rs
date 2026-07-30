@@ -160,4 +160,22 @@ mod tests {
         assert!(value.get("follow-up").is_none());
         for role in ["writer", "reviewer", "behavior-tests"] { assert_eq!(value["coders"][role]["model"], "gpt-5.6-terra"); }
     }
+
+    #[test]
+    fn configured_setup_rejects_incomplete_and_conflicting_flags() {
+        let incomplete = ConfiguredSetup::from_inputs(InitSetupInputs {
+            coder_profile: Some("custom".into()),
+            follow_up_mode: Some("propose".into()),
+            write_coder: Some("codex".into()),
+            ..Default::default()
+        });
+        assert!(incomplete.is_err());
+        let conflicting = ConfiguredSetup::from_inputs(InitSetupInputs {
+            coder_profile: Some("codex-balanced".into()),
+            follow_up_mode: Some("propose".into()),
+            write_coder: Some("codex".into()),
+            ..Default::default()
+        });
+        assert!(conflicting.is_err());
+    }
 }

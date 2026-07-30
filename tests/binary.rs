@@ -1618,6 +1618,88 @@ fn coder_profile_apply_propose_writes_only_coder_mapping() {
     assert!(config.get("coders").is_some());
 }
 
+#[test]
+fn coder_profile_preflight_checks_command_and_authentication() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
+    let log = tmp.path().join("providers.log");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\nprintf 'codex %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2\" = \"login status\" ]\n");
+    write_mock_executable(&bin_dir, "claude", "#!/bin/bash\nprintf 'claude %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2 $3\" = \"auth status --json\" ]\n");
+    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\nprintf 'pi\\n' >> \"${PREFLIGHT_LOG:?}\"\nexit 0\n");
+
+    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home).env("PREFLIGHT_LOG", &log)
+        .args(["init", "--coder-profile", "custom", "--follow-up-mode", "propose",
+            "--write-coder", "codex", "--write-model", "test-codex", "--write-effort", "medium",
+            "--review-coder", "claude", "--review-model", "test-claude", "--review-effort", "high",
+            "--behavior-tests-coder", "pi", "--behavior-tests-model", "test-pi", "--behavior-tests-effort", "low"])
+        .assert().success();
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(calls.contains("codex login status"));
+    assert!(calls.contains("claude auth status --json"));
+    assert!(calls.contains("pi"));
+}
+
+#[test]
+fn coder_profile_preflight_does_not_invoke_model() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ] || exit 99\n");
+    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home)
+        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .assert().success();
+}
+
+#[test]
+fn coder_profile_preflight_failure_preserves_uninitialized_project() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    write_mock_codex(&bin_dir, "#!/bin/bash\nexit 1\n");
+    let output = fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir))
+        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(!tmp.path().join(".fluent").exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("codex"));
+}
+
+#[test]
+fn coder_profile_apply_execute_merges_profile_and_follow_up_mode() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
+    fluent_cmd().current_dir(tmp.path()).env("PATH", mock_path(&bin_dir)).env("CODEX_HOME", &codex_home)
+        .args(["init", "--coder-profile", "codex-stronger", "--follow-up-mode", "execute"])
+        .assert().success();
+    let config: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap()).unwrap();
+    assert_eq!(config["follow-up"]["mode"], "execute");
+    assert_eq!(config["coders"]["writer"]["model"], "gpt-5.6-sol");
+}
+
+#[test]
+fn coder_profile_apply_failure_never_leaves_partial_mapping() {
+    let tmp = TempDir::new().unwrap();
+    let fluent_dir = tmp.path().join(".fluent");
+    fs::create_dir(&fluent_dir).unwrap();
+    fs::write(fluent_dir.join("config.yaml"), "unrelated: retained\n").unwrap();
+    let profile = fluent::setup::ConfiguredSetup::from_inputs(fluent::setup::InitSetupInputs {
+        coder_profile: Some("codex-balanced".into()), follow_up_mode: Some("propose".into()), ..Default::default()
+    }).unwrap().unwrap();
+    // A non-mapping existing `coders` value fails before atomic replacement.
+    fs::write(fluent_dir.join("config.yaml"), "coders: invalid\nunrelated: retained\n").unwrap();
+    assert!(fluent::setup::apply_project_config(tmp.path(), &profile.mapping, profile.follow_up_mode).is_err());
+    let config = fs::read_to_string(fluent_dir.join("config.yaml")).unwrap();
+    assert_eq!(config, "coders: invalid\nunrelated: retained\n");
+}
+
 // -------------------------------------------------------------------------
 // Init — craft section seeding
 // -------------------------------------------------------------------------
