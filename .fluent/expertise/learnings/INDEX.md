@@ -6,6 +6,7 @@
 - [atomic-task-start-reservation](atomic-task-start-reservation.md) — Task starts run read-only preflight, then a single lock-held reservation that honors the precedence boundary, then CAS rollback — never mark Executing while discarding the transition verdict
 - [atomic-write-replace-through-utility](atomic-write-replace-through-utility.md) — Replace a durable file through crate::atomic_write::atomic_write (unique temp + persist), never a fixed-name temp + rename; distinguish NotFound from other read errors instead of unwrap_or_default
 - [attempt-coder-mapping-is-runtime-authority](attempt-coder-mapping-is-runtime-authority.md) — Resolve coder mappings from config and environment only when creating an Attempt; existing runs use the persisted mapping, with explicit CLI fields applied as a fresh atomic overlay
+- [autonomous-claude-safe-mode-boundary](autonomous-claude-safe-mode-boundary.md) — Launch autonomous Claude work in safe mode while leaving explicitly interactive sessions customizable
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
 - [canonical-reviewer-cache-cleanup](canonical-reviewer-cache-cleanup.md) — Reviewer-cache reclamation deletes only recognized canonical cache directories, preserves all other artifacts, and retries failed cleanup at later admissions
@@ -71,3 +72,4 @@
 - [test-names-match-assertions](test-names-match-assertions.md) — Test function names must describe the behavior the test actually asserts, not what a behavior statement claims
 - [tester-readiness-shares-production-boundary](tester-readiness-shares-production-boundary.md) — Tester readiness validates structure and executes through the production sandbox, extraction, and normalization boundary; production boundary failures pause only the Tester for repair and retry
 - [utf8-safe-diagnostic-truncation](utf8-safe-diagnostic-truncation.md) — Byte-capped diagnostic excerpts must realign truncation to a UTF-8 character boundary before slicing
+- [verified-cleanup-for-bounded-host-probes](verified-cleanup-for-bounded-host-probes.md) — A timed host-side probe may report timeout only after its owned process group has been verifiably swept
