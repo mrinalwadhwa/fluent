@@ -4851,61 +4851,114 @@ Test: tests/binary.rs (init_seeds_local_preview_operating_boundary)
 ### B21
 
 WHEN the full fluent skill detects that `.fluent/` does not exist,
-THE SYSTEM SHALL offer the `propose` or `execute` follow-up-mode choice before
-running `fluent init`.
-Test: src/content.rs (bundled_fluent_skill_orders_first_init_choice)
+THE SYSTEM SHALL offer both the `propose` or `execute` follow-up-mode choice
+and the explicit curated or custom coder-profile choice before running
+configured `fluent init`.
+Test: src/content.rs (bundled_fluent_skill_offers_coder_profiles_before_init)
 
 ### B22
 
-WHEN `.fluent/` does not exist and the full fluent skill offers the
-follow-up-mode choice,
-THE SYSTEM SHALL run `fluent init` only after the user chooses.
-Test: src/content.rs (bundled_fluent_skill_orders_first_init_choice)
+WHEN `.fluent/` does not exist and the full fluent skill offers setup choices,
+THE SYSTEM SHALL run configured `fluent init` only after the user completes the
+follow-up mode and coder profile.
+Test: src/content.rs (bundled_fluent_skill_orders_profile_preflight_before_init)
 
 ### B23
 
 WHERE the user chooses `propose` during first-time project setup,
-THE SYSTEM SHALL leave `.fluent/config.yaml` unchanged.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+THE SYSTEM SHALL persist the selected coder profile without adding a follow-up
+mapping.
+Test: tests/binary.rs (coder_profile_apply_propose_writes_only_coder_mapping)
 
 ### B24
 
 WHERE the user chooses `execute` during first-time project setup,
-THE SYSTEM SHALL write the nested `follow-up: { mode: execute }` mapping after
-init.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+THE SYSTEM SHALL persist the selected profile and nested
+`follow-up: { mode: execute }` mapping.
+Test: tests/binary.rs (coder_profile_apply_execute_merges_profile_and_follow_up_mode)
 
 ### B25
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute authorizes Work.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+Test: skills/fluent.full/fluent.md
 
 ### B25a
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute queues Work.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+Test: skills/fluent.full/fluent.md
 
 ### B25b
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that execute does not start Work.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+Test: skills/fluent.full/fluent.md
 
 ### B26
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that a separately started scheduler executes the
 queued Work.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+Test: skills/fluent.full/fluent.md
 
 ### B27
 
 WHERE the user chooses `execute` during first-time project setup,
 THE SYSTEM SHALL explain that the resulting candidate still requires human
 inspection and landing.
-Test: src/content.rs (bundled_fluent_skill_writes_nested_execute_mode)
+Test: skills/fluent.full/fluent.md
+
+---
+
+## First-time coder profile setup
+
+### B1
+
+WHEN configured `fluent init` receives `codex-balanced`, `codex-stronger`, or a
+complete custom profile,
+THE SYSTEM SHALL resolve explicit coder, model, and effort values for writer,
+reviewer, and behavior-test roles and preflight every distinct provider before
+the first initialization mutation.
+Test: tests/binary.rs (coder_profile_preflight_checks_command_and_authentication)
+
+### B2
+
+WHEN configured init preflights a provider,
+THE SYSTEM SHALL check command and authentication readiness without requesting
+model inference or consuming model quota.
+Test: tests/binary.rs (coder_profile_preflight_does_not_invoke_model)
+
+### B3
+
+IF configured-init provider preflight fails,
+THEN THE SYSTEM SHALL report the failed provider, leave a new project
+uninitialized, and direct the user to retry or choose a different profile.
+Test: tests/binary.rs (coder_profile_preflight_failure_preserves_uninitialized_project)
+Test: src/content.rs (bundled_fluent_skill_offers_preflight_retry_or_reselection)
+
+### B4
+
+WHEN configured initialization succeeds,
+THE SYSTEM SHALL atomically merge the complete three-role profile into project
+configuration while preserving unrelated keys, and SHALL add `follow-up.mode`
+only for `execute`.
+Test: tests/binary.rs (coder_profile_apply_merges_all_roles_and_preserves_unrelated_config,
+coder_profile_apply_execute_merges_profile_and_follow_up_mode)
+
+### B5
+
+IF Fluent cannot save the complete coder profile,
+THEN THE SYSTEM SHALL retain the prior configuration without a partial role
+mapping and report that setup is incomplete.
+Test: tests/binary.rs (coder_profile_apply_failure_never_leaves_partial_mapping)
+
+### B6
+
+WHEN first-time coder-profile setup completes,
+THE SYSTEM SHALL show the saved three-role mapping and explain that new Attempts
+freeze the effective mapping unless explicit Attempt overrides are supplied.
+Test: src/content.rs (bundled_fluent_skill_reports_saved_profile_and_attempt_boundary)
 
 ---
 

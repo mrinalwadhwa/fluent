@@ -1809,8 +1809,9 @@ fn init_seeds_local_preview_operating_boundary() {
     assert!(managed.contains("`fluent auto-merge`"));
     assert!(managed.contains("Fargate"));
     assert!(managed.contains("outside this path"));
-    assert!(managed.contains("before running\n  `fluent init`"));
-    assert!(managed.contains("follow-up:\n    mode: execute"));
+    assert!(managed.contains("explicit\n  coder profile before running configured `fluent init`"));
+    assert!(managed.contains("Bare `fluent init` remains available"));
+    assert!(managed.contains("preflights\n  providers, and saves the three-role mapping atomically"));
     assert!(!managed.contains("autonomous execute → review → land"));
     assert!(!managed.contains("policy allows autonomous merging"));
 }

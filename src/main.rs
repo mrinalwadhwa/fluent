@@ -1695,13 +1695,10 @@ This section is the always-loaded summary and is enough to drive fluent on its o
   Post-merge review is off by default; opt in per land with
   `fluent merge-candidate land --post-merge-review`. `fluent auto-merge`, automatic
   scheduler lifecycle, automatic landing, and Fargate are outside this path. For an
-  uninitialized project, use the full fluent skill to choose follow-up mode before running
-  `fluent init`. If the user chooses execute, write this after init:
-
-  ```yaml
-  follow-up:
-    mode: execute
-  ```
+  uninitialized project, use the full fluent skill to choose a follow-up mode and explicit
+  coder profile before running configured `fluent init`. Bare `fluent init` remains available
+  for compatible automation; the full skill passes the profile and follow-up flags, preflights
+  providers, and saves the three-role mapping atomically.
 
 ### Ask the user easy-to-answer questions
 

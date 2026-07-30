@@ -532,10 +532,24 @@ positive per-land opt-in. `fluent auto-merge`, automatic scheduler lifecycle,
 automatic landing, and Fargate are outside the Local Preview.
 
 For an uninitialized project, the bundled full skill detects the missing
-`.fluent/` directory and offers the built-in `propose` mode or explicit
-`execute` mode before running `fluent init`. `propose` leaves
-`.fluent/config.yaml` unchanged. If the user chooses `execute`, the skill runs
-init and then writes the nested `follow-up: { mode: execute }` mapping.
+`.fluent/` directory and asks separately for a follow-up mode and coder profile.
+The curated `codex-balanced` profile saves Codex `gpt-5.6-terra` at medium
+effort, while `codex-stronger` saves Codex `gpt-5.6-sol` at medium effort;
+both apply to writer, reviewer, and behavior-test roles. A custom profile
+collects the explicit coder, model, and effort for each role. The skill invokes
+one configured `fluent init` command only after every choice is complete.
+
+Configured init validates the complete argument combination and preflights every
+distinct provider before it creates `.fluent/`, installs skills, seeds
+instructions, or writes configuration. Readiness checks command availability
+and local authentication without a model inference, so they cannot reserve or
+guarantee future provider capacity. The configuration writer parses the existing
+YAML, updates only the three role mappings and (for execute) `follow-up.mode`,
+then atomically replaces the file. It preserves unrelated keys and never leaves
+a partial role mapping. `propose` adds no follow-up mapping. Bare `fluent init`
+remains compatible with existing non-interactive callers and therefore retains
+the legacy implicit-default path.
+
 Execute mode authorizes and queues corrective Work; it still requires a
 separately started scheduler and human candidate landing.
 Initialization creates or updates the managed Fluent block in `AGENTS.md` and
