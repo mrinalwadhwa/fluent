@@ -1624,6 +1624,8 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     let bin_dir = tmp.path().join("bin");
     let codex_home = tmp.path().join("codex-home");
     let log = tmp.path().join("providers.log");
+    fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
+    fs::write(tmp.path().join(".fluent/config.yaml"), "unrelated: retained\n").unwrap();
     fs::create_dir_all(&codex_home).unwrap();
     fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
     write_mock_codex(&bin_dir, "#!/bin/bash\nprintf 'codex %s\\n' \"$*\" >> \"${PREFLIGHT_LOG:?}\"\n[ \"$1 $2\" = \"login status\" ]\n");
@@ -1641,6 +1643,20 @@ fn coder_profile_preflight_checks_command_and_authentication() {
     assert!(calls.contains("claude auth status --json"));
     assert!(calls.contains("pi --version"));
     assert!(!calls.contains("bare pi"));
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["unrelated"], "retained");
+    for (role, coder, model, effort) in [
+        ("writer", "codex", "test-codex", "medium"),
+        ("reviewer", "claude", "test-claude", "high"),
+        ("behavior-tests", "pi", "test-pi", "low"),
+    ] {
+        assert_eq!(config["coders"][role]["coder"], coder);
+        assert_eq!(config["coders"][role]["model"], model);
+        assert_eq!(config["coders"][role]["effort"], effort);
+    }
 }
 
 #[test]
