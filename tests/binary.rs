@@ -1670,6 +1670,37 @@ fn coder_profile_preflight_failure_preserves_uninitialized_project() {
 }
 
 #[test]
+fn coder_profile_preflight_reports_every_failed_provider_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let fluent_dir = tmp.path().join(".fluent");
+    fs::create_dir_all(&fluent_dir).unwrap();
+    let config_path = fluent_dir.join("config.yaml");
+    let original_config = "unrelated: retained\n";
+    fs::write(&config_path, original_config).unwrap();
+    write_mock_executable(&bin_dir, "claude", "#!/bin/bash\n[ \"$1 $2 $3\" = \"auth status --json\" ]\nexit 1\n");
+    write_mock_executable(&bin_dir, "pi", "#!/bin/bash\n[ \"$1\" = \"--version\" ]\nexit 1\n");
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .args([
+            "init", "--coder-profile", "custom", "--follow-up-mode", "propose",
+            "--write-coder", "claude", "--write-model", "write-model", "--write-effort", "medium",
+            "--review-coder", "pi", "--review-model", "review-model", "--review-effort", "medium",
+            "--behavior-tests-coder", "claude", "--behavior-tests-model", "behavior-model", "--behavior-tests-effort", "medium",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("claude: authentication is unavailable"), "{stderr}");
+    assert!(stderr.contains("pi: command readiness check failed"), "{stderr}");
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original_config);
+}
+
+#[test]
 fn coder_profile_apply_execute_merges_profile_and_follow_up_mode() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");

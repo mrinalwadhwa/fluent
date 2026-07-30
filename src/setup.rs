@@ -109,7 +109,15 @@ fn provider_ready(provider: CoderKind) -> Result<()> {
         CoderKind::Codex => unreachable!("Codex returns above"),
     }
     let status = command.status().with_context(|| format!("{program}: command is not installed"))?;
-    if status.success() { Ok(()) } else { bail!("{program}: authentication is unavailable") }
+    if status.success() {
+        Ok(())
+    } else {
+        match provider {
+            CoderKind::Claude => bail!("{program}: authentication is unavailable"),
+            CoderKind::Pi => bail!("{program}: command readiness check failed"),
+            CoderKind::Codex => unreachable!("Codex returns above"),
+        }
+    }
 }
 
 #[cfg(test)]
