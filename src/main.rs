@@ -171,8 +171,35 @@ fn main() -> Result<()> {
         }) => {
             cmd_cleanup(&cwd, apply, prune_all_review_worktrees)?;
         }
-        Some(Commands::Init) => {
-            cmd_init(&cwd)?;
+        Some(Commands::Init {
+            coder_profile,
+            follow_up_mode,
+            write_coder,
+            write_model,
+            write_effort,
+            review_coder,
+            review_model,
+            review_effort,
+            behavior_tests_coder,
+            behavior_tests_model,
+            behavior_tests_effort,
+        }) => {
+            cmd_init(
+                &cwd,
+                fluent::setup::InitSetupInputs {
+                    coder_profile,
+                    follow_up_mode,
+                    write_coder,
+                    write_model,
+                    write_effort,
+                    review_coder,
+                    review_model,
+                    review_effort,
+                    behavior_tests_coder,
+                    behavior_tests_model,
+                    behavior_tests_effort,
+                },
+            )?;
         }
         Some(Commands::Dashboard { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
@@ -1560,7 +1587,11 @@ fn cmd_status(search_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(cwd: &Path) -> Result<()> {
+fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
+    let configured_setup = fluent::setup::ConfiguredSetup::from_inputs(inputs)?;
+    if let Some(setup) = configured_setup.as_ref() {
+        fluent::setup::preflight_providers(&setup.mapping)?;
+    }
     let fluent_dir = cwd.join(".fluent");
     if fluent_dir.exists() {
         write_gitignore_if_absent(&fluent_dir)?;
@@ -1580,6 +1611,24 @@ fn cmd_init(cwd: &Path) -> Result<()> {
 
     if let Err(e) = seed_agent_instructions(cwd) {
         eprintln!("  warning: could not seed agent instructions: {e}");
+    }
+    if let Some(setup) = configured_setup {
+        let saved = fluent::setup::apply_project_config(cwd, &setup.mapping, setup.follow_up_mode)
+            .context("first-time setup is incomplete")?;
+        eprintln!("  Saved coder profile:");
+        for (role, pair) in [
+            ("writer", &saved.write),
+            ("reviewer", &saved.review),
+            ("behavior-test", &saved.behavior_tests),
+        ] {
+            eprintln!(
+                "    {role}: {} {} {}",
+                pair.coder.as_str(),
+                pair.model,
+                pair.effort.as_deref().unwrap_or("default")
+            );
+        }
+        eprintln!("  Each new Attempt stores this effective mapping unless you supply Attempt overrides.");
     }
     match instruction_files_requiring_git_resolution(cwd) {
         Ok(paths) if !paths.is_empty() => {

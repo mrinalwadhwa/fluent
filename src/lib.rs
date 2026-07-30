@@ -45,6 +45,7 @@ pub mod observations;
 pub mod queue;
 pub mod scheduler;
 pub mod skill_install;
+pub mod setup;
 #[cfg(test)]
 pub(crate) mod test_lock_probe;
 pub mod tester;

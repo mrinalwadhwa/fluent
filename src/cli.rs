@@ -143,7 +143,34 @@ pub enum Commands {
     },
 
     /// Initialize .fluent/ directory
-    Init,
+    Init {
+        /// Curated coder profile: codex-balanced, codex-stronger, or custom
+        #[arg(long)]
+        coder_profile: Option<String>,
+
+        /// Follow-up mode for configured first-time setup: propose or execute
+        #[arg(long)]
+        follow_up_mode: Option<String>,
+
+        #[arg(long)]
+        write_coder: Option<String>,
+        #[arg(long)]
+        write_model: Option<String>,
+        #[arg(long)]
+        write_effort: Option<String>,
+        #[arg(long)]
+        review_coder: Option<String>,
+        #[arg(long)]
+        review_model: Option<String>,
+        #[arg(long)]
+        review_effort: Option<String>,
+        #[arg(long)]
+        behavior_tests_coder: Option<String>,
+        #[arg(long)]
+        behavior_tests_model: Option<String>,
+        #[arg(long)]
+        behavior_tests_effort: Option<String>,
+    },
 
     /// Clean stale Work Item artifacts and registered worktrees
     Cleanup {

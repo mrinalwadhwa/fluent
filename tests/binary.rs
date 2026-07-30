@@ -1564,6 +1564,60 @@ fn init_no_layout_tip_when_dir_named_main() {
         .stderr(predicate::str::contains("Tip:").not());
 }
 
+#[test]
+fn coder_profile_apply_merges_all_roles_and_preserves_unrelated_config() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
+    fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    fs::write(tmp.path().join(".fluent/config.yaml"), "unrelated: retained\n").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .assert()
+        .success();
+
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
+    ).unwrap();
+    assert_eq!(config["unrelated"], "retained");
+    assert!(config.get("follow-up").is_none());
+    for role in ["writer", "reviewer", "behavior-tests"] {
+        assert_eq!(config["coders"][role]["coder"], "codex");
+        assert_eq!(config["coders"][role]["model"], "gpt-5.6-terra");
+        assert_eq!(config["coders"][role]["effort"], "medium");
+    }
+}
+
+#[test]
+fn coder_profile_apply_propose_writes_only_coder_mapping() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let codex_home = tmp.path().join("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(codex_home.join("auth.json"), "authenticated").unwrap();
+    write_mock_codex(&bin_dir, "#!/bin/bash\n[ \"$1 $2\" = \"login status\" ]\n");
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("PATH", mock_path(&bin_dir))
+        .env("CODEX_HOME", &codex_home)
+        .args(["init", "--coder-profile", "codex-balanced", "--follow-up-mode", "propose"])
+        .assert()
+        .success();
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(tmp.path().join(".fluent/config.yaml")).unwrap(),
+    ).unwrap();
+    assert!(config.get("follow-up").is_none());
+    assert!(config.get("coders").is_some());
+}
+
 // -------------------------------------------------------------------------
 // Init — craft section seeding
 // -------------------------------------------------------------------------
