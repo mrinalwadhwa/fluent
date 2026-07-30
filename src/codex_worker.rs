@@ -43,6 +43,15 @@ impl CodexWorkerEnvironment {
     pub fn prepare() -> std::result::Result<Self, CodexAuthError> {
         #[cfg(feature = "test-support")]
         if env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some() {
+            if let Some(source_home) = env::var_os("CODEX_HOME") {
+                return Self::prepare_from_with_environment_auth(
+                    &canonical_existing_path(PathBuf::from(source_home)),
+                    has_environment_auth(),
+                );
+            }
+            if has_environment_auth() {
+                return Self::prepare_hermetic_fixture_worker_with_environment_auth();
+            }
             return Self::prepare_hermetic_fixture_worker();
         }
 
@@ -72,6 +81,15 @@ impl CodexWorkerEnvironment {
             CodexAuthError::new(format!("cannot write test authentication source: {error}"))
         })?;
         Self::prepare_from_with_environment_auth(source.path(), false)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn prepare_hermetic_fixture_worker_with_environment_auth()
+    -> std::result::Result<Self, CodexAuthError> {
+        let source = tempfile::tempdir().map_err(|error| {
+            CodexAuthError::new(format!("cannot create test authentication source: {error}"))
+        })?;
+        Self::prepare_from_with_environment_auth(source.path(), true)
     }
 
     #[cfg(test)]

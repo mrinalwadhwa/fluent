@@ -2577,7 +2577,7 @@ fn run_task_coder_with_coder(
     sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
-    if !no_sandbox || codex_worker.is_some() {
+    if !no_sandbox || (codex_worker.is_some() && !test_hermetic_no_sandbox()) {
         os::check_prerequisites_for(coder_kind)?;
         credential::inject_credentials()?;
         credential::setup_git_signing();
@@ -2653,7 +2653,7 @@ fn run_task_coder_with_coder(
             CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string()),
             None,
         )
-    } else if no_sandbox && codex_worker.is_none() {
+    } else if no_sandbox && (codex_worker.is_none() || test_hermetic_no_sandbox()) {
         (CoderSandbox::None, None)
     } else {
         let common_git_dir = worktree::git_common_dir(workspace_path)?;
@@ -2734,6 +2734,16 @@ fn run_task_coder_with_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+#[cfg(feature = "test-support")]
+fn test_hermetic_no_sandbox() -> bool {
+    std::env::var_os("FLUENT_TEST_HERMETIC_NO_SANDBOX").is_some()
+}
+
+#[cfg(not(feature = "test-support"))]
+fn test_hermetic_no_sandbox() -> bool {
+    false
 }
 
 /// The immutable execution context a derived corrective Work Item renders into

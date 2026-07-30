@@ -253,6 +253,7 @@ fn nested_work_routes_use_only_fixture_coders() {
             .current_dir(&project)
             .args(["attempt", "run", &work_item_id, "attempt-1", "--no-sandbox"])
             .env("PATH", &path)
+            .env("FLUENT_TEST_HERMETIC_NO_SANDBOX", "1")
             .assert()
             .failure()
             .stderr(predicate::str::contains(format!(
