@@ -3183,7 +3183,10 @@ WHEN `src/coder.rs::run_with_transcript_retrying` observes the
 coder process exit non-zero AND the transcript's most recent
 `result` event has `api_error_status == 401`,
 THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
-and re-run the coder session. If the re-run still produces a 401,
+and re-run the coder session only after the refresh probe succeeds and Fluent
+rereads the credential store. If the probe times out or exits unsuccessfully,
+THE SYSTEM SHALL return `AuthError::RefreshFailed` so the existing Attempt
+pauses for authentication recovery. If the re-run still produces a 401,
 THE SYSTEM SHALL return `AuthError::Rejected { request_id }`
 (populated from the transcript's `result.request_id` when
 present) so the caller bails with a recovery message.
