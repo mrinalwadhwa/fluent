@@ -26,6 +26,66 @@ fn fluent_cmd() -> LoggedCommand {
     cmd
 }
 
+#[test]
+fn release_suite_process_guard_reports_scoped_leaks() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("fixture-root");
+    fs::create_dir_all(&root).unwrap();
+    let inventory = tmp.path().join("processes.tsv");
+    let guard =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release-test-process-guard.sh");
+    let leak = format!("4242\tfluent scheduler\t{}\n", root.display());
+    let output = Command::new("bash")
+        .arg(&guard)
+        .arg("bash")
+        .args([
+            "-c",
+            "printf '%s' \"$FLUENT_TEST_GUARD_LEAK\" > \"$FLUENT_TEST_PROCESS_INVENTORY\"",
+        ])
+        .env("FLUENT_RELEASE_TEST_ROOTS", &root)
+        .env("FLUENT_TEST_PROCESS_INVENTORY", &inventory)
+        .env("FLUENT_TEST_GUARD_LEAK", leak)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "guard accepted a scoped leak");
+    assert!(stderr.contains("pid=4242"), "diagnostic: {stderr}");
+    assert!(
+        stderr.contains("kind=fluent scheduler"),
+        "diagnostic: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("root={}", root.display())),
+        "diagnostic: {stderr}"
+    );
+}
+
+#[test]
+fn release_suite_process_guard_allows_clean_suite() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("fixture-root");
+    fs::create_dir_all(&root).unwrap();
+    let guard =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release-test-process-guard.sh");
+    let output = Command::new("bash")
+        .arg(guard)
+        .args(["true"])
+        .env("FLUENT_RELEASE_TEST_ROOTS", root)
+        .env(
+            "FLUENT_TEST_PROCESS_INVENTORY",
+            tmp.path().join("processes.tsv"),
+        )
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "clean suite failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn provider_double_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-doubles")
 }
@@ -318,7 +378,7 @@ exit 70
 
 #[cfg(unix)]
 struct OwnedFixtureProcess {
-    child: Child,
+    child: Option<Child>,
 }
 
 #[cfg(unix)]
@@ -328,17 +388,40 @@ impl OwnedFixtureProcess {
 
         command.process_group(0);
         Self {
-            child: command.spawn().unwrap(),
+            child: Some(command.spawn().unwrap()),
         }
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("fixture child is available")
+            .id()
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child
+            .as_mut()
+            .expect("fixture child is available")
+            .wait()
+    }
+
+    fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
+        self.child
+            .take()
+            .expect("fixture child is available")
+            .wait_with_output()
     }
 }
 
 #[cfg(unix)]
 impl Drop for OwnedFixtureProcess {
     fn drop(&mut self) {
-        let group = i32::try_from(self.child.id()).unwrap();
-        let _ = unsafe { libc::kill(-group, libc::SIGTERM) };
-        self.child.wait().unwrap();
+        if let Some(child) = self.child.as_mut() {
+            let group = i32::try_from(child.id()).unwrap();
+            let _ = unsafe { libc::kill(-group, libc::SIGTERM) };
+            let _ = child.wait();
+        }
     }
 }
 
@@ -355,7 +438,7 @@ fn long_lived_fixture_reaps_its_process_group() {
             &pid_file.path().join("descendant.pid").to_string_lossy(),
         ]);
         let process = OwnedFixtureProcess::spawn(&mut command);
-        let leader = process.child.id();
+        let leader = process.id();
         assert!(poll_until(std::time::Duration::from_secs(2), || {
             pid_file.path().join("descendant.pid").exists()
         }));
@@ -7084,8 +7167,9 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
         )
     });
     let terminal_status = latest_dispatch_status(&main_dir, DERIVED_FU1);
-    send_signal(scheduler.child.id(), "TERM");
-    let scheduler_output = scheduler.child.wait_with_output().unwrap();
+    let mut scheduler = scheduler;
+    send_signal(scheduler.id(), "TERM");
+    let scheduler_output = scheduler.wait_with_output().unwrap();
     assert!(
         reached_terminal,
         "scheduler did not reach a terminal dispatch within 60 seconds; status={terminal_status}"
@@ -17605,8 +17689,9 @@ fn auto_merge_skips_candidate_already_marked_skipped() {
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    send_signal(child.child.id(), "INT");
-    let output = child.child.wait_with_output().unwrap();
+    let mut child = child;
+    send_signal(child.id(), "INT");
+    let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("[auto-merge] merged"),
@@ -17642,8 +17727,8 @@ fn auto_merge_exits_clean_on_sigterm() {
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    send_signal(child.child.id(), "TERM");
-    let status = child.child.wait().unwrap();
+    send_signal(child.id(), "TERM");
+    let status = child.wait().unwrap();
     assert!(
         status.success(),
         "auto-merge should exit cleanly on SIGTERM"
@@ -18389,8 +18474,8 @@ fn work_scheduler_run_exits_clean_on_sigterm_when_idle() {
     };
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    send_signal(child.child.id(), "TERM");
-    let status = child.child.wait().unwrap();
+    send_signal(child.id(), "TERM");
+    let status = child.wait().unwrap();
     assert!(
         status.success(),
         "scheduler should exit cleanly on SIGTERM when idle"
@@ -18428,21 +18513,23 @@ exit 0
     let before_dispatches = before["dispatches"].as_array().expect("dispatch ledger");
     assert_eq!(before_dispatches.last().unwrap()["status"], "queued");
 
-    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(project)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(project)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     let latest_status = |value: &serde_json::Value| -> String {
         value["dispatches"]
@@ -18589,22 +18676,24 @@ exit 0
     }
 
     let queue_dir = project.join(".fluent/work/queue");
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(project)
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("FLUENT_TEST_RELEASE", &release)
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(project)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("FLUENT_TEST_RELEASE", &release)
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     // The default capacity is four; the blocked writers hold their slots so the
     // count stably reaches four and never exceeds it while two stay queued.
@@ -18625,7 +18714,7 @@ exit 0
 
     // Release the blocked writers, then stop the scheduler.
     fs::write(&release, b"go").unwrap();
-    let _ = child.kill();
+    send_signal(child.id(), "TERM");
     let _ = child.wait();
     remove_sibling_worktrees(project, &token);
 
@@ -18642,12 +18731,14 @@ fn second_scheduler_run_reuses_live_coordinator() {
     fs::create_dir_all(project.join(".fluent/work/items")).unwrap();
 
     // Start a live coordinator that idles while holding its lease.
-    let mut first = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(project)
-        .args(["scheduler", "run", "--poll-seconds", "5"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut first = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(project)
+            .args(["scheduler", "run", "--poll-seconds", "5"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     // A second start finds the live coordinator, reports reuse, and returns.
@@ -18813,12 +18904,14 @@ fn idle_scheduler_shutdown_exits_immediately() {
 
     // A long poll interval would delay a naive shutdown; an idle scheduler must
     // exit promptly on SIGTERM regardless.
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(tmp.path())
-        .args(["scheduler", "run", "--poll-seconds", "30"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(tmp.path())
+            .args(["scheduler", "run", "--poll-seconds", "30"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     std::thread::sleep(std::time::Duration::from_millis(1500));
     let signalled = std::time::Instant::now();
@@ -18905,13 +18998,15 @@ exit 0
     };
 
     // First coordinator: processes one Work Item, then is stopped.
-    let first = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(project)
-        .env("PATH", &path_env)
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut first = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(project)
+            .env("PATH", &path_env)
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !(is_terminal(&wi_a) || is_terminal(&wi_b)) {
@@ -18929,13 +19024,15 @@ exit 0
     );
 
     // The remaining Work stayed durably queued; a restart processes it.
-    let second = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"))
-        .current_dir(project)
-        .env("PATH", &path_env)
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut second = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(project)
+            .env("PATH", &path_env)
+            .args(["scheduler", "run", "--poll-seconds", "1"])
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
     while !(is_terminal(&wi_a) && is_terminal(&wi_b)) {
