@@ -389,6 +389,7 @@ phase_prepare() {
 RUN_PROJECT=""
 RUN_HOME=""
 RUN_BIN=""
+RUN_CODEX_HOME=""
 
 # Rank the completed run-setup stages so a resumed run skips public commands it
 # has already run. init, work-item create, and attempt create are not idempotent
@@ -411,7 +412,12 @@ run_fluent() {
   local logfile="$1"; shift
   local rc=0
   printf '$ fluent %s\n' "$*" >> "$logfile"
-  ( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" ) >> "$logfile" 2>&1 || rc=$?
+  if [ -n "$RUN_CODEX_HOME" ]; then
+    ( cd "$RUN_PROJECT" && HOME="$RUN_HOME" CODEX_HOME="$RUN_CODEX_HOME" "$RUN_BIN" "$@" ) \
+      >> "$logfile" 2>&1 || rc=$?
+  else
+    ( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" ) >> "$logfile" 2>&1 || rc=$?
+  fi
   printf 'exit: %s\n' "$rc" >> "$logfile"
   return "$rc"
 }
@@ -421,10 +427,32 @@ run_fluent() {
 capture_fluent() {
   local logfile="$1"; shift
   local out rc=0
-  out="$( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" 2>>"$logfile" )" || rc=$?
+  if [ -n "$RUN_CODEX_HOME" ]; then
+    out="$( cd "$RUN_PROJECT" && HOME="$RUN_HOME" CODEX_HOME="$RUN_CODEX_HOME" "$RUN_BIN" "$@" 2>>"$logfile" )" || rc=$?
+  else
+    out="$( cd "$RUN_PROJECT" && HOME="$RUN_HOME" "$RUN_BIN" "$@" 2>>"$logfile" )" || rc=$?
+  fi
   printf '$ fluent %s\n%s\nexit: %s\n' "$*" "$out" "$rc" >> "$logfile"
   [ "$rc" -eq 0 ] && printf '%s' "$out"
   return "$rc"
+}
+
+install_tester_config() {
+  local project="$1"
+  mkdir -p "$project/.fluent"
+  cat > "$project/.fluent/tester.yaml" <<'TESTER'
+commands:
+  - command: ./check.sh
+    test_harness: shell-harness
+TESTER
+}
+
+commit_initialization() {
+  local project="$1"
+  if [ -n "$(git -C "$project" status --porcelain)" ]; then
+    git -C "$project" add -A
+    git -C "$project" commit -m "Initialize Fluent smoke fixture"
+  fi
 }
 
 # Install or select Fluent through the configured boundary. Every installer form
@@ -489,6 +517,7 @@ phase_run() {
   RUN_PROJECT="$(project_dir "$root")"
   RUN_HOME="$(home_dir "$root")"
   RUN_BIN="$(manifest_get "$root" '.fluent_bin')"
+  RUN_CODEX_HOME="$(manifest_get "$root" '.codex_home // ""')"
 
   # Already at a ready candidate: reprint the handoff without repeating work.
   if [ "$safe_phase" = "ran" ]; then
@@ -519,7 +548,14 @@ phase_run() {
 
   # init -> Work Item -> Attempt (public first-run commands), each checkpointed.
   if [ "$done_rank" -lt "$(run_stage_rank init)" ]; then
+    begin_log "$logs/init.log" "init"
     run_fluent "$logs/init.log" init \
+      --coder-profile codex-balanced \
+      --follow-up-mode propose \
+      || fail_phase "$root" "run" "$logs/init.log" "run"
+    install_tester_config "$RUN_PROJECT" >> "$logs/init.log" 2>&1 \
+      || fail_phase "$root" "run" "$logs/init.log" "run"
+    commit_initialization "$RUN_PROJECT" >> "$logs/init.log" 2>&1 \
       || fail_phase "$root" "run" "$logs/init.log" "run"
     checkpoint "$root" "run" "$manifest_log" "run_stage" "init"
   fi
@@ -643,6 +679,7 @@ phase_land() {
   RUN_PROJECT="$(project_dir "$root")"
   RUN_HOME="$(home_dir "$root")"
   RUN_BIN="$(manifest_get "$root" '.fluent_bin')"
+  RUN_CODEX_HOME="$(manifest_get "$root" '.codex_home // ""')"
 
   local logs land_log manifest_log
   logs="$(log_dir "$root")"

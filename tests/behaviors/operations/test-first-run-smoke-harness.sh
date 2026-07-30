@@ -67,6 +67,7 @@ learning_status() {
 
 record() {
   [ -n "${FAKE_CMD_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_CMD_LOG"
+  [ -n "${FAKE_CODEX_HOME_LOG:-}" ] && printf '%s\n' "${CODEX_HOME:-}" >> "$FAKE_CODEX_HOME_LOG"
   return 0
 }
 
@@ -82,9 +83,14 @@ case "${1:-}" in
     printf 'fluent 0.0.0-fake\n'
     ;;
   init)
-    record "init"
-    [ "$(stage)" = "installed" ] || reject "init out of order (stage=$(stage))"
+    record "init $*"
+    [ "$#" = 5 ] \
+      && [ "$2" = "--coder-profile" ] && [ "$3" = "codex-balanced" ] \
+      && [ "$4" = "--follow-up-mode" ] && [ "$5" = "propose" ] \
+      || reject "init must configure the Codex profile and follow-up mode"
+    case "$(stage)" in installed|init) ;; *) reject "init out of order (stage=$(stage))" ;; esac
     mkdir -p .fluent/work
+    printf '# Fluent instructions\n' > AGENTS.md
     set_stage "init"
     ;;
   work-item)
@@ -475,6 +481,37 @@ test_prepare_leaves_fluent_uninitialized_and_records_codex_home() {
   return $rc
 }
 
+test_run_configures_init_and_commits_before_attempt() {
+  new_workspace
+  trap cleanup_workspace RETURN
+
+  local codex_home="$WORK/codex-home"
+  mkdir -p "$codex_home"
+  printf 'secret credential\n' > "$codex_home/auth.json"
+  run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
+    --codex-home "$codex_home" > /dev/null 2>&1
+  local codex_home_log="$WORK/codex-home-log"
+  FAKE_CODEX_HOME_LOG="$codex_home_log" run_harness run "$ROOT" > "$WORK/run.out" 2>&1
+
+  local rc=0
+  grep -Fxq 'init init --coder-profile codex-balanced --follow-up-mode propose' "$FAKE_CMD_LOG" \
+    || { printf '    FAIL: run did not configure fluent init\n'; rc=1; }
+  [ -f "$ROOT/project/main/.fluent/tester.yaml" ] \
+    || { printf '    FAIL: run did not install tester configuration\n'; rc=1; }
+  [ -f "$ROOT/project/main/AGENTS.md" ] \
+    || { printf '    FAIL: configured init did not generate instructions\n'; rc=1; }
+  [ -z "$(git -C "$ROOT/project/main" status --porcelain)" ] \
+    || { printf '    FAIL: attempt started from a dirty checkout\n'; rc=1; }
+  git -C "$ROOT/project/main" log --format=%s | grep -Fxq 'Initialize Fluent smoke fixture' \
+    || { printf '    FAIL: initialization changes were not committed\n'; rc=1; }
+  [ "$(head -1 "$codex_home_log")" = "$(cd "$codex_home" && pwd -P)" ] \
+    || { printf '    FAIL: Fluent did not receive the recorded Codex home\n'; rc=1; }
+  if grep -R -Fq -- 'secret credential' "$ROOT"; then
+    printf '    FAIL: run copied Codex credentials into the smoke root\n'; rc=1
+  fi
+  return $rc
+}
+
 test_prepare_rejects_nonempty_root() {
   new_workspace
   trap cleanup_workspace RETURN
@@ -529,7 +566,7 @@ test_run_uses_public_sequence_and_stops_before_land() {
   # The recorded commands follow the public first-run sequence. `attempt show`
   # gates readiness on the stored Learner state before the candidate is shown.
   local expected
-  expected="$(printf 'init\nwork-item create\nattempt create\nattempt run\nattempt show\nmerge-candidate show\n')"
+  expected="$(printf 'init init --coder-profile codex-balanced --follow-up-mode propose\nwork-item create\nattempt create\nattempt run\nattempt show\nmerge-candidate show\n')"
   if [ "$(cat "$FAKE_CMD_LOG")" != "$expected" ]; then
     printf '    FAIL: unexpected command sequence:\n%s\n' "$(cat "$FAKE_CMD_LOG")"
     rc=1
@@ -754,7 +791,7 @@ test_failure_preserves_evidence_and_resume() {
   # not by re-running the non-idempotent setup commands.
   run_harness run "$ROOT" > "$WORK/resume.out" 2>&1 \
     || { printf '    FAIL: resume did not reach a ready candidate\n'; rc=1; }
-  [ "$(grep -c '^init$' "$FAKE_CMD_LOG")" -eq 1 ] \
+  [ "$(grep -c '^init init --coder-profile codex-balanced --follow-up-mode propose$' "$FAKE_CMD_LOG")" -eq 1 ] \
     || { printf '    FAIL: resume replayed init\n'; rc=1; }
   [ "$(grep -c '^work-item create$' "$FAKE_CMD_LOG")" -eq 1 ] \
     || { printf '    FAIL: resume replayed work-item create\n'; rc=1; }
@@ -1565,6 +1602,8 @@ printf 'test-first-run-smoke-harness\n\n'
 run_test "prepare is isolated" test_prepare_is_isolated
 run_test "prepare leaves Fluent uninitialized and records Codex home" \
   test_prepare_leaves_fluent_uninitialized_and_records_codex_home
+run_test "run configures init and commits before attempt" \
+  test_run_configures_init_and_commits_before_attempt
 run_test "prepare rejects nonempty root" test_prepare_rejects_nonempty_root
 run_test "prepare encodes json significant root" \
   test_prepare_encodes_json_significant_root
