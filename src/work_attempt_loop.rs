@@ -8560,9 +8560,34 @@ mod tests {
                 });
                 attempt.tasks[1].depends_on = Some(blocker.id.clone());
                 attempt.tasks.push(blocker);
+                let mut tester = tester_task(
+                    "attempt-1-tester",
+                    ".fluent/work/artifacts/work-1/attempt-1/tester",
+                );
+                tester.work_item_id = item.id.clone();
+                tester.status = TaskStatus::Complete;
+                attempt.tasks.push(tester);
+                let mut peer = review_task_with_artifact(
+                    "attempt-1-review-tests",
+                    "tests",
+                    ".fluent/work/artifacts/work-1/attempt-1/review-tests",
+                );
+                peer.work_item_id = item.id.clone();
+                peer.status = TaskStatus::Complete;
+                attempt.tasks.push(peer);
                 Ok(())
             })
             .unwrap();
+        let candidate_marker = tmp
+            .path()
+            .join(".fluent/work/workspaces/work-1/attempt-1/candidate/preserved.txt");
+        fs::create_dir_all(candidate_marker.parent().unwrap()).unwrap();
+        fs::write(&candidate_marker, "candidate state").unwrap();
+        let peer_review = tmp.path().join(
+            ".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md",
+        );
+        fs::create_dir_all(peer_review.parent().unwrap()).unwrap();
+        fs::write(&peer_review, "Verdict: PASS\n").unwrap();
         let transcript = tmp
             .path()
             .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl");
@@ -8587,7 +8612,27 @@ mod tests {
         assert_eq!(attempt.status, AttemptStatus::Planned);
         assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
         assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+        assert_eq!(
+            attempt
+                .tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-tester")
+                .unwrap()
+                .status,
+            TaskStatus::Complete
+        );
+        assert_eq!(
+            attempt
+                .tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-review-tests")
+                .unwrap()
+                .status,
+            TaskStatus::Complete
+        );
         assert_eq!(fs::read_to_string(transcript).unwrap(), evidence);
+        assert_eq!(fs::read_to_string(candidate_marker).unwrap(), "candidate state");
+        assert_eq!(fs::read_to_string(peer_review).unwrap(), "Verdict: PASS\n");
     }
 
     #[test]

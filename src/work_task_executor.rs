@@ -463,6 +463,15 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 }
 
 fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    run_write_task_with_coder(config, None)
+}
+
+/// Run a Writer Task, optionally injecting the coder factory for deterministic
+/// full-route tests.
+fn run_write_task_with_coder(
+    config: WorkTaskRunConfig<'_>,
+    coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
+) -> Result<WorkTaskRunResult> {
     // Read the Work Item once for WorkItem-level prompt context (instructions and
     // planning), which is immutable across the run. Every Task/Attempt execution
     // input instead derives from the plan snapshot.
@@ -631,7 +640,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .join("transcript.jsonl")
     });
     let mut run_result = provider_pause_error(
-        run_task_coder(
+        run_task_coder_with_optional_coder(
             &item,
             config.attempt_id,
             config.task_id,
@@ -647,6 +656,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             &pump_config,
             provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
+            coder_override,
         ),
         reservation.coder,
         transcript.clone(),
@@ -660,7 +670,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             max_task_retries() + 1
         );
         run_result = provider_pause_error(
-            run_task_coder(
+            run_task_coder_with_optional_coder(
                 &item,
                 config.attempt_id,
                 config.task_id,
@@ -676,6 +686,7 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
                 &pump_config,
                 provider_readiness.codex_worker(),
                 sandbox_profile.as_ref(),
+                coder_override,
             ),
             reservation.coder,
             transcript.clone(),
@@ -2586,7 +2597,7 @@ fn preflight_write_sandbox_profile(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_task_coder(
+fn run_task_coder_with_optional_coder(
     item: &WorkItem,
     attempt_id: &str,
     task_id: &str,
@@ -2602,10 +2613,8 @@ fn run_task_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox_profile: Option<&os::SandboxProfile>,
+    coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
-    // Production launches the resolved coder; the `_with_coder` seam lets route
-    // tests inject a recording coder to prove the resolved capture threads through
-    // this route unchanged, mirroring the Learner and rebase launch seams.
     run_task_coder_with_coder(
         item,
         attempt_id,
@@ -2622,13 +2631,14 @@ fn run_task_coder(
         pump_config,
         codex_worker,
         sandbox_profile,
-        move |sandbox, _executable| {
-            coder_kind.boxed_with_model_and_executable(
+        move |sandbox, _executable| match coder_override {
+            Some(make) => make(sandbox),
+            None => coder_kind.boxed_with_model_and_executable(
                 sandbox,
                 model,
                 effort,
                 codex_worker.map(|worker| worker.launcher().executable()),
-            )
+            ),
         },
     )
 }
@@ -7913,7 +7923,7 @@ mod tests {
         ) -> Result<i32> {
             *self.launches.lock().unwrap() += 1;
             let transcript = capture
-                .expect("review coder receives transcript capture")
+                .expect("task coder receives transcript capture")
                 .path();
             let parent = transcript.parent().unwrap();
             fs::create_dir_all(parent).unwrap();
@@ -7941,6 +7951,95 @@ mod tests {
         ) -> Result<i32> {
             unreachable!("the review route never runs interactively")
         }
+    }
+
+    #[test]
+    fn writer_provider_outage_pauses_exact_task_without_writer_charge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let project_root = project_root.as_path();
+        crate::git::run(project_root, &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(
+            project_root,
+            &["config", "user.email", "t@t.co"],
+            "configure fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            project_root,
+            &["config", "user.name", "t"],
+            "configure fixture",
+        )
+        .unwrap();
+        fs::write(project_root.join("tracked.txt"), "baseline").unwrap();
+        crate::git::run(project_root, &["add", "."], "add fixture").unwrap();
+        crate::git::run(
+            project_root,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "writer-provider-outage".to_string(),
+            title: "Writer provider outage".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("writer-provider-attempt").unwrap();
+        item.attempts[0].coder_mapping.write.coder = CoderKind::Claude;
+        let task_id = item.attempts[0].tasks[0].id.clone();
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+        let launches = Arc::new(Mutex::new(0));
+        let launches_for_coder = Arc::clone(&launches);
+        let make_coder = move |_sandbox| {
+            Box::new(ProviderOutageCoder {
+                launches: Arc::clone(&launches_for_coder),
+            }) as Box<dyn crate::coder::Coder>
+        };
+
+        let _error = run_write_task_with_coder(
+            WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: "writer-provider-outage",
+                attempt_id: "writer-provider-attempt",
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        )
+        .expect_err("provider outage pauses the Writer task");
+
+        assert_eq!(
+            *launches.lock().unwrap(),
+            1,
+            "the typed pause must bypass Fluent's outer generic coder retries"
+        );
+        let attempt = &store
+            .read_work_item("writer-provider-outage")
+            .unwrap()
+            .attempts[0];
+        assert_eq!(attempt.tasks[0].id, task_id);
+        assert_eq!(attempt.tasks[0].status, TaskStatus::NeedsUser);
+        assert_eq!(
+            attempt.pause_kind,
+            Some(crate::work_model::PauseKind::ProviderUnavailable)
+        );
+        assert_eq!(
+            attempt
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            1,
+            "a provider pause must not consume or create another Writer round"
+        );
     }
 
     #[test]
