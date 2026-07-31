@@ -788,3 +788,95 @@ fn concurrent_registry_mutations_preserve_every_successful_change() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────
+// Step 2 (contract closure): request immutability and dispatch exact binding
+// ─────────────────────────────────────────────────
+
+#[test]
+fn request_persistence_is_immutable_and_idempotent() {
+    let project = TempDir::new().unwrap();
+    let request =
+        fluent::scheduler_service::AttemptExecutionRequest::new("wi-imm", "attempt-1").unwrap();
+
+    // First persist: must succeed.
+    scheduler_service::persist_request(project.path(), &request).unwrap();
+
+    // Second persist with identical content: idempotent success.
+    scheduler_service::persist_request(project.path(), &request).unwrap();
+
+    // Original content must be unchanged.
+    let loaded = scheduler_service::load_request(project.path(), &request.id).unwrap();
+    assert_eq!(loaded, request, "loaded request must equal the original");
+
+    // Persist with same ID but different work_item_id: must be rejected.
+    let mut different = request.clone();
+    different.work_item_id = "wi-other".to_string();
+    let result = scheduler_service::persist_request(project.path(), &different);
+    assert!(
+        result.is_err(),
+        "persist with conflicting content must return an error"
+    );
+
+    // Original content must survive the rejected overwrite.
+    let after_rejection = scheduler_service::load_request(project.path(), &request.id).unwrap();
+    assert_eq!(
+        after_rejection, request,
+        "original request must be preserved after a rejected overwrite"
+    );
+}
+
+#[test]
+fn dispatch_rejects_request_or_token_identity_mismatch() {
+    let project = TempDir::new().unwrap();
+
+    // Persist a valid request.
+    let request =
+        fluent::scheduler_service::AttemptExecutionRequest::new("wi-bound", "attempt-1").unwrap();
+    scheduler_service::persist_request(project.path(), &request).unwrap();
+
+    // Submitting with a wrong work_item_id must be rejected.
+    let mut tampered_wi = request.clone();
+    tampered_wi.work_item_id = "wi-other".to_string();
+    assert!(
+        scheduler_service::submit_dispatch(project.path(), &tampered_wi).is_err(),
+        "dispatch with wrong work_item_id must fail"
+    );
+
+    // Submitting with a wrong attempt_id must be rejected.
+    let mut tampered_at = request.clone();
+    tampered_at.attempt_id = "attempt-other".to_string();
+    assert!(
+        scheduler_service::submit_dispatch(project.path(), &tampered_at).is_err(),
+        "dispatch with wrong attempt_id must fail"
+    );
+
+    // Correct submission: creates a token.
+    let token = scheduler_service::submit_dispatch(project.path(), &request).unwrap();
+    assert_eq!(token.request_id, request.id);
+    assert_eq!(token.work_item_id, "wi-bound");
+    assert_eq!(token.attempt_id, "attempt-1");
+
+    // Idempotent re-submission with correct request: returns the same token.
+    let token2 = scheduler_service::submit_dispatch(project.path(), &request).unwrap();
+    assert_eq!(token, token2, "idempotent dispatch must return the same token");
+
+    // Corrupt the on-disk token to simulate tampering.
+    let token_path = project
+        .path()
+        .join(".fluent/work/scheduler/dispatches")
+        .join(format!("{}.json", request.id));
+    let corrupted = fluent::scheduler_service::DispatchToken {
+        request_id: request.id.clone(),
+        work_item_id: "wi-corrupted".to_string(),
+        attempt_id: "attempt-1".to_string(),
+    };
+    fs::write(&token_path, serde_json::to_vec_pretty(&corrupted).unwrap()).unwrap();
+
+    // Submission must now fail because the stored token doesn't match the
+    // persisted request.
+    assert!(
+        scheduler_service::submit_dispatch(project.path(), &request).is_err(),
+        "dispatch must fail when the stored token has a mismatched work_item_id"
+    );
+}

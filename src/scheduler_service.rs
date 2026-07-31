@@ -90,6 +90,44 @@ fn acquire_registry_lock(home_dir: &Path) -> Result<RegistryLock> {
     Ok(RegistryLock { _file: file })
 }
 
+struct RequestLock {
+    _file: fs::File,
+}
+
+fn request_lock_path(project_root: &Path, request_id: &str) -> PathBuf {
+    requests_dir(project_root).join(format!("{request_id}.lock"))
+}
+
+fn acquire_request_lock(project_root: &Path, request_id: &str) -> Result<RequestLock> {
+    let dir = requests_dir(project_root);
+    fs::create_dir_all(&dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(request_lock_path(project_root, request_id))?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    Ok(RequestLock { _file: file })
+}
+
+struct DispatchLock {
+    _file: fs::File,
+}
+
+fn dispatch_lock_path(project_root: &Path, request_id: &str) -> PathBuf {
+    dispatch_tokens_dir(project_root).join(format!("{request_id}.lock"))
+}
+
+fn acquire_dispatch_lock(project_root: &Path, request_id: &str) -> Result<DispatchLock> {
+    let dir = dispatch_tokens_dir(project_root);
+    fs::create_dir_all(&dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(dispatch_lock_path(project_root, request_id))?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    Ok(DispatchLock { _file: file })
+}
+
 // ─────────────────────────────────────────────────
 // Checkout identity
 // ─────────────────────────────────────────────────
@@ -619,9 +657,24 @@ fn request_path(project_root: &Path, request_id: &str) -> PathBuf {
 }
 
 /// Persist a frozen `AttemptExecutionRequest`. Idempotent: writing the same id
-/// twice with identical content is safe.
+/// twice with identical content succeeds. Rejects a write that would change
+/// any field of an already-persisted request.
 pub fn persist_request(project_root: &Path, request: &AttemptExecutionRequest) -> Result<()> {
     let path = request_path(project_root, &request.id);
+    let _lock = acquire_request_lock(project_root, &request.id)?;
+    if path.exists() {
+        let bytes = fs::read(&path)
+            .with_context(|| format!("read existing request {}", path.display()))?;
+        let existing: AttemptExecutionRequest = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse existing request {}", path.display()))?;
+        if existing == *request {
+            return Ok(());
+        }
+        bail!(
+            "request {} is already persisted with different content",
+            request.id
+        );
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -654,30 +707,66 @@ fn dispatch_token_path(project_root: &Path, request_id: &str) -> PathBuf {
 
 /// Submit an `AttemptExecutionRequest` through an exact-bound idempotent
 /// dispatch boundary. The same request id always returns the same token.
-/// The request must be persisted before calling this function.
+/// The request must be persisted before calling this function, and the
+/// submitted request's id, work_item_id, and attempt_id must exactly match
+/// the persisted record. Any existing token is also verified against the
+/// persisted request before being returned.
 pub fn submit_dispatch(
     project_root: &Path,
     request: &AttemptExecutionRequest,
 ) -> Result<DispatchToken> {
+    let _lock = acquire_dispatch_lock(project_root, &request.id)?;
+
+    // Load and verify the persisted request.
+    let persisted_path = request_path(project_root, &request.id);
+    if !persisted_path.exists() {
+        bail!(
+            "request {} must be persisted before dispatch; {} not found",
+            request.id,
+            persisted_path.display()
+        );
+    }
+    let persisted_bytes = fs::read(&persisted_path)
+        .with_context(|| format!("read persisted request {}", persisted_path.display()))?;
+    let persisted: AttemptExecutionRequest = serde_json::from_slice(&persisted_bytes)
+        .with_context(|| format!("parse persisted request {}", persisted_path.display()))?;
+
+    // Submitted request must match the persisted record on all identity fields.
+    if request.id != persisted.id
+        || request.work_item_id != persisted.work_item_id
+        || request.attempt_id != persisted.attempt_id
+    {
+        bail!(
+            "submitted request does not match persisted request {} \
+             (work_item_id or attempt_id mismatch)",
+            persisted.id
+        );
+    }
+
     let token_path = dispatch_token_path(project_root, &request.id);
     if token_path.exists() {
         let bytes = fs::read(&token_path)
             .with_context(|| format!("read dispatch token {}", token_path.display()))?;
-        return serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse dispatch token {}", token_path.display()));
+        let token: DispatchToken = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse dispatch token {}", token_path.display()))?;
+        // Existing token must be exactly bound to the persisted request.
+        if token.request_id != persisted.id
+            || token.work_item_id != persisted.work_item_id
+            || token.attempt_id != persisted.attempt_id
+        {
+            bail!(
+                "existing dispatch token does not match persisted request {} \
+                 (token identity mismatch)",
+                persisted.id
+            );
+        }
+        return Ok(token);
     }
-    let persisted = request_path(project_root, &request.id);
-    if !persisted.exists() {
-        bail!(
-            "request {} must be persisted before dispatch; {} not found",
-            request.id,
-            persisted.display()
-        );
-    }
+
     let token = DispatchToken {
-        request_id: request.id.clone(),
-        work_item_id: request.work_item_id.clone(),
-        attempt_id: request.attempt_id.clone(),
+        request_id: persisted.id.clone(),
+        work_item_id: persisted.work_item_id.clone(),
+        attempt_id: persisted.attempt_id.clone(),
     };
     if let Some(parent) = token_path.parent() {
         fs::create_dir_all(parent)?;
