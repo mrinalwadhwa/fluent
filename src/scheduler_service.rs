@@ -20,6 +20,10 @@ use crate::atomic_write::atomic_write;
 /// incompatibly.
 pub const PROTOCOL_GENERATION: u32 = 1;
 
+/// Maximum size of a single protocol frame in bytes (64 KiB). Frames that
+/// declare or carry more than this many bytes are rejected before allocation.
+pub const MAX_FRAME_SIZE: usize = 64 * 1024;
+
 // ─────────────────────────────────────────────────
 // Filesystem layout
 // ─────────────────────────────────────────────────
@@ -525,6 +529,16 @@ pub fn send_health_request(sock_path: &Path) -> Result<HealthResponse> {
 }
 
 fn frame_write(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "frame payload {} bytes exceeds maximum {} bytes",
+                payload.len(),
+                MAX_FRAME_SIZE
+            ),
+        ));
+    }
     let len = payload.len() as u32;
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(payload)
@@ -534,9 +548,37 @@ fn frame_read(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "peer declared frame length {} bytes exceeds maximum {} bytes",
+                len, MAX_FRAME_SIZE
+            ),
+        ));
+    }
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload)?;
     Ok(payload)
+}
+
+/// Read a raw protocol frame from a Unix stream.
+///
+/// Exposed only under the `test-support` feature so integration tests can
+/// drive oversized-frame rejection through a `UnixStream::pair()` without
+/// binding a socket path.
+#[cfg(feature = "test-support")]
+pub fn frame_read_test_support(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+    frame_read(stream)
+}
+
+/// Write a raw protocol frame to a Unix stream.
+///
+/// Exposed only under the `test-support` feature for the same reason as
+/// `frame_read_test_support`.
+#[cfg(feature = "test-support")]
+pub fn frame_write_test_support(stream: &mut UnixStream, payload: &[u8]) -> io::Result<()> {
+    frame_write(stream, payload)
 }
 
 fn run_fake_listener(listener: UnixListener, build: BuildIdentity, stop_flag: Arc<AtomicBool>) {

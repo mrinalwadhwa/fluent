@@ -880,3 +880,65 @@ fn dispatch_rejects_request_or_token_identity_mismatch() {
         "dispatch must fail when the stored token has a mismatched work_item_id"
     );
 }
+
+// ─────────────────────────────────────────────────
+// Step 3 (contract closure): oversized frame rejection
+// ─────────────────────────────────────────────────
+
+#[test]
+#[cfg(feature = "test-support")]
+fn oversized_frame_is_rejected_before_payload_read() {
+    use std::os::unix::net::UnixStream;
+
+    // Create a connected socket pair without binding — avoids the sandbox
+    // restriction on Unix socket bind.
+    let (mut server, mut client) = UnixStream::pair().expect("UnixStream::pair");
+
+    // Server: read the request frame, then respond with an oversized length
+    // header but no payload. The client must bail before reading any payload.
+    let server_handle = std::thread::spawn(move || {
+        let mut len_buf = [0u8; 4];
+        server.read_exact(&mut len_buf).unwrap();
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut req_buf = vec![0u8; len];
+        server.read_exact(&mut req_buf).unwrap();
+        // Declare MAX_FRAME_SIZE + 1 bytes without writing any payload.
+        let oversized: u32 = (fluent::scheduler_service::MAX_FRAME_SIZE as u32) + 1;
+        server.write_all(&oversized.to_le_bytes()).unwrap();
+    });
+
+    // Client: write a valid request frame, then try to read the oversized response.
+    let req = serde_json::to_vec(&serde_json::json!({
+        "kind": "health",
+        "generation": fluent::scheduler_service::PROTOCOL_GENERATION
+    }))
+    .unwrap();
+    fluent::scheduler_service::frame_write_test_support(&mut client, &req)
+        .expect("write valid request frame");
+    let result = fluent::scheduler_service::frame_read_test_support(&mut client);
+    assert!(
+        result.is_err(),
+        "frame_read must return an error for an oversized declared length"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData,
+        "error kind must be InvalidData for an oversized inbound frame"
+    );
+
+    server_handle.join().expect("server thread panicked");
+
+    // Also verify that frame_write rejects an outbound payload exceeding the cap.
+    let (mut a, _b) = UnixStream::pair().expect("second UnixStream::pair");
+    let huge = vec![0u8; fluent::scheduler_service::MAX_FRAME_SIZE + 1];
+    let write_result = fluent::scheduler_service::frame_write_test_support(&mut a, &huge);
+    assert!(
+        write_result.is_err(),
+        "frame_write must return an error for a payload exceeding MAX_FRAME_SIZE"
+    );
+    assert_eq!(
+        write_result.unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput,
+        "error kind must be InvalidInput for an oversized outbound payload"
+    );
+}
