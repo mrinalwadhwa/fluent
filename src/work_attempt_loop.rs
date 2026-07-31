@@ -167,14 +167,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
 
         match reject_terminal_attempt(attempt)? {
             TerminalCheck::Reopen => {
-                let mut item = item;
-                let attempt_mut = item
-                    .attempts
-                    .iter_mut()
-                    .find(|a| a.id == config.attempt_id)
-                    .unwrap();
-                crate::work_model::reopen_attempt(attempt_mut);
-                config.store.write_work_item(&item)?;
+                reopen_resumable_attempt(config.store, config.work_item_id, config.attempt_id)?;
                 continue;
             }
             TerminalCheck::Continue => {}
@@ -807,6 +800,46 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
         },
         _ => Ok(TerminalCheck::Continue),
     }
+}
+
+/// Reopen a supported pause from a fresh Work-model aggregate.
+///
+/// The Attempt loop initially reads the Work Item to inspect its next action,
+/// but a peer can complete between that read and a resume. Re-read and reopen
+/// under the model lock so the transition preserves that peer instead of
+/// attempting to write the stale aggregate back.
+fn reopen_resumable_attempt(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<()> {
+    store.mutate_work_item(work_item_id, |item| {
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let can_reopen = attempt.status == AttemptStatus::NeedsUser
+            && matches!(
+                attempt.pause_kind,
+                Some(PauseKind::Auth)
+                    | Some(PauseKind::TranscriptPump)
+                    | Some(PauseKind::HostSandbox)
+                    | Some(PauseKind::TesterHarness)
+                    | Some(PauseKind::ProviderUnavailable)
+            )
+            && !attempt
+                .tasks
+                .iter()
+                .any(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Executing));
+        if can_reopen {
+            crate::work_model::reopen_attempt(attempt);
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Atomically migrate only legacy review failures whose canonical transcript
@@ -8431,11 +8464,84 @@ mod tests {
         .expect_err("blocked follow-up work stops after the public route reopens the pause");
         assert!(error.to_string().contains("no planned transition"));
 
-        let attempt = &store.read_work_item("resume-provider-pause").unwrap().attempts[0];
+        let attempt = &store
+            .read_work_item("resume-provider-pause")
+            .unwrap()
+            .attempts[0];
         assert_eq!(attempt.status, AttemptStatus::Planned);
         assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
         assert_eq!(attempt.tasks[2].status, TaskStatus::Planned);
-        assert_eq!(fs::read_to_string(transcript).unwrap(), "durable provider evidence\n");
+        assert_eq!(
+            fs::read_to_string(transcript).unwrap(),
+            "durable provider evidence\n"
+        );
+    }
+
+    #[test]
+    fn provider_pause_reopen_preserves_concurrent_peer_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "provider-pause-peer".to_string(),
+            title: "Resume provider pause without losing a peer".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("provider-pause-attempt").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "candidate".to_string(),
+            source_branch: "work/provider-pause-attempt".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+        });
+        let mut paused = review_task_with_artifact(
+            "provider-pause-review",
+            "architecture",
+            ".fluent/work/artifacts/provider-pause-peer/provider-pause-attempt/review",
+        );
+        paused.status = TaskStatus::NeedsUser;
+        paused.work_item_id = item.id.clone();
+        paused.attempt_id = Some(attempt.id.clone());
+        let mut peer = review_task_with_artifact(
+            "provider-pause-peer-review",
+            "tests",
+            ".fluent/work/artifacts/provider-pause-peer/provider-pause-attempt/peer",
+        );
+        peer.work_item_id = item.id.clone();
+        peer.attempt_id = Some(attempt.id.clone());
+        attempt.tasks.extend([paused, peer]);
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::ProviderUnavailable);
+        store.create_work_item(&item).unwrap();
+
+        // This mutation stands in for a peer that completes after the outer loop
+        // observed the pause but before the reopen transaction acquires its lock.
+        store
+            .mutate_work_item("provider-pause-peer", |fresh| {
+                crate::work_model::set_task_terminal(
+                    &mut fresh.attempts[0].tasks[2],
+                    TaskStatus::Complete,
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        reopen_resumable_attempt(&store, "provider-pause-peer", "provider-pause-attempt").unwrap();
+
+        let attempt = &store
+            .read_work_item("provider-pause-peer")
+            .unwrap()
+            .attempts[0];
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+        assert_eq!(
+            attempt.tasks[2].status,
+            TaskStatus::Complete,
+            "the fresh lock-held reopen must retain a peer completion"
+        );
     }
 
     #[test]
