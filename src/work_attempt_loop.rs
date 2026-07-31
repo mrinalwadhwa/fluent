@@ -838,6 +838,19 @@ fn reclassify_legacy_provider_pause(
         {
             return Ok(LegacyProviderPauseRecovery::NotLegacy);
         }
+        match can_advance_loop(project_root, attempt) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(LegacyProviderPauseRecovery::Ineligible(
+                    "the Attempt reached a real write-round limit".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Ok(LegacyProviderPauseRecovery::Ineligible(format!(
+                    "the Attempt's write-round limit cannot be verified: {error:#}"
+                )));
+            }
+        }
         let failed: Vec<_> = attempt
             .tasks
             .iter()
@@ -8466,6 +8479,46 @@ mod tests {
             Some(PauseKind::RoundCap),
             "a failed compatibility check must not mutate legacy state"
         );
+    }
+
+    #[test]
+    fn legacy_round_cap_at_real_write_limit_remains_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                let writer = attempt.tasks[0].clone();
+                for round in 2..=max_total_write_rounds() {
+                    let mut task = writer.clone();
+                    task.id = format!("attempt-1-write-{round}");
+                    attempt.tasks.push(task);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("a real write-round limit must remain blocked");
+
+        assert!(
+            error.to_string().contains("real write-round limit"),
+            "the public attempt route must explain why migration is ineligible: {error:#}"
+        );
+        let attempt = &store.read_work_item("work-1").unwrap().attempts[0];
+        assert_eq!(attempt.pause_kind, Some(PauseKind::RoundCap));
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Failed);
     }
 
     #[test]
