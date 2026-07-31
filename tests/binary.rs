@@ -23624,3 +23624,53 @@ fn task_run_overrides_only_explicit_coder_mapping_fields() {
     assert_eq!(mapping["behavior-tests"]["effort"], "low");
     remove_sibling_worktrees(&main_dir, &token);
 }
+
+// B9: THE SYSTEM SHALL install and run the scheduler service only for the
+// current user, without requiring administrator privileges or serving other users.
+#[cfg(unix)]
+#[test]
+fn scheduler_service_installation_is_current_user_scoped() {
+    use fluent::scheduler_service::{self, BuildIdentity, FakeServiceManager, ServiceManager};
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    // Assign and register the checkout using only the current user's home;
+    // no administrator privilege is required.
+    let identity = scheduler_service::assign_checkout_identity(project.path()).unwrap();
+    scheduler_service::register_checkout(home.path(), project.path(), &identity).unwrap();
+
+    // The state root must be confined to the user-private path.
+    let state_root = scheduler_service::service_state_root(home.path());
+    assert!(
+        state_root.starts_with(home.path()),
+        "state root must be under the user home, not a system-wide path"
+    );
+    let root_meta = fs::metadata(&state_root).unwrap();
+    let root_mode = root_meta.permissions().mode() & 0o777;
+    assert_eq!(root_mode, 0o700, "state root must be accessible only by the owner");
+
+    // The socket path must also be under the user-private state root.
+    let sock = scheduler_service::socket_path(home.path());
+    assert!(
+        sock.starts_with(&state_root),
+        "socket must be confined to the user-private state root"
+    );
+
+    // Install and start through a fake manager — no LaunchAgent, no admin privilege.
+    let build = BuildIdentity {
+        version: "0.1.0-b9".to_string(),
+        hash: "testbuildidentity123".to_string(),
+    };
+    let manager = FakeServiceManager::new();
+    manager
+        .install_or_update(&std::path::PathBuf::from("/fake/exe"), &build, &sock)
+        .unwrap();
+    manager.start().unwrap();
+    assert!(
+        manager.is_running(),
+        "service must be running after start without admin privileges"
+    );
+    manager.stop().unwrap();
+}
