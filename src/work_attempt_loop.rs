@@ -8370,26 +8370,72 @@ mod tests {
 
     #[test]
     fn provider_pause_resumes_exact_unfinished_tasks() {
-        let mut completed = review_task_with_artifact("write", "writer", "artifacts/write");
-        completed.kind = TaskKind::Write;
-        completed.status = TaskStatus::Complete;
-        let mut paused = review_task_with_artifact("review", "reviewer", "artifacts/review");
-        paused.status = TaskStatus::NeedsUser;
-        let mut attempt = Attempt {
-            id: "attempt-1".to_string(),
-            status: AttemptStatus::NeedsUser,
-            pause_kind: Some(PauseKind::ProviderUnavailable),
-            tasks: vec![completed, paused],
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "resume-provider-pause".to_string(),
+            title: "Resume provider pause".to_string(),
             ..Default::default()
         };
-        assert!(matches!(
-            reject_terminal_attempt(&attempt).unwrap(),
-            TerminalCheck::Reopen
-        ));
-        crate::work_model::reopen_attempt(&mut attempt);
+        item.add_initial_attempt("resume-attempt").unwrap();
+        let attempt = &mut item.attempts[0];
+        let writer = &mut attempt.tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "candidate".to_string(),
+            source_branch: "work/resume-attempt".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+        });
+        let mut blocker = review_task_with_artifact(
+            "resume-attempt-blocker",
+            "blocker",
+            ".fluent/work/artifacts/resume-provider-pause/resume-attempt/blocker",
+        );
+        blocker.status = TaskStatus::Planned;
+        blocker.depends_on = Some("missing-predecessor".to_string());
+        blocker.work_item_id = item.id.clone();
+        blocker.attempt_id = Some(attempt.id.clone());
+        let mut paused = review_task_with_artifact(
+            "resume-attempt-review",
+            "reviewer",
+            ".fluent/work/artifacts/resume-provider-pause/resume-attempt/review",
+        );
+        paused.status = TaskStatus::NeedsUser;
+        paused.depends_on = Some(blocker.id.clone());
+        paused.work_item_id = item.id.clone();
+        paused.attempt_id = Some(attempt.id.clone());
+        attempt.tasks.extend([blocker, paused]);
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::ProviderUnavailable);
+        store.create_work_item(&item).unwrap();
+        let transcript = tmp.path().join(
+            ".fluent/work/artifacts/resume-provider-pause/resume-attempt/review/transcript.jsonl",
+        );
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, "durable provider evidence\n").unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "resume-provider-pause",
+            attempt_id: "resume-attempt",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("blocked follow-up work stops after the public route reopens the pause");
+        assert!(error.to_string().contains("no planned transition"));
+
+        let attempt = &store.read_work_item("resume-provider-pause").unwrap().attempts[0];
+        assert_eq!(attempt.status, AttemptStatus::Planned);
         assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
-        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
-        assert!(attempt.tasks[1].artifact_area.is_some());
+        assert_eq!(attempt.tasks[2].status, TaskStatus::Planned);
+        assert_eq!(fs::read_to_string(transcript).unwrap(), "durable provider evidence\n");
     }
 
     #[test]
