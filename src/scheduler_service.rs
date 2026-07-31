@@ -705,8 +705,8 @@ pub fn persist_request(project_root: &Path, request: &AttemptExecutionRequest) -
     let path = request_path(project_root, &request.id);
     let _lock = acquire_request_lock(project_root, &request.id)?;
     if path.exists() {
-        let bytes = fs::read(&path)
-            .with_context(|| format!("read existing request {}", path.display()))?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("read existing request {}", path.display()))?;
         let existing: AttemptExecutionRequest = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse existing request {}", path.display()))?;
         if existing == *request {

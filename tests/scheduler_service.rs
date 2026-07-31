@@ -721,11 +721,8 @@ fn __registry_child_worker() {
             .expect("register_checkout in child process");
         }
         "unregister" => {
-            fluent::scheduler_service::unregister_checkout(
-                std::path::Path::new(&home),
-                project,
-            )
-            .expect("unregister_checkout in child process");
+            fluent::scheduler_service::unregister_checkout(std::path::Path::new(&home), project)
+                .expect("unregister_checkout in child process");
         }
         other => panic!("unknown FLUENT_REGISTRY_CHILD action: {other}"),
     }
@@ -769,10 +766,7 @@ fn concurrent_registry_mutations_preserve_every_successful_change() {
 
     for (i, child) in children.iter_mut().enumerate() {
         let status = child.wait().expect("wait for child process");
-        assert!(
-            status.success(),
-            "child process {i} exited with {status:?}"
-        );
+        assert!(status.success(), "child process {i} exited with {status:?}");
     }
 
     // All N checkouts must appear in the registry with correct identities.
@@ -859,7 +853,10 @@ fn dispatch_rejects_request_or_token_identity_mismatch() {
 
     // Idempotent re-submission with correct request: returns the same token.
     let token2 = scheduler_service::submit_dispatch(project.path(), &request).unwrap();
-    assert_eq!(token, token2, "idempotent dispatch must return the same token");
+    assert_eq!(
+        token, token2,
+        "idempotent dispatch must return the same token"
+    );
 
     // Corrupt the on-disk token to simulate tampering.
     let token_path = project
