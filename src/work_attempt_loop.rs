@@ -5568,26 +5568,39 @@ mod tests {
         project_root: &Path,
         coder: crate::coder::CoderKind,
     ) -> WorkModelStore {
+        legacy_provider_pause_fixture_with_ids(project_root, coder, "work-1", "attempt-1")
+    }
+
+    fn legacy_provider_pause_fixture_with_ids(
+        project_root: &Path,
+        coder: crate::coder::CoderKind,
+        work_item_id: &str,
+        attempt_id: &str,
+    ) -> WorkModelStore {
         let store = WorkModelStore::new(project_root);
         let mut item = WorkItem {
-            id: "work-1".to_string(),
+            id: work_item_id.to_string(),
             title: "Legacy provider pause".to_string(),
             ..Default::default()
         };
-        item.add_initial_attempt("attempt-1").unwrap();
+        item.add_initial_attempt(attempt_id).unwrap();
         let attempt = &mut item.attempts[0];
         attempt.tasks[0].status = TaskStatus::Complete;
         attempt.tasks[0].output = Some(TaskOutput {
             workspace_id: "candidate".to_string(),
-            workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
-            source_branch: "work/attempt-1".to_string(),
+            workspace_path: format!(
+                ".fluent/work/workspaces/{work_item_id}/{attempt_id}/candidate"
+            ),
+            source_branch: format!("work/{attempt_id}"),
             base_commit: None,
             commit: "abc123".to_string(),
         });
-        let artifact_path = work_artifact_path("work-1", "attempt-1", "review-provider");
+        let artifact_path = work_artifact_path(work_item_id, attempt_id, "review-provider");
         let mut review =
             review_task_with_artifact("review-provider", "architecture", &artifact_path);
         review.status = TaskStatus::Failed;
+        review.work_item_id = work_item_id.to_string();
+        review.attempt_id = Some(attempt_id.to_string());
         attempt.tasks.push(review);
         attempt.status = AttemptStatus::NeedsUser;
         attempt.pause_kind = Some(PauseKind::RoundCap);
@@ -8749,13 +8762,103 @@ mod tests {
     }
 
     #[test]
+    fn legacy_round_cap_with_failed_non_review_task_remains_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].tasks[1].kind = TaskKind::Tester;
+                Ok(())
+            })
+            .unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("a non-review failure must remain a legacy round-cap pause");
+
+        assert!(error.to_string().contains("not a review Task"));
+        let attempt = &store.read_work_item("work-1").unwrap().attempts[0];
+        assert_eq!(attempt.pause_kind, Some(PauseKind::RoundCap));
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn legacy_round_cap_with_reviewer_verdict_remains_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        let review = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/review.md");
+        fs::write(&review, "Verdict: FAIL\n").unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("a reviewer verdict must remain a legacy round-cap pause");
+
+        assert!(error.to_string().contains("has a reviewer verdict"));
+        let attempt = &store.read_work_item("work-1").unwrap().attempts[0];
+        assert_eq!(attempt.pause_kind, Some(PauseKind::RoundCap));
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Failed);
+    }
+
+    #[test]
     fn legacy_provider_recovery_is_identity_independent() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Codex);
-        assert_eq!(
-            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
-            LegacyProviderPauseRecovery::Reclassified
+        let work_item_id = "other-legacy-work";
+        let attempt_id = "nonstandard-resume-id";
+        let store = legacy_provider_pause_fixture_with_ids(
+            tmp.path(),
+            crate::coder::CoderKind::Codex,
+            work_item_id,
+            attempt_id,
         );
+        store
+            .mutate_work_item(work_item_id, |item| {
+                item.attempts[0].tasks[1].depends_on = Some("missing-predecessor".to_string());
+                Ok(())
+            })
+            .unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id,
+            attempt_id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("the public route reclassifies distinct persisted identities");
+
+        assert!(error.to_string().contains("no planned transition"));
+        let attempt = &store.read_work_item(work_item_id).unwrap().attempts[0];
+        assert_eq!(attempt.status, AttemptStatus::Planned);
+        assert!(attempt.pause_kind.is_none());
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
     }
 
     #[test]
