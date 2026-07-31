@@ -23649,7 +23649,10 @@ fn scheduler_service_installation_is_current_user_scoped() {
     );
     let root_meta = fs::metadata(&state_root).unwrap();
     let root_mode = root_meta.permissions().mode() & 0o777;
-    assert_eq!(root_mode, 0o700, "state root must be accessible only by the owner");
+    assert_eq!(
+        root_mode, 0o700,
+        "state root must be accessible only by the owner"
+    );
 
     // The socket path must also be under the user-private state root.
     let sock = scheduler_service::socket_path(home.path());

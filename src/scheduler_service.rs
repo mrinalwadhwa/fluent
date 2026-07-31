@@ -7,8 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -159,10 +159,8 @@ pub fn read_registry(home_dir: &Path) -> Result<HashMap<PathBuf, CheckoutIdentit
 
 fn read_registry_raw(home_dir: &Path) -> Result<RegistryFile> {
     let path = registry_path(home_dir);
-    let bytes = fs::read(&path)
-        .with_context(|| format!("read registry {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse registry {}", path.display()))
+    let bytes = fs::read(&path).with_context(|| format!("read registry {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse registry {}", path.display()))
 }
 
 // ─────────────────────────────────────────────────
@@ -228,8 +226,11 @@ pub fn read_observed_build(home_dir: &Path) -> Result<Option<BuildIdentity>> {
 
 fn read_optional_build(path: PathBuf) -> Result<Option<BuildIdentity>> {
     match fs::read(&path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse build state {}", path.display()))?)),
+        Ok(bytes) => {
+            Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                format!("parse build state {}", path.display())
+            })?))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read build state {}", path.display())),
     }
@@ -605,10 +606,8 @@ pub fn persist_request(project_root: &Path, request: &AttemptExecutionRequest) -
 /// Load a previously persisted `AttemptExecutionRequest` by id.
 pub fn load_request(project_root: &Path, request_id: &str) -> Result<AttemptExecutionRequest> {
     let path = request_path(project_root, request_id);
-    let bytes = fs::read(&path)
-        .with_context(|| format!("read request {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parse request {}", path.display()))
+    let bytes = fs::read(&path).with_context(|| format!("read request {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse request {}", path.display()))
 }
 
 // ─────────────────────────────────────────────────

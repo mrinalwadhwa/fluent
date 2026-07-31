@@ -25,11 +25,7 @@ fn fake_build() -> BuildIdentity {
     }
 }
 
-fn make_event(
-    seq: u64,
-    attempt_id: &str,
-    kind: &str,
-) -> fluent::scheduler_service::AttemptEvent {
+fn make_event(seq: u64, attempt_id: &str, kind: &str) -> fluent::scheduler_service::AttemptEvent {
     fluent::scheduler_service::AttemptEvent {
         seq,
         kind: kind.to_string(),
@@ -64,7 +60,10 @@ fn checkout_identity_differs_across_projects() {
     let p2 = TempDir::new().unwrap();
     let id1 = scheduler_service::assign_checkout_identity(p1.path()).unwrap();
     let id2 = scheduler_service::assign_checkout_identity(p2.path()).unwrap();
-    assert_ne!(id1, id2, "different checkouts must get different identities");
+    assert_ne!(
+        id1, id2,
+        "different checkouts must get different identities"
+    );
 }
 
 #[test]
@@ -113,7 +112,10 @@ fn service_state_root_is_user_private() {
     let root = scheduler_service::service_state_root(home.path());
     let meta = fs::metadata(&root).unwrap();
     let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700, "state root must be accessible only by the owner");
+    assert_eq!(
+        mode, 0o700,
+        "state root must be accessible only by the owner"
+    );
 }
 
 #[test]
@@ -239,7 +241,10 @@ fn service_manager_install_then_enable_disable_drain_transitions() {
 
     manager.disable().unwrap();
     assert!(!manager.is_enabled(), "disabled must clear enabled flag");
-    assert!(manager.is_running(), "disable must not stop the running service");
+    assert!(
+        manager.is_running(),
+        "disable must not stop the running service"
+    );
 
     manager.drain().unwrap();
     assert!(!manager.is_running(), "drain must stop the service");
@@ -248,7 +253,10 @@ fn service_manager_install_then_enable_disable_drain_transitions() {
 #[test]
 fn enable_requires_prior_install() {
     let manager = FakeServiceManager::new();
-    assert!(manager.enable().is_err(), "enable without install must fail");
+    assert!(
+        manager.enable().is_err(),
+        "enable without install must fail"
+    );
 }
 
 #[test]
@@ -289,7 +297,10 @@ fn setup_service_registers_checkout_and_records_desired_build() {
         registry.contains_key(&canonical),
         "checkout must be registered after setup"
     );
-    assert!(manager.is_installed(), "service must be installed after setup");
+    assert!(
+        manager.is_installed(),
+        "service must be installed after setup"
+    );
     assert_eq!(
         scheduler_service::read_desired_build(home.path())
             .unwrap()
@@ -335,7 +346,10 @@ fn desired_build_updates_when_executable_changes() {
     let build2 =
         scheduler_service::setup_service(project.path(), home.path(), &exe2, &manager).unwrap();
 
-    assert_ne!(build1.hash, build2.hash, "a new exe must produce a new build hash");
+    assert_ne!(
+        build1.hash, build2.hash,
+        "a new exe must produce a new build hash"
+    );
     assert_eq!(
         scheduler_service::read_desired_build(home.path())
             .unwrap()
@@ -359,13 +373,15 @@ fn attempt_execution_request_round_trips_through_persistence() {
     scheduler_service::persist_request(project.path(), &request).unwrap();
     let loaded = scheduler_service::load_request(project.path(), &original_id).unwrap();
 
-    assert_eq!(loaded, request, "loaded request must equal the persisted one");
+    assert_eq!(
+        loaded, request,
+        "loaded request must equal the persisted one"
+    );
 }
 
 #[test]
 fn attempt_execution_request_has_nonempty_generated_id() {
-    let r =
-        fluent::scheduler_service::AttemptExecutionRequest::new("wi-1", "attempt-1").unwrap();
+    let r = fluent::scheduler_service::AttemptExecutionRequest::new("wi-1", "attempt-1").unwrap();
     assert!(!r.id.is_empty(), "generated request id must be non-empty");
     assert!(!r.created_at.is_empty(), "created_at must be non-empty");
 }
@@ -380,7 +396,10 @@ fn dispatch_submission_is_exact_bound_and_idempotent() {
     let token1 = scheduler_service::submit_dispatch(project.path(), &request).unwrap();
     let token2 = scheduler_service::submit_dispatch(project.path(), &request).unwrap();
 
-    assert_eq!(token1, token2, "idempotent dispatch must return the same token");
+    assert_eq!(
+        token1, token2,
+        "idempotent dispatch must return the same token"
+    );
     assert_eq!(token1.work_item_id, "wi-1");
     assert_eq!(token1.attempt_id, "attempt-1");
     assert_eq!(token1.request_id, request.id);
@@ -441,7 +460,10 @@ fn events_for_different_attempts_are_stored_independently() {
 fn replay_returns_empty_for_unknown_attempt() {
     let project = TempDir::new().unwrap();
     let events = scheduler_service::replay_events(project.path(), "attempt-999").unwrap();
-    assert!(events.is_empty(), "replay of unknown attempt must return empty");
+    assert!(
+        events.is_empty(),
+        "replay of unknown attempt must return empty"
+    );
 }
 
 #[test]
@@ -529,9 +551,7 @@ fn malformed_registry_entry_does_not_prevent_healthy_project_registration() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    let reg_path = home
-        .path()
-        .join(".config/fluent/scheduler/registry.json");
+    let reg_path = home.path().join(".config/fluent/scheduler/registry.json");
     fs::create_dir_all(reg_path.parent().unwrap()).unwrap();
     fs::write(
         &reg_path,
@@ -610,7 +630,10 @@ fn duplicate_start_via_fake_manager_is_idempotent() {
     manager.start().unwrap();
     assert!(manager.is_running());
     manager.start().unwrap();
-    assert!(manager.is_running(), "duplicate start must leave service running");
+    assert!(
+        manager.is_running(),
+        "duplicate start must leave service running"
+    );
 
     manager.stop().unwrap();
     assert!(!manager.is_running());
