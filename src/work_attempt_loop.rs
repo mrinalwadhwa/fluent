@@ -8442,16 +8442,46 @@ mod tests {
     fn legacy_provider_failures_reclassify_and_resume_in_one_run() {
         let tmp = tempfile::tempdir().unwrap();
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
-        assert_eq!(
-            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
-            LegacyProviderPauseRecovery::Reclassified
-        );
-        let mut item = store.read_work_item("work-1").unwrap();
-        let attempt = &mut item.attempts[0];
-        assert_eq!(attempt.pause_kind, Some(PauseKind::ProviderUnavailable));
-        crate::work_model::reopen_attempt(attempt);
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                let mut blocker = attempt.tasks[1].clone();
+                blocker.id = "attempt-1-review-blocker".to_string();
+                blocker.status = TaskStatus::Planned;
+                blocker.depends_on = Some("missing-predecessor".to_string());
+                blocker.artifact_area = Some(TaskArtifactArea {
+                    path: ".fluent/work/artifacts/work-1/attempt-1/review-blocker".to_string(),
+                });
+                attempt.tasks[1].depends_on = Some(blocker.id.clone());
+                attempt.tasks.push(blocker);
+                Ok(())
+            })
+            .unwrap();
+        let transcript = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl");
+        let evidence = fs::read_to_string(&transcript).unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("the public route reclassifies and reopens before blocked work stops");
+        assert!(error.to_string().contains("no planned transition"));
+
+        let attempt = &store.read_work_item("work-1").unwrap().attempts[0];
+        assert_eq!(attempt.status, AttemptStatus::Planned);
         assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
         assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+        assert_eq!(fs::read_to_string(transcript).unwrap(), evidence);
     }
 
     #[test]

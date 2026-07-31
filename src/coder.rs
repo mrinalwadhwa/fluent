@@ -4825,6 +4825,32 @@ mod auth_refresh_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: this serial test restores the process environment on drop.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: restore the value this test observed before mutating it.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     fn make_401_script(counter_path: &Path, succeed_on_call: Option<u32>) -> String {
         let counter = counter_path.display();
         let success_check = match succeed_on_call {
@@ -4840,6 +4866,47 @@ printf '%s' "$count" > "{counter}"
 echo '{{"type":"result","api_error_status":401,"request_id":"req-test"}}'
 exit 1"#
         )
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rate_limit_retry_helper_exhausts_every_provider_launch() {
+        let _jitter = ScopedEnv::set("FLUENT_RATE_LIMIT_JITTER_MAX_SECONDS", "0");
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("launches");
+        let script = format!(
+            "count=0; [ -f '{0}' ] && count=$(cat '{0}'); count=$((count + 1)); \\
+             printf '%s' \"$count\" > '{0}'; \\
+             printf '%s\\n' '{{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":0}}'; \\
+             exit 1",
+            counter.display()
+        );
+
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+            &|_, _| {},
+            &|| Ok(()),
+        );
+
+        assert_eq!(result.unwrap(), 1, "exhaustion preserves the provider exit");
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap(),
+            (RATE_LIMIT_MAX_RETRIES + 1).to_string(),
+            "the real capture-and-retry helper launches the provider through its full bounded budget"
+        );
+        for phase in 0..RATE_LIMIT_MAX_RETRIES {
+            assert!(
+                transcript.with_file_name(format!("transcript.{phase}.jsonl")).is_file(),
+                "retry phase {phase} must be preserved before the next launch"
+            );
+        }
     }
 
     #[test]
