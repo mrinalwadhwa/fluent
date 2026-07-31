@@ -45,6 +45,7 @@ pub mod worktree;
 pub mod observations;
 pub mod queue;
 pub mod scheduler;
+pub mod scheduler_service;
 pub mod setup;
 pub mod skill_install;
 #[cfg(test)]
