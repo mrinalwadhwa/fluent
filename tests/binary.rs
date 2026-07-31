@@ -18895,8 +18895,11 @@ exit 0
             )
             .env("FLUENT_TEST_RELEASE", &release)
             .args(["scheduler", "run", "--poll-seconds", "1"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            // This test never inspects scheduler output. Piping it without a
+            // concurrent reader can fill the pipe when scheduled Attempts
+            // inherit the handles, deadlocking the fixture before teardown.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         OwnedFixtureProcess::spawn(&mut command)
     };
 
