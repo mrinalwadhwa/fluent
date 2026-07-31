@@ -641,6 +641,16 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         provider_readiness.codex_worker(),
         sandbox_profile.as_ref(),
     );
+    run_result = provider_pause_error(
+        run_result,
+        reservation.coder,
+        plan.task.artifact_area.as_ref().map(|area| {
+            config
+                .project_root
+                .join(&area.path)
+                .join("transcript.jsonl")
+        }),
+    );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
@@ -665,6 +675,16 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             &pump_config,
             provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
+        );
+        run_result = provider_pause_error(
+            run_result,
+            reservation.coder,
+            plan.task.artifact_area.as_ref().map(|area| {
+                config
+                    .project_root
+                    .join(&area.path)
+                    .join("transcript.jsonl")
+            }),
         );
     }
 
@@ -1080,6 +1100,11 @@ fn run_review_task_with_coder(
         sandbox_profile.as_ref(),
         coder_override,
     );
+    run_result = provider_pause_error(
+        run_result,
+        reservation.coder,
+        Some(artifact_dir.join("transcript.jsonl")),
+    );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
@@ -1109,6 +1134,11 @@ fn run_review_task_with_coder(
             sandbox_profile.as_ref(),
             coder_override,
         );
+        run_result = provider_pause_error(
+            run_result,
+            reservation.coder,
+            Some(artifact_dir.join("transcript.jsonl")),
+        );
     }
 
     // Compose the coder/pump primary with the workspace-confinement cleanup
@@ -1134,7 +1164,10 @@ fn run_review_task_with_coder(
 fn is_resumable_task_failure(error: &anyhow::Error) -> bool {
     matches!(
         classify_task_failure(error),
-        TaskFailure::Auth(_) | TaskFailure::TranscriptPump(_) | TaskFailure::TesterHarness
+        TaskFailure::Auth(_)
+            | TaskFailure::TranscriptPump(_)
+            | TaskFailure::TesterHarness
+            | TaskFailure::ProviderUnavailable
     )
 }
 
@@ -1900,6 +1933,10 @@ fn should_retry_coder_error(result: &Result<()>) -> bool {
         && !is_transcript_pump_error(result)
         && !is_supervision_sidecar_error(result)
         && !is_host_sandbox_preflight_error(result)
+        && !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<crate::provider_evidence::ProviderUnavailableError>())
 }
 
 /// How a Task's terminal failure should be recorded in durable Attempt state and
@@ -1919,6 +1956,7 @@ enum TaskFailure {
     HostSandbox(String),
     /// Tester configuration, sandbox, extraction, or result persistence failed.
     TesterHarness,
+    ProviderUnavailable,
     /// Any other persistent failure (generic coder error at the retry cap, a
     /// tester error, and the like).
     Generic,
@@ -1926,7 +1964,9 @@ enum TaskFailure {
 
 /// Classify a terminal coder error for durable persistence and resume.
 fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
-    if let Some(auth) = error.downcast_ref::<crate::claude_auth::AuthError>() {
+    if error.is::<crate::provider_evidence::ProviderUnavailableError>() {
+        TaskFailure::ProviderUnavailable
+    } else if let Some(auth) = error.downcast_ref::<crate::claude_auth::AuthError>() {
         TaskFailure::Auth(auth.user_message())
     } else if let Some(auth) = error.downcast_ref::<crate::codex_worker::CodexAuthError>() {
         TaskFailure::Auth(auth.to_string())
@@ -1941,6 +1981,26 @@ fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
         TaskFailure::HostSandbox(host.message().to_string())
     } else {
         TaskFailure::Generic
+    }
+}
+
+fn provider_pause_error(
+    result: Result<()>,
+    coder: CoderKind,
+    transcript: Option<std::path::PathBuf>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match transcript
+            .as_deref()
+            .and_then(|path| crate::provider_evidence::classify_provider_unavailable(coder, path))
+        {
+            Some(evidence) => Err(anyhow::Error::new(
+                crate::provider_evidence::ProviderUnavailableError(evidence),
+            )
+            .context(error)),
+            None => Err(error),
+        },
     }
 }
 
@@ -1975,6 +2035,7 @@ fn mark_task_failed_attempt_needs_user(
             | TaskFailure::TranscriptPump(_)
             | TaskFailure::HostSandbox(_)
             | TaskFailure::TesterHarness => TaskStatus::NeedsUser,
+            TaskFailure::ProviderUnavailable => TaskStatus::NeedsUser,
             TaskFailure::Generic => TaskStatus::Failed,
         };
         crate::work_model::set_task_terminal(
@@ -1986,6 +2047,7 @@ fn mark_task_failed_attempt_needs_user(
             TaskFailure::TranscriptPump(_) => crate::work_model::PauseKind::TranscriptPump,
             TaskFailure::HostSandbox(_) => crate::work_model::PauseKind::HostSandbox,
             TaskFailure::TesterHarness => crate::work_model::PauseKind::TesterHarness,
+            TaskFailure::ProviderUnavailable => crate::work_model::PauseKind::ProviderUnavailable,
             TaskFailure::Generic => crate::work_model::PauseKind::RoundCap,
         };
         // Route through the precedence boundary so a resumable pause cannot mask
@@ -2021,6 +2083,10 @@ fn mark_task_failed_attempt_needs_user(
             TaskFailure::TesterHarness => notify_fn(
                 "Fluent",
                 "Tester harness failed. Repair the project Tester, then 'fluent attempt run' to retry the same Tester Task.",
+            ),
+            TaskFailure::ProviderUnavailable => notify_fn(
+                "Fluent",
+                "Provider capacity is unavailable before model progress. Run 'fluent attempt run' to retry the same Task.",
             ),
             TaskFailure::Generic => {}
         }
@@ -2125,6 +2191,9 @@ fn write_task_error_handoff(
         ),
         TaskFailure::TesterHarness => format!(
             "# Tester needs repair\n\nTester Task {task_id:?} could not produce trustworthy test evidence. Repair the Tester configuration, extractor, sandbox, or result persistence, then retry this Attempt.\n"
+        ),
+        TaskFailure::ProviderUnavailable => format!(
+            "# Provider unavailable\n\nTask {task_id:?} exhausted provider retries before the model used tools or produced tokens. Run `fluent attempt run` to retry this same Task.\n"
         ),
         TaskFailure::Generic => format!(
             "# Attempt needs user input\n\nTask {task_id:?} failed after {} retries. \

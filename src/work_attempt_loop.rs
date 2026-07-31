@@ -145,6 +145,21 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             .find(|attempt| attempt.id == config.attempt_id)
             .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", config.attempt_id))?;
 
+        // Earlier versions recorded an exhausted provider outage as a RoundCap.
+        // Recover only the narrow, durable review-only shape before the normal
+        // terminal-state gate rejects it.
+        if attempt.status == AttemptStatus::NeedsUser
+            && attempt.pause_kind == Some(PauseKind::RoundCap)
+            && reclassify_legacy_provider_pause(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+            )?
+        {
+            continue;
+        }
+
         match reject_terminal_attempt(attempt)? {
             TerminalCheck::Reopen => {
                 let mut item = item;
@@ -755,7 +770,8 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
             Some(PauseKind::Auth)
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
-            | Some(PauseKind::TesterHarness) => {
+            | Some(PauseKind::TesterHarness)
+            | Some(PauseKind::ProviderUnavailable) => {
                 // Resume only a cleanly resumable Attempt: a hard-Failed or
                 // still-live peer Task means resuming could discard a hard
                 // failure or race a running Task. Such a mixed state needs the
@@ -786,6 +802,72 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
         },
         _ => Ok(TerminalCheck::Continue),
     }
+}
+
+/// Atomically migrate only legacy review failures whose canonical transcript
+/// proves the current provider-unavailable contract. Any missing artifact,
+/// reviewer verdict, non-review failure, or mixed failure leaves state intact.
+fn reclassify_legacy_provider_pause(
+    store: &WorkModelStore,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<bool> {
+    store.mutate_work_item(work_item_id, |item| {
+        let Some(attempt) = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Ok(false);
+        };
+        if attempt.status != AttemptStatus::NeedsUser
+            || attempt.pause_kind != Some(PauseKind::RoundCap)
+        {
+            return Ok(false);
+        }
+        let failed: Vec<_> = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Failed)
+            .collect();
+        if failed.is_empty()
+            || failed
+                .iter()
+                .any(|task| task.kind != crate::work_model::TaskKind::Review)
+            || attempt.tasks.iter().any(|task| {
+                task.status == TaskStatus::Failed
+                    && task.kind != crate::work_model::TaskKind::Review
+            })
+        {
+            return Ok(false);
+        }
+        let eligible = failed.iter().all(|task| {
+            let Some(area) = task.artifact_area.as_ref() else {
+                return false;
+            };
+            // A review artifact is a real reviewer verdict, never an outage.
+            if project_root.join(&area.path).join("review.md").is_file() {
+                return false;
+            }
+            let coder = attempt.coder_mapping.for_task_kind(task.kind).coder;
+            crate::provider_evidence::classify_provider_unavailable(
+                coder,
+                &project_root.join(&area.path).join("transcript.jsonl"),
+            )
+            .is_some()
+        });
+        if !eligible {
+            return Ok(false);
+        }
+        for task in &mut attempt.tasks {
+            if task.status == TaskStatus::Failed {
+                task.status = TaskStatus::NeedsUser;
+            }
+        }
+        attempt.pause_kind = Some(PauseKind::ProviderUnavailable);
+        Ok(true)
+    })
 }
 
 /// Decide whether the Attempt loop may plan another write round.

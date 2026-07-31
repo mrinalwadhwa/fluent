@@ -2783,6 +2783,9 @@ pub enum PauseKind {
     /// The Tester could not produce trustworthy normalized evidence. Retrying
     /// resumes this same Tester Task after the project repairs its harness.
     TesterHarness,
+    /// The provider exhausted its own bounded retries before the model used a
+    /// tool or emitted tokens. Re-running resumes this exact Task.
+    ProviderUnavailable,
 }
 
 /// Coarse attempt lifecycle state.
@@ -3323,6 +3326,7 @@ fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
             | Some(PauseKind::TesterHarness) => 3,
+            Some(PauseKind::ProviderUnavailable) => 3,
             // RoundCap, Uncertain, or an unclassified pause is non-resumable.
             _ => 4,
         },
