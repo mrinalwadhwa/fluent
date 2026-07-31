@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 
 use crate::atomic_write::atomic_write;
@@ -64,6 +65,29 @@ fn events_dir(project_root: &Path) -> PathBuf {
 
 fn dispatch_tokens_dir(project_root: &Path) -> PathBuf {
     project_root.join(".fluent/work/scheduler/dispatches")
+}
+
+fn registry_lock_path(home_dir: &Path) -> PathBuf {
+    service_state_root(home_dir).join("registry.lock")
+}
+
+// ─────────────────────────────────────────────────
+// Advisory lock helpers
+// ─────────────────────────────────────────────────
+
+struct RegistryLock {
+    _file: fs::File,
+}
+
+fn acquire_registry_lock(home_dir: &Path) -> Result<RegistryLock> {
+    let state_root = service_state_root(home_dir);
+    fs::create_dir_all(&state_root)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(registry_lock_path(home_dir))?;
+    flock(&file, FlockOperation::LockExclusive)?;
+    Ok(RegistryLock { _file: file })
 }
 
 // ─────────────────────────────────────────────────
@@ -123,6 +147,7 @@ pub fn register_checkout(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700))?;
     }
+    let _lock = acquire_registry_lock(home_dir)?;
     let mut reg = read_registry_raw(home_dir).unwrap_or_default();
     reg.checkouts
         .insert(canonical.to_string_lossy().into_owned(), identity.0.clone());
@@ -135,6 +160,7 @@ pub fn unregister_checkout(home_dir: &Path, project_root: &Path) -> Result<()> {
     let canonical = project_root
         .canonicalize()
         .with_context(|| format!("canonicalize {}", project_root.display()))?;
+    let _lock = acquire_registry_lock(home_dir)?;
     let mut reg = read_registry_raw(home_dir).unwrap_or_default();
     reg.checkouts
         .remove(&canonical.to_string_lossy().into_owned());

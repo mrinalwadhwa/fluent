@@ -1,5 +1,6 @@
 use fluent::scheduler_service::{self, BuildIdentity, FakeServiceManager, ServiceManager};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -687,4 +688,103 @@ fn observed_build_is_recorded_independently_of_desired_build() {
             .as_ref(),
         Some(&build_a)
     );
+}
+
+// ─────────────────────────────────────────────────
+// Step 1 (contract closure): concurrent registry mutations
+// ─────────────────────────────────────────────────
+
+// Sentinel test invoked as a child process by
+// concurrent_registry_mutations_preserve_every_successful_change. When
+// FLUENT_REGISTRY_CHILD is absent (normal nextest runs), returns immediately
+// as a harmless no-op.
+#[test]
+fn __registry_child_worker() {
+    let action = match std::env::var("FLUENT_REGISTRY_CHILD") {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let home = std::env::var("FLUENT_REGISTRY_CHILD_HOME").expect("FLUENT_REGISTRY_CHILD_HOME");
+    let project_str =
+        std::env::var("FLUENT_REGISTRY_CHILD_PROJECT").expect("FLUENT_REGISTRY_CHILD_PROJECT");
+    let project = std::path::Path::new(&project_str);
+    match action.as_str() {
+        "register" => {
+            let id = std::env::var("FLUENT_REGISTRY_CHILD_IDENTITY")
+                .expect("FLUENT_REGISTRY_CHILD_IDENTITY");
+            let identity = fluent::scheduler_service::CheckoutIdentity(id);
+            fluent::scheduler_service::register_checkout(
+                std::path::Path::new(&home),
+                project,
+                &identity,
+            )
+            .expect("register_checkout in child process");
+        }
+        "unregister" => {
+            fluent::scheduler_service::unregister_checkout(
+                std::path::Path::new(&home),
+                project,
+            )
+            .expect("unregister_checkout in child process");
+        }
+        other => panic!("unknown FLUENT_REGISTRY_CHILD action: {other}"),
+    }
+}
+
+fn spawn_registry_child(
+    action: &str,
+    home: &std::path::Path,
+    project: &std::path::Path,
+    identity: Option<&str>,
+) -> std::process::Child {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("__registry_child_worker")
+        .env("FLUENT_REGISTRY_CHILD", action)
+        .env("FLUENT_REGISTRY_CHILD_HOME", home)
+        .env("FLUENT_REGISTRY_CHILD_PROJECT", project)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(id) = identity {
+        cmd.env("FLUENT_REGISTRY_CHILD_IDENTITY", id);
+    }
+    cmd.spawn().expect("spawn registry child process")
+}
+
+#[test]
+fn concurrent_registry_mutations_preserve_every_successful_change() {
+    const N: usize = 8;
+    let home = TempDir::new().unwrap();
+    let projects: Vec<TempDir> = (0..N).map(|_| TempDir::new().unwrap()).collect();
+    let identities: Vec<String> = (0..N).map(|i| format!("ident{i:08x}")).collect();
+
+    // Spawn N child processes concurrently; each registers a distinct checkout.
+    let mut children: Vec<_> = projects
+        .iter()
+        .zip(identities.iter())
+        .map(|(project, identity)| {
+            spawn_registry_child("register", home.path(), project.path(), Some(identity))
+        })
+        .collect();
+
+    for (i, child) in children.iter_mut().enumerate() {
+        let status = child.wait().expect("wait for child process");
+        assert!(
+            status.success(),
+            "child process {i} exited with {status:?}"
+        );
+    }
+
+    // All N checkouts must appear in the registry with correct identities.
+    let registry = scheduler_service::read_registry(home.path()).unwrap();
+    for (i, (project, identity)) in projects.iter().zip(identities.iter()).enumerate() {
+        let canonical = project.path().canonicalize().unwrap();
+        let registered = registry.get(&canonical).unwrap_or_else(|| {
+            panic!("project {i} is missing from the registry after concurrent registration")
+        });
+        assert_eq!(
+            registered.0, *identity,
+            "project {i} has the wrong identity in the registry"
+        );
+    }
 }
