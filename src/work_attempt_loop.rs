@@ -8596,9 +8596,9 @@ mod tests {
             .join(".fluent/work/workspaces/work-1/attempt-1/candidate/preserved.txt");
         fs::create_dir_all(candidate_marker.parent().unwrap()).unwrap();
         fs::write(&candidate_marker, "candidate state").unwrap();
-        let peer_review = tmp.path().join(
-            ".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md",
-        );
+        let peer_review = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md");
         fs::create_dir_all(peer_review.parent().unwrap()).unwrap();
         fs::write(&peer_review, "Verdict: PASS\n").unwrap();
         let transcript = tmp
@@ -8644,7 +8644,10 @@ mod tests {
             TaskStatus::Complete
         );
         assert_eq!(fs::read_to_string(transcript).unwrap(), evidence);
-        assert_eq!(fs::read_to_string(candidate_marker).unwrap(), "candidate state");
+        assert_eq!(
+            fs::read_to_string(candidate_marker).unwrap(),
+            "candidate state"
+        );
         assert_eq!(fs::read_to_string(peer_review).unwrap(), "Verdict: PASS\n");
     }
 

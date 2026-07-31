@@ -4903,7 +4903,9 @@ exit 1"#
         );
         for phase in 0..RATE_LIMIT_MAX_RETRIES {
             assert!(
-                transcript.with_file_name(format!("transcript.{phase}.jsonl")).is_file(),
+                transcript
+                    .with_file_name(format!("transcript.{phase}.jsonl"))
+                    .is_file(),
                 "retry phase {phase} must be preserved before the next launch"
             );
         }
