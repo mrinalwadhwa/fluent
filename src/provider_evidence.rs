@@ -31,7 +31,7 @@ impl fmt::Display for ProviderUnavailableError {
 impl std::error::Error for ProviderUnavailableError {}
 
 /// Return evidence only after every bounded provider retry phase and the terminal
-/// transcript contain an explicit provider rate-limit event and no model text or
+/// transcript contain an explicit provider rate-limit event and no model tokens or
 /// tool activity. Unknown providers and unsupported transcript shapes fail closed.
 pub fn classify_provider_unavailable(
     provider: CoderKind,
@@ -104,7 +104,7 @@ fn classify_provider_phase(provider: CoderKind, transcript: &Path) -> bool {
     let Ok(file) = File::open(transcript) else {
         return false;
     };
-    let mut unavailable = false;
+    let mut terminal_rate_limit = false;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else {
             return false;
@@ -112,49 +112,46 @@ fn classify_provider_phase(provider: CoderKind, transcript: &Path) -> bool {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             return false;
         };
-        if model_progressed(provider, &event) {
+        if terminal_rate_limit {
             return false;
         }
-        unavailable |= match provider {
-            CoderKind::Claude => {
-                event["type"].as_str() == Some("rate_limit_event")
-                    && (event["retry_after"].is_u64()
-                        || event["retry_after_ms"].is_u64()
-                        || event["reset_at"].is_string())
-            }
-            CoderKind::Codex => {
-                event["type"].as_str() == Some("error")
-                    && event["code"].as_str() == Some("rate_limit")
-                    && (event["retry_after"].is_u64()
-                        || event["retry_after_ms"].is_u64()
-                        || event["reset_at"].is_string())
-            }
-            CoderKind::Pi => false,
-        };
+        if is_terminal_rate_limit(provider, &event) {
+            terminal_rate_limit = true;
+        } else if !is_safe_prelude(provider, &event) {
+            return false;
+        }
     }
-    unavailable
+    terminal_rate_limit
 }
 
-fn model_progressed(provider: CoderKind, event: &Value) -> bool {
+/// Accept only provider launch metadata before the terminal structured
+/// rate-limit event. Any assistant, item, unknown, or post-terminal record
+/// fails closed, including Claude thinking blocks that produced model tokens.
+fn is_safe_prelude(provider: CoderKind, event: &Value) -> bool {
     match provider {
         CoderKind::Claude => {
-            event["type"].as_str() == Some("assistant")
-                && event["message"]["content"]
-                    .as_array()
-                    .is_some_and(|content| {
-                        content.iter().any(|part| {
-                            matches!(part["type"].as_str(), Some("text") | Some("tool_use"))
-                        })
-                    })
+            event["type"].as_str() == Some("system") && event["subtype"].as_str() == Some("init")
         }
         CoderKind::Codex => matches!(
-            event["item"]["type"].as_str(),
-            Some("agent_message")
-                | Some("reasoning")
-                | Some("command_execution")
-                | Some("function_call")
+            event["type"].as_str(),
+            Some("thread.started") | Some("turn.started")
         ),
-        CoderKind::Pi => true,
+        CoderKind::Pi => false,
+    }
+}
+
+fn is_terminal_rate_limit(provider: CoderKind, event: &Value) -> bool {
+    let has_timing = event["retry_after"].is_u64()
+        || event["retry_after_ms"].is_u64()
+        || event["reset_at"].is_string();
+    match provider {
+        CoderKind::Claude => event["type"].as_str() == Some("rate_limit_event") && has_timing,
+        CoderKind::Codex => {
+            event["type"].as_str() == Some("error")
+                && event["code"].as_str() == Some("rate_limit")
+                && has_timing
+        }
+        CoderKind::Pi => false,
     }
 }
 
@@ -175,7 +172,7 @@ mod tests {
             )
             .unwrap();
         }
-        writeln!(file, r#"{{"type":"system"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"system","subtype":"init"}}"#).unwrap();
         writeln!(file, r#"{{"type":"rate_limit_event","retry_after":1}}"#).unwrap();
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_some());
     }
@@ -194,6 +191,46 @@ mod tests {
         std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n{\"type\":\"rate_limit_event\",\"retry_after\":1}\n").unwrap();
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
         std::fs::write(&path, "not json\n").unwrap();
+        assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
+    }
+
+    #[test]
+    fn rejects_nonterminal_rate_limit_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            std::fs::write(
+                phase_transcript_path(&path, phase),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            &path,
+            "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n{\"type\":\"system\",\"subtype\":\"init\"}\n",
+        )
+        .unwrap();
+
+        assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
+    }
+
+    #[test]
+    fn rejects_claude_thinking_before_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            std::fs::write(
+                phase_transcript_path(&path, phase),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"considering\"}]}}\n{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+        )
+        .unwrap();
+
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
     }
 
