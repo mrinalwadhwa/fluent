@@ -137,6 +137,8 @@ Each Reviewer writes a report that records its evidence, classifies each finding
 
 After a `fail`, Fluent starts another round. The Writer receives the failed review reports and any Tester regressions, revises the candidate, and commits the revision. The Tester reruns all declared test commands, then the affected Reviewers inspect the revision and mark earlier findings as addressed or still open. If the Attempt reaches its configured review-round limit, Fluent pauses with the evidence collected rather than continuing indefinitely.
 
+If a provider exhausts its retry budget before a model produces tokens or uses tools, Fluent pauses the Attempt as `provider-unavailable`. After provider capacity returns, run `fluent attempt run <work-item-id> [<attempt-id>]`; Fluent resumes the same unfinished Task and keeps completed peer Tasks and prior transcripts.
+
 Once the Tester and every Reviewer pass, the Learner examines the accepted change and the evidence from every round, updates Expertise when it finds something reusable, and records possible follow-ups in a handoff. The Attempt then produces a ready Merge Candidate.
 
 A ready Merge Candidate contains the reviewed change and any Expertise captured by the Learner, but it has not changed the target branch. Ask Fluent to show you the candidate so you can inspect it and decide whether to land it. By default, Fluent waits for your decision. Projects that want automatic landing can opt into a separate auto-merge process.

@@ -98,8 +98,9 @@ The round outcome determines what happens next:
   with human intervention. Do not rerun the Learner or land the candidate.
 - Any fail — follow-up write next round, scoped to failed reviewers.
 - Any uncertain, or a round cap reached — Attempt records `needs-user`, pausing the loop.
+- A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
 
-The user provides input; `fluent attempt run` resumes the loop where it left off.
+The user provides input; `fluent attempt run` resumes the loop where it left off. When the pause is `provider-unavailable`, wait for provider capacity, then run `fluent attempt run <work-item-id> [attempt-id]` without new input. Fluent retries the same unfinished Task and keeps completed peer Tasks and transcripts.
 
 ### Codex authentication pauses
 

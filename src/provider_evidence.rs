@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Evidence that a provider rejected a launch before the model made progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,9 +30,9 @@ impl fmt::Display for ProviderUnavailableError {
 
 impl std::error::Error for ProviderUnavailableError {}
 
-/// Return evidence only for a complete JSONL transcript containing one explicit
-/// provider rate-limit terminal event and no model text or tool activity.
-/// Unknown providers and unsupported transcript shapes intentionally fail closed.
+/// Return evidence only after every bounded provider retry phase and the terminal
+/// transcript contain an explicit provider rate-limit event and no model text or
+/// tool activity. Unknown providers and unsupported transcript shapes fail closed.
 pub fn classify_provider_unavailable(
     provider: CoderKind,
     transcript: &Path,
@@ -40,13 +40,42 @@ pub fn classify_provider_unavailable(
     if !matches!(provider, CoderKind::Claude | CoderKind::Codex) {
         return None;
     }
-    let file = File::open(transcript).ok()?;
+    for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+        let phase_path = phase_transcript_path(transcript, phase);
+        if !classify_provider_phase(provider, &phase_path) {
+            return None;
+        }
+    }
+    classify_provider_phase(provider, transcript).then_some(ProviderUnavailable { provider })
+}
+
+fn phase_transcript_path(transcript: &Path, phase: u32) -> PathBuf {
+    let mut name = transcript
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.push_str(&format!(".{phase}"));
+    if let Some(extension) = transcript.extension() {
+        name.push('.');
+        name.push_str(&extension.to_string_lossy());
+    }
+    transcript.with_file_name(name)
+}
+
+fn classify_provider_phase(provider: CoderKind, transcript: &Path) -> bool {
+    let Ok(file) = File::open(transcript) else {
+        return false;
+    };
     let mut unavailable = false;
     for line in BufReader::new(file).lines() {
-        let line = line.ok()?;
-        let event: Value = serde_json::from_str(&line).ok()?;
+        let Ok(line) = line else {
+            return false;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            return false;
+        };
         if model_progressed(provider, &event) {
-            return None;
+            return false;
         }
         unavailable |= match provider {
             CoderKind::Claude => {
@@ -65,7 +94,7 @@ pub fn classify_provider_unavailable(
             CoderKind::Pi => false,
         };
     }
-    unavailable.then_some(ProviderUnavailable { provider })
+    unavailable
 }
 
 fn model_progressed(provider: CoderKind, event: &Value) -> bool {
@@ -101,6 +130,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let mut file = File::create(&path).unwrap();
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            std::fs::write(
+                phase_transcript_path(&path, phase),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
         writeln!(file, r#"{{"type":"system"}}"#).unwrap();
         writeln!(file, r#"{{"type":"rate_limit_event","retry_after":1}}"#).unwrap();
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_some());
@@ -110,9 +146,33 @@ mod tests {
     fn rejects_started_or_malformed_transcripts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transcript.jsonl");
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            std::fs::write(
+                phase_transcript_path(&path, phase),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
         std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n{\"type\":\"rate_limit_event\",\"retry_after\":1}\n").unwrap();
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
         std::fs::write(&path, "not json\n").unwrap();
         assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
+    }
+
+    #[test]
+    fn requires_every_provider_retry_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            phase_transcript_path(&path, 0),
+            "{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":1}\n",
+        )
+        .unwrap();
+        assert!(classify_provider_unavailable(CoderKind::Codex, &path).is_none());
     }
 }

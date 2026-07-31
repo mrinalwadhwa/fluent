@@ -2010,7 +2010,7 @@ impl Drop for CoderSupervisor {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 1800;
-const RATE_LIMIT_MAX_RETRIES: u32 = 2;
+pub(crate) const RATE_LIMIT_MAX_RETRIES: u32 = 2;
 const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 
 fn ensure_not_expired_with_refresh() -> Result<(), crate::claude_auth::AuthError> {

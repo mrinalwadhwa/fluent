@@ -813,7 +813,7 @@ fn reclassify_legacy_provider_pause(
     work_item_id: &str,
     attempt_id: &str,
 ) -> Result<bool> {
-    store.mutate_work_item(work_item_id, |item| {
+    Ok(store.mutate_work_item(work_item_id, |item| {
         let Some(attempt) = item
             .attempts
             .iter_mut()
@@ -867,7 +867,7 @@ fn reclassify_legacy_provider_pause(
         }
         attempt.pause_kind = Some(PauseKind::ProviderUnavailable);
         Ok(true)
-    })
+    })?)
 }
 
 /// Decide whether the Attempt loop may plan another write round.
@@ -5472,6 +5472,62 @@ mod tests {
         }
     }
 
+    fn write_provider_outage(artifact_dir: &Path, coder: crate::coder::CoderKind) {
+        let (event, terminal) = match coder {
+            crate::coder::CoderKind::Claude => (
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            ),
+            crate::coder::CoderKind::Codex => (
+                "{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":1}\n",
+                "{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":1}\n",
+            ),
+            crate::coder::CoderKind::Pi => unreachable!("Pi has no provider outage contract"),
+        };
+        fs::create_dir_all(artifact_dir).unwrap();
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            fs::write(
+                artifact_dir.join(format!("transcript.{phase}.jsonl")),
+                event,
+            )
+            .unwrap();
+        }
+        fs::write(artifact_dir.join("transcript.jsonl"), terminal).unwrap();
+    }
+
+    fn legacy_provider_pause_fixture(
+        project_root: &Path,
+        coder: crate::coder::CoderKind,
+    ) -> WorkModelStore {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Legacy provider pause".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].status = TaskStatus::Complete;
+        attempt.tasks[0].output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+        });
+        let artifact_path = work_artifact_path("work-1", "attempt-1", "review-provider");
+        let mut review =
+            review_task_with_artifact("review-provider", "architecture", &artifact_path);
+        review.status = TaskStatus::Failed;
+        attempt.tasks.push(review);
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::RoundCap);
+        attempt.coder_mapping.review.coder = coder;
+        store.create_work_item(&item).unwrap();
+        write_provider_outage(&project_root.join(artifact_path), coder);
+        store
+    }
+
     use crate::work_model::TaskOutput;
 
     fn make_interpret_reviews_fixture(
@@ -8273,6 +8329,87 @@ mod tests {
             attempt.tasks[1].status,
             TaskStatus::Planned,
             "auth-failed review task should reset to Planned"
+        );
+    }
+
+    #[test]
+    fn provider_pause_resumes_exact_unfinished_tasks() {
+        let mut completed = review_task_with_artifact("write", "writer", "artifacts/write");
+        completed.kind = TaskKind::Write;
+        completed.status = TaskStatus::Complete;
+        let mut paused = review_task_with_artifact("review", "reviewer", "artifacts/review");
+        paused.status = TaskStatus::NeedsUser;
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            status: AttemptStatus::NeedsUser,
+            pause_kind: Some(PauseKind::ProviderUnavailable),
+            tasks: vec![completed, paused],
+            ..Default::default()
+        };
+        assert!(matches!(
+            reject_terminal_attempt(&attempt).unwrap(),
+            TerminalCheck::Reopen
+        ));
+        crate::work_model::reopen_attempt(&mut attempt);
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+        assert!(attempt.tasks[1].artifact_area.is_some());
+    }
+
+    #[test]
+    fn legacy_provider_failures_reclassify_and_resume_in_one_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        assert!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        );
+        let mut item = store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        assert_eq!(attempt.pause_kind, Some(PauseKind::ProviderUnavailable));
+        crate::work_model::reopen_attempt(attempt);
+        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+    }
+
+    #[test]
+    fn legacy_provider_recovery_preserves_completed_attempt_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        let before = store.read_work_item("work-1").unwrap();
+        assert!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        );
+        let after = store.read_work_item("work-1").unwrap();
+        assert_eq!(after.attempts[0].tasks[0], before.attempts[0].tasks[0]);
+        assert!(
+            tmp.path()
+                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn legacy_round_cap_without_complete_provider_proof_remains_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        fs::remove_file(
+            tmp.path()
+                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.1.jsonl"),
+        )
+        .unwrap();
+        assert!(
+            !reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        );
+        let item = store.read_work_item("work-1").unwrap();
+        assert_eq!(item.attempts[0].pause_kind, Some(PauseKind::RoundCap));
+    }
+
+    #[test]
+    fn legacy_provider_recovery_is_identity_independent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Codex);
+        assert!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
         );
     }
 

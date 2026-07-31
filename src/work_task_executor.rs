@@ -641,16 +641,6 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         provider_readiness.codex_worker(),
         sandbox_profile.as_ref(),
     );
-    run_result = provider_pause_error(
-        run_result,
-        reservation.coder,
-        plan.task.artifact_area.as_ref().map(|area| {
-            config
-                .project_root
-                .join(&area.path)
-                .join("transcript.jsonl")
-        }),
-    );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
@@ -676,17 +666,17 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
         );
-        run_result = provider_pause_error(
-            run_result,
-            reservation.coder,
-            plan.task.artifact_area.as_ref().map(|area| {
-                config
-                    .project_root
-                    .join(&area.path)
-                    .join("transcript.jsonl")
-            }),
-        );
     }
+    run_result = provider_pause_error(
+        run_result,
+        reservation.coder,
+        plan.task.artifact_area.as_ref().map(|area| {
+            config
+                .project_root
+                .join(&area.path)
+                .join("transcript.jsonl")
+        }),
+    );
 
     if let Err(error) = run_result {
         let failure = classify_task_failure(&error);
@@ -1100,11 +1090,6 @@ fn run_review_task_with_coder(
         sandbox_profile.as_ref(),
         coder_override,
     );
-    run_result = provider_pause_error(
-        run_result,
-        reservation.coder,
-        Some(artifact_dir.join("transcript.jsonl")),
-    );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
         retries += 1;
@@ -1134,12 +1119,12 @@ fn run_review_task_with_coder(
             sandbox_profile.as_ref(),
             coder_override,
         );
-        run_result = provider_pause_error(
-            run_result,
-            reservation.coder,
-            Some(artifact_dir.join("transcript.jsonl")),
-        );
     }
+    run_result = provider_pause_error(
+        run_result,
+        reservation.coder,
+        Some(artifact_dir.join("transcript.jsonl")),
+    );
 
     // Compose the coder/pump primary with the workspace-confinement cleanup
     // outcome and durably terminalize through one boundary. A confinement cleanup
@@ -5604,6 +5589,76 @@ mod tests {
         assert!(
             !should_retry_coder_error(&sidecar),
             "a supervision-sidecar failure is terminal, never relaunches the coder"
+        );
+    }
+
+    #[test]
+    fn provider_unavailable_pauses_exact_task_without_writer_charge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Provider pause".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        let task_id = item.attempts[0].tasks[0].id.clone();
+
+        let failure = anyhow::Error::new(crate::provider_evidence::ProviderUnavailableError(
+            crate::provider_evidence::ProviderUnavailable {
+                provider: CoderKind::Claude,
+            },
+        ));
+        assert!(
+            !should_retry_coder_error(&Err(failure)),
+            "the typed terminal result bypasses generic retries only after classification"
+        );
+        mark_task_failed_attempt_needs_user(
+            &store,
+            tmp.path(),
+            "work-1",
+            "attempt-1",
+            &task_id,
+            &TaskFailure::ProviderUnavailable,
+            &|_, _| {},
+        )
+        .unwrap();
+
+        let paused = store.read_work_item("work-1").unwrap();
+        assert_eq!(paused.attempts[0].tasks[0].id, task_id);
+        assert_eq!(paused.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+        assert_eq!(
+            paused.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::ProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_started_coder_failure_is_not_provider_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        for phase in 0..2 {
+            std::fs::write(
+                transcript.with_file_name(format!("transcript.{phase}.jsonl")),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\"}]}}\n",
+        )
+        .unwrap();
+        let result: Result<()> = Err(anyhow::anyhow!("Coder exited with code 1"));
+        let result = provider_pause_error(result, CoderKind::Claude, Some(transcript));
+        assert!(result.is_err());
+        assert!(
+            !result
+                .as_ref()
+                .unwrap_err()
+                .is::<crate::provider_evidence::ProviderUnavailableError>(),
+            "model progress prevents the typed provider pause"
         );
     }
 
