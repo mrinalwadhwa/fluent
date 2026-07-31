@@ -624,32 +624,14 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // retry loop, and thread the same immutable config into every attempt so a config
     // change between retries can never swap this role's capture mid-run.
     let pump_config = crate::transcript_pump::resolve_config(config.project_root);
-    let mut run_result = run_task_coder(
-        &item,
-        config.attempt_id,
-        config.task_id,
-        config.project_root,
-        &workspace_path,
-        &prior_reviews,
-        config.resolver,
-        config.extra_args,
-        reservation.coder,
-        config.no_sandbox,
-        reservation.model.as_deref(),
-        reservation.effort.as_deref(),
-        &pump_config,
-        provider_readiness.codex_worker(),
-        sandbox_profile.as_ref(),
-    );
-    let mut retries = 0;
-    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
-        retries += 1;
-        eprintln!(
-            "  Retrying coder (attempt {}/{})",
-            retries + 1,
-            max_task_retries() + 1
-        );
-        run_result = run_task_coder(
+    let transcript = plan.task.artifact_area.as_ref().map(|area| {
+        config
+            .project_root
+            .join(&area.path)
+            .join("transcript.jsonl")
+    });
+    let mut run_result = provider_pause_error(
+        run_task_coder(
             &item,
             config.attempt_id,
             config.task_id,
@@ -665,18 +647,40 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             &pump_config,
             provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
+        ),
+        reservation.coder,
+        transcript.clone(),
+    );
+    let mut retries = 0;
+    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
+        retries += 1;
+        eprintln!(
+            "  Retrying coder (attempt {}/{})",
+            retries + 1,
+            max_task_retries() + 1
+        );
+        run_result = provider_pause_error(
+            run_task_coder(
+                &item,
+                config.attempt_id,
+                config.task_id,
+                config.project_root,
+                &workspace_path,
+                &prior_reviews,
+                config.resolver,
+                config.extra_args,
+                reservation.coder,
+                config.no_sandbox,
+                reservation.model.as_deref(),
+                reservation.effort.as_deref(),
+                &pump_config,
+                provider_readiness.codex_worker(),
+                sandbox_profile.as_ref(),
+            ),
+            reservation.coder,
+            transcript.clone(),
         );
     }
-    run_result = provider_pause_error(
-        run_result,
-        reservation.coder,
-        plan.task.artifact_area.as_ref().map(|area| {
-            config
-                .project_root
-                .join(&area.path)
-                .join("transcript.jsonl")
-        }),
-    );
 
     if let Err(error) = run_result {
         let failure = classify_task_failure(&error);
@@ -1069,36 +1073,9 @@ fn run_review_task_with_coder(
     // retry loop, and thread the same immutable config into every attempt so a config
     // change between retries can never swap this role's capture mid-run.
     let pump_config = crate::transcript_pump::resolve_config(config.project_root);
-    let mut run_result = run_review_coder(
-        &item,
-        config.attempt_id,
-        config.task_id,
-        config.project_root,
-        &artifact_dir,
-        &review_path,
-        &readable_workspace_paths,
-        &input_artifacts,
-        attempt_kind.is_review_only_like(),
-        config.resolver,
-        config.extra_args,
-        reservation.coder,
-        config.no_sandbox,
-        reservation.model.as_deref(),
-        reservation.effort.as_deref(),
-        &pump_config,
-        provider_readiness.codex_worker(),
-        sandbox_profile.as_ref(),
-        coder_override,
-    );
-    let mut retries = 0;
-    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
-        retries += 1;
-        eprintln!(
-            "  Retrying coder (attempt {}/{})",
-            retries + 1,
-            max_task_retries() + 1
-        );
-        run_result = run_review_coder(
+    let transcript = artifact_dir.join("transcript.jsonl");
+    let mut run_result = provider_pause_error(
+        run_review_coder(
             &item,
             config.attempt_id,
             config.task_id,
@@ -1118,13 +1095,44 @@ fn run_review_task_with_coder(
             provider_readiness.codex_worker(),
             sandbox_profile.as_ref(),
             coder_override,
+        ),
+        reservation.coder,
+        Some(transcript.clone()),
+    );
+    let mut retries = 0;
+    while should_retry_coder_error(&run_result) && retries < max_task_retries() {
+        retries += 1;
+        eprintln!(
+            "  Retrying coder (attempt {}/{})",
+            retries + 1,
+            max_task_retries() + 1
+        );
+        run_result = provider_pause_error(
+            run_review_coder(
+                &item,
+                config.attempt_id,
+                config.task_id,
+                config.project_root,
+                &artifact_dir,
+                &review_path,
+                &readable_workspace_paths,
+                &input_artifacts,
+                attempt_kind.is_review_only_like(),
+                config.resolver,
+                config.extra_args,
+                reservation.coder,
+                config.no_sandbox,
+                reservation.model.as_deref(),
+                reservation.effort.as_deref(),
+                &pump_config,
+                provider_readiness.codex_worker(),
+                sandbox_profile.as_ref(),
+                coder_override,
+            ),
+            reservation.coder,
+            Some(transcript.clone()),
         );
     }
-    run_result = provider_pause_error(
-        run_result,
-        reservation.coder,
-        Some(artifact_dir.join("transcript.jsonl")),
-    );
 
     // Compose the coder/pump primary with the workspace-confinement cleanup
     // outcome and durably terminalize through one boundary. A confinement cleanup
@@ -7875,6 +7883,148 @@ mod tests {
         ) -> Result<i32> {
             unreachable!("the review route never runs interactively")
         }
+    }
+
+    struct ProviderOutageCoder {
+        launches: Arc<Mutex<usize>>,
+    }
+
+    impl crate::coder::Coder for ProviderOutageCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the review route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            *self.launches.lock().unwrap() += 1;
+            let transcript = capture
+                .expect("review coder receives transcript capture")
+                .path();
+            let parent = transcript.parent().unwrap();
+            fs::create_dir_all(parent).unwrap();
+            for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+                fs::write(
+                    parent.join(format!("transcript.{phase}.jsonl")),
+                    "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+                )
+                .unwrap();
+            }
+            fs::write(
+                transcript,
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+            Ok(1)
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the review route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn provider_outage_pauses_reviewer_before_generic_retries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        crate::git::run(project_root, &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(
+            project_root,
+            &["config", "user.email", "t@t.co"],
+            "configure fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            project_root,
+            &["config", "user.name", "t"],
+            "configure fixture",
+        )
+        .unwrap();
+        fs::write(project_root.join("tracked.txt"), "baseline").unwrap();
+        crate::git::run(project_root, &["add", "."], "add fixture").unwrap();
+        crate::git::run(
+            project_root,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+        let head =
+            crate::git::run_stdout(project_root, &["rev-parse", "HEAD"], "resolve head").unwrap();
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "provider-outage-work".to_string(),
+            title: "Provider outage".to_string(),
+            ..Default::default()
+        };
+        item.add_review_only_attempt(
+            "provider-outage-attempt",
+            &["architecture"],
+            "main",
+            head.trim(),
+            true,
+        )
+        .unwrap();
+        item.attempts[0].coder_mapping.review.coder = CoderKind::Claude;
+        let task_id = item.attempts[0].tasks[0].id.clone();
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+        let launches = Arc::new(Mutex::new(0));
+        let launches_for_coder = Arc::clone(&launches);
+        let make_coder = move |_sandbox| {
+            Box::new(ProviderOutageCoder {
+                launches: Arc::clone(&launches_for_coder),
+            }) as Box<dyn crate::coder::Coder>
+        };
+
+        run_review_task_with_coder(
+            WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: "provider-outage-work",
+                attempt_id: "provider-outage-attempt",
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+            &FilesystemReviewerCacheAdmission,
+            &report_reviewer_cache,
+        )
+        .expect_err("provider outage pauses the review task");
+
+        assert_eq!(
+            *launches.lock().unwrap(),
+            1,
+            "typed provider evidence bypasses the generic retry budget"
+        );
+        let stored = store.read_work_item("provider-outage-work").unwrap();
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(crate::work_model::PauseKind::ProviderUnavailable)
+        );
     }
 
     #[test]

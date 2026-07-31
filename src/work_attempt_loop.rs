@@ -150,14 +150,19 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         // terminal-state gate rejects it.
         if attempt.status == AttemptStatus::NeedsUser
             && attempt.pause_kind == Some(PauseKind::RoundCap)
-            && reclassify_legacy_provider_pause(
+        {
+            match reclassify_legacy_provider_pause(
                 config.store,
                 config.project_root,
                 config.work_item_id,
                 config.attempt_id,
-            )?
-        {
-            continue;
+            )? {
+                LegacyProviderPauseRecovery::Reclassified => continue,
+                LegacyProviderPauseRecovery::Ineligible(reason) => {
+                    bail!("Attempt cannot resume automatically: {reason}");
+                }
+                LegacyProviderPauseRecovery::NotLegacy => {}
+            }
         }
 
         match reject_terminal_attempt(attempt)? {
@@ -807,58 +812,76 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
 /// Atomically migrate only legacy review failures whose canonical transcript
 /// proves the current provider-unavailable contract. Any missing artifact,
 /// reviewer verdict, non-review failure, or mixed failure leaves state intact.
+#[derive(Debug, PartialEq, Eq)]
+enum LegacyProviderPauseRecovery {
+    Reclassified,
+    Ineligible(String),
+    NotLegacy,
+}
+
 fn reclassify_legacy_provider_pause(
     store: &WorkModelStore,
     project_root: &Path,
     work_item_id: &str,
     attempt_id: &str,
-) -> Result<bool> {
+) -> Result<LegacyProviderPauseRecovery> {
     Ok(store.mutate_work_item(work_item_id, |item| {
         let Some(attempt) = item
             .attempts
             .iter_mut()
             .find(|attempt| attempt.id == attempt_id)
         else {
-            return Ok(false);
+            return Ok(LegacyProviderPauseRecovery::NotLegacy);
         };
         if attempt.status != AttemptStatus::NeedsUser
             || attempt.pause_kind != Some(PauseKind::RoundCap)
         {
-            return Ok(false);
+            return Ok(LegacyProviderPauseRecovery::NotLegacy);
         }
         let failed: Vec<_> = attempt
             .tasks
             .iter()
             .filter(|task| task.status == TaskStatus::Failed)
             .collect();
-        if failed.is_empty()
-            || failed
-                .iter()
-                .any(|task| task.kind != crate::work_model::TaskKind::Review)
-            || attempt.tasks.iter().any(|task| {
-                task.status == TaskStatus::Failed
-                    && task.kind != crate::work_model::TaskKind::Review
-            })
-        {
-            return Ok(false);
+        if failed.is_empty() {
+            return Ok(LegacyProviderPauseRecovery::Ineligible(
+                "the round-cap pause has no failed review Tasks with provider evidence".to_string(),
+            ));
         }
-        let eligible = failed.iter().all(|task| {
+        if failed
+            .iter()
+            .any(|task| task.kind != crate::work_model::TaskKind::Review)
+        {
+            return Ok(LegacyProviderPauseRecovery::Ineligible(
+                "a blocking failed Task is not a review Task".to_string(),
+            ));
+        }
+        for task in failed {
             let Some(area) = task.artifact_area.as_ref() else {
-                return false;
+                return Ok(LegacyProviderPauseRecovery::Ineligible(format!(
+                    "review Task {:?} has no transcript artifact area",
+                    task.id
+                )));
             };
             // A review artifact is a real reviewer verdict, never an outage.
             if project_root.join(&area.path).join("review.md").is_file() {
-                return false;
+                return Ok(LegacyProviderPauseRecovery::Ineligible(format!(
+                    "review Task {:?} has a reviewer verdict",
+                    task.id
+                )));
             }
             let coder = attempt.coder_mapping.for_task_kind(task.kind).coder;
-            crate::provider_evidence::classify_provider_unavailable(
+            if crate::provider_evidence::classify_provider_unavailable(
                 coder,
                 &project_root.join(&area.path).join("transcript.jsonl"),
             )
-            .is_some()
-        });
-        if !eligible {
-            return Ok(false);
+            .is_none()
+            {
+                return Ok(LegacyProviderPauseRecovery::Ineligible(format!(
+                    "review Task {:?} lacks conclusive provider-unavailable transcript evidence",
+                    task.id
+                )));
+            }
         }
         for task in &mut attempt.tasks {
             if task.status == TaskStatus::Failed {
@@ -866,7 +889,7 @@ fn reclassify_legacy_provider_pause(
             }
         }
         attempt.pause_kind = Some(PauseKind::ProviderUnavailable);
-        Ok(true)
+        Ok(LegacyProviderPauseRecovery::Reclassified)
     })?)
 }
 
@@ -8360,8 +8383,9 @@ mod tests {
     fn legacy_provider_failures_reclassify_and_resume_in_one_run() {
         let tmp = tempfile::tempdir().unwrap();
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
-        assert!(
-            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        assert_eq!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
+            LegacyProviderPauseRecovery::Reclassified
         );
         let mut item = store.read_work_item("work-1").unwrap();
         let attempt = &mut item.attempts[0];
@@ -8376,8 +8400,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
         let before = store.read_work_item("work-1").unwrap();
-        assert!(
-            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        assert_eq!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
+            LegacyProviderPauseRecovery::Reclassified
         );
         let after = store.read_work_item("work-1").unwrap();
         assert_eq!(after.attempts[0].tasks[0], before.attempts[0].tasks[0]);
@@ -8397,19 +8422,59 @@ mod tests {
                 .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.1.jsonl"),
         )
         .unwrap();
-        assert!(
-            !reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
-        );
+        assert!(matches!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
+            LegacyProviderPauseRecovery::Ineligible(reason)
+                if reason.contains("lacks conclusive provider-unavailable transcript evidence")
+        ));
         let item = store.read_work_item("work-1").unwrap();
         assert_eq!(item.attempts[0].pause_kind, Some(PauseKind::RoundCap));
+    }
+
+    #[test]
+    fn legacy_ineligible_round_cap_explains_provider_evidence_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+        fs::remove_file(
+            tmp.path()
+                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.1.jsonl"),
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+
+        let error = run_attempt(WorkAttemptRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            coder_mapping_inputs: None,
+            learner_run_coder: None,
+        })
+        .expect_err("incomplete provider evidence leaves the legacy round cap blocked");
+
+        assert!(
+            error
+                .to_string()
+                .contains("lacks conclusive provider-unavailable transcript evidence"),
+            "the public attempt route must identify the compatibility eligibility failure: {error:#}"
+        );
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().attempts[0].pause_kind,
+            Some(PauseKind::RoundCap),
+            "a failed compatibility check must not mutate legacy state"
+        );
     }
 
     #[test]
     fn legacy_provider_recovery_is_identity_independent() {
         let tmp = tempfile::tempdir().unwrap();
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Codex);
-        assert!(
-            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap()
+        assert_eq!(
+            reclassify_legacy_provider_pause(&store, tmp.path(), "work-1", "attempt-1").unwrap(),
+            LegacyProviderPauseRecovery::Reclassified
         );
     }
 

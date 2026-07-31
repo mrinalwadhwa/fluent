@@ -40,8 +40,11 @@ pub fn classify_provider_unavailable(
     if !matches!(provider, CoderKind::Claude | CoderKind::Codex) {
         return None;
     }
-    for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
-        let phase_path = phase_transcript_path(transcript, phase);
+    let phase_paths = preserved_phase_paths(transcript)?;
+    if phase_paths.len() < crate::coder::RATE_LIMIT_MAX_RETRIES as usize {
+        return None;
+    }
+    for phase_path in phase_paths {
         if !classify_provider_phase(provider, &phase_path) {
             return None;
         }
@@ -49,6 +52,41 @@ pub fn classify_provider_unavailable(
     classify_provider_phase(provider, transcript).then_some(ProviderUnavailable { provider })
 }
 
+/// List every immutable retry transcript alongside the live transcript. A later
+/// generic retry preserves additional phases, and all of them are evidence: one
+/// missing, malformed, or progressed phase must prevent the typed pause.
+fn preserved_phase_paths(transcript: &Path) -> Option<Vec<PathBuf>> {
+    let parent = transcript.parent()?;
+    let stem = transcript.file_stem()?.to_str()?;
+    let extension = transcript.extension()?.to_str()?;
+    let prefix = format!("{stem}.");
+    let suffix = format!(".{extension}");
+    let mut phases = Vec::new();
+
+    for entry in std::fs::read_dir(parent).ok()? {
+        let path = entry.ok()?.path();
+        let name = path.file_name()?.to_str()?;
+        let Some(number) = name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(&suffix))
+        else {
+            continue;
+        };
+        let phase = number.parse::<u32>().ok()?;
+        phases.push((phase, path));
+    }
+    phases.sort_by_key(|(phase, _)| *phase);
+    if phases
+        .iter()
+        .enumerate()
+        .any(|(expected, (actual, _))| *actual != expected as u32)
+    {
+        return None;
+    }
+    Some(phases.into_iter().map(|(_, path)| path).collect())
+}
+
+#[cfg(test)]
 fn phase_transcript_path(transcript: &Path, phase: u32) -> PathBuf {
     let mut name = transcript
         .file_stem()
@@ -174,5 +212,26 @@ mod tests {
         )
         .unwrap();
         assert!(classify_provider_unavailable(CoderKind::Codex, &path).is_none());
+    }
+
+    #[test]
+    fn rejects_progress_in_any_preserved_retry_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            std::fs::write(
+                phase_transcript_path(&path, phase),
+                "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            phase_transcript_path(&path, crate::coder::RATE_LIMIT_MAX_RETRIES),
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"started\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(&path, "{\"type\":\"rate_limit_event\",\"retry_after\":1}\n").unwrap();
+
+        assert!(classify_provider_unavailable(CoderKind::Claude, &path).is_none());
     }
 }
