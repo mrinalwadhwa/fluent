@@ -29,6 +29,10 @@ pub fn work_item_input_path(work_item_id: &str, index: usize, filename: &str) ->
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/inputs/{index:04}-{filename}")
 }
 
+pub fn validate_work_item_id(id: &str) -> Result<(), WorkModelError> {
+    validate_id("work item", id)
+}
+
 pub fn work_artifact_path(work_item_id: &str, attempt_id: &str, artifact: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/{attempt_id}/{artifact}")
 }

@@ -12234,6 +12234,34 @@ mod tests {
     }
 
     #[test]
+    fn preserved_work_item_input_parent_is_read_only_in_sandbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let input_parent = tmp.path().join(".fluent/work/artifacts/work-1/inputs");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&input_parent).unwrap();
+        let resolver = ContentResolver::new(None);
+
+        let (_, profile) = build_coder_sandbox_with_writable_and_read_only_roots(
+            CoderKind::Claude,
+            &resolver,
+            &workspace,
+            &[],
+            std::slice::from_ref(&input_parent),
+        )
+        .unwrap();
+        let profile = fs::read_to_string(profile.unwrap().path).unwrap();
+        assert!(profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            input_parent.display()
+        )));
+        assert!(!profile.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            input_parent.display()
+        )));
+    }
+
+    #[test]
     fn pre_land_no_expertise_denies_expertise_candidate_and_live_git_writes() {
         // A pre-land no-expertise run reuses the confined denied-writes profile:
         // only the managed handoff staging surface is writable, while expertise,

@@ -3802,6 +3802,105 @@ fn reviewers_receive_preserved_work_item_inputs_and_attempt_inputs() {
 }
 
 #[test]
+fn work_create_rejects_invalid_input_artifact_before_persisting() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let managed = main_dir.join(".fluent/work/artifacts/evidence");
+    fs::create_dir_all(&managed).unwrap();
+    let outside = main_dir.join("outside.txt");
+    fs::write(&outside, b"outside").unwrap();
+    let directory = managed.join("directory");
+    fs::create_dir(&directory).unwrap();
+
+    let mut invalid = vec![
+        ("missing-input", managed.join("missing.txt")),
+        ("directory-input", directory),
+        ("outside-input", outside.clone()),
+    ];
+    #[cfg(unix)]
+    {
+        let escape = managed.join("escape.txt");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        invalid.push(("symlink-input", escape));
+    }
+
+    for (id, path) in invalid {
+        fluent_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "work-item",
+                "create",
+                id,
+                "--title",
+                "Reject input",
+                "--input-artifact",
+                path.to_str().unwrap(),
+            ])
+            .assert()
+            .failure();
+        assert!(
+            !main_dir
+                .join(".fluent/work/items")
+                .join(format!("{id}.json"))
+                .exists()
+        );
+        assert!(!main_dir.join(".fluent/work/artifacts").join(id).exists());
+    }
+
+    let first = managed.join("first.txt");
+    fs::write(&first, b"first").unwrap();
+    let long_name = format!("{}.txt", "x".repeat(247));
+    let obstructed = managed.join(long_name);
+    fs::write(&obstructed, b"second").unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "partial-input",
+            "--title",
+            "Reject partial install",
+            "--input-artifact",
+            first.to_str().unwrap(),
+            "--input-artifact",
+            obstructed.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !main_dir
+            .join(".fluent/work/items/partial-input.json")
+            .exists()
+    );
+    assert!(
+        !main_dir
+            .join(".fluent/work/artifacts/partial-input")
+            .exists()
+    );
+}
+
+#[test]
+fn legacy_work_items_without_inputs_remain_compatible() {
+    let tmp = TempDir::new().unwrap();
+    let item_dir = tmp.path().join(".fluent/work/items");
+    fs::create_dir_all(&item_dir).unwrap();
+    fs::write(
+        item_dir.join("legacy.json"),
+        r#"{"id":"legacy","title":"Legacy Work"}"#,
+    )
+    .unwrap();
+
+    let shown = read_work_show_json(tmp.path(), "legacy");
+    assert_eq!(shown["id"], "legacy");
+    assert!(shown.get("input_artifacts").is_none());
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "legacy", "attempt-1"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn work_item_create_accepts_explicit_capture_learner_mode() {
     let tmp = TempDir::new().unwrap();
     fluent_cmd()

@@ -295,6 +295,7 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 learner_mode: learner_mode.unwrap_or_default(),
                 ..WorkItem::planned(id, title)
             };
+            work_model::validate_work_item_id(&item.id)?;
             let snapshots = prepare_work_item_inputs(project_root, &item.id, &input_artifact)?;
             item.input_artifacts = snapshots.identities.clone();
             if let Err(error) = store.create_work_item(&item) {

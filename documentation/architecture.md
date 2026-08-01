@@ -102,8 +102,18 @@ skills treat this Work Item planning context as the normal handoff to
 delegated Work execution. Callers may also pass explicit prompt text with `--instructions <text>` or
 `--instructions-file <path>`; Fluent stores that text as optional
 `WorkItem.instructions` and gives it precedence over derived planning
-context when it creates write Task instructions. `fluent attempt create
-<work-item-id> <attempt-id>` creates the first operational transition
+context when it creates write Task instructions.
+Callers may repeat `--input-artifact <path>` to approve exact existing files
+under `.fluent/work/artifacts/` or `.fluent/work/progress/` as execution
+inputs. Intake canonicalizes every source to reject symlink escapes, reads all
+sources before changing Work state, and installs byte-for-byte snapshots under
+`.fluent/work/artifacts/<work-item-id>/inputs/`. Each stored identity records
+the canonical project-relative source, managed snapshot, and `sha256:` digest.
+Any validation, snapshot installation, or Work Item storage failure removes
+the new snapshot tree and leaves no runnable Work Item. Work Items created
+without inputs retain the legacy storage shape.
+
+`fluent attempt create <work-item-id> <attempt-id>` creates the first operational transition
 from intake: it appends a planned Attempt with one initial `write` Task.
 The Task declares role `author`, copies explicit Work Item instructions
 or derives instructions from Work Item planning context into optional
@@ -1078,6 +1088,15 @@ round, each review Task receives the matching prior failed review
 artifact for its role in `input_artifacts`, so the executor can prompt
 the reviewer to verify the follow-up against the concrete findings and
 grant sandboxed read access to that artifact.
+Every Writer and reviewer Task also copies the Work Item's preserved input
+references into `input_artifacts`. Task construction deduplicates those
+references against Attempt-generated inputs. Reviewer-role selection continues
+to derive roles only from completed review Task producer ids, so the Work Item
+producer marker cannot widen a targeted review round. Prompt rendering lists
+preserved inputs separately from prior reviews. The executor resolves the
+snapshots through the existing managed-input preflight and grants their
+isolated `inputs/` parent read-only; it does not grant the broader
+`.fluent/work` tree or any Attempt artifact sibling.
 JSON omits `input_artifacts` when the list is empty. Incomplete Tasks do
 not carry output. Attempt
 completion is derived from its Tasks; a complete Attempt must not contain
@@ -1148,6 +1167,8 @@ The Work storage contract is:
       <merge-candidate-id>.json
   artifacts/
     <work-item-id>/
+      inputs/
+        <ordinal>-<source-filename>
       <attempt-id>/
         <task-id>/
         <merge-candidate-id>/merge/
@@ -1156,7 +1177,9 @@ The Work storage contract is:
 Each file in `items/` stores Work Item metadata and planning context:
 the Work Item id, title, optional explicit instructions, optional
 brief/behaviors/approach/plan context, and optional abandonment marker
-with the operator-provided reason. Attempts live in
+with the operator-provided reason. It also stores optional immutable input
+identities; legacy records omit the field and deserialize to an empty input
+list. Attempts live in
 `attempts/<work-item-id>/<attempt-id>.json`, Tasks live in
 `tasks/<work-item-id>/<attempt-id>/<task-id>.json`, and Merge Candidates
 live in `merge-candidates/<work-item-id>/<merge-candidate-id>.json`.

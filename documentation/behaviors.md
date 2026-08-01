@@ -149,6 +149,50 @@ Test: src/observations.rs (migrate_idempotent)
 
 ---
 
+## Work Item input artifacts
+
+### B1
+
+WHEN `fluent work-item create` receives one or more repeatable
+`--input-artifact <path>` arguments that name existing managed artifact or
+progress files,
+THE SYSTEM SHALL preserve their exact bytes as immutable Work Item-owned inputs
+and record each canonical source path, snapshot path, and SHA-256 digest.
+Test: tests/binary.rs (work_create_snapshots_exact_managed_input_artifact_bytes)
+
+### B2
+
+WHEN a Work Item has preserved input artifacts,
+THE SYSTEM SHALL expose their durable identities through
+`fluent work-item show <id>`.
+Test: tests/binary.rs (work_show_reports_preserved_work_item_input_artifacts)
+
+### B3
+
+WHEN Fluent creates any initial or follow-up Writer Task for a Work Item with
+preserved inputs,
+THE SYSTEM SHALL declare each preserved snapshot once in the Task inputs, name
+it as authoritative input in the Writer prompt, and grant read-only access to
+its isolated managed directory.
+Test: tests/binary.rs (every_writer_receives_preserved_work_item_input_artifacts_read_only)
+
+### B4
+
+WHEN Fluent creates a reviewer Task for a Work Item with preserved inputs,
+THE SYSTEM SHALL combine those snapshots with the Tester, progress, and
+role-matched prior-review inputs that apply to that reviewer.
+Test: tests/binary.rs (reviewers_receive_preserved_work_item_inputs_and_attempt_inputs)
+
+### B5
+
+IF a requested Work Item input is missing, is not a regular file, escapes the
+managed artifact and progress roots, or cannot be installed completely,
+THEN THE SYSTEM SHALL reject Work Item creation without storing the Work Item
+or a partial input snapshot tree.
+Test: tests/binary.rs (work_create_rejects_invalid_input_artifact_before_persisting)
+
+---
+
 ## Work Item intake and inspection
 
 ### B1
