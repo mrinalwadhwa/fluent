@@ -3662,6 +3662,146 @@ fn work_show_reports_preserved_work_item_input_artifacts() {
 }
 
 #[test]
+fn every_writer_receives_preserved_work_item_input_artifacts_read_only() {
+    use fluent::work_model::{ArtifactRef, TaskOutput, TaskStatus};
+
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let source = main_dir.join(".fluent/work/artifacts/evidence/input.txt");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"authoritative\n").unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Propagate input",
+            "--input-artifact",
+            ".fluent/work/artifacts/evidence/input.txt",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-input", "attempt-1"])
+        .assert()
+        .success();
+
+    let store = WorkModelStore::new(&main_dir);
+    let mut item = store.read_work_item("work-input").unwrap();
+    let preserved = item.attempts[0].tasks[0].input_artifacts[0].clone();
+    let initial = &mut item.attempts[0].tasks[0];
+    initial.status = TaskStatus::Complete;
+    initial.output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: "../candidate".to_string(),
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: "abc123".to_string(),
+    });
+    item.add_next_write_round(
+        "attempt-1",
+        vec![
+            preserved.clone(),
+            ArtifactRef {
+                producer_id: "attempt-1-review-tests".to_string(),
+                path: ".fluent/work/artifacts/work-input/attempt-1/review.md".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    store.write_work_item(&item).unwrap();
+
+    let shown = read_work_show_json(&main_dir, "work-input");
+    for writer in shown["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["kind"] == "write")
+    {
+        let inputs = writer["input_artifacts"].as_array().unwrap();
+        assert_eq!(
+            inputs
+                .iter()
+                .filter(|input| input["path"] == preserved.path)
+                .count(),
+            1
+        );
+        assert_eq!(inputs[0]["producer_id"], "work-item");
+    }
+    assert_eq!(
+        fs::read(main_dir.join(&preserved.path)).unwrap(),
+        b"authoritative\n"
+    );
+    assert!(
+        preserved
+            .path
+            .starts_with(".fluent/work/artifacts/work-input/inputs/"),
+        "the read-only parent is isolated from Attempt artifact siblings"
+    );
+}
+
+#[test]
+fn reviewers_receive_preserved_work_item_inputs_and_attempt_inputs() {
+    use fluent::work_model::{TaskOutput, TaskStatus};
+
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let source = main_dir.join(".fluent/work/progress/evidence/attempt/progress.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"approved\n").unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Review input",
+            "--input-artifact",
+            ".fluent/work/progress/evidence/attempt/progress.md",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-input", "attempt-1"])
+        .assert()
+        .success();
+
+    let store = WorkModelStore::new(&main_dir);
+    let mut item = store.read_work_item("work-input").unwrap();
+    let write = &mut item.attempts[0].tasks[0];
+    write.status = TaskStatus::Complete;
+    write.output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: "../candidate".to_string(),
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: "abc123".to_string(),
+    });
+    item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+    store.write_work_item(&item).unwrap();
+
+    let shown = read_work_show_json(&main_dir, "work-input");
+    let reviewer = shown["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["kind"] == "review")
+        .unwrap();
+    let producers: Vec<_> = reviewer["input_artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|input| input["producer_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(producers, vec!["work-item", "attempt-1-tester", "writer"]);
+}
+
+#[test]
 fn work_item_create_accepts_explicit_capture_learner_mode() {
     let tmp = TempDir::new().unwrap();
     fluent_cmd()

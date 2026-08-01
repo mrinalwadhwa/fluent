@@ -4447,6 +4447,13 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     } else {
         "yes"
     };
+    let work_item_inputs = work_item_inputs_only(input.item, input.project_root);
+    let work_item_inputs_list = prior_reviews_block(&work_item_inputs, "");
+    let reviewer_has_work_item_inputs = if work_item_inputs.is_empty() {
+        ""
+    } else {
+        "yes"
+    };
     let is_review_tests_value = if task.role == "tests" { "yes" } else { "" };
     let is_review_behaviors_value = if task.role == "behaviors" { "yes" } else { "" };
     let is_review_architecture_value = if task.role == "architecture" {
@@ -4540,11 +4547,13 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ),
             ("skill_path", &skill_path),
             ("has_prior_reviews", reviewer_has_prior_reviews),
+            ("has_work_item_inputs", reviewer_has_work_item_inputs),
             ("is_review_tests", is_review_tests_value),
             ("is_review_behaviors", is_review_behaviors_value),
             ("is_review_architecture", is_review_architecture_value),
             ("is_review_documentation", is_review_documentation_value),
             ("prior_reviews_list", &reviewer_prior_reviews_list),
+            ("work_item_inputs_list", &work_item_inputs_list),
             (
                 "candidate_workspace_path",
                 &review_context.candidate_workspace_path,
@@ -9375,6 +9384,43 @@ mod tests {
             .find(|task| task.kind == TaskKind::Tester)
             .expect("corrective Attempt has a Tester Task");
         assert_eq!(tester.instructions.as_deref(), Some(context.as_str()));
+    }
+
+    #[test]
+    fn reviewer_prompt_names_preserved_work_item_inputs_separately() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = tmp.path().join("candidate");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut item = corrective_review_item("tests");
+        item.input_artifacts = vec![crate::work_model::WorkItemInputArtifact {
+            source_path: ".fluent/work/artifacts/source/evidence.jsonl".to_string(),
+            snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-evidence.jsonl".to_string(),
+            digest: "sha256:approved".to_string(),
+        }];
+        let input_path = project_root.join(&item.input_artifacts[0].snapshot_path);
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &artifact_dir.join("review.md"),
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: std::slice::from_ref(&input_path),
+            review_only: false,
+        })
+        .unwrap();
+
+        assert!(prompts.review_prompt.contains("preserved Work Item input"));
+        assert!(prompts.review_prompt.contains("0000-evidence.jsonl"));
+        assert!(
+            !prompts
+                .review_prompt
+                .contains("Read each prior review file")
+        );
     }
 
     #[test]

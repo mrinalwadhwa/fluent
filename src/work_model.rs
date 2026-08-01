@@ -390,6 +390,16 @@ impl WorkItem {
             .collect()
     }
 
+    fn with_preserved_inputs(&self, inputs: Vec<ArtifactRef>) -> Vec<ArtifactRef> {
+        let mut combined = self.preserved_input_refs();
+        for input in inputs {
+            if !combined.contains(&input) {
+                combined.push(input);
+            }
+        }
+        combined
+    }
+
     /// Create a Work Item through the ordinary human-approved planning flow:
     /// execution-ready as an uncharged lineage root with no corrective context.
     pub fn planned(id: impl Into<String>, title: impl Into<String>) -> Self {
@@ -631,6 +641,7 @@ impl WorkItem {
             path: ".".to_string(),
         };
         let review_task_instructions = self.write_task_instructions();
+        let preserved_inputs = self.preserved_input_refs();
         let mut task_ids = Vec::new();
         let mut tasks = Vec::new();
         for role in roles {
@@ -656,7 +667,7 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                     base_commit: None,
                 }),
-                input_artifacts: Vec::new(),
+                input_artifacts: preserved_inputs.clone(),
                 depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
@@ -707,6 +718,7 @@ impl WorkItem {
             path: crate::review_only_worktree::review_only_worktree_path(&source_ref),
         };
         let review_task_instructions = self.write_task_instructions();
+        let preserved_inputs = self.preserved_input_refs();
         // Persist corrective input on the Tester Task for inspection. The
         // Tester runner executes tester.yaml and does not consume a prompt.
         let tester_instructions = self.write_task_instructions();
@@ -773,7 +785,11 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                     base_commit: base_commit.clone(),
                 }),
-                input_artifacts: vec![tester_results_artifact],
+                input_artifacts: {
+                    let mut inputs = preserved_inputs.clone();
+                    inputs.push(tester_results_artifact);
+                    inputs
+                },
                 depends_on: Some(tester_task_id.clone()),
                 output: None,
                 created_at: Some(now_iso8601()),
@@ -847,6 +863,7 @@ impl WorkItem {
     ) -> Result<Vec<String>, WorkModelError> {
         self.ensure_not_abandoned()?;
         let tester_instructions = self.write_task_instructions();
+        let preserved_inputs = self.preserved_input_refs();
         let Some(attempt) = self
             .attempts
             .iter_mut()
@@ -932,10 +949,16 @@ impl WorkItem {
             if attempt.tasks.iter().any(|task| task.id == task_id) {
                 return Err(WorkModelError::TaskAlreadyExists { id: task_id });
             }
-            let mut task_input_artifacts = review_input_artifacts
+            let mut task_input_artifacts = preserved_inputs.clone();
+            for artifact in review_input_artifacts
                 .get(*role)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+            {
+                if !task_input_artifacts.contains(&artifact) {
+                    task_input_artifacts.push(artifact);
+                }
+            }
             task_input_artifacts.push(ArtifactRef {
                 producer_id: tester_task_id.clone(),
                 path: format!(
@@ -991,6 +1014,7 @@ impl WorkItem {
     ) -> Result<String, WorkModelError> {
         self.ensure_not_abandoned()?;
         let write_task_instructions = self.write_task_instructions();
+        let input_artifacts = self.with_preserved_inputs(input_artifacts);
         let Some(attempt) = self
             .attempts
             .iter_mut()
@@ -6467,6 +6491,88 @@ random banner prose that must be ignored
         assert_eq!(
             followup_task.artifact_area.as_ref().unwrap().path,
             ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+        );
+    }
+
+    fn preserved_input() -> WorkItemInputArtifact {
+        WorkItemInputArtifact {
+            source_path: ".fluent/work/artifacts/source/evidence.jsonl".to_string(),
+            snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-evidence.jsonl".to_string(),
+            digest: "sha256:approved".to_string(),
+        }
+    }
+
+    #[test]
+    fn every_write_task_copies_and_deduplicates_preserved_inputs() {
+        let mut work_item = WorkItem {
+            input_artifacts: vec![preserved_input()],
+            ..WorkItem::planned("work-1", "Preserved input")
+        };
+        work_item.add_initial_attempt("attempt-1").unwrap();
+        let initial = &mut work_item.attempts[0].tasks[0];
+        initial.status = TaskStatus::Complete;
+        initial.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../candidate".to_string(),
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+        });
+        let preserved_ref = work_item.preserved_input_refs()[0].clone();
+        work_item
+            .add_next_write_round(
+                "attempt-1",
+                vec![
+                    preserved_ref.clone(),
+                    ArtifactRef {
+                        producer_id: "attempt-1-review-tests".to_string(),
+                        path: ".fluent/work/artifacts/work-1/attempt-1/review.md".to_string(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        for task in work_item.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+        {
+            assert_eq!(
+                task.input_artifacts
+                    .iter()
+                    .filter(|artifact| **artifact == preserved_ref)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn reviewers_combine_preserved_tester_and_progress_inputs() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item.input_artifacts = vec![preserved_input()];
+        work_item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+
+        let reviewer = work_item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Review)
+            .unwrap();
+        assert_eq!(
+            reviewer.input_artifacts[0],
+            work_item.preserved_input_refs()[0]
+        );
+        assert!(
+            reviewer
+                .input_artifacts
+                .iter()
+                .any(|artifact| artifact.producer_id == "attempt-1-tester")
+        );
+        assert!(
+            reviewer
+                .input_artifacts
+                .iter()
+                .any(|artifact| artifact.producer_id == "writer")
         );
     }
 
