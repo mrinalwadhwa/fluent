@@ -9357,6 +9357,9 @@ random banner prose that must be ignored
         item.attempts[0].tasks.pop();
         item.attempts[0].tasks.push(canonicalized.clone());
         item.attempts[0].learning = Some(AttemptLearning::handoff_pending(1));
+        item.attempts[0].status = AttemptStatus::Complete;
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        item.create_or_get_merge_candidate("attempt-1").unwrap();
 
         store.create_work_item(&item).unwrap();
         let loaded = store.read_work_item("work-1").unwrap();
