@@ -3923,6 +3923,50 @@ fn work_create_rejects_invalid_input_artifact_before_persisting() {
 }
 
 #[test]
+fn work_create_storage_rejection_leaves_no_input_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Existing Work Item",
+        ])
+        .assert()
+        .success();
+    let record_path = main_dir.join(".fluent/work/items/work-input.json");
+    let record_before = fs::read(&record_path).unwrap();
+    let source = main_dir.join(".fluent/work/artifacts/evidence/input.txt");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"authoritative\n").unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Losing Work Item",
+            "--input-artifact",
+            ".fluent/work/artifacts/evidence/input.txt",
+        ])
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read(record_path).unwrap(), record_before);
+    assert!(!main_dir.join(".fluent/work/artifacts/work-input").exists());
+    let stored = WorkModelStore::new(&main_dir)
+        .read_work_item("work-input")
+        .unwrap();
+    assert_eq!(stored.title, "Existing Work Item");
+    assert!(stored.input_artifacts.is_empty());
+}
+
+#[test]
 fn legacy_work_items_without_inputs_remain_compatible() {
     let tmp = TempDir::new().unwrap();
     let item_dir = tmp.path().join(".fluent/work/items");

@@ -199,6 +199,7 @@ managed artifact and progress roots, or cannot be installed completely,
 THEN THE SYSTEM SHALL reject Work Item creation without storing the Work Item
 or a partial input snapshot tree.
 Test: tests/binary.rs (work_create_rejects_invalid_input_artifact_before_persisting)
+Test: tests/binary.rs (work_create_storage_rejection_leaves_no_input_snapshot)
 
 ---
 
