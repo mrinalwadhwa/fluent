@@ -1266,6 +1266,19 @@ impl WorkItem {
                 });
             }
             attempt.validate(&self.id)?;
+            for task in &attempt.tasks {
+                let has_canonicalization = task
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| output.learner_canonicalization.is_some());
+                if has_canonicalization
+                    && (!self.learner_mode.is_capture() || attempt.learning.is_none())
+                {
+                    return Err(WorkModelError::InvalidTaskNoChangeOutput {
+                        task_id: task.id.clone(),
+                    });
+                }
+            }
         }
         let mut merge_candidate_ids = HashSet::new();
         let mut merge_candidate_attempts = HashSet::new();
@@ -9039,6 +9052,21 @@ random banner prose that must be ignored
         });
         canonicalized.validate().unwrap();
 
+        let mut item = WorkItem::planned("work-1", "Canonicalized no-change output");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0] = canonicalized.clone();
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+        item.attempts[0].learning = Some(AttemptLearning::handoff_pending(1));
+        item.validate().unwrap();
+        item.learner_mode = LearnerMode::NoExpertise;
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+
         let mut cases = Vec::new();
 
         let mut missing = canonicalized.clone();
@@ -9249,6 +9277,7 @@ random banner prose that must be ignored
         });
         item.attempts[0].tasks.pop();
         item.attempts[0].tasks.push(canonicalized.clone());
+        item.attempts[0].learning = Some(AttemptLearning::handoff_pending(1));
 
         store.create_work_item(&item).unwrap();
         let loaded = store.read_work_item("work-1").unwrap();

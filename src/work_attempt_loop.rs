@@ -15,9 +15,9 @@ use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
     ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, CoderMappingInputs,
-    MergeCandidateMergeStatus, PauseKind, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
-    WorkModelStorageError, WorkModelStore, resolve_managed_sibling_workspace_path,
-    work_artifact_path,
+    LearnerCommitCanonicalization, MergeCandidateMergeStatus, PauseKind, Task, TaskKind,
+    TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
+    resolve_managed_sibling_workspace_path, work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -2562,8 +2562,22 @@ fn run_pre_land_learner(
         normalized.expertise,
     )?;
     if let Some(canonical) = normalized.canonical_commit {
+        let learner_canonicalization = if write_output.no_change.is_some() {
+            let from_commit = write_output.base_commit.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no-change Writer output is missing its verified base commit before Learning"
+                )
+            })?;
+            Some(LearnerCommitCanonicalization {
+                from_commit,
+                to_commit: canonical.clone(),
+            })
+        } else {
+            None
+        };
         item.attempts[attempt_index].tasks[write_task_index].output = Some(TaskOutput {
             commit: canonical.clone(),
+            learner_canonicalization,
             ..write_output.clone()
         });
         if let Some(candidate) = item
@@ -6173,6 +6187,37 @@ mod tests {
         (store, project_root, workspace, base)
     }
 
+    fn mark_latest_writer_as_verified_no_change(store: &WorkModelStore, commit: &str) {
+        store
+            .mutate_work_item("work-1", |item| {
+                let task = item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .rev()
+                    .find(|task| {
+                        task.kind == TaskKind::Write && task.status == TaskStatus::Complete
+                    })
+                    .expect("completed Writer");
+                let artifact_path = work_artifact_path("work-1", "attempt-1", &task.id);
+                task.artifact_area = Some(TaskArtifactArea {
+                    path: artifact_path.clone(),
+                });
+                let output = task.output.as_mut().expect("Writer output");
+                output.base_commit = Some(commit.to_string());
+                output.no_change = Some(crate::work_model::NoChangeOutput {
+                    schema_version: 1,
+                    declaration_path: format!("{artifact_path}/no-change.json"),
+                    reason: "The candidate already satisfies the correction".to_string(),
+                    verification: vec![crate::work_model::NoChangeVerification {
+                        command: "cargo test focused".to_string(),
+                        result: crate::work_model::NoChangeVerificationResult::Pass,
+                    }],
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+
     /// A Learner coder stub that writes an untrusted draft into the handoff
     /// surface and makes no expertise commit.
     fn draft_only_coder(
@@ -6629,7 +6674,35 @@ mod tests {
         // exposed handoff with no learning state.
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         let tmp = tempfile::TempDir::new().unwrap();
-        let (store, project_root, _workspace, _base) = make_learner_passing_fixture(tmp.path(), 1);
+        let (store, project_root, _workspace, verified_commit) =
+            make_learner_passing_fixture(tmp.path(), 1);
+        mark_latest_writer_as_verified_no_change(&store, &verified_commit);
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+                crate::work_model::set_attempt_terminal(
+                    &mut item.attempts[0],
+                    AttemptStatus::Complete,
+                );
+                item.create_or_get_merge_candidate("attempt-1")?;
+                let canonical_commit = "canonical-expertise-commit".to_string();
+                let output = item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .rev()
+                    .find(|task| task.kind == TaskKind::Write)
+                    .and_then(|task| task.output.as_mut())
+                    .unwrap();
+                output.commit = canonical_commit.clone();
+                output.learner_canonicalization = Some(LearnerCommitCanonicalization {
+                    from_commit: verified_commit.clone(),
+                    to_commit: canonical_commit.clone(),
+                });
+                item.merge_candidates[0].candidate_commit = canonical_commit;
+                item.attempts[0].learning = Some(AttemptLearning::in_progress(1));
+                Ok(())
+            })
+            .unwrap();
         let mut item = store.read_work_item("work-1").unwrap();
 
         let handoff = crate::follow_up::LearnerHandoffV1::new(
@@ -6651,6 +6724,7 @@ mod tests {
             let probe = WorkModelStore::new(&probe_root)
                 .read_work_item("work-1")
                 .unwrap();
+            probe.validate().unwrap();
             let learning = probe.attempts[0]
                 .learning
                 .as_ref()
@@ -6692,6 +6766,24 @@ mod tests {
             .as_ref()
             .expect("Succeeded carries its handoff reference");
         assert_eq!(handoff_ref.path, "handoff.json");
+        let output = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write)
+            .and_then(|task| task.output.as_ref())
+            .unwrap();
+        assert_eq!(
+            output.base_commit.as_deref(),
+            Some(verified_commit.as_str())
+        );
+        assert_eq!(
+            output
+                .learner_canonicalization
+                .as_ref()
+                .map(|transition| transition.to_commit.as_str()),
+            Some("canonical-expertise-commit")
+        );
     }
 
     #[test]
@@ -9252,6 +9344,117 @@ mod tests {
         assert_eq!(
             stored.merge_candidates[0].candidate_commit, expertise_head,
             "a confined expertise commit becomes the candidate commit"
+        );
+    }
+
+    #[test]
+    fn learner_expertise_commit_preserves_no_change_writer_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, verified_commit) =
+            make_learner_passing_fixture(tmp.path(), 2);
+        mark_latest_writer_as_verified_no_change(&store, &verified_commit);
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("no-change-identity.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "canonicalized no-change output remains ready; got {outcome:?}"
+        );
+
+        let canonical_commit =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "canonical HEAD").unwrap();
+        assert_ne!(canonical_commit, verified_commit);
+        let stored = store.read_work_item("work-1").unwrap();
+        stored.validate().unwrap();
+        let output = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .expect("latest Writer output");
+        assert_eq!(
+            output.base_commit.as_deref(),
+            Some(verified_commit.as_str())
+        );
+        assert_eq!(output.commit, canonical_commit);
+        assert_eq!(
+            output.learner_canonicalization,
+            Some(crate::work_model::LearnerCommitCanonicalization {
+                from_commit: verified_commit,
+                to_commit: canonical_commit.clone(),
+            })
+        );
+        let candidate = &stored.merge_candidates[0];
+        assert_eq!(candidate.candidate_commit, canonical_commit);
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_succeeded());
+        candidate.validate_advancement(&stored).unwrap();
+    }
+
+    #[test]
+    fn learner_handoff_failure_preserves_no_change_writer_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, verified_commit) =
+            make_learner_passing_fixture(tmp.path(), 2);
+        mark_latest_writer_as_verified_no_change(&store, &verified_commit);
+        let handoff_path =
+            project_root.join(crate::learner::handoff_path_rel("work-1", "attempt-1"));
+        fs::create_dir_all(&handoff_path).unwrap();
+
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("publication-failure.md"), "learned").unwrap();
+            write_valid_learner_draft(request);
+            Ok(())
+        };
+
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+
+        let canonical_commit =
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "canonical HEAD").unwrap();
+        let stored = store.read_work_item("work-1").unwrap();
+        stored.validate().unwrap();
+        let output = stored.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write)
+            .and_then(|task| task.output.as_ref())
+            .unwrap();
+        assert_eq!(
+            output.base_commit.as_deref(),
+            Some(verified_commit.as_str())
+        );
+        assert_eq!(output.commit, canonical_commit);
+        assert_eq!(
+            output
+                .learner_canonicalization
+                .as_ref()
+                .map(|transition| (&transition.from_commit, &transition.to_commit)),
+            Some((&verified_commit, &canonical_commit))
+        );
+        assert_eq!(
+            stored.merge_candidates[0].candidate_commit,
+            canonical_commit
+        );
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_failed());
+        assert!(
+            stored.merge_candidates[0]
+                .validate_advancement(&stored)
+                .is_err(),
+            "publication failure withholds landing readiness"
         );
     }
 
