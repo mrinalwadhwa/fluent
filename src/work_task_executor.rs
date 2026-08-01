@@ -8016,14 +8016,8 @@ mod tests {
         ) -> Result<i32> {
             let input_dir = self.input_path.parent().unwrap().canonicalize().unwrap();
             let profile = fs::read_to_string(&self.profile_path).unwrap();
-            let read_rule = format!(
-                "(allow file-read*  (subpath \"{}\"))",
-                input_dir.display()
-            );
-            let write_rule = format!(
-                "(allow file-write* (subpath \"{}\"))",
-                input_dir.display()
-            );
+            let read_rule = format!("(allow file-read*  (subpath \"{}\"))", input_dir.display());
+            let write_rule = format!("(allow file-write* (subpath \"{}\"))", input_dir.display());
             let sandbox_usable = std::process::Command::new("/usr/bin/sandbox-exec")
                 .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
                 .output()
@@ -8088,8 +8082,7 @@ mod tests {
             crate::git::run(&project_root, args, "set up Writer input fixture").unwrap();
         }
 
-        let input_path =
-            project_root.join(".fluent/work/artifacts/work-1/inputs/0000-input.txt");
+        let input_path = project_root.join(".fluent/work/artifacts/work-1/inputs/0000-input.txt");
         fs::create_dir_all(input_path.parent().unwrap()).unwrap();
         fs::write(&input_path, "authoritative\n").unwrap();
         let mut item = WorkItem {
@@ -8141,7 +8134,10 @@ mod tests {
         assert!(observation.profile_granted_read);
         assert!(!observation.profile_granted_write);
         if let Some(succeeded) = observation.sandbox_probe_succeeded {
-            assert!(succeeded, "the sandboxed Writer must read but not modify the input");
+            assert!(
+                succeeded,
+                "the sandboxed Writer must read but not modify the input"
+            );
         }
         assert_eq!(fs::read_to_string(input_path).unwrap(), "authoritative\n");
     }
@@ -9604,9 +9600,8 @@ mod tests {
             digest: "sha256:approved".to_string(),
         }];
         let input_path = project_root.join(&item.input_artifacts[0].snapshot_path);
-        let prior_review = project_root.join(
-            ".fluent/work/artifacts/work-1/attempt-0/attempt-0-review-tests/review.md",
-        );
+        let prior_review = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-0/attempt-0-review-tests/review.md");
         let artifact_dir =
             project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
@@ -9649,14 +9644,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        item.add_review_only_attempt(
-            "attempt-1",
-            &["tests"],
-            "main",
-            "abc123",
-            true,
-        )
-        .unwrap();
+        item.add_review_only_attempt("attempt-1", &["tests"], "main", "abc123", true)
+            .unwrap();
         let input_path = project_root.join(&item.input_artifacts[0].snapshot_path);
         let artifact_dir =
             project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");

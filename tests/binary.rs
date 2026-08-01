@@ -3632,6 +3632,49 @@ fn work_create_snapshots_exact_managed_input_artifact_bytes() {
 }
 
 #[test]
+fn concurrent_same_id_work_creation_preserves_the_winners_input_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let source = main_dir.join(".fluent/work/artifacts/evidence/input.txt");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"authoritative\n").unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("fluent");
+    let mut children = Vec::new();
+    for title in ["First creator", "Second creator"] {
+        children.push(
+            Command::new(&binary)
+                .current_dir(&main_dir)
+                .args([
+                    "work-item",
+                    "create",
+                    "work-input",
+                    "--title",
+                    title,
+                    "--input-artifact",
+                    ".fluent/work/artifacts/evidence/input.txt",
+                ])
+                .env("FLUENT_NO_UPDATE_CHECK", "1")
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let statuses = children
+        .into_iter()
+        .map(|mut child| child.wait().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses.iter().filter(|status| status.success()).count(), 1);
+
+    let stored = WorkModelStore::new(&main_dir)
+        .read_work_item("work-input")
+        .unwrap();
+    assert_eq!(stored.input_artifacts.len(), 1);
+    assert_eq!(
+        fs::read(main_dir.join(&stored.input_artifacts[0].snapshot_path)).unwrap(),
+        b"authoritative\n"
+    );
+}
+
+#[test]
 fn work_show_reports_preserved_work_item_input_artifacts() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

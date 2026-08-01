@@ -1088,6 +1088,14 @@ round, each review Task receives the matching prior failed review
 artifact for its role in `input_artifacts`, so the executor can prompt
 the reviewer to verify the follow-up against the concrete findings and
 grant sandboxed read access to that artifact.
+`WorkModelStore::create_work_item_with_inputs` owns input intake and Work Item
+publication under the same per-item `model.lock`. It validates and reads the
+approved managed sources before taking the lock, then installs snapshots and
+authors the recoverable Work-model transaction while holding it. A competing
+creator cannot install or remove that Work Item's snapshot tree. If storage
+fails before it authors a transaction, the creator removes only its unpublished
+tree. If the item record or recovery journal became durable, it retains the
+snapshots so transaction recovery cannot publish references to missing inputs.
 Every Writer and reviewer Task also copies the Work Item's preserved input
 references into `input_artifacts`. Task construction deduplicates those
 references against Attempt-generated inputs. Reviewer-role selection continues

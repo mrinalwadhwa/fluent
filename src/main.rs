@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -35,8 +34,7 @@ use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use fluent::work_merge_executor::{self, WorkMergeConfig};
 use fluent::work_model::{
-    self, PlanningContext, WorkItem, WorkItemInputArtifact, WorkModelStorageError, WorkModelStore,
-    to_json_pretty,
+    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
 use fluent::work_status;
 use fluent::work_task_executor::{self, WorkTaskRunConfig};
@@ -295,13 +293,7 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 learner_mode: learner_mode.unwrap_or_default(),
                 ..WorkItem::planned(id, title)
             };
-            work_model::validate_work_item_id(&item.id)?;
-            let snapshots = prepare_work_item_inputs(project_root, &item.id, &input_artifact)?;
-            item.input_artifacts = snapshots.identities.clone();
-            if let Err(error) = store.create_work_item(&item) {
-                snapshots.rollback();
-                return Err(error.into());
-            }
+            store.create_work_item_with_inputs(&mut item, &input_artifact)?;
             println!("Created Work Item {}", item.id);
             if guidance::guidance_enabled() {
                 eprintln!("{}", guidance::after_work_item_create());
@@ -362,134 +354,6 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
         }
     }
     Ok(())
-}
-
-struct PreparedWorkItemInputs {
-    identities: Vec<WorkItemInputArtifact>,
-    installed_root: Option<PathBuf>,
-}
-
-impl PreparedWorkItemInputs {
-    fn rollback(&self) {
-        if let Some(root) = &self.installed_root {
-            let _ = fs::remove_dir_all(root);
-        }
-    }
-}
-
-fn prepare_work_item_inputs(
-    project_root: &Path,
-    work_item_id: &str,
-    requested: &[String],
-) -> Result<PreparedWorkItemInputs> {
-    if requested.is_empty() {
-        return Ok(PreparedWorkItemInputs {
-            identities: Vec::new(),
-            installed_root: None,
-        });
-    }
-
-    let canonical_project = fs::canonicalize(project_root)
-        .with_context(|| format!("Failed to resolve project root {}", project_root.display()))?;
-    let managed_roots: Vec<PathBuf> = [
-        work_model::WORK_ARTIFACTS_DIR,
-        work_model::WORK_PROGRESS_DIR,
-    ]
-    .iter()
-    .filter_map(|root| fs::canonicalize(canonical_project.join(root)).ok())
-    .collect();
-    let mut approved = Vec::new();
-    for value in requested {
-        let requested_path = Path::new(value);
-        let joined = if requested_path.is_absolute() {
-            requested_path.to_path_buf()
-        } else {
-            canonical_project.join(requested_path)
-        };
-        let canonical = fs::canonicalize(&joined).with_context(|| {
-            format!(
-                "Work Item input artifact does not exist: {}",
-                joined.display()
-            )
-        })?;
-        if !canonical.is_file() {
-            bail!(
-                "Work Item input artifact is not a regular file: {}",
-                joined.display()
-            );
-        }
-        if !managed_roots.iter().any(|root| canonical.starts_with(root)) {
-            bail!(
-                "Work Item input artifact must stay under .fluent/work/artifacts/ or .fluent/work/progress/: {}",
-                joined.display()
-            );
-        }
-        let source_path = canonical
-            .strip_prefix(&canonical_project)
-            .with_context(|| format!("Managed input escaped project root: {}", joined.display()))?
-            .to_string_lossy()
-            .to_string();
-        let bytes = fs::read(&canonical).with_context(|| {
-            format!(
-                "Failed to read Work Item input artifact {}",
-                canonical.display()
-            )
-        })?;
-        approved.push((source_path, canonical, bytes));
-    }
-
-    let artifact_root = canonical_project
-        .join(work_model::WORK_ARTIFACTS_DIR)
-        .join(work_item_id);
-    if artifact_root.exists() {
-        bail!(
-            "Work Item artifact root already exists: {}",
-            artifact_root.display()
-        );
-    }
-    let input_root = artifact_root.join("inputs");
-    fs::create_dir_all(&input_root).with_context(|| {
-        format!(
-            "Failed to create Work Item input directory {}",
-            input_root.display()
-        )
-    })?;
-
-    let install = (|| -> Result<Vec<WorkItemInputArtifact>> {
-        let mut identities = Vec::new();
-        for (index, (source_path, canonical, bytes)) in approved.into_iter().enumerate() {
-            let filename = canonical
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Work Item input filename is not UTF-8: {}",
-                        canonical.display()
-                    )
-                })?;
-            let snapshot_path = work_model::work_item_input_path(work_item_id, index, filename);
-            let absolute_snapshot = canonical_project.join(&snapshot_path);
-            fluent::atomic_write::atomic_write(&absolute_snapshot, &bytes).with_context(|| {
-                format!("Failed to preserve Work Item input {}", canonical.display())
-            })?;
-            identities.push(WorkItemInputArtifact {
-                source_path,
-                snapshot_path,
-                digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
-            });
-        }
-        Ok(identities)
-    })();
-    match install {
-        Ok(identities) => Ok(PreparedWorkItemInputs {
-            identities,
-            installed_root: Some(artifact_root),
-        }),
-        Err(error) => {
-            let _ = fs::remove_dir_all(&artifact_root);
-            Err(error)
-        }
-    }
 }
 
 /// Authorize a proposed Work Item to execute and reconcile its regular-queue

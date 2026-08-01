@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustix::fs::{FlockOperation, flock};
+use sha2::{Digest, Sha256};
 
 use crate::coder::CoderKind;
 
@@ -3943,27 +3944,27 @@ impl Error for WorkModelStorageError {
     }
 }
 
-/// A wholly `#[cfg(test)]` fault at the real Work-model atomic persistence leaf.
+/// Wholly `#[cfg(test)]` faults at real Work-model persistence boundaries.
 ///
 /// Production carries no injectable path: the non-test build authors and applies
-/// the transaction directly. Only a test build can arm this so a public land is
-/// observed leaving its speculative follow-up result unknown — the durable land
-/// itself already committed — while the failure originates inside the real
-/// `WorkModelStore` write and retains its typed [`WorkModelStorageError`] cause
-/// (B4ak). It is thread-local, RAII-restored, and keyed to one Work Item's
-/// follow-up-result write, so concurrent tests are unaffected and every other
-/// write in the same land still commits for real.
+/// transactions directly. Test builds can fault one keyed Work Item write before
+/// transaction publication or after the item record publishes but before journal
+/// cleanup. Each fault is thread-local, RAII-restored, and consumed once, so
+/// concurrent tests and unrelated writes remain unaffected.
 #[cfg(test)]
 pub(crate) mod persist_fault {
     use std::cell::RefCell;
 
     thread_local! {
         static FOLLOW_UP_WRITE_FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
+        static CREATION_AFTER_PUBLISH_FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
     /// RAII guard: arm the persistence leaf to fail the next write that persists a
     /// follow-up-processing failure for `work_item_id`. Dropping it disarms.
     pub(crate) struct FollowUpWriteFaultGuard;
+
+    pub(crate) struct CreationAfterPublishFaultGuard;
 
     /// Arm the fault for exactly one follow-up-result write of `work_item_id`.
     pub(crate) fn arm_follow_up_write(work_item_id: &str) -> FollowUpWriteFaultGuard {
@@ -3971,9 +3972,21 @@ pub(crate) mod persist_fault {
         FollowUpWriteFaultGuard
     }
 
+    pub(crate) fn arm_creation_after_publish(work_item_id: &str) -> CreationAfterPublishFaultGuard {
+        CREATION_AFTER_PUBLISH_FAULT
+            .with(|fault| *fault.borrow_mut() = Some(work_item_id.to_string()));
+        CreationAfterPublishFaultGuard
+    }
+
     impl Drop for FollowUpWriteFaultGuard {
         fn drop(&mut self) {
             FOLLOW_UP_WRITE_FAULT.with(|fault| *fault.borrow_mut() = None);
+        }
+    }
+
+    impl Drop for CreationAfterPublishFaultGuard {
+        fn drop(&mut self) {
+            CREATION_AFTER_PUBLISH_FAULT.with(|fault| *fault.borrow_mut() = None);
         }
     }
 
@@ -3988,6 +4001,16 @@ pub(crate) mod persist_fault {
                     .merge_candidates
                     .iter()
                     .any(|candidate| candidate.merge_state.follow_up_failure.is_some());
+            if matches {
+                *fault.borrow_mut() = None;
+            }
+            matches
+        })
+    }
+
+    pub(crate) fn should_fault_creation_after_publish(work_item: &super::WorkItem) -> bool {
+        CREATION_AFTER_PUBLISH_FAULT.with(|fault| {
+            let matches = fault.borrow().as_deref() == Some(work_item.id.as_str());
             if matches {
                 *fault.borrow_mut() = None;
             }
@@ -4347,6 +4370,158 @@ impl WorkModelStore {
         self.write_work_item_file(work_item, true)
     }
 
+    /// Preserve approved managed input files and publish their Work Item through
+    /// one per-item serialized ownership boundary.
+    pub fn create_work_item_with_inputs(
+        &self,
+        work_item: &mut WorkItem,
+        requested: &[String],
+    ) -> Result<(), anyhow::Error> {
+        validate_work_item_id(&work_item.id)?;
+        let canonical_project = fs::canonicalize(&self.project_root).map_err(|error| {
+            anyhow::anyhow!(
+                "Failed to resolve project root {}: {error}",
+                self.project_root.display()
+            )
+        })?;
+        let managed_roots = [WORK_ARTIFACTS_DIR, WORK_PROGRESS_DIR]
+            .iter()
+            .filter_map(|root| fs::canonicalize(canonical_project.join(root)).ok())
+            .collect::<Vec<_>>();
+        let mut approved = Vec::new();
+        for value in requested {
+            let requested_path = Path::new(value);
+            let joined = if requested_path.is_absolute() {
+                requested_path.to_path_buf()
+            } else {
+                canonical_project.join(requested_path)
+            };
+            let canonical = fs::canonicalize(&joined).map_err(|error| {
+                anyhow::anyhow!(
+                    "Work Item input artifact does not exist: {}: {error}",
+                    joined.display()
+                )
+            })?;
+            if !canonical.is_file() {
+                return Err(anyhow::anyhow!(
+                    "Work Item input artifact is not a regular file: {}",
+                    joined.display()
+                ));
+            }
+            if !managed_roots.iter().any(|root| canonical.starts_with(root)) {
+                return Err(anyhow::anyhow!(
+                    "Work Item input artifact must stay under .fluent/work/artifacts/ or .fluent/work/progress/: {}",
+                    joined.display()
+                ));
+            }
+            let source_path = canonical
+                .strip_prefix(&canonical_project)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Managed input escaped project root: {}: {error}",
+                        joined.display()
+                    )
+                })?
+                .to_string_lossy()
+                .to_string();
+            let bytes = fs::read(&canonical).map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to read Work Item input artifact {}: {error}",
+                    canonical.display()
+                )
+            })?;
+            approved.push((source_path, canonical, bytes));
+        }
+
+        let mut target = work_item.clone();
+        target.input_artifacts = approved
+            .iter()
+            .enumerate()
+            .map(|(index, (source_path, canonical, bytes))| {
+                let filename = canonical
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Work Item input filename is not UTF-8: {}",
+                            canonical.display()
+                        )
+                    })?;
+                Ok(WorkItemInputArtifact {
+                    source_path: source_path.clone(),
+                    snapshot_path: work_item_input_path(&target.id, index, filename),
+                    digest: format!("sha256:{:x}", Sha256::digest(bytes)),
+                })
+            })
+            .collect::<Result<Vec<_>, anyhow::Error>>()?;
+        let item_path = self.work_item_path(&target.id)?;
+        target
+            .validate()
+            .map_err(|source| WorkModelStorageError::InvalidModel {
+                path: item_path.clone(),
+                source,
+            })?;
+
+        let _lock = self.lock_work_item_model(&target.id)?;
+        self.recover_work_item_transaction(&target.id)?;
+        if item_path.exists() {
+            return Err(WorkModelStorageError::WorkItemAlreadyExists {
+                path: item_path,
+                id: target.id.clone(),
+            }
+            .into());
+        }
+
+        let artifact_root = canonical_project.join(WORK_ARTIFACTS_DIR).join(&target.id);
+        if !approved.is_empty() && artifact_root.exists() {
+            return Err(anyhow::anyhow!(
+                "Work Item artifact root already exists: {}",
+                artifact_root.display()
+            ));
+        }
+        if !approved.is_empty() {
+            let input_root = artifact_root.join("inputs");
+            fs::create_dir_all(&input_root).map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to create Work Item input directory {}: {error}",
+                    input_root.display()
+                )
+            })?;
+            for ((_, canonical, bytes), identity) in approved.iter().zip(&target.input_artifacts) {
+                let snapshot = canonical_project.join(&identity.snapshot_path);
+                if let Err(error) = crate::atomic_write::atomic_write(&snapshot, bytes) {
+                    let rollback = fs::remove_dir_all(&artifact_root);
+                    return match rollback {
+                        Ok(()) => Err(anyhow::anyhow!(
+                            "Failed to preserve Work Item input {}: {error}",
+                            canonical.display()
+                        )),
+                        Err(rollback_error) => Err(anyhow::anyhow!(
+                            "Failed to preserve Work Item input {}: {error}; failed to remove partial input tree {}: {rollback_error}",
+                            canonical.display(),
+                            artifact_root.display()
+                        )),
+                    };
+                }
+            }
+        }
+
+        if let Err(error) = self.write_work_item_file_unchecked(&target, true) {
+            let transaction_path = self.work_transaction_path(&target.id)?;
+            if !item_path.exists() && !transaction_path.exists() && artifact_root.exists() {
+                fs::remove_dir_all(&artifact_root).map_err(|rollback_error| {
+                    anyhow::anyhow!(
+                        "{error}; failed to remove unpublished input tree {}: {rollback_error}",
+                        artifact_root.display()
+                    )
+                })?;
+            }
+            return Err(error.into());
+        }
+        *work_item = target;
+        Ok(())
+    }
+
     pub fn write_work_item(&self, work_item: &WorkItem) -> Result<(), WorkModelStorageError> {
         self.write_work_item_file(work_item, false)
     }
@@ -4672,6 +4847,13 @@ impl WorkModelStore {
             }
         })?;
         let transaction_path = self.work_transaction_path(&transaction.id)?;
+        #[cfg(test)]
+        if persist_fault::should_fault_creation_after_publish(&transaction.work_item) {
+            return Err(WorkModelStorageError::WriteFile {
+                path: transaction_path,
+                source: io::Error::other("injected post-publication transaction cleanup fault"),
+            });
+        }
         fs::remove_file(&transaction_path).map_err(|source| WorkModelStorageError::WriteFile {
             path: transaction_path,
             source,
@@ -8032,6 +8214,35 @@ random banner prose that must be ignored
         handle.join().unwrap();
         assert_eq!(observed.title, "Committed snapshot");
         assert_eq!(observed.attempts[0].coder_mapping.write.model, "new-model");
+    }
+
+    #[test]
+    fn post_publication_creation_error_retains_recoverable_input_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join(".fluent/work/artifacts/evidence/input.txt");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"authoritative\n").unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Retain durable input");
+        let _fault = persist_fault::arm_creation_after_publish("work-1");
+
+        store
+            .create_work_item_with_inputs(
+                &mut item,
+                &[".fluent/work/artifacts/evidence/input.txt".to_string()],
+            )
+            .expect_err("the injected post-publication cleanup fault must surface");
+
+        let snapshot = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/inputs/0000-input.txt");
+        assert_eq!(fs::read(&snapshot).unwrap(), b"authoritative\n");
+        let recovered = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            recovered.input_artifacts[0].snapshot_path,
+            snapshot.strip_prefix(tmp.path()).unwrap().to_string_lossy()
+        );
+        assert_eq!(fs::read(snapshot).unwrap(), b"authoritative\n");
     }
 
     #[test]

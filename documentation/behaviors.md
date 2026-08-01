@@ -159,6 +159,8 @@ progress files,
 THE SYSTEM SHALL preserve their exact bytes as immutable Work Item-owned inputs
 and record each canonical source path, snapshot path, and SHA-256 digest.
 Test: tests/binary.rs (work_create_snapshots_exact_managed_input_artifact_bytes)
+Test: tests/binary.rs (concurrent_same_id_work_creation_preserves_the_winners_input_snapshot)
+Test: src/work_model.rs (post_publication_creation_error_retains_recoverable_input_snapshot)
 
 ### B2
 
