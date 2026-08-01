@@ -13,7 +13,8 @@ use crate::os;
 use crate::prep;
 use crate::review_diff_command::render_review_diff_command;
 use crate::work_model::{
-    ArtifactRef, AttemptKind, AttemptStatus, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
+    ArtifactRef, AttemptKind, AttemptStatus, NoChangeOutput, NoChangeVerification,
+    NoChangeVerificationResult, Task, TaskKind, TaskOutput, TaskStatus, WorkItem,
     WorkModelStorageError, WorkModelStore, WorkspaceRef, resolve_expected_candidate_workspace_path,
     resolve_managed_sibling_workspace_path, to_json_pretty, work_artifact_path,
 };
@@ -35,6 +36,15 @@ pub struct WorkTaskRunConfig<'a> {
 pub struct WorkTaskRunResult {
     pub task_id: String,
     pub output: String,
+}
+
+const NO_CHANGE_DECLARATION_FILE: &str = "no-change.json";
+
+#[derive(Debug, serde::Deserialize)]
+struct NoChangeDeclaration {
+    schema_version: u32,
+    reason: String,
+    verification: Vec<NoChangeVerification>,
 }
 
 /// A Task start lost the precedence race: a peer already took the Attempt
@@ -728,18 +738,22 @@ fn run_write_task_with_coder(
             return Err(error);
         }
     };
-    if produced_count == 0 {
-        mark_task_failed(
-            config.store,
-            config.work_item_id,
-            config.attempt_id,
-            config.task_id,
-        )?;
-        bail!(
-            "Task {:?} has no committed Task output; commit the Task output before completing",
-            config.task_id
-        );
-    }
+    let no_change = if produced_count == 0 {
+        match validate_followup_no_change(&config, &workspace_path) {
+            Ok(no_change) => Some(no_change),
+            Err(error) => {
+                mark_task_failed(
+                    config.store,
+                    config.work_item_id,
+                    config.attempt_id,
+                    config.task_id,
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     // Route every post-reservation completion failure — head lookup, completion
     // read/find, and the terminal write — through one durable terminal-state
     // boundary, so no raw `?` after the reservation can leave the Task Executing.
@@ -749,6 +763,7 @@ fn run_write_task_with_coder(
         &workspace_path,
         source_branch,
         baseline_commit,
+        no_change,
     );
     match completion {
         Ok(result) => Ok(result),
@@ -773,6 +788,7 @@ fn complete_write_task(
     workspace_path: &Path,
     source_branch: String,
     baseline_commit: String,
+    no_change: Option<NoChangeOutput>,
 ) -> Result<WorkTaskRunResult> {
     let commit = head_commit(workspace_path)?;
 
@@ -782,6 +798,7 @@ fn complete_write_task(
         source_branch,
         base_commit: Some(baseline_commit),
         commit: commit.clone(),
+        no_change,
     };
     let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let (attempt_index, task_index) =
@@ -820,6 +837,108 @@ fn complete_write_task(
     Ok(WorkTaskRunResult {
         task_id: config.task_id.to_string(),
         output: commit,
+    })
+}
+
+/// Validate the fresh Task-owned evidence that lets a corrective Writer retain
+/// the previous completed Writer commit without producing a new commit.
+fn validate_followup_no_change(
+    config: &WorkTaskRunConfig<'_>,
+    workspace_path: &Path,
+) -> Result<NoChangeOutput> {
+    let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    let (attempt_index, task_index) =
+        find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+            .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
+    let task = &item.attempts[attempt_index].tasks[task_index];
+    let previous_output = item.attempts[attempt_index].tasks[..task_index]
+        .iter()
+        .rev()
+        .find(|candidate| {
+            candidate.kind == TaskKind::Write && candidate.status == TaskStatus::Complete
+        })
+        .and_then(|candidate| candidate.output.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Task {:?} has no committed Task output; commit the Task output before completing",
+                config.task_id
+            )
+        })?;
+
+    let head = head_commit(workspace_path)?;
+    if head != previous_output.commit {
+        bail!(
+            "Task {:?} cannot complete as no-change: workspace HEAD {head} does not equal the previous completed Writer commit {}",
+            config.task_id,
+            previous_output.commit
+        );
+    }
+
+    let artifact_area = task.artifact_area.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Task {:?} requires an artifact area for a valid no-change declaration",
+            config.task_id
+        )
+    })?;
+    let artifact_dir =
+        resolve_managed_artifact_area_path(config.project_root, &artifact_area.path)?;
+    let declaration_path = artifact_dir.join(NO_CHANGE_DECLARATION_FILE);
+    let bytes = fs::read(&declaration_path).with_context(|| {
+        format!(
+            "Task {:?} produced no commit; a valid no-change declaration is required at {}",
+            config.task_id,
+            declaration_path.display()
+        )
+    })?;
+    let declaration: NoChangeDeclaration = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "Task {:?} produced no commit; {} must be a valid schema-version-1 no-change declaration",
+            config.task_id,
+            declaration_path.display()
+        )
+    })?;
+    if declaration.schema_version != 1 {
+        bail!(
+            "Task {:?} produced no commit; {} must use no-change schema_version 1",
+            config.task_id,
+            declaration_path.display()
+        );
+    }
+    if declaration.reason.trim().is_empty() {
+        bail!(
+            "Task {:?} produced no commit; {} must contain a non-empty reason",
+            config.task_id,
+            declaration_path.display()
+        );
+    }
+    if declaration.verification.is_empty()
+        || declaration
+            .verification
+            .iter()
+            .any(|entry| entry.command.trim().is_empty())
+    {
+        bail!(
+            "Task {:?} produced no commit; {} must contain one or more passing verification entries with non-empty commands",
+            config.task_id,
+            declaration_path.display()
+        );
+    }
+    debug_assert!(
+        declaration
+            .verification
+            .iter()
+            .all(|entry| entry.result == NoChangeVerificationResult::Pass)
+    );
+
+    Ok(NoChangeOutput {
+        schema_version: declaration.schema_version,
+        declaration_path: format!(
+            "{}/{}",
+            artifact_area.path.trim_end_matches('/'),
+            NO_CHANGE_DECLARATION_FILE
+        ),
+        reason: declaration.reason,
+        verification: declaration.verification,
     })
 }
 
@@ -2789,6 +2908,7 @@ fn run_task_coder_with_coder(
         }
     }
 
+    clear_no_change_declaration(project_root, task)?;
     let coder = make_coder(
         sandbox,
         codex_worker.map(|worker| worker.launcher().executable()),
@@ -2831,6 +2951,25 @@ fn run_task_coder_with_coder(
     }
 }
 
+/// Remove only the declaration a prior launch could have left behind. The next
+/// coder must create fresh evidence for this launch; transcripts and every other
+/// Task artifact remain untouched.
+fn clear_no_change_declaration(project_root: &Path, task: &Task) -> Result<()> {
+    let Some(area) = task.artifact_area.as_ref() else {
+        return Ok(());
+    };
+    let declaration = resolve_managed_artifact_area_path(project_root, &area.path)?
+        .join(NO_CHANGE_DECLARATION_FILE);
+    match fs::remove_file(&declaration) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "remove stale no-change declaration at {}",
+            declaration.display()
+        ))),
+    }
+}
+
 #[cfg(feature = "test-support")]
 fn test_hermetic_no_sandbox() -> bool {
     std::env::var_os("FLUENT_TEST_HERMETIC_NO_SANDBOX").is_some()
@@ -2868,12 +3007,26 @@ fn build_write_task_prompt_with_workspace(
     workspace_path: Option<&Path>,
     project_root: Option<&Path>,
 ) -> String {
-    let task = item
+    let attempt = item
         .attempts
         .iter()
         .find(|a| a.id == attempt_id)
-        .and_then(|a| a.tasks.iter().find(|t| t.id == task_id))
+        .expect("Attempt must exist");
+    let task_index = attempt
+        .tasks
+        .iter()
+        .position(|task| task.id == task_id)
         .expect("Task must exist");
+    let task = attempt.tasks.get(task_index).expect("Task must exist");
+    let is_followup_writer = attempt.tasks[..task_index]
+        .iter()
+        .any(|candidate| candidate.kind == TaskKind::Write);
+    let is_followup_writer_value = if is_followup_writer { "yes" } else { "" };
+    let no_change_declaration_path = project_root
+        .zip(task.artifact_area.as_ref())
+        .map(|(root, area)| root.join(&area.path).join(NO_CHANGE_DECLARATION_FILE))
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     let task_json = to_json_pretty(task).unwrap_or_default();
     let work_item_inputs = project_root
         .map(|root| work_item_inputs_only(item, root))
@@ -2984,6 +3137,8 @@ fn build_write_task_prompt_with_workspace(
             ("work_item_inputs_list", &work_item_inputs_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
+            ("is_followup_writer", is_followup_writer_value),
+            ("no_change_declaration_path", &no_change_declaration_path),
             ("is_corrective", is_corrective_value),
             ("corrective_context", &corrective_context),
             ("bootstrap_anything", bootstrap_anything_value),
@@ -8680,6 +8835,7 @@ mod tests {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();
         item
@@ -9473,6 +9629,7 @@ mod tests {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();
         item
@@ -9722,6 +9879,7 @@ mod tests {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: merged_commit.clone(),
+            no_change: None,
         });
         attempt.status = crate::work_model::AttemptStatus::Complete;
         attempt.review_state = Some(crate::work_model::AttemptReviewState::Passed);
@@ -9806,6 +9964,7 @@ mod tests {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: batch.origin.merged_commit.clone(),
+            no_change: None,
         });
         seeded
             .add_review_tasks(

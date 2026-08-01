@@ -648,6 +648,7 @@ pub(crate) mod test_support {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);

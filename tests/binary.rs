@@ -3743,6 +3743,7 @@ fn every_writer_receives_preserved_work_item_input_artifacts_read_only() {
         source_branch: "main".to_string(),
         base_commit: None,
         commit: "abc123".to_string(),
+        no_change: None,
     });
     item.add_next_write_round(
         "attempt-1",
@@ -3824,6 +3825,7 @@ fn reviewers_receive_preserved_work_item_inputs_and_attempt_inputs() {
         source_branch: "main".to_string(),
         base_commit: None,
         commit: "abc123".to_string(),
+        no_change: None,
     });
     item.add_review_tasks("attempt-1", &["tests"]).unwrap();
     store.write_work_item(&item).unwrap();
@@ -14999,6 +15001,170 @@ fn work_task_run_rejects_success_without_commits() {
     assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
 }
 
+fn plan_followup_writer(main_dir: &Path) {
+    use fluent::work_model::{AttemptReviewState, AttemptStatus, TaskKind, TaskStatus};
+
+    let store = WorkModelStore::new(main_dir);
+    let mut item = store.read_work_item("work-1").unwrap();
+    item.add_next_review_tasks(
+        "attempt-1",
+        &[
+            "documentation",
+            "behaviors",
+            "architecture",
+            "skills",
+            "tests",
+        ],
+    )
+    .unwrap();
+    for task in item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind != TaskKind::Write)
+    {
+        fluent::work_model::set_task_terminal(task, TaskStatus::Complete);
+        if task.kind == TaskKind::Review {
+            let artifact_dir = main_dir.join(&task.artifact_area.as_ref().unwrap().path);
+            fs::create_dir_all(&artifact_dir).unwrap();
+            fs::write(artifact_dir.join("review.md"), "Verdict: fail\n").unwrap();
+        }
+    }
+    item.attempts[0].status = AttemptStatus::Complete;
+    item.attempts[0].review_state = Some(AttemptReviewState::Failed);
+    item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+    store.write_work_item(&item).unwrap();
+}
+
+fn no_change_writer_mock_script() -> &'static str {
+    r##"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{"learning_summary":"none","follow_ups":[]}' > "$DRAFT"
+  exit 0
+fi
+case "$PWD" in
+  */work-6-work-1-attempt-1)
+    mkdir -p "$PROJECT_ROOT/.fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+    printf '%s\n' '{"schema_version":1,"reason":"The reported failure was transient.","verification":[{"command":"cargo test --test binary","result":"pass"}]}' \
+      > "$PROJECT_ROOT/.fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json"
+    if [ -n "${PROMPT_LOG:-}" ]; then printf '%s' "$PROMPT" > "$PROMPT_LOG"; fi
+    ;;
+  *)
+    printf 'Verdict: pass\n\nUnchanged candidate verified.\n' > review.md
+    ;;
+esac
+exit 0
+"##
+}
+
+#[test]
+fn followup_writer_completes_with_valid_no_change_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    plan_followup_writer(&main_dir);
+    let candidate = git_head(&main_dir.join("../work-6-work-1-attempt-1"));
+    let bin_dir = tmp.path().join("bin-no-change");
+    let prompt_log = tmp.path().join("writer-prompt.txt");
+    write_mock_claude(&bin_dir, no_change_writer_mock_script());
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-2",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROJECT_ROOT", &main_dir)
+        .env("PROMPT_LOG", &prompt_log)
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let output = &value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap()["output"];
+    assert_eq!(output["commit"], candidate);
+    assert_eq!(output["no_change"]["schema_version"], 1);
+    assert_eq!(
+        output["no_change"]["declaration_path"],
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json"
+    );
+    assert_eq!(output["no_change"]["verification"][0]["result"], "pass");
+    assert!(
+        fs::read_to_string(prompt_log)
+            .unwrap()
+            .contains("no-change.json"),
+        "the real Writer prompt must explain the no-change protocol"
+    );
+}
+
+#[test]
+fn attempt_reviews_unchanged_candidate_after_no_change_writer() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    plan_followup_writer(&main_dir);
+    let candidate = git_head(&main_dir.join("../work-6-work-1-attempt-1"));
+    let bin_dir = tmp.path().join("bin-no-change-loop");
+    write_mock_claude(&bin_dir, no_change_writer_mock_script());
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROJECT_ROOT", &main_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "attempt run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let tasks = value["attempts"][0]["tasks"].as_array().unwrap();
+    let writer = tasks
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap();
+    assert_eq!(writer["output"]["commit"], candidate);
+    let tester = tasks
+        .iter()
+        .find(|task| task["id"] == "attempt-1-tester-2")
+        .unwrap();
+    assert_eq!(tester["status"], "complete");
+    let reviews = tasks
+        .iter()
+        .filter(|task| {
+            task["kind"] == "review"
+                && task["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("attempt-1-review-2-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reviews.len(), 5);
+    assert!(reviews.iter().all(|task| {
+        task["status"] == "complete" && task["review_context"]["candidate_commit"] == candidate
+    }));
+}
+
 #[test]
 fn work_task_run_rejects_reused_workspace_without_new_commit() {
     let tmp = TempDir::new().unwrap();
@@ -19015,6 +19181,7 @@ fn queue_add_rejects_suspended_attempt_and_pending_candidate() {
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);

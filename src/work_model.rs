@@ -3119,6 +3119,33 @@ pub struct TaskOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
     pub commit: String,
+    /// Evidence that a corrective Writer verified the existing candidate and
+    /// intentionally preserved it instead of producing another commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_change: Option<NoChangeOutput>,
+}
+
+/// Typed reference to a follow-up Writer's Task-owned no-change declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoChangeOutput {
+    pub schema_version: u32,
+    pub declaration_path: String,
+    pub reason: String,
+    pub verification: Vec<NoChangeVerification>,
+}
+
+/// One command a follow-up Writer ran before declaring no correction necessary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoChangeVerification {
+    pub command: String,
+    pub result: NoChangeVerificationResult,
+}
+
+/// Machine-checkable outcome accepted in a no-change verification entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoChangeVerificationResult {
+    Pass,
 }
 
 /// Pointer to durable output from a task or attempt.
@@ -6482,6 +6509,7 @@ random banner prose that must be ignored
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "commit-second".to_string(),
+            no_change: None,
         });
         work_item.attempts[0].status = AttemptStatus::Complete;
         work_item
@@ -6703,6 +6731,7 @@ random banner prose that must be ignored
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         let preserved_ref = work_item.preserved_input_refs()[0].clone();
         work_item
@@ -8185,6 +8214,7 @@ random banner prose that must be ignored
                 source_branch: "main".to_string(),
                 base_commit: None,
                 commit: format!("commit-{suffix}"),
+                no_change: None,
             }),
             created_at: None,
             started_at: None,
@@ -9540,6 +9570,7 @@ random banner prose that must be ignored
             source_branch: "main".to_string(),
             base_commit: None,
             commit: "abc123".to_string(),
+            no_change: None,
         });
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();
         let attempt = &mut item.attempts[0];

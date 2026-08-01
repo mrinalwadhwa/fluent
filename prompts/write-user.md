@@ -147,8 +147,26 @@ Skip TDD only when the step has no new behavior to test. Skip-eligible examples:
 
 ### D. Commit and advance
 
+{{#if is_followup_writer}}
+1. When the step requires a correction, make one commit per step. Include everything the step touched — code, tests, `tester.yaml` updates, pattern files, docs — in that commit. Write a message that describes what changed and follows the project's stated commit conventions (`AGENTS.md` / `CLAUDE.md`) — subject length, mood, prohibited trailers, and the like.
+2. If verification proves the previous Writer commit already satisfies the requested correction, preserve the clean candidate without creating a commit. Write {{no_change_declaration_path}} with this exact JSON shape:
+
+   ```json
+   {
+     "schema_version": 1,
+     "reason": "Why no correction was necessary",
+     "verification": [
+       {"command": "the command you ran", "result": "pass"}
+     ]
+   }
+   ```
+
+   `reason` and every `command` must be non-empty, and `verification` must contain at least one passing entry. Fluent deletes this file before every coder launch, so only evidence produced by this run can authorize no-change completion. Do not use this path when you changed the candidate, when verification did not pass, or when the workspace is dirty.
+3. In progress.md: toggle `- [ ]` to `- [x]` and add a nested bullet below it with the commit hash, or note the verified no-change result, plus anything the next round should know.
+{{else}}
 1. Make one commit per step. Include everything the step touched — code, tests, `tester.yaml` updates, pattern files, docs — in that commit. Write a message that describes what changed and follows the project's stated commit conventions (`AGENTS.md` / `CLAUDE.md`) — subject length, mood, prohibited trailers, and the like.
 2. In progress.md: toggle `- [ ]` to `- [x]` and add a nested bullet below it with the commit hash and anything the next round should know.
+{{/if}}
 3. Move to the next `- [ ]` item.
 
 ## Phase 4 — Final verification
@@ -161,7 +179,11 @@ Run all the test commands in `.fluent/tester.yaml`. Fix and re-run until everyth
 - All test commands in `.fluent/tester.yaml` succeed.
 - The workspace has no unstaged, staged, or untracked changes — commit meaningful files; add generated ones to `.gitignore`.
 
-A Write Task with no new commits fails automatically.
+{{#if is_followup_writer}}
+A follow-up Write Task with no new commit succeeds only through the verified no-change declaration above. Initial Writers and every Writer without valid fresh evidence must produce a commit.
+{{else}}
+An initial Write Task with no new commits fails automatically.
+{{/if}}
 
 ## Rules during step execution
 

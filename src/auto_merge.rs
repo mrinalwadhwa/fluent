@@ -322,6 +322,7 @@ mod tests {
                         source_branch: "main".to_string(),
                         base_commit: None,
                         commit: "abc123".to_string(),
+                        no_change: None,
                     }),
                     created_at: None,
                     started_at: None,
