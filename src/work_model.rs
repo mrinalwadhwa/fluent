@@ -6763,6 +6763,77 @@ random banner prose that must be ignored
     }
 
     #[test]
+    fn source_checkout_review_only_tasks_receive_preserved_inputs() {
+        let mut work_item = WorkItem {
+            input_artifacts: vec![preserved_input()],
+            ..WorkItem::planned("work-1", "Review source checkout")
+        };
+        work_item
+            .add_review_only_attempt(
+                "attempt-review",
+                &["architecture", "tests"],
+                "main",
+                "abc123",
+                true,
+            )
+            .unwrap();
+        let preserved = work_item.preserved_input_refs();
+
+        for reviewer in &work_item.attempts[0].tasks {
+            assert_eq!(reviewer.kind, TaskKind::Review);
+            assert_eq!(reviewer.input_artifacts, preserved);
+        }
+    }
+
+    #[test]
+    fn worktree_and_post_merge_reviewers_combine_preserved_and_tester_inputs() {
+        for post_merge in [false, true] {
+            let mut work_item = WorkItem {
+                input_artifacts: vec![preserved_input()],
+                ..WorkItem::planned("work-1", "Review managed worktree")
+            };
+            if post_merge {
+                work_item
+                    .add_post_merge_review_attempt(
+                        "attempt-review",
+                        &["tests"],
+                        "main",
+                        "abc123",
+                        Some("base123".to_string()),
+                    )
+                    .unwrap();
+            } else {
+                work_item
+                    .add_review_only_attempt("attempt-review", &["tests"], "main", "abc123", false)
+                    .unwrap();
+            }
+
+            let attempt = &work_item.attempts[0];
+            let tester = attempt
+                .tasks
+                .iter()
+                .find(|task| task.kind == TaskKind::Tester)
+                .unwrap();
+            let reviewer = attempt
+                .tasks
+                .iter()
+                .find(|task| task.kind == TaskKind::Review)
+                .unwrap();
+            assert!(tester.input_artifacts.is_empty());
+            assert_eq!(
+                reviewer.input_artifacts[0],
+                work_item.preserved_input_refs()[0]
+            );
+            assert_eq!(reviewer.input_artifacts[1].producer_id, tester.id);
+            assert!(
+                reviewer.input_artifacts[1]
+                    .path
+                    .ends_with("/tester-results.json")
+            );
+        }
+    }
+
+    #[test]
     fn review_task_rejects_workspace_writes() {
         let review_task = task(TaskKind::Review, vec![workspace("candidate")]);
         assert_eq!(
