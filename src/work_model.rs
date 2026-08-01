@@ -1283,10 +1283,10 @@ impl WorkItem {
                         && attempt.learning.as_ref().is_some_and(|learning| {
                             matches!(
                                 learning.status,
-                                LearningStatus::HandoffPending
-                                    | LearningStatus::Succeeded
-                                    | LearningStatus::Failed
-                            )
+                                LearningStatus::HandoffPending | LearningStatus::Succeeded
+                            ) || (learning.status == LearningStatus::Failed
+                                && learning.failure_stage
+                                    == Some(LearningFailureStage::HandoffPublication))
                         })
                         && latest_completed_writer == Some(task_index)
                         && candidate.is_some_and(|candidate| {
@@ -1776,6 +1776,20 @@ pub struct AttemptLearning {
     /// Absent on records written before this field existed (backward-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<LearningFailureKind>,
+    /// The host-owned stage reached before a failed run settled. Only handoff
+    /// publication follows accepted canonicalization, so this durable marker can
+    /// account for commit divergence retained after publication fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<LearningFailureStage>,
+}
+
+/// The host-owned Learning stage reached before a terminal failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningFailureStage {
+    /// Fluent accepted and persisted the canonical candidate, then failed to
+    /// publish its handoff.
+    HandoffPublication,
 }
 
 /// The typed classification of a failed Learner run, retained on the durable
@@ -2019,6 +2033,7 @@ impl AttemptLearning {
             handoff: None,
             last_failure: None,
             failure_kind: None,
+            failure_stage: None,
         }
     }
 
@@ -2034,6 +2049,7 @@ impl AttemptLearning {
             handoff: None,
             last_failure: None,
             failure_kind: None,
+            failure_stage: None,
         }
     }
 
@@ -2045,6 +2061,7 @@ impl AttemptLearning {
             handoff: Some(handoff),
             last_failure: None,
             failure_kind: None,
+            failure_stage: None,
         }
     }
 
@@ -2065,6 +2082,19 @@ impl AttemptLearning {
             handoff: None,
             last_failure: Some(reason.into()),
             failure_kind: Some(kind),
+            failure_stage: None,
+        }
+    }
+
+    /// A failed handoff publication after Fluent accepted canonical Learning.
+    pub fn failed_after_handoff_publication(
+        runs: u32,
+        reason: impl Into<String>,
+        kind: LearningFailureKind,
+    ) -> Self {
+        Self {
+            failure_stage: Some(LearningFailureStage::HandoffPublication),
+            ..Self::failed_with_kind(runs, reason, kind)
         }
     }
 
@@ -9118,6 +9148,31 @@ random banner prose that must be ignored
             started_at: None,
             completed_at: None,
         });
+        item.validate().unwrap();
+
+        for kind in [
+            LearningFailureKind::Generic,
+            LearningFailureKind::TranscriptPump,
+            LearningFailureKind::EvidencePending,
+        ] {
+            item.attempts[0].learning = Some(AttemptLearning::failed_with_kind(
+                1,
+                "ordinary failure",
+                kind,
+            ));
+            assert!(matches!(
+                item.validate(),
+                Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+            ));
+        }
+
+        let mut publication_failure = AttemptLearning::failed_with_kind(
+            1,
+            "handoff publication failed",
+            LearningFailureKind::Generic,
+        );
+        publication_failure.failure_stage = Some(LearningFailureStage::HandoffPublication);
+        item.attempts[0].learning = Some(publication_failure);
         item.validate().unwrap();
 
         item.merge_candidates[0].candidate_commit = "other".to_string();

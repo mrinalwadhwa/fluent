@@ -1985,7 +1985,7 @@ fn finalize_learning(
                     );
                     let kind = classify_learning_failure(&err);
                     item.attempts[attempt_index].learning =
-                        Some(AttemptLearning::failed_with_kind(
+                        Some(AttemptLearning::failed_after_handoff_publication(
                             runs,
                             format!("learner produced a handoff but persisting it failed: {err:#}"),
                             kind,
@@ -4478,15 +4478,21 @@ mod tests {
     }
 
     #[test]
-    fn learning_record_without_failure_kind_deserializes_backward_compatibly() {
-        // The new typed failure_kind is backward-compatible: a record persisted
-        // before it existed (no `failure_kind` field) still deserializes, with the
-        // kind absent.
+    fn learning_record_without_optional_failure_fields_deserializes() {
+        // The optional typed failure fields are backward-compatible: a record
+        // persisted before they existed still deserializes with both absent.
         let legacy = r#"{"status":"failed","runs":2,"last_failure":"old failure"}"#;
         let learning: crate::work_model::AttemptLearning = serde_json::from_str(legacy).unwrap();
         assert!(learning.is_failed());
         assert_eq!(learning.runs, 2);
         assert_eq!(learning.failure_kind, None, "absent on legacy records");
+        assert_eq!(learning.failure_stage, None, "absent on legacy records");
+        assert!(
+            !serde_json::to_string(&learning)
+                .unwrap()
+                .contains("failure_stage"),
+            "an absent failure stage preserves the legacy serialized shape"
+        );
     }
 
     /// Acquire a Task lease, retrying to absorb macOS flock release-visibility
@@ -9453,7 +9459,12 @@ mod tests {
             stored.merge_candidates[0].candidate_commit,
             canonical_commit
         );
-        assert!(stored.attempts[0].learning.as_ref().unwrap().is_failed());
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert_eq!(
+            learning.failure_stage,
+            Some(crate::work_model::LearningFailureStage::HandoffPublication)
+        );
         assert!(
             stored.merge_candidates[0]
                 .validate_advancement(&stored)

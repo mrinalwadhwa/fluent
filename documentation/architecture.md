@@ -140,10 +140,13 @@ keeps `base_commit`, advances `commit`, and stores a typed
 `learner_canonicalization` record whose `from_commit` and `to_commit` match those
 two fields. Validation rejects unexplained, reversed, partial, or mismatched
 divergence and accepts the record only for a capture Attempt with durable Learning
-state. Existing TaskOutput JSON without either optional record keeps its legacy
-shape. The Attempt loop plans Tester and reviewer Tasks against the Writer output
-that exists before Learning; after Learning, landing consumes the current
-`TaskOutput.commit`.
+state that proves Fluent accepted the canonical result: `HandoffPending`,
+`Succeeded`, or `Failed` with the typed `HandoffPublication` failure stage.
+Ordinary coder, transcript-pump, and evidence-persistence failures do not account
+for divergence. Existing TaskOutput and AttemptLearning JSON records without the
+optional fields keep their legacy shape. The Attempt loop plans Tester and
+reviewer Tasks against the Writer output that exists before Learning; after
+Learning, landing consumes the current `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and
 untracked changes outside `.fluent/`. If it finds any, it reports Git's

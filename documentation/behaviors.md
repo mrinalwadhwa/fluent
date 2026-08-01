@@ -5742,8 +5742,10 @@ result is verified,
 THEN THE SYSTEM SHALL retain that result as both the Write output and
 Merge Candidate candidate commit and record relaunchable `Generic`
 failed Learning with no handoff reference and a
-canonical-handoff-publication diagnostic. A no-change Write output SHALL retain
-its verified commit and canonicalization transition in this recovery state.
+canonical-handoff-publication diagnostic plus the typed `HandoffPublication`
+failure stage. A no-change Write output SHALL retain its verified commit and
+canonicalization transition only in this accounted recovery state; ordinary
+failed Learning SHALL NOT authorize commit divergence.
 Test: src/work_attempt_loop.rs (learner_handoff_failure_retains_clean_typed_failed_result)
 Test: src/work_attempt_loop.rs (learner_handoff_failure_preserves_no_change_writer_identity)
 
