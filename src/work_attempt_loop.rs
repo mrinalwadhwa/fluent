@@ -6685,25 +6685,29 @@ mod tests {
                     AttemptStatus::Complete,
                 );
                 item.create_or_get_merge_candidate("attempt-1")?;
-                let canonical_commit = "canonical-expertise-commit".to_string();
-                let output = item.attempts[0]
-                    .tasks
-                    .iter_mut()
-                    .rev()
-                    .find(|task| task.kind == TaskKind::Write)
-                    .and_then(|task| task.output.as_mut())
-                    .unwrap();
-                output.commit = canonical_commit.clone();
-                output.learner_canonicalization = Some(LearnerCommitCanonicalization {
-                    from_commit: verified_commit.clone(),
-                    to_commit: canonical_commit.clone(),
-                });
-                item.merge_candidates[0].candidate_commit = canonical_commit;
                 item.attempts[0].learning = Some(AttemptLearning::in_progress(1));
                 Ok(())
             })
             .unwrap();
         let mut item = store.read_work_item("work-1").unwrap();
+        // Mirror the production boundary: `try_learn` canonicalizes only the
+        // in-memory aggregate returned from the accepted Learner run. The durable
+        // reservation remains non-divergent/InProgress until `finalize_learning`
+        // atomically persists the pointers with HandoffPending.
+        let canonical_commit = "canonical-expertise-commit".to_string();
+        let output = item.attempts[0]
+            .tasks
+            .iter_mut()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write)
+            .and_then(|task| task.output.as_mut())
+            .unwrap();
+        output.commit = canonical_commit.clone();
+        output.learner_canonicalization = Some(LearnerCommitCanonicalization {
+            from_commit: verified_commit.clone(),
+            to_commit: canonical_commit.clone(),
+        });
+        item.merge_candidates[0].candidate_commit = canonical_commit;
 
         let handoff = crate::follow_up::LearnerHandoffV1::new(
             "work-1",

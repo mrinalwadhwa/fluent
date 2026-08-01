@@ -1266,14 +1266,34 @@ impl WorkItem {
                 });
             }
             attempt.validate(&self.id)?;
-            for task in &attempt.tasks {
-                let has_canonicalization = task
+            let latest_completed_writer = attempt.tasks.iter().rposition(|task| {
+                task.kind == TaskKind::Write && task.status == TaskStatus::Complete
+            });
+            let candidate = self
+                .merge_candidates
+                .iter()
+                .find(|candidate| candidate.attempt_id == attempt.id);
+            for (task_index, task) in attempt.tasks.iter().enumerate() {
+                let canonicalization = task
                     .output
                     .as_ref()
-                    .is_some_and(|output| output.learner_canonicalization.is_some());
-                if has_canonicalization
-                    && (!self.learner_mode.is_capture() || attempt.learning.is_none())
-                {
+                    .and_then(|output| output.learner_canonicalization.as_ref());
+                let canonicalization_is_accounted_for = canonicalization.is_none_or(|transition| {
+                    self.learner_mode.is_capture()
+                        && attempt.learning.as_ref().is_some_and(|learning| {
+                            matches!(
+                                learning.status,
+                                LearningStatus::HandoffPending
+                                    | LearningStatus::Succeeded
+                                    | LearningStatus::Failed
+                            )
+                        })
+                        && latest_completed_writer == Some(task_index)
+                        && candidate.is_some_and(|candidate| {
+                            candidate.candidate_commit == transition.to_commit
+                        })
+                });
+                if !canonicalization_is_accounted_for {
                     return Err(WorkModelError::InvalidTaskNoChangeOutput {
                         task_id: task.id.clone(),
                     });
@@ -9055,12 +9075,71 @@ random banner prose that must be ignored
         let mut item = WorkItem::planned("work-1", "Canonicalized no-change output");
         item.add_initial_attempt("attempt-1").unwrap();
         item.attempts[0].tasks[0] = canonicalized.clone();
+        item.attempts[0].status = AttemptStatus::Complete;
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
         assert!(matches!(
             item.validate(),
             Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
         ));
+
+        item.attempts[0].learning = Some(AttemptLearning::in_progress(1));
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+        assert!(matches!(
+            item.attempts[0].learning_advancement_readiness(),
+            Err(WorkModelError::AttemptLearningNotSucceeded {
+                state: "in progress",
+                ..
+            })
+        ));
+
         item.attempts[0].learning = Some(AttemptLearning::handoff_pending(1));
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+
+        item.merge_candidates.push(MergeCandidate {
+            id: "attempt-1-merge-candidate".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            source_workspace: workspace("candidate"),
+            target_workspace: WorkspaceRef {
+                id: "target".to_string(),
+                path: ".".to_string(),
+            },
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            candidate_commit: "def456".to_string(),
+            merge_review_state: MergeReviewState::Pending,
+            merge_state: MergeCandidateMergeState::default(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        });
         item.validate().unwrap();
+
+        item.merge_candidates[0].candidate_commit = "other".to_string();
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+        item.merge_candidates[0].candidate_commit = "def456".to_string();
+
+        let mut stale_writer = valid_no_change_task();
+        stale_writer.id = "attempt-1-write-3".to_string();
+        stale_writer.output.as_mut().unwrap().base_commit = Some("def456".to_string());
+        stale_writer.output.as_mut().unwrap().commit = "def456".to_string();
+        stale_writer.output.as_mut().unwrap().no_change = None;
+        stale_writer.artifact_area = None;
+        item.attempts[0].tasks.push(stale_writer);
+        assert!(matches!(
+            item.validate(),
+            Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+        ));
+        item.attempts[0].tasks.pop();
+
         item.learner_mode = LearnerMode::NoExpertise;
         assert!(matches!(
             item.validate(),
