@@ -15166,6 +15166,287 @@ fn attempt_reviews_unchanged_candidate_after_no_change_writer() {
 }
 
 #[test]
+fn initial_writer_rejects_no_change_declaration_without_commit() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let bin_dir = tmp.path().join("bin-initial-no-change");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+mkdir -p "$PROJECT_ROOT/.fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+printf '%s\n' '{"schema_version":1,"reason":"Already correct.","verification":[{"command":"true","result":"pass"}]}' \
+  > "$PROJECT_ROOT/.fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/no-change.json"
+exit 0
+"##,
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Initial writer"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-1",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("PROJECT_ROOT", &main_dir)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no committed Task output"));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(value["attempts"][0]["tasks"][0]["status"], "failed");
+    assert!(value["attempts"][0]["tasks"][0].get("output").is_none());
+}
+
+#[test]
+fn followup_writer_rejects_missing_or_invalid_no_change_declaration() {
+    let cases = [
+        ("missing", None),
+        ("malformed", Some("not json")),
+        (
+            "wrong-version",
+            Some(
+                r#"{"schema_version":2,"reason":"Checked.","verification":[{"command":"true","result":"pass"}]}"#,
+            ),
+        ),
+        (
+            "empty-reason",
+            Some(
+                r#"{"schema_version":1,"reason":" ","verification":[{"command":"true","result":"pass"}]}"#,
+            ),
+        ),
+        (
+            "empty-verification",
+            Some(r#"{"schema_version":1,"reason":"Checked.","verification":[]}"#),
+        ),
+        (
+            "empty-command",
+            Some(
+                r#"{"schema_version":1,"reason":"Checked.","verification":[{"command":" ","result":"pass"}]}"#,
+            ),
+        ),
+        (
+            "non-passing-result",
+            Some(
+                r#"{"schema_version":1,"reason":"Checked.","verification":[{"command":"true","result":"fail"}]}"#,
+            ),
+        ),
+    ];
+
+    for (case, declaration) in cases {
+        let tmp = TempDir::new().unwrap();
+        let main_dir = setup_git_project(&tmp);
+        create_completed_work_attempt(&tmp, &main_dir);
+        plan_followup_writer(&main_dir);
+        let bin_dir = tmp.path().join(format!("bin-invalid-{case}"));
+        let script = match declaration {
+            Some(json) => format!(
+                "#!/bin/bash\nprintf '%s\\n' '{}' > \"$DECLARATION_PATH\"\nexit 0\n",
+                json
+            ),
+            None => "#!/bin/bash\nexit 0\n".to_string(),
+        };
+        write_mock_claude(&bin_dir, &script);
+
+        fluent_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-write-2",
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .env(
+                "DECLARATION_PATH",
+                main_dir.join(
+                    ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json",
+                ),
+            )
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no-change"));
+
+        let value = read_work_show_json(&main_dir, "work-1");
+        let writer = value["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == "attempt-1-write-2")
+            .unwrap();
+        assert_eq!(writer["status"], "failed", "case {case}");
+        assert!(writer.get("output").is_none(), "case {case}");
+    }
+}
+
+#[test]
+fn followup_writer_rejects_no_change_for_dirty_or_divergent_candidate() {
+    for (case, mutation, expected) in [
+        (
+            "dirty",
+            "printf 'dirty\\n' > uncommitted.txt",
+            "uncommitted changes",
+        ),
+        (
+            "divergent",
+            "git reset --hard HEAD^ >/dev/null",
+            "previous completed Writer commit",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let main_dir = setup_git_project(&tmp);
+        create_completed_work_attempt(&tmp, &main_dir);
+        plan_followup_writer(&main_dir);
+        let bin_dir = tmp.path().join(format!("bin-no-change-{case}"));
+        write_mock_claude(
+            &bin_dir,
+            &format!(
+                r##"#!/bin/bash
+{mutation}
+printf '%s\n' '{{"schema_version":1,"reason":"Checked.","verification":[{{"command":"true","result":"pass"}}]}}' > "$DECLARATION_PATH"
+exit 0
+"##
+            ),
+        );
+
+        fluent_cmd()
+            .current_dir(&main_dir)
+            .args([
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-write-2",
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin_dir))
+            .env(
+                "DECLARATION_PATH",
+                main_dir.join(
+                    ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json",
+                ),
+            )
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+    }
+}
+
+#[test]
+fn followup_writer_clears_stale_no_change_declaration_before_retry() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    plan_followup_writer(&main_dir);
+    let bin_dir = tmp.path().join("bin-stale-no-change");
+    let counter = tmp.path().join("coder-count");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+HAS_PROMPT=0
+for arg in "$@"; do
+  if [ "$arg" = "-p" ]; then HAS_PROMPT=1; break; fi
+done
+if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
+n=$(cat "$COUNTER" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n' '{"schema_version":1,"reason":"First run only.","verification":[{"command":"true","result":"pass"}]}' > "$DECLARATION_PATH"
+  exit 7
+fi
+exit 0
+"##,
+    );
+    let declaration_path =
+        main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-2",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env("COUNTER", &counter)
+        .env("DECLARATION_PATH", &declaration_path)
+        .env("FLUENT_MAX_TASK_RETRIES", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("valid no-change declaration"));
+
+    assert_eq!(fs::read_to_string(counter).unwrap(), "2");
+    assert!(!declaration_path.exists());
+}
+
+#[test]
+fn corrective_writer_commit_ignores_no_change_declaration() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    plan_followup_writer(&main_dir);
+    let bin_dir = tmp.path().join("bin-corrective-commit");
+    write_mock_claude(
+        &bin_dir,
+        r##"#!/bin/bash
+printf 'correction\n' > correction.txt
+git add correction.txt
+git commit -m 'Add correction' >/dev/null
+printf '%s\n' '{"schema_version":1,"reason":"Should be ignored.","verification":[{"command":"true","result":"pass"}]}' > "$DECLARATION_PATH"
+exit 0
+"##,
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-2",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .env(
+            "DECLARATION_PATH",
+            main_dir
+                .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json"),
+        )
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let writer = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap();
+    assert!(writer["output"].get("no_change").is_none());
+    assert_ne!(writer["output"]["base_commit"], writer["output"]["commit"]);
+}
+
+#[test]
 fn work_task_run_rejects_reused_workspace_without_new_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

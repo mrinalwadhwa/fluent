@@ -2931,6 +2931,30 @@ impl Task {
                 status: self.status.clone(),
             });
         }
+        if let Some(no_change) = self
+            .output
+            .as_ref()
+            .and_then(|output| output.no_change.as_ref())
+        {
+            let expected_path = self
+                .artifact_area
+                .as_ref()
+                .map(|area| format!("{}/no-change.json", area.path.trim_end_matches('/')));
+            let invalid = self.kind != TaskKind::Write
+                || no_change.schema_version != 1
+                || no_change.reason.trim().is_empty()
+                || no_change.verification.is_empty()
+                || no_change
+                    .verification
+                    .iter()
+                    .any(|entry| entry.command.trim().is_empty())
+                || expected_path.as_deref() != Some(no_change.declaration_path.as_str());
+            if invalid {
+                return Err(WorkModelError::InvalidTaskNoChangeOutput {
+                    task_id: self.id.clone(),
+                });
+            }
+        }
         if self.kind == TaskKind::Review && !self.workspace_access.writes.is_empty() {
             return Err(WorkModelError::ReviewTaskWritesWorkspace {
                 task_id: self.id.clone(),
@@ -3593,6 +3617,9 @@ pub enum WorkModelError {
         task_id: String,
         status: TaskStatus,
     },
+    InvalidTaskNoChangeOutput {
+        task_id: String,
+    },
     CompleteAttemptHasIncompleteTask {
         attempt_id: String,
         task_id: String,
@@ -3774,6 +3801,9 @@ impl fmt::Display for WorkModelError {
             }
             Self::IncompleteTaskHasOutput { task_id, status } => {
                 write!(f, "task {task_id} has output but status is {status}")
+            }
+            Self::InvalidTaskNoChangeOutput { task_id } => {
+                write!(f, "task {task_id} has invalid no-change output")
             }
             Self::CompleteAttemptHasIncompleteTask {
                 attempt_id,
