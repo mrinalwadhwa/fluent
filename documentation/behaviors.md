@@ -167,14 +167,21 @@ THE SYSTEM SHALL expose their durable identities through
 `fluent work-item show <id>`.
 Test: tests/binary.rs (work_show_reports_preserved_work_item_input_artifacts)
 
-### B3
+### B3a
 
 WHEN Fluent creates any initial or follow-up Writer Task for a Work Item with
 preserved inputs,
-THE SYSTEM SHALL declare each preserved snapshot once in the Task inputs, name
-it as authoritative input in the Writer prompt, and grant read-only access to
-its isolated managed directory.
+THE SYSTEM SHALL declare each preserved snapshot once in the Task inputs and
+name it as authoritative input in the Writer prompt.
 Test: tests/binary.rs (every_writer_receives_preserved_work_item_input_artifacts_read_only)
+Test: src/work_task_executor.rs (initial_writer_prompt_names_preserved_work_item_inputs)
+
+### B3b
+
+WHEN Fluent launches a Writer with preserved Work Item inputs,
+THE SYSTEM SHALL grant the Writer read-only access to each input's isolated
+managed directory.
+Test: src/work_task_executor.rs (writer_launch_names_and_confines_preserved_work_item_input)
 
 ### B4
 

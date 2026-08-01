@@ -7978,6 +7978,174 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WriterInputBoundaryObservation {
+        prompt_named_input: bool,
+        profile_granted_read: bool,
+        profile_granted_write: bool,
+        sandbox_probe_succeeded: Option<bool>,
+    }
+
+    struct WriterInputBoundaryCoder {
+        profile_path: PathBuf,
+        input_path: PathBuf,
+        observation: Arc<Mutex<WriterInputBoundaryObservation>>,
+    }
+
+    impl crate::coder::Coder for WriterInputBoundaryCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the Writer route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            let input_dir = self.input_path.parent().unwrap().canonicalize().unwrap();
+            let profile = fs::read_to_string(&self.profile_path).unwrap();
+            let read_rule = format!(
+                "(allow file-read*  (subpath \"{}\"))",
+                input_dir.display()
+            );
+            let write_rule = format!(
+                "(allow file-write* (subpath \"{}\"))",
+                input_dir.display()
+            );
+            let sandbox_usable = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            let sandbox_probe_succeeded = sandbox_usable.then(|| {
+                std::process::Command::new("/usr/bin/sandbox-exec")
+                    .arg("-f")
+                    .arg(&self.profile_path)
+                    .args([
+                        "/bin/sh",
+                        "-c",
+                        "value=$(/bin/cat \"$1\") || exit 10; [ \"$value\" = authoritative ] || exit 11; if /bin/echo mutated > \"$1\"; then exit 12; fi",
+                        "writer-input-probe",
+                    ])
+                    .arg(&self.input_path)
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            });
+
+            *self.observation.lock().unwrap() = WriterInputBoundaryObservation {
+                prompt_named_input: prompt.contains("preserved Work Item input")
+                    && prompt.contains("0000-input.txt"),
+                profile_granted_read: profile.contains(&read_rule),
+                profile_granted_write: profile.contains(&write_rule),
+                sandbox_probe_succeeded,
+            };
+            Ok(0)
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the Writer route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn writer_launch_names_and_confines_preserved_work_item_input() {
+        let current_dir = std::env::current_dir().unwrap();
+        let tmp = tempfile::TempDir::new_in(current_dir).unwrap();
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(project_root.join(".fluent/expertise")).unwrap();
+        fs::write(
+            project_root.join(".fluent/expertise/INDEX.md"),
+            "# Project Expertise Index\n",
+        )
+        .unwrap();
+        fs::write(project_root.join("tracked.txt"), "baseline\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"] as &[&str],
+            &["config", "user.email", "test@test"],
+            &["config", "user.name", "test"],
+            &["add", "."],
+            &["commit", "-q", "-m", "Add fixture"],
+        ] {
+            crate::git::run(&project_root, args, "set up Writer input fixture").unwrap();
+        }
+
+        let input_path =
+            project_root.join(".fluent/work/artifacts/work-1/inputs/0000-input.txt");
+        fs::create_dir_all(input_path.parent().unwrap()).unwrap();
+        fs::write(&input_path, "authoritative\n").unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Use authoritative input".to_string(),
+            input_artifacts: vec![crate::work_model::WorkItemInputArtifact {
+                source_path: ".fluent/work/artifacts/source/input.txt".to_string(),
+                snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-input.txt".to_string(),
+                digest: "sha256:approved".to_string(),
+            }],
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task_id = item.attempts[0].tasks[0].id.clone();
+        let store = WorkModelStore::new(&project_root);
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(&project_root));
+        let observation = Arc::new(Mutex::new(WriterInputBoundaryObservation::default()));
+        let observed = Arc::clone(&observation);
+        let expected_input = input_path.clone();
+        let make_coder = move |sandbox| {
+            let CoderSandbox::SeatbeltProfile(profile_path) = sandbox else {
+                panic!("the Writer must launch with its production Seatbelt profile")
+            };
+            Box::new(WriterInputBoundaryCoder {
+                profile_path: PathBuf::from(profile_path),
+                input_path: expected_input.clone(),
+                observation: Arc::clone(&observed),
+            }) as Box<dyn crate::coder::Coder>
+        };
+
+        let _ = run_write_task_with_coder(
+            WorkTaskRunConfig {
+                project_root: &project_root,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: false,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        );
+
+        let observation = observation.lock().unwrap();
+        assert!(observation.prompt_named_input);
+        assert!(observation.profile_granted_read);
+        assert!(!observation.profile_granted_write);
+        if let Some(succeeded) = observation.sandbox_probe_succeeded {
+            assert!(succeeded, "the sandboxed Writer must read but not modify the input");
+        }
+        assert_eq!(fs::read_to_string(input_path).unwrap(), "authoritative\n");
+    }
+
     #[test]
     fn writer_provider_outage_pauses_exact_task_without_writer_charge() {
         let tmp = tempfile::TempDir::new().unwrap();
