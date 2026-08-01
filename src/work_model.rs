@@ -25,6 +25,10 @@ const WORK_TRANSACTIONS_DIR: &str = "transactions";
 pub const WORK_ARTIFACTS_DIR: &str = ".fluent/work/artifacts";
 pub const WORK_PROGRESS_DIR: &str = ".fluent/work/progress";
 
+pub fn work_item_input_path(work_item_id: &str, index: usize, filename: &str) -> String {
+    format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/inputs/{index:04}-{filename}")
+}
+
 pub fn work_artifact_path(work_item_id: &str, attempt_id: &str, artifact: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/{attempt_id}/{artifact}")
 }
@@ -314,6 +318,10 @@ pub struct WorkItem {
     /// the queue write can be reconciled on retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_enqueue: Option<EnqueueIntent>,
+    /// Immutable snapshots of managed files approved when this Work Item was
+    /// created. Every Task copies these references into its read boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_artifacts: Vec<WorkItemInputArtifact>,
     /// Store-managed optimistic revision for aggregate split-record writes.
     #[doc(hidden)]
     #[serde(skip)]
@@ -339,6 +347,7 @@ impl PartialEq for WorkItem {
             && self.corrective_context == other.corrective_context
             && self.corrective_audit == other.corrective_audit
             && self.pending_enqueue == other.pending_enqueue
+            && self.input_artifacts == other.input_artifacts
             && self.attempts == other.attempts
             && self.merge_candidates == other.merge_candidates
     }
@@ -362,6 +371,7 @@ impl Default for WorkItem {
             corrective_context: None,
             corrective_audit: None,
             pending_enqueue: None,
+            input_artifacts: Vec::new(),
             storage_revision: StorageRevision::default(),
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
@@ -370,6 +380,16 @@ impl Default for WorkItem {
 }
 
 impl WorkItem {
+    fn preserved_input_refs(&self) -> Vec<ArtifactRef> {
+        self.input_artifacts
+            .iter()
+            .map(|input| ArtifactRef {
+                producer_id: "work-item".to_string(),
+                path: input.snapshot_path.clone(),
+            })
+            .collect()
+    }
+
     /// Create a Work Item through the ordinary human-approved planning flow:
     /// execution-ready as an uncharged lineage root with no corrective context.
     pub fn planned(id: impl Into<String>, title: impl Into<String>) -> Self {
@@ -496,6 +516,7 @@ impl WorkItem {
             .as_ref()
             .and_then(|context| context.plan.as_deref())
             .and_then(ProgressContract::from_plan);
+        let input_artifacts = self.preserved_input_refs();
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
             work_item_id: self.id.clone(),
@@ -521,7 +542,7 @@ impl WorkItem {
                     path: artifact_path,
                 }),
                 review_context: None,
-                input_artifacts: Vec::new(),
+                input_artifacts,
                 depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
@@ -3078,6 +3099,14 @@ pub struct ArtifactRef {
     pub path: String,
 }
 
+/// Durable identity for exact bytes approved as Work Item execution input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkItemInputArtifact {
+    pub source_path: String,
+    pub snapshot_path: String,
+    pub digest: String,
+}
+
 /// Candidate merge result and its merge-review lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeCandidate {
@@ -3975,6 +4004,8 @@ struct WorkItemRecord {
     corrective_audit: Option<CorrectiveAuditContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_enqueue: Option<EnqueueIntent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_artifacts: Vec<WorkItemInputArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4046,6 +4077,7 @@ impl From<&WorkItem> for WorkItemRecord {
             corrective_context: work_item.corrective_context.clone(),
             corrective_audit: work_item.corrective_audit.clone(),
             pending_enqueue: work_item.pending_enqueue.clone(),
+            input_artifacts: work_item.input_artifacts.clone(),
         }
     }
 }
@@ -4067,6 +4099,7 @@ impl From<WorkItemRecord> for WorkItem {
             corrective_context: record.corrective_context,
             corrective_audit: record.corrective_audit,
             pending_enqueue: record.pending_enqueue,
+            input_artifacts: record.input_artifacts,
             attempts: Vec::new(),
             merge_candidates: Vec::new(),
         }

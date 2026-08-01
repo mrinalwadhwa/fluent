@@ -3582,6 +3582,86 @@ fn work_item_create_defaults_learner_mode_to_capture() {
 }
 
 #[test]
+fn work_create_snapshots_exact_managed_input_artifact_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let source = main_dir.join(".fluent/work/artifacts/evidence/transcript.bin");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let approved = b"approved\0bytes\xff";
+    fs::write(&source, approved).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Preserve evidence",
+            "--input-artifact",
+            ".fluent/work/artifacts/evidence/transcript.bin",
+        ])
+        .assert()
+        .success();
+
+    fs::write(&source, b"changed").unwrap();
+    fs::remove_file(&source).unwrap();
+    let shown = read_work_show_json(&main_dir, "work-input");
+    let identity = &shown["input_artifacts"][0];
+    assert_eq!(
+        identity["source_path"],
+        ".fluent/work/artifacts/evidence/transcript.bin"
+    );
+    assert_eq!(
+        identity["digest"],
+        format!("sha256:{:x}", Sha256::digest(approved))
+    );
+    let snapshot = main_dir.join(identity["snapshot_path"].as_str().unwrap());
+    assert_eq!(fs::read(snapshot).unwrap(), approved);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-input", "attempt-1"])
+        .assert()
+        .success();
+    let shown = read_work_show_json(&main_dir, "work-input");
+    assert_eq!(
+        shown["attempts"][0]["tasks"][0]["input_artifacts"][0]["path"],
+        identity["snapshot_path"]
+    );
+}
+
+#[test]
+fn work_show_reports_preserved_work_item_input_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let source = main_dir.join(".fluent/work/progress/source/attempt/progress.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"approved progress\n").unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-input",
+            "--title",
+            "Preserve progress",
+            "--input-artifact",
+            ".fluent/work/progress/source/attempt/progress.md",
+        ])
+        .assert()
+        .success();
+
+    let shown = read_work_show_json(&main_dir, "work-input");
+    assert_eq!(shown["input_artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        shown["input_artifacts"][0]["snapshot_path"],
+        ".fluent/work/artifacts/work-input/inputs/0000-progress.md"
+    );
+}
+
+#[test]
 fn work_item_create_accepts_explicit_capture_learner_mode() {
     let tmp = TempDir::new().unwrap();
     fluent_cmd()

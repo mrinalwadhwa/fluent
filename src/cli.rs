@@ -270,6 +270,10 @@ pub enum WorkItemCommands {
         /// Pre-land Learner policy: `capture` (default) or `no-expertise`
         #[arg(long, value_name = "MODE")]
         learner_mode: Option<crate::work_model::LearnerMode>,
+
+        /// Preserve an existing managed artifact as immutable execution input
+        #[arg(long, value_name = "PATH")]
+        input_artifact: Vec<String>,
     },
 
     /// List stored Work Items

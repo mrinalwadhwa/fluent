@@ -2875,7 +2875,12 @@ fn build_write_task_prompt_with_workspace(
         .and_then(|a| a.tasks.iter().find(|t| t.id == task_id))
         .expect("Task must exist");
     let task_json = to_json_pretty(task).unwrap_or_default();
-    let prior_reviews_list = prior_reviews_block(prior_reviews, "   ");
+    let work_item_inputs = project_root
+        .map(|root| work_item_inputs_only(item, root))
+        .unwrap_or_default();
+    let prior_reviews = prior_reviews_only(prior_reviews);
+    let prior_reviews_list = prior_reviews_block(&prior_reviews, "   ");
+    let work_item_inputs_list = prior_reviews_block(&work_item_inputs, "   ");
     let progress_md_pathbuf = project_root.and_then(|root| {
         item.attempts
             .iter()
@@ -2898,6 +2903,7 @@ fn build_write_task_prompt_with_workspace(
         .is_some();
     let has_required_progress_value = if has_required_progress { "yes" } else { "" };
     let has_prior_reviews = !prior_reviews.is_empty();
+    let has_work_item_inputs = !work_item_inputs.is_empty();
     let planning = project_root
         .map(|root| compute_planning_paths(item, root))
         .unwrap_or_default();
@@ -2932,6 +2938,7 @@ fn build_write_task_prompt_with_workspace(
         ""
     };
     let has_prior_reviews_value = if has_prior_reviews { "yes" } else { "" };
+    let has_work_item_inputs_value = if has_work_item_inputs { "yes" } else { "" };
     let has_prior_reviews_with_required_progress_value =
         if has_prior_reviews && has_required_progress {
             "yes"
@@ -2974,6 +2981,7 @@ fn build_write_task_prompt_with_workspace(
             ("approach_path", &approach_path),
             ("plan_path", &plan_path),
             ("prior_reviews_list", &prior_reviews_list),
+            ("work_item_inputs_list", &work_item_inputs_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
             ("is_corrective", is_corrective_value),
@@ -2982,6 +2990,7 @@ fn build_write_task_prompt_with_workspace(
             ("bootstrap_tester_yaml", bootstrap_yaml_value),
             ("bootstrap_extract_script", bootstrap_extract_value),
             ("has_prior_reviews", has_prior_reviews_value),
+            ("has_work_item_inputs", has_work_item_inputs_value),
             (
                 "has_prior_reviews_with_required_progress",
                 has_prior_reviews_with_required_progress_value,
@@ -4166,6 +4175,13 @@ fn prior_reviews_only(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
                 .unwrap_or(false)
         })
         .cloned()
+        .collect()
+}
+
+fn work_item_inputs_only(item: &WorkItem, project_root: &Path) -> Vec<PathBuf> {
+    item.input_artifacts
+        .iter()
+        .map(|input| project_root.join(&input.snapshot_path))
         .collect()
 }
 
@@ -10328,6 +10344,34 @@ mod tests {
             !prompt.contains("Address review finding:"),
             "first-round prompt should NOT include the prior-finding-record instruction; got prompt:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn initial_writer_prompt_names_preserved_work_item_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut item = review_item();
+        item.input_artifacts = vec![crate::work_model::WorkItemInputArtifact {
+            source_path: ".fluent/work/artifacts/source/transcript.jsonl".to_string(),
+            snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-transcript.jsonl".to_string(),
+            digest: "sha256:approved".to_string(),
+        }];
+        item.attempts[0].tasks[0].input_artifacts = vec![crate::work_model::ArtifactRef {
+            producer_id: "work-item".to_string(),
+            path: item.input_artifacts[0].snapshot_path.clone(),
+        }];
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[tmp.path().join(&item.input_artifacts[0].snapshot_path)],
+            Some(tmp.path()),
+            Some(tmp.path()),
+        );
+
+        assert!(prompt.contains("preserved Work Item input"));
+        assert!(prompt.contains("0000-transcript.jsonl"));
+        assert!(!prompt.contains("Read each prior review file"));
     }
 
     #[test]
