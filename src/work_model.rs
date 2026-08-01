@@ -2931,16 +2931,18 @@ impl Task {
                 status: self.status.clone(),
             });
         }
-        if let Some(no_change) = self
-            .output
-            .as_ref()
-            .and_then(|output| output.no_change.as_ref())
-        {
+        if let Some((output, no_change)) = self.output.as_ref().and_then(|output| {
+            output
+                .no_change
+                .as_ref()
+                .map(|no_change| (output, no_change))
+        }) {
             let expected_path = self
                 .artifact_area
                 .as_ref()
                 .map(|area| format!("{}/no-change.json", area.path.trim_end_matches('/')));
             let invalid = self.kind != TaskKind::Write
+                || output.base_commit.as_deref() != Some(output.commit.as_str())
                 || no_change.schema_version != 1
                 || no_change.reason.trim().is_empty()
                 || no_change.verification.is_empty()
@@ -8944,6 +8946,184 @@ random banner prose that must be ignored
         persisted.base_commit = Some("base123".to_string());
         let json = serde_json::to_string(&persisted).unwrap();
         assert!(json.contains(r#""base_commit":"base123""#));
+    }
+
+    fn valid_no_change_task() -> Task {
+        Task {
+            id: "attempt-1-write-2".to_string(),
+            kind: TaskKind::Write,
+            status: TaskStatus::Complete,
+            role: "author".to_string(),
+            instructions: None,
+            work_item_id: "work-1".to_string(),
+            attempt_id: Some("attempt-1".to_string()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: vec![workspace("candidate")],
+            },
+            artifact_area: Some(TaskArtifactArea {
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2".to_string(),
+            }),
+            review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: Some(TaskOutput {
+                workspace_id: "candidate".to_string(),
+                workspace_path: "/workspaces/candidate".to_string(),
+                source_branch: "main".to_string(),
+                base_commit: Some("abc123".to_string()),
+                commit: "abc123".to_string(),
+                no_change: Some(NoChangeOutput {
+                    schema_version: 1,
+                    declaration_path:
+                        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json"
+                            .to_string(),
+                    reason: "The candidate already passes the requested check".to_string(),
+                    verification: vec![NoChangeVerification {
+                        command: "cargo test focused_test".to_string(),
+                        result: NoChangeVerificationResult::Pass,
+                    }],
+                }),
+            }),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn valid_no_change_task_output_passes_model_validation() {
+        valid_no_change_task().validate().unwrap();
+    }
+
+    #[test]
+    fn ordinary_committed_task_output_may_advance_from_base_commit() {
+        let mut task = valid_no_change_task();
+        let output = task.output.as_mut().unwrap();
+        output.commit = "def456".to_string();
+        output.no_change = None;
+
+        task.validate().unwrap();
+    }
+
+    #[test]
+    fn invalid_no_change_task_output_shapes_fail_model_validation() {
+        let mut cases = Vec::new();
+
+        let mut changed_commit = valid_no_change_task();
+        changed_commit.output.as_mut().unwrap().commit = "def456".to_string();
+        cases.push(("changed commit", changed_commit));
+
+        let mut missing_base = valid_no_change_task();
+        missing_base.output.as_mut().unwrap().base_commit = None;
+        cases.push(("missing base commit", missing_base));
+
+        let mut wrong_kind = valid_no_change_task();
+        wrong_kind.kind = TaskKind::Tester;
+        cases.push(("non-Writer task", wrong_kind));
+
+        let mut wrong_path = valid_no_change_task();
+        wrong_path
+            .output
+            .as_mut()
+            .unwrap()
+            .no_change
+            .as_mut()
+            .unwrap()
+            .declaration_path = ".fluent/work/artifacts/other/no-change.json".to_string();
+        cases.push(("wrong declaration path", wrong_path));
+
+        let mut wrong_version = valid_no_change_task();
+        wrong_version
+            .output
+            .as_mut()
+            .unwrap()
+            .no_change
+            .as_mut()
+            .unwrap()
+            .schema_version = 2;
+        cases.push(("wrong schema version", wrong_version));
+
+        let mut empty_reason = valid_no_change_task();
+        empty_reason
+            .output
+            .as_mut()
+            .unwrap()
+            .no_change
+            .as_mut()
+            .unwrap()
+            .reason = " ".to_string();
+        cases.push(("empty reason", empty_reason));
+
+        let mut empty_verification = valid_no_change_task();
+        empty_verification
+            .output
+            .as_mut()
+            .unwrap()
+            .no_change
+            .as_mut()
+            .unwrap()
+            .verification
+            .clear();
+        cases.push(("empty verification", empty_verification));
+
+        let mut empty_command = valid_no_change_task();
+        empty_command
+            .output
+            .as_mut()
+            .unwrap()
+            .no_change
+            .as_mut()
+            .unwrap()
+            .verification[0]
+            .command = " ".to_string();
+        cases.push(("empty verification command", empty_command));
+
+        for (case, task) in cases {
+            assert!(
+                matches!(
+                    task.validate(),
+                    Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+                ),
+                "{case} must fail no-change validation"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_no_change_output_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "No-change output");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0] = completed_write_task("attempt-1-write-1", "first");
+        item.attempts[0].tasks[0].output.as_mut().unwrap().commit = "abc123".to_string();
+        item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+        item.attempts[0].tasks.pop();
+        item.attempts[0].tasks.push(valid_no_change_task());
+
+        store.create_work_item(&item).unwrap();
+        let loaded = store.read_work_item("work-1").unwrap();
+
+        assert_eq!(loaded.attempts[0].tasks[1], valid_no_change_task());
+    }
+
+    #[test]
+    fn storage_rejects_no_change_output_with_changed_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Contradictory no-change output");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0] = completed_write_task("attempt-1-write-1", "first");
+        item.attempts[0].tasks[0].output.as_mut().unwrap().commit = "abc123".to_string();
+        item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+        let mut contradictory = valid_no_change_task();
+        contradictory.output.as_mut().unwrap().commit = "def456".to_string();
+        item.attempts[0].tasks.pop();
+        item.attempts[0].tasks.push(contradictory);
+
+        assert!(store.create_work_item(&item).is_err());
+        assert!(!store.work_item_path("work-1").unwrap().exists());
     }
 
     #[test]
