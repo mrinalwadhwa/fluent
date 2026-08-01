@@ -66,10 +66,10 @@ First, understand what this Work Item asks for:
      this is fluent's own accumulated understanding of the project — prefer it over re-deriving.
 {{/if}}
 {{#if has_prior_reviews}}
-6. Read each prior review file. The list below is the complete set from the most recent prior round: {{prior_reviews_list}}
+- Read each prior review file. The list below is the complete set from the most recent prior round: {{prior_reviews_list}}
 {{/if}}
 {{#if has_work_item_inputs}}
-6. Read each preserved Work Item input. These immutable files are authoritative execution inputs: {{work_item_inputs_list}}
+- Read each preserved Work Item input. These immutable files are authoritative execution inputs: {{work_item_inputs_list}}
 {{/if}}
 
 Before implementing, orient to the codebase so your work fits how this project already does things:

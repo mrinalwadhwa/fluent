@@ -28,10 +28,10 @@ The Writer's workspace and commits:
 6. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
 {{/if}}
 {{#if has_prior_reviews}}
-7. Read each prior review file. The list below is the complete set of {{role}} reviews from the most recent prior round: {{prior_reviews_list}}
+- Read each prior review file. The list below is the complete set of {{role}} reviews from the most recent prior round: {{prior_reviews_list}}
 {{/if}}
 {{#if has_work_item_inputs}}
-7. Read each preserved Work Item input. These immutable files are authoritative review inputs: {{work_item_inputs_list}}
+- Read each preserved Work Item input. These immutable files are authoritative review inputs: {{work_item_inputs_list}}
 {{/if}}
 
 ## Phase 2 — Inspect the candidate
