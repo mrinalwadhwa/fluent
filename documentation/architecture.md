@@ -131,12 +131,19 @@ each coder launch, including retries, so evidence from an earlier launch cannot
 authorize completion. Initial Writers and follow-up Writers without valid fresh
 evidence still require a new commit.
 
-`TaskOutput.commit` names the candidate for both paths. A no-change output also
-stores typed `no_change` evidence with the declaration's project-relative path,
-reason, and verification entries. Existing TaskOutput JSON without `no_change`
-deserializes as ordinary committed output and continues to serialize without the
-optional field. The Attempt loop treats either completed output the same way: it
-plans Tester and reviewer Tasks against `TaskOutput.commit`.
+`TaskOutput.commit` names the current candidate for both paths, while
+`TaskOutput.base_commit` keeps the commit a no-change Writer verified. Those
+identities initially match. A no-change output also stores typed `no_change`
+evidence with the declaration's project-relative path, reason, and verification
+entries. If capture Learning later adds a canonical expertise commit, the host
+keeps `base_commit`, advances `commit`, and stores a typed
+`learner_canonicalization` record whose `from_commit` and `to_commit` match those
+two fields. Validation rejects unexplained, reversed, partial, or mismatched
+divergence and accepts the record only for a capture Attempt with durable Learning
+state. Existing TaskOutput JSON without either optional record keeps its legacy
+shape. The Attempt loop plans Tester and reviewer Tasks against the Writer output
+that exists before Learning; after Learning, landing consumes the current
+`TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and
 untracked changes outside `.fluent/`. If it finds any, it reports Git's
@@ -650,7 +657,10 @@ to the baseline while retaining the final worktree, stages the complete
 with subject `Update expertise` whose sole parent is the baseline; a result
 with no net expertise delta keeps the baseline without an empty commit. The
 Write output and Merge Candidate pointers move only after the canonical result
-is verified exactly clean, and the handoff is written last. Any pre-acceptance
+is verified exactly clean. When a no-change Writer produced that output, the same
+in-memory aggregate preserves its verified `base_commit` and records the exact
+Learner commit transition before the finalizer first persists `HandoffPending`.
+The handoff is written last. Any pre-acceptance
 failure runs one restoring rollback that hard-resets and cleans back to the
 proven baseline; an obstructed rollback composes a distinct restoration
 diagnostic under the primary without changing its typed kind or relaunchability.
@@ -658,7 +668,8 @@ Every ordinary completed-call rejection settles terminal failed Learning and
 withholds Merge Candidate readiness. If canonical-handoff publication fails
 after a clean successor is verified, that successor is retained as both
 pointers while Learning stays relaunchable `Generic` failed with no handoff
-reference.
+reference; a canonicalized no-change output retains its original verified commit
+and typed transition in that recovery state.
 
 A `no-expertise` pre-land Learner instead runs from an isolated snapshot of the
 reviewed accepted change, baselined on the reviewed Writer commit rather than the

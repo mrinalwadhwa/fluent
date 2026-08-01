@@ -733,7 +733,10 @@ clean and either contains at least one commit produced after Fluent created or
 bound the workspace for that Task run, or the Task is a follow-up Writer whose
 HEAD still equals the previous completed Writer commit and whose fresh
 `no-change.json` records schema version 1, a non-empty reason, and at least one
-non-empty command with result `pass`.
+non-empty command with result `pass`. If the capture Learner later creates a
+canonical expertise commit, Fluent SHALL keep the verified Writer commit in
+`TaskOutput.base_commit`, move `TaskOutput.commit` and the Merge Candidate to
+the canonical commit, and record the exact transition between those identities.
 Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
 Test: tests/binary.rs (followup_writer_completes_with_valid_no_change_declaration)
@@ -741,6 +744,7 @@ Test: tests/binary.rs (attempt_reviews_unchanged_candidate_after_no_change_write
 Test: tests/behaviors/operations/test-work-task-run.sh (clean committed Task completes)
 Test: tests/behaviors/operations/test-work-task-run.sh (verified follow-up no-change continues into review)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
+Test: src/work_attempt_loop.rs (learner_expertise_commit_preserves_no_change_writer_identity)
 
 ### B51
 
@@ -761,7 +765,10 @@ THEN THE SYSTEM SHALL leave the Task incomplete and report that there is
 no committed Task output or name the valid declaration required. Initial
 Writers, malformed or empty declarations, stale retry declarations, dirty
 workspaces, and HEADs that differ from the previous completed Writer commit do
-not qualify.
+not qualify. A persisted no-change output whose verified and current commits
+differ also does not qualify unless a capture Learner record names that exact
+`from_commit` and `to_commit` transition; missing, partial, reversed, and
+mismatched transitions SHALL fail Work-model validation.
 Test: tests/binary.rs (work_task_run_rejects_success_without_commits)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
 Test: tests/binary.rs (initial_writer_rejects_no_change_declaration_without_commit)
@@ -770,6 +777,7 @@ Test: tests/binary.rs (followup_writer_rejects_no_change_for_dirty_or_divergent_
 Test: tests/binary.rs (followup_writer_clears_stale_no_change_declaration_before_retry)
 Test: tests/binary.rs (corrective_writer_commit_ignores_no_change_declaration)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
+Test: src/work_model.rs (no_change_commit_divergence_requires_successful_capture_learning)
 
 ### B53
 
@@ -5720,9 +5728,12 @@ Test: src/work_attempt_loop.rs (learner_rollback_failure_preserves_primary_kind_
 
 WHEN Fluent records a pre-land Learner as succeeded,
 THE SYSTEM SHALL expose a Write output and Merge Candidate that both name
-the same clean canonical expertise result with no uncommitted portion.
+the same clean canonical expertise result with no uncommitted portion. If the
+Write output carries verified no-change evidence, THE SYSTEM SHALL preserve its
+verified commit separately and record the host-owned canonicalization transition.
 Test: src/work_attempt_loop.rs (learner_success_requires_complete_clean_expertise_result)
 Test: src/work_attempt_loop.rs (learner_success_updates_pointers_only_after_clean_verification)
+Test: src/work_attempt_loop.rs (learner_expertise_commit_preserves_no_change_writer_identity)
 
 ### B30a
 
@@ -5731,8 +5742,10 @@ result is verified,
 THEN THE SYSTEM SHALL retain that result as both the Write output and
 Merge Candidate candidate commit and record relaunchable `Generic`
 failed Learning with no handoff reference and a
-canonical-handoff-publication diagnostic.
+canonical-handoff-publication diagnostic. A no-change Write output SHALL retain
+its verified commit and canonicalization transition in this recovery state.
 Test: src/work_attempt_loop.rs (learner_handoff_failure_retains_clean_typed_failed_result)
+Test: src/work_attempt_loop.rs (learner_handoff_failure_preserves_no_change_writer_identity)
 
 ## Selectable pre-land Learner policy
 
