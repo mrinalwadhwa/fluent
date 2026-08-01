@@ -10890,6 +10890,23 @@ mod tests {
     }
 
     #[test]
+    fn followup_writer_prompt_has_no_unconditional_commit_requirement() {
+        let mut item = review_item();
+        item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+
+        let prompt = build_write_task_prompt(&item, "attempt-1", "attempt-1-write-2", &[]);
+
+        assert!(
+            prompt.contains("verified as no-change"),
+            "follow-up completion criteria should allow verified no-change steps; got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Every step is committed."),
+            "follow-up prompt must not retain the initial Writer's unconditional commit requirement; got:\n{prompt}"
+        );
+    }
+
+    #[test]
     fn write_task_prompt_includes_progress_md_path_when_plan_present() {
         let mut item = review_item();
         item.planning_context = Some(crate::work_model::PlanningContext {

@@ -175,7 +175,11 @@ Run all the test commands in `.fluent/tester.yaml`. Fix and re-run until everyth
 
 ### Task is done when
 
+{{#if is_followup_writer}}
+- Every step is committed or explicitly verified as no-change.
+{{else}}
 - Every step is committed.
+{{/if}}
 - All test commands in `.fluent/tester.yaml` succeed.
 - The workspace has no unstaged, staged, or untracked changes — commit meaningful files; add generated ones to `.gitignore`.
 
