@@ -323,6 +323,7 @@ mod tests {
                         base_commit: None,
                         commit: "abc123".to_string(),
                         no_change: None,
+                        learner_canonicalization: None,
                     }),
                     created_at: None,
                     started_at: None,

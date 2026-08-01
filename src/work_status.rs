@@ -371,6 +371,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);
@@ -600,6 +601,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);

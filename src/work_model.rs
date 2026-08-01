@@ -2941,8 +2941,16 @@ impl Task {
                 .artifact_area
                 .as_ref()
                 .map(|area| format!("{}/no-change.json", area.path.trim_end_matches('/')));
+            let commit_identity_is_valid = match &output.learner_canonicalization {
+                None => output.base_commit.as_deref() == Some(output.commit.as_str()),
+                Some(canonicalization) => {
+                    output.base_commit.as_deref() == Some(canonicalization.from_commit.as_str())
+                        && output.commit == canonicalization.to_commit
+                        && canonicalization.from_commit != canonicalization.to_commit
+                }
+            };
             let invalid = self.kind != TaskKind::Write
-                || output.base_commit.as_deref() != Some(output.commit.as_str())
+                || !commit_identity_is_valid
                 || no_change.schema_version != 1
                 || no_change.reason.trim().is_empty()
                 || no_change.verification.is_empty()
@@ -2956,6 +2964,14 @@ impl Task {
                     task_id: self.id.clone(),
                 });
             }
+        } else if self
+            .output
+            .as_ref()
+            .is_some_and(|output| output.learner_canonicalization.is_some())
+        {
+            return Err(WorkModelError::InvalidTaskNoChangeOutput {
+                task_id: self.id.clone(),
+            });
         }
         if self.kind == TaskKind::Review && !self.workspace_access.writes.is_empty() {
             return Err(WorkModelError::ReviewTaskWritesWorkspace {
@@ -3149,6 +3165,17 @@ pub struct TaskOutput {
     /// intentionally preserved it instead of producing another commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_change: Option<NoChangeOutput>,
+    /// The host-owned capture Learner transition from the commit verified by a
+    /// no-change Writer to the current canonical candidate commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learner_canonicalization: Option<LearnerCommitCanonicalization>,
+}
+
+/// Typed provenance for a capture Learner's canonical expertise commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnerCommitCanonicalization {
+    pub from_commit: String,
+    pub to_commit: String,
 }
 
 /// Typed reference to a follow-up Writer's Task-owned no-change declaration.
@@ -6542,6 +6569,7 @@ random banner prose that must be ignored
             base_commit: None,
             commit: "commit-second".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         work_item.attempts[0].status = AttemptStatus::Complete;
         work_item
@@ -6764,6 +6792,7 @@ random banner prose that must be ignored
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         let preserved_ref = work_item.preserved_input_refs()[0].clone();
         work_item
@@ -8247,6 +8276,7 @@ random banner prose that must be ignored
                 base_commit: None,
                 commit: format!("commit-{suffix}"),
                 no_change: None,
+                learner_canonicalization: None,
             }),
             created_at: None,
             started_at: None,
@@ -8931,6 +8961,7 @@ random banner prose that must be ignored
             output.no_change.is_none(),
             "legacy output remains an ordinary committed Writer output"
         );
+        assert!(output.learner_canonicalization.is_none());
         assert!(
             !serde_json::to_string(&output)
                 .unwrap()
@@ -8984,6 +9015,7 @@ random banner prose that must be ignored
                         result: NoChangeVerificationResult::Pass,
                     }],
                 }),
+                learner_canonicalization: None,
             }),
             created_at: None,
             started_at: None,
@@ -8994,6 +9026,97 @@ random banner prose that must be ignored
     #[test]
     fn valid_no_change_task_output_passes_model_validation() {
         valid_no_change_task().validate().unwrap();
+    }
+
+    #[test]
+    fn no_change_commit_divergence_requires_successful_capture_learning() {
+        let mut canonicalized = valid_no_change_task();
+        let output = canonicalized.output.as_mut().unwrap();
+        output.commit = "def456".to_string();
+        output.learner_canonicalization = Some(LearnerCommitCanonicalization {
+            from_commit: "abc123".to_string(),
+            to_commit: "def456".to_string(),
+        });
+        canonicalized.validate().unwrap();
+
+        let mut cases = Vec::new();
+
+        let mut missing = canonicalized.clone();
+        missing.output.as_mut().unwrap().learner_canonicalization = None;
+        cases.push(("missing transition", missing));
+
+        let mut reversed = canonicalized.clone();
+        reversed
+            .output
+            .as_mut()
+            .unwrap()
+            .learner_canonicalization
+            .as_mut()
+            .unwrap()
+            .from_commit = "def456".to_string();
+        reversed
+            .output
+            .as_mut()
+            .unwrap()
+            .learner_canonicalization
+            .as_mut()
+            .unwrap()
+            .to_commit = "abc123".to_string();
+        cases.push(("reversed transition", reversed));
+
+        let mut mismatched_from = canonicalized.clone();
+        mismatched_from
+            .output
+            .as_mut()
+            .unwrap()
+            .learner_canonicalization
+            .as_mut()
+            .unwrap()
+            .from_commit = "other".to_string();
+        cases.push(("mismatched source", mismatched_from));
+
+        let mut mismatched_to = canonicalized;
+        mismatched_to
+            .output
+            .as_mut()
+            .unwrap()
+            .learner_canonicalization
+            .as_mut()
+            .unwrap()
+            .to_commit = "other".to_string();
+        cases.push(("mismatched destination", mismatched_to));
+
+        for (name, task) in cases {
+            assert!(
+                matches!(
+                    task.validate(),
+                    Err(WorkModelError::InvalidTaskNoChangeOutput { .. })
+                ),
+                "{name} must fail no-change validation"
+            );
+        }
+    }
+
+    #[test]
+    fn learner_canonicalization_rejects_partial_json_and_omits_none() {
+        let mut output = valid_no_change_task().output.unwrap();
+        let legacy_json = serde_json::to_string(&output).unwrap();
+        assert!(!legacy_json.contains("learner_canonicalization"));
+
+        let partial = legacy_json.replace(
+            r#""commit":"abc123""#,
+            r#""commit":"def456","learner_canonicalization":{"from_commit":"abc123"}"#,
+        );
+        assert!(serde_json::from_str::<TaskOutput>(&partial).is_err());
+
+        output.commit = "def456".to_string();
+        output.learner_canonicalization = Some(LearnerCommitCanonicalization {
+            from_commit: "abc123".to_string(),
+            to_commit: "def456".to_string(),
+        });
+        let round_tripped: TaskOutput =
+            serde_json::from_str(&serde_json::to_string(&output).unwrap()).unwrap();
+        assert_eq!(round_tripped, output);
     }
 
     #[test]
@@ -9106,6 +9229,31 @@ random banner prose that must be ignored
         let loaded = store.read_work_item("work-1").unwrap();
 
         assert_eq!(loaded.attempts[0].tasks[1], valid_no_change_task());
+    }
+
+    #[test]
+    fn canonicalized_no_change_output_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Canonicalized no-change output");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0] = completed_write_task("attempt-1-write-1", "first");
+        item.attempts[0].tasks[0].output.as_mut().unwrap().commit = "abc123".to_string();
+        item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+        let mut canonicalized = valid_no_change_task();
+        let output = canonicalized.output.as_mut().unwrap();
+        output.commit = "def456".to_string();
+        output.learner_canonicalization = Some(LearnerCommitCanonicalization {
+            from_commit: "abc123".to_string(),
+            to_commit: "def456".to_string(),
+        });
+        item.attempts[0].tasks.pop();
+        item.attempts[0].tasks.push(canonicalized.clone());
+
+        store.create_work_item(&item).unwrap();
+        let loaded = store.read_work_item("work-1").unwrap();
+
+        assert_eq!(loaded.attempts[0].tasks[1], canonicalized);
     }
 
     #[test]
@@ -9790,6 +9938,7 @@ random banner prose that must be ignored
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();
         let attempt = &mut item.attempts[0];

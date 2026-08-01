@@ -799,6 +799,7 @@ fn complete_write_task(
         base_commit: Some(baseline_commit),
         commit: commit.clone(),
         no_change,
+        learner_canonicalization: None,
     };
     let mut completed_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let (attempt_index, task_index) =
@@ -8836,6 +8837,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();
         item
@@ -9630,6 +9632,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         item.add_review_tasks("attempt-1", &[role]).unwrap();
         item
@@ -9880,6 +9883,7 @@ mod tests {
             base_commit: None,
             commit: merged_commit.clone(),
             no_change: None,
+            learner_canonicalization: None,
         });
         attempt.status = crate::work_model::AttemptStatus::Complete;
         attempt.review_state = Some(crate::work_model::AttemptReviewState::Passed);
@@ -9965,6 +9969,7 @@ mod tests {
             base_commit: None,
             commit: batch.origin.merged_commit.clone(),
             no_change: None,
+            learner_canonicalization: None,
         });
         seeded
             .add_review_tasks(

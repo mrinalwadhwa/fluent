@@ -3744,6 +3744,7 @@ fn every_writer_receives_preserved_work_item_input_artifacts_read_only() {
         base_commit: None,
         commit: "abc123".to_string(),
         no_change: None,
+        learner_canonicalization: None,
     });
     item.add_next_write_round(
         "attempt-1",
@@ -3826,6 +3827,7 @@ fn reviewers_receive_preserved_work_item_inputs_and_attempt_inputs() {
         base_commit: None,
         commit: "abc123".to_string(),
         no_change: None,
+        learner_canonicalization: None,
     });
     item.add_review_tasks("attempt-1", &["tests"]).unwrap();
     store.write_work_item(&item).unwrap();
@@ -19463,6 +19465,7 @@ fn queue_add_rejects_suspended_attempt_and_pending_candidate() {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         attempt.status = AttemptStatus::Complete;
         attempt.review_state = Some(AttemptReviewState::Passed);

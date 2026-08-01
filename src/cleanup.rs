@@ -1233,6 +1233,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
         store.create_work_item(&item).unwrap();

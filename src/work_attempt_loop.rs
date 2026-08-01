@@ -5595,6 +5595,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         let artifact_path = work_artifact_path(work_item_id, attempt_id, "review-provider");
         let mut review =
@@ -5641,6 +5642,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
 
         let tester_artifact_path = work_artifact_path("work-1", "attempt-1", "attempt-1-tester");
@@ -6120,6 +6122,7 @@ mod tests {
             base_commit: None,
             commit: base.clone(),
             no_change: None,
+            learner_canonicalization: None,
         };
 
         let attempt = &mut item.attempts[0];
@@ -8361,6 +8364,7 @@ mod tests {
                         base_commit: None,
                         commit: "abc123".to_string(),
                         no_change: None,
+                        learner_canonicalization: None,
                     }),
                     created_at: None,
                     started_at: None,
@@ -8438,6 +8442,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         let mut blocker = review_task_with_artifact(
             "resume-attempt-blocker",
@@ -8514,6 +8519,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
         let mut paused = review_task_with_artifact(
             "provider-pause-review",

@@ -2977,6 +2977,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
 
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
@@ -3835,6 +3836,7 @@ mod tests {
             base_commit: None,
             commit: "abc123".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
 
         let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
@@ -4063,6 +4065,7 @@ mod tests {
             base_commit: None,
             commit: "old-sha-1".to_string(),
             no_change: None,
+            learner_canonicalization: None,
         });
 
         let second_write = Task {
@@ -4088,6 +4091,7 @@ mod tests {
                 base_commit: None,
                 commit: "old-sha-2".to_string(),
                 no_change: None,
+                learner_canonicalization: None,
             }),
             created_at: None,
             started_at: None,
@@ -4735,6 +4739,7 @@ mod tests {
             base_commit: None,
             commit: reviewed_sha.clone(),
             no_change: None,
+            learner_canonicalization: None,
         });
         item.create_or_get_merge_candidate("attempt-1").unwrap();
         configure(&mut item, &reviewed_sha);
@@ -6127,6 +6132,7 @@ mod tests {
             base_commit: None,
             commit: candidate_commit.clone(),
             no_change: None,
+            learner_canonicalization: None,
         });
         item.create_or_get_merge_candidate("attempt-1").unwrap();
         item.attempts[0].coder_mapping.write = crate::work_model::CoderModelPair {
