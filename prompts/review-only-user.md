@@ -21,6 +21,13 @@ Review the codebase at {{candidate_workspace_path}}.
 {{#if decisions_path}}
 3. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
 {{/if}}
+{{#if has_work_item_inputs}}
+
+### Authoritative Work Item inputs
+
+Read each preserved Work Item input. These immutable files are authoritative review inputs:
+{{work_item_inputs_list}}
+{{/if}}
 
 ## Phase 2 — Inspect the codebase
 

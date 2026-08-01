@@ -9424,6 +9424,53 @@ mod tests {
     }
 
     #[test]
+    fn review_only_prompt_names_preserved_work_item_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review authoritative evidence".to_string(),
+            input_artifacts: vec![crate::work_model::WorkItemInputArtifact {
+                source_path: ".fluent/work/artifacts/source/evidence.jsonl".to_string(),
+                snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-evidence.jsonl"
+                    .to_string(),
+                digest: "sha256:approved".to_string(),
+            }],
+            ..Default::default()
+        };
+        item.add_review_only_attempt(
+            "attempt-1",
+            &["tests"],
+            "main",
+            "abc123",
+            true,
+        )
+        .unwrap();
+        let input_path = project_root.join(&item.input_artifacts[0].snapshot_path);
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &artifact_dir.join("review.md"),
+            readable_workspaces: std::slice::from_ref(&project_root.to_path_buf()),
+            input_artifacts: std::slice::from_ref(&input_path),
+            review_only: true,
+        })
+        .unwrap();
+
+        assert!(
+            prompts
+                .review_prompt
+                .contains("immutable files are authoritative review inputs")
+        );
+        assert!(prompts.review_prompt.contains("0000-evidence.jsonl"));
+    }
+
+    #[test]
     fn writer_and_every_reviewer_prompt_retain_audit_after_origin_cleanup() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path().join("project");
