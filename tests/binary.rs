@@ -15047,6 +15047,10 @@ for arg in "$@"; do
 done
 if [ -z "$PROMPT" ]; then exit 0; fi
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  mkdir -p .fluent/expertise
+  printf '%s\n' '# No-change identity' > .fluent/expertise/no-change-identity.md
+  git add .fluent/expertise/no-change-identity.md
+  git commit -m 'Update expertise' >/dev/null
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   mkdir -p "$(dirname "$DRAFT")"
   printf '%s\n' '{"learning_summary":"none","follow_ups":[]}' > "$DRAFT"
@@ -15117,7 +15121,7 @@ fn followup_writer_completes_with_valid_no_change_declaration() {
 }
 
 #[test]
-fn attempt_reviews_unchanged_candidate_after_no_change_writer() {
+fn learner_expertise_commit_preserves_no_change_writer_identity() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     create_completed_work_attempt(&tmp, &main_dir);
@@ -15146,7 +15150,17 @@ fn attempt_reviews_unchanged_candidate_after_no_change_writer() {
         .iter()
         .find(|task| task["id"] == "attempt-1-write-2")
         .unwrap();
-    assert_eq!(writer["output"]["commit"], candidate);
+    let canonical_commit = writer["output"]["commit"].as_str().unwrap();
+    assert_ne!(canonical_commit, candidate);
+    assert_eq!(writer["output"]["base_commit"], candidate);
+    assert_eq!(
+        writer["output"]["learner_canonicalization"]["from_commit"],
+        candidate
+    );
+    assert_eq!(
+        writer["output"]["learner_canonicalization"]["to_commit"],
+        canonical_commit
+    );
     let tester = tasks
         .iter()
         .find(|task| task["id"] == "attempt-1-tester-2")
@@ -15165,6 +15179,19 @@ fn attempt_reviews_unchanged_candidate_after_no_change_writer() {
     assert!(reviews.iter().all(|task| {
         task["status"] == "complete" && task["review_context"]["candidate_commit"] == candidate
     }));
+    assert_eq!(value["attempts"][0]["learning"]["status"], "succeeded");
+    assert_eq!(
+        value["merge_candidates"][0]["candidate_commit"],
+        canonical_commit
+    );
+
+    let stored = WorkModelStore::new(&main_dir)
+        .read_work_item("work-1")
+        .unwrap();
+    stored.validate().unwrap();
+    stored.merge_candidates[0]
+        .validate_advancement(&stored)
+        .unwrap();
 }
 
 #[test]
