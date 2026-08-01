@@ -121,8 +121,22 @@ or derives instructions from Work Item planning context into optional
 `../work-<work-item-id-byte-len>-<work-item-id>-<attempt-id>`.
 `fluent task run` creates or reuses that writable workspace as a
 sibling git worktree beside the source checkout, runs the coder there,
-and completes the Task only after the workspace is clean and contains a
-new commit produced after Fluent bound the workspace for that Task run.
+and normally completes the Task only after the workspace is clean and contains
+a new commit produced after Fluent bound the workspace for that Task run. A
+follow-up Writer may instead preserve the previous completed Writer commit. It
+must leave the workspace clean at that exact commit and write a fresh
+`no-change.json` in its Task artifact area with schema version 1, a reason, and
+one or more passing command entries. Fluent removes only that declaration before
+each coder launch, including retries, so evidence from an earlier launch cannot
+authorize completion. Initial Writers and follow-up Writers without valid fresh
+evidence still require a new commit.
+
+`TaskOutput.commit` names the candidate for both paths. A no-change output also
+stores typed `no_change` evidence with the declaration's project-relative path,
+reason, and verification entries. Existing TaskOutput JSON without `no_change`
+deserializes as ordinary committed output and continues to serialize without the
+optional field. The Attempt loop treats either completed output the same way: it
+plans Tester and reviewer Tasks against `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and
 untracked changes outside `.fluent/`. If it finds any, it reports Git's

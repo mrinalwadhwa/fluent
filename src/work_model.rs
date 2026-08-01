@@ -8926,9 +8926,18 @@ random banner prose that must be ignored
         let output: TaskOutput = serde_json::from_str(legacy).unwrap();
         assert!(output.base_commit.is_none());
         assert!(
+            output.no_change.is_none(),
+            "legacy output remains an ordinary committed Writer output"
+        );
+        assert!(
             !serde_json::to_string(&output)
                 .unwrap()
                 .contains("base_commit")
+        );
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("no_change")
         );
 
         let mut persisted = output;

@@ -729,11 +729,17 @@ Test: tests/behaviors/operations/test-work-task-instructions.sh (minimal Work It
 
 WHEN a write Task coder exits successfully,
 THE SYSTEM SHALL complete the Task only if the writable workspace is
-clean and contains at least one commit produced after Fluent created or
-bound the workspace for that Task run.
+clean and either contains at least one commit produced after Fluent created or
+bound the workspace for that Task run, or the Task is a follow-up Writer whose
+HEAD still equals the previous completed Writer commit and whose fresh
+`no-change.json` records schema version 1, a non-empty reason, and at least one
+non-empty command with result `pass`.
 Test: tests/binary.rs (work_task_run_completes_write_task_with_committed_output)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
+Test: tests/binary.rs (followup_writer_completes_with_valid_no_change_declaration)
+Test: tests/binary.rs (attempt_reviews_unchanged_candidate_after_no_change_writer)
 Test: tests/behaviors/operations/test-work-task-run.sh (clean committed Task completes)
+Test: tests/behaviors/operations/test-work-task-run.sh (verified follow-up no-change continues into review)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
 
 ### B51
@@ -743,16 +749,26 @@ uncommitted changes,
 THEN THE SYSTEM SHALL leave the Task incomplete and report that the Task
 must commit or remove the dirty changes.
 Test: tests/binary.rs (work_task_run_rejects_dirty_successful_workspace)
+Test: tests/binary.rs (followup_writer_rejects_no_change_for_dirty_or_divergent_candidate)
 Test: tests/behaviors/operations/test-work-task-run.sh (dirty successful Task fails with guidance)
 
 ### B52
 
 IF the write Task coder exits successfully but the writable workspace has
-no committed Task output produced by that run,
+no committed Task output produced by that run and does not qualify as a verified
+follow-up no-change output,
 THEN THE SYSTEM SHALL leave the Task incomplete and report that there is
-no committed Task output.
+no committed Task output or name the valid declaration required. Initial
+Writers, malformed or empty declarations, stale retry declarations, dirty
+workspaces, and HEADs that differ from the previous completed Writer commit do
+not qualify.
 Test: tests/binary.rs (work_task_run_rejects_success_without_commits)
 Test: tests/binary.rs (work_task_run_rejects_reused_workspace_without_new_commit)
+Test: tests/binary.rs (initial_writer_rejects_no_change_declaration_without_commit)
+Test: tests/binary.rs (followup_writer_rejects_missing_or_invalid_no_change_declaration)
+Test: tests/binary.rs (followup_writer_rejects_no_change_for_dirty_or_divergent_candidate)
+Test: tests/binary.rs (followup_writer_clears_stale_no_change_declaration_before_retry)
+Test: tests/binary.rs (corrective_writer_commit_ignores_no_change_declaration)
 Test: tests/behaviors/operations/test-work-task-run.sh (success without new commit fails with guidance)
 
 ### B53

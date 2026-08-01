@@ -88,6 +88,28 @@ case "${TASK_RUN_MOCK_MODE:-commit}" in
     ;;
   no-commit)
     ;;
+  no-change-loop)
+    if [[ "$last_arg" == *"You are the Learner"* ]]; then
+      [[ "$last_arg" =~ (/[^[:space:]]*follow-up-draft\.json) ]]
+      draft_path="${BASH_REMATCH[1]}"
+      mkdir -p "$(dirname "$draft_path")"
+      printf '%s\n' '{"learning_summary":"none","follow_ups":[]}' > "$draft_path"
+    elif [[ "$PWD" == *"/work-6-work-1-attempt-1" ]]; then
+      if [ ! -f task-output.txt ]; then
+        printf 'task output\n' > task-output.txt
+        git add task-output.txt
+        git commit -m "Add task output" > /dev/null 2>&1
+      else
+        [[ "$last_arg" =~ (/[^[:space:]]*no-change\.json) ]]
+        declaration_path="${BASH_REMATCH[1]}"
+        printf '%s\n' '{"schema_version":1,"reason":"The first review failure was transient.","verification":[{"command":"true","result":"pass"}]}' > "$declaration_path"
+      fi
+    elif [[ "$PWD" == *"review-2-"* ]]; then
+      printf 'Verdict: pass\n\nUnchanged candidate verified.\n' > review.md
+    else
+      printf 'Verdict: fail\n\nRequest a corrective verification.\n' > review.md
+    fi
+    ;;
   review-fail)
     printf 'Verdict: fail\n\nReview finding.\n' > review.md
     ;;
@@ -304,6 +326,32 @@ test_success_without_new_commit_fails_with_guidance() {
   assert_fails run_task no-commit || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stderr")" "no committed Task output" || RESULT=1
   assert_not_complete || RESULT=1
+
+  cleanup_test_project
+  return $RESULT
+}
+
+test_followup_no_change_continues_into_review() {
+  setup_test_project
+  create_work_task
+  write_mock_codex
+
+  RESULT=0
+  TASK_RUN_MOCK_MODE=no-change-loop \
+    PATH="${MOCK_BIN}:${PATH}" \
+    CODER_CWD_LOG="${TEST_DIR}/coder-cwd.log" \
+    CODER_ARGS_LOG="${TEST_DIR}/coder-args.log" \
+    CODER_PROMPT_LOG="${TEST_DIR}/coder-prompt.log" \
+    "$FLUENT_BIN" attempt run --no-sandbox --coder codex \
+      work-1 attempt-1 > "$TEST_DIR/stdout" 2> "$TEST_DIR/stderr" || RESULT=1
+
+  FIRST_COMMIT="$(show_json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-1") | .output.commit')"
+  FOLLOWUP_COMMIT="$(show_json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .output.commit')"
+  NO_CHANGE_REASON="$(show_json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .output.no_change.reason')"
+  TESTER_STATUS="$(show_json_value '.attempts[0].tasks[] | select(.id == "attempt-1-tester-2") | .status')"
+  [ "$FIRST_COMMIT" = "$FOLLOWUP_COMMIT" ] || RESULT=1
+  [ "$NO_CHANGE_REASON" = "The first review failure was transient." ] || RESULT=1
+  [ "$TESTER_STATUS" = "complete" ] || RESULT=1
 
   cleanup_test_project
   return $RESULT
@@ -680,6 +728,8 @@ run_test "dirty successful Task fails with guidance" \
 run_test "coder failure marks Task failed" test_coder_failure_marks_task_failed
 run_test "success without new commit fails with guidance" \
   test_success_without_new_commit_fails_with_guidance
+run_test "verified follow-up no-change continues into review" \
+  test_followup_no_change_continues_into_review
 run_test "review planning requires completed write output" \
   test_review_planning_requires_completed_write_output
 run_test "review planning adds read-only Task without changing candidate" \
