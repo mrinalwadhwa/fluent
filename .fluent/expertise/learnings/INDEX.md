@@ -37,6 +37,7 @@
 - [json-manifest-paths-via-jq-arg](json-manifest-paths-via-jq-arg.md) — External values written into JSON manifests must use jq --arg, not string interpolation
 - [keep-architecture-doc-in-sync](keep-architecture-doc-in-sync.md) — documentation/architecture.md is a living present-tense doc; subsystem changes must update its file map and subsystem sections in the same change
 - [lease-acquire-types-contention-vs-infrastructure](lease-acquire-types-contention-vs-infrastructure.md) — Lock/lease acquisition must return a typed result — only a non-blocking flock WouldBlock is a live peer (fail open); every other lock-path IO error propagates as a real failure
+- [legacy-evidence-compatibility-stays-isolated](legacy-evidence-compatibility-stays-isolated.md) — Recover historical evidence through a separate exact compatibility classifier that cannot weaken current execution rules
 - [lock-ordering-across-subsystems](lock-ordering-across-subsystems.md) — Release the queue lock before mutating the Work model; the codebase has a lock hierarchy that must not be inverted
 - [log-append-across-retries](log-append-across-retries.md) — Retried operation logs must append with timestamps rather than truncate so prior failures are preserved
 - [macos-flock-child-process-test-pattern](macos-flock-child-process-test-pattern.md) — macOS flock tests must spawn child processes via current_exe, not threads; a sentinel test function guards the child entry point
