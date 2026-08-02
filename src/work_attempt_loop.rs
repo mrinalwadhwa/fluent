@@ -842,8 +842,8 @@ fn reopen_resumable_attempt(
     Ok(())
 }
 
-/// Atomically migrate only legacy review failures whose canonical transcript
-/// proves the current provider-unavailable contract. Any missing artifact,
+/// Atomically migrate only legacy review failures whose single-file transcript
+/// matches the preserved Claude scheduler outage grammar. Any missing artifact,
 /// reviewer verdict, non-review failure, or mixed failure leaves state intact.
 #[derive(Debug, PartialEq, Eq)]
 enum LegacyProviderPauseRecovery {
@@ -916,9 +916,7 @@ fn reclassify_legacy_provider_pause(
                     task.id
                 )));
             }
-            let coder = attempt.coder_mapping.for_task_kind(task.kind).coder;
-            if crate::provider_evidence::classify_provider_unavailable(
-                coder,
+            if crate::provider_evidence::classify_legacy_claude_scheduler_outage(
                 &project_root.join(&area.path).join("transcript.jsonl"),
             )
             .is_none()
@@ -5629,7 +5627,40 @@ mod tests {
         attempt.coder_mapping.review.coder = coder;
         store.create_work_item(&item).unwrap();
         write_provider_outage(&project_root.join(artifact_path), coder);
+        if coder == crate::coder::CoderKind::Claude {
+            replace_provider_evidence_with_legacy_scheduler_fixture(
+                project_root,
+                work_item_id,
+                attempt_id,
+                "review-provider",
+                "claude-scheduler-outage-a.jsonl",
+            );
+        }
         store
+    }
+
+    fn replace_provider_evidence_with_legacy_scheduler_fixture(
+        project_root: &Path,
+        work_item_id: &str,
+        attempt_id: &str,
+        artifact_name: &str,
+        fixture_name: &str,
+    ) {
+        let artifact_dir =
+            project_root.join(work_artifact_path(work_item_id, attempt_id, artifact_name));
+        for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
+            let path = artifact_dir.join(format!("transcript.{phase}.jsonl"));
+            if path.is_file() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/provider-transcripts")
+                .join(fixture_name),
+            artifact_dir.join("transcript.jsonl"),
+        )
+        .unwrap();
     }
 
     use crate::work_model::TaskOutput;
@@ -8672,97 +8703,265 @@ mod tests {
     }
 
     #[test]
-    fn legacy_provider_failures_reclassify_and_resume_in_one_run() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
-        store
-            .mutate_work_item("work-1", |item| {
-                let attempt = &mut item.attempts[0];
-                let mut blocker = attempt.tasks[1].clone();
-                blocker.id = "attempt-1-review-blocker".to_string();
-                blocker.status = TaskStatus::Planned;
-                blocker.depends_on = Some("missing-predecessor".to_string());
-                blocker.artifact_area = Some(TaskArtifactArea {
-                    path: ".fluent/work/artifacts/work-1/attempt-1/review-blocker".to_string(),
-                });
-                attempt.tasks[1].depends_on = Some(blocker.id.clone());
-                attempt.tasks.push(blocker);
-                let mut tester = tester_task(
-                    "attempt-1-tester",
-                    ".fluent/work/artifacts/work-1/attempt-1/tester",
-                );
-                tester.work_item_id = item.id.clone();
-                tester.status = TaskStatus::Complete;
-                attempt.tasks.push(tester);
-                let mut peer = review_task_with_artifact(
-                    "attempt-1-review-tests",
-                    "tests",
-                    ".fluent/work/artifacts/work-1/attempt-1/review-tests",
-                );
-                peer.work_item_id = item.id.clone();
-                peer.status = TaskStatus::Complete;
-                attempt.tasks.push(peer);
-                Ok(())
+    fn preserved_scheduler_attempt_transcripts_resume_through_public_route() {
+        for (work_item_id, fixture_name) in [
+            (
+                "20260730-175933-persistent-scheduler-service-attempt-submit-attach",
+                "claude-scheduler-outage-a.jsonl",
+            ),
+            (
+                "20260730-175933-persistent-scheduler-service-multi-project-dispatch",
+                "claude-scheduler-outage-b.jsonl",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let attempt_id = "attempt-1";
+            let store = legacy_provider_pause_fixture_with_ids(
+                tmp.path(),
+                crate::coder::CoderKind::Claude,
+                work_item_id,
+                attempt_id,
+            );
+            replace_provider_evidence_with_legacy_scheduler_fixture(
+                tmp.path(),
+                work_item_id,
+                attempt_id,
+                "review-provider",
+                fixture_name,
+            );
+            store
+                .mutate_work_item(work_item_id, |item| {
+                    let attempt = &mut item.attempts[0];
+                    let mut blocker = attempt.tasks[1].clone();
+                    blocker.id = "attempt-1-review-blocker".to_string();
+                    blocker.status = TaskStatus::Planned;
+                    blocker.depends_on = Some("missing-predecessor".to_string());
+                    blocker.artifact_area = Some(TaskArtifactArea {
+                        path: work_artifact_path(work_item_id, attempt_id, "review-blocker"),
+                    });
+                    attempt.tasks[1].depends_on = Some(blocker.id.clone());
+                    attempt.tasks.push(blocker);
+                    let mut tester = tester_task(
+                        "attempt-1-tester",
+                        &work_artifact_path(work_item_id, attempt_id, "tester"),
+                    );
+                    tester.work_item_id = item.id.clone();
+                    tester.status = TaskStatus::Complete;
+                    attempt.tasks.push(tester);
+                    for role in ["behaviors", "documentation", "skills", "tests"] {
+                        let artifact_name = format!("review-{role}");
+                        let mut review = review_task_with_artifact(
+                            &format!("attempt-1-review-{role}"),
+                            role,
+                            &work_artifact_path(work_item_id, attempt_id, &artifact_name),
+                        );
+                        review.work_item_id = item.id.clone();
+                        review.attempt_id = Some(attempt_id.to_string());
+                        review.status = TaskStatus::Failed;
+                        review.depends_on = Some("attempt-1-review-blocker".to_string());
+                        attempt.tasks.push(review);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            for role in ["behaviors", "documentation", "skills", "tests"] {
+                let artifact_name = format!("review-{role}");
+                let artifact_dir =
+                    tmp.path()
+                        .join(work_artifact_path(work_item_id, attempt_id, &artifact_name));
+                fs::create_dir_all(&artifact_dir).unwrap();
+                fs::copy(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/provider-transcripts")
+                        .join(fixture_name),
+                    artifact_dir.join("transcript.jsonl"),
+                )
+                .unwrap();
+            }
+            let candidate_marker = tmp.path().join(format!(
+                ".fluent/work/workspaces/{work_item_id}/{attempt_id}/candidate/preserved.txt"
+            ));
+            fs::create_dir_all(candidate_marker.parent().unwrap()).unwrap();
+            fs::write(&candidate_marker, "candidate state").unwrap();
+            let before = store.read_work_item(work_item_id).unwrap();
+            let transcript = tmp.path().join(work_artifact_path(
+                work_item_id,
+                attempt_id,
+                "review-provider/transcript.jsonl",
+            ));
+            let evidence = fs::read(&transcript).unwrap();
+            let resolver = ContentResolver::new(Some(tmp.path()));
+
+            let error = run_attempt(WorkAttemptRunConfig {
+                project_root: tmp.path(),
+                store: &store,
+                work_item_id,
+                attempt_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                coder_mapping_inputs: None,
+                learner_run_coder: None,
             })
-            .unwrap();
-        let candidate_marker = tmp
-            .path()
-            .join(".fluent/work/workspaces/work-1/attempt-1/candidate/preserved.txt");
-        fs::create_dir_all(candidate_marker.parent().unwrap()).unwrap();
-        fs::write(&candidate_marker, "candidate state").unwrap();
-        let peer_review = tmp
-            .path()
-            .join(".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md");
-        fs::create_dir_all(peer_review.parent().unwrap()).unwrap();
-        fs::write(&peer_review, "Verdict: PASS\n").unwrap();
-        let transcript = tmp
-            .path()
-            .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl");
-        let evidence = fs::read_to_string(&transcript).unwrap();
-        let resolver = ContentResolver::new(Some(tmp.path()));
+            .expect_err("the public route reopens the preserved reviews before blocked work stops");
+            assert!(error.to_string().contains("no planned transition"));
 
-        let error = run_attempt(WorkAttemptRunConfig {
-            project_root: tmp.path(),
-            store: &store,
-            work_item_id: "work-1",
-            attempt_id: "attempt-1",
-            resolver: &resolver,
-            extra_args: &[],
-            no_sandbox: true,
-            coder_mapping_inputs: None,
-            learner_run_coder: None,
-        })
-        .expect_err("the public route reclassifies and reopens before blocked work stops");
-        assert!(error.to_string().contains("no planned transition"));
+            let after = store.read_work_item(work_item_id).unwrap();
+            let before_attempt = &before.attempts[0];
+            let after_attempt = &after.attempts[0];
+            assert_eq!(after_attempt.status, AttemptStatus::Planned);
+            assert!(after_attempt.pause_kind.is_none());
+            assert_eq!(after_attempt.tasks[0], before_attempt.tasks[0]);
+            assert_eq!(after_attempt.tasks[3], before_attempt.tasks[3]);
+            assert_eq!(
+                after_attempt
+                    .tasks
+                    .iter()
+                    .map(|task| task.id.as_str())
+                    .collect::<Vec<_>>(),
+                before_attempt
+                    .tasks
+                    .iter()
+                    .map(|task| task.id.as_str())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                after_attempt
+                    .tasks
+                    .iter()
+                    .filter(|task| task.kind == TaskKind::Review
+                        && task.id != "attempt-1-review-blocker")
+                    .all(|task| task.status == TaskStatus::Planned)
+            );
+            assert_eq!(fs::read(transcript).unwrap(), evidence);
+            assert_eq!(
+                fs::read_to_string(candidate_marker).unwrap(),
+                "candidate state"
+            );
+        }
+    }
 
-        let attempt = &store.read_work_item("work-1").unwrap().attempts[0];
-        assert_eq!(attempt.status, AttemptStatus::Planned);
-        assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
-        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
-        assert_eq!(
-            attempt
-                .tasks
-                .iter()
-                .find(|task| task.id == "attempt-1-tester")
+    #[test]
+    fn legacy_scheduler_transcript_deviations_remain_round_cap() {
+        let cases = [
+            ("missing-event", "lacks conclusive"),
+            ("extra-event", "lacks conclusive"),
+            ("malformed-event", "lacks conclusive"),
+            ("reordered-events", "lacks conclusive"),
+            ("retry-sequence", "lacks conclusive"),
+            ("retry-count", "lacks conclusive"),
+            ("session-identity", "lacks conclusive"),
+            ("terminal-semantics", "lacks conclusive"),
+            ("model-tokens", "lacks conclusive"),
+            ("thinking", "lacks conclusive"),
+            ("tool-use", "lacks conclusive"),
+            ("nonzero-cost", "lacks conclusive"),
+            ("nonzero-usage", "lacks conclusive"),
+            ("model-usage", "lacks conclusive"),
+            ("permission-use", "lacks conclusive"),
+            ("unknown-field", "lacks conclusive"),
+            ("reviewer-verdict", "reviewer verdict"),
+            ("mixed-non-review", "not a review Task"),
+        ];
+
+        for (case, expected_error) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
+            replace_provider_evidence_with_legacy_scheduler_fixture(
+                tmp.path(),
+                "work-1",
+                "attempt-1",
+                "review-provider",
+                "claude-scheduler-outage-a.jsonl",
+            );
+            let transcript = tmp.path().join(work_artifact_path(
+                "work-1",
+                "attempt-1",
+                "review-provider/transcript.jsonl",
+            ));
+            let mut events: Vec<serde_json::Value> = fs::read_to_string(&transcript)
                 .unwrap()
-                .status,
-            TaskStatus::Complete
-        );
-        assert_eq!(
-            attempt
-                .tasks
-                .iter()
-                .find(|task| task.id == "attempt-1-review-tests")
-                .unwrap()
-                .status,
-            TaskStatus::Complete
-        );
-        assert_eq!(fs::read_to_string(transcript).unwrap(), evidence);
-        assert_eq!(
-            fs::read_to_string(candidate_marker).unwrap(),
-            "candidate state"
-        );
-        assert_eq!(fs::read_to_string(peer_review).unwrap(), "Verdict: PASS\n");
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            match case {
+                "missing-event" => {
+                    events.remove(5);
+                }
+                "extra-event" => events.push(events[0].clone()),
+                "malformed-event" => fs::write(&transcript, "not json\n").unwrap(),
+                "reordered-events" => events.swap(2, 3),
+                "retry-sequence" => events[5]["attempt"] = serde_json::json!(99),
+                "retry-count" => events[5]["max_retries"] = serde_json::json!(9),
+                "session-identity" => events[5]["session_id"] = serde_json::json!("other-session"),
+                "terminal-semantics" => events[12]["terminal_reason"] = serde_json::json!("error"),
+                "model-tokens" => {
+                    events[11]["message"]["usage"]["output_tokens"] = serde_json::json!(1)
+                }
+                "thinking" => events[11]["message"]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"type": "thinking", "thinking": "work"})),
+                "tool-use" => events[11]["message"]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"type": "tool_use", "name": "Read"})),
+                "nonzero-cost" => events[12]["total_cost_usd"] = serde_json::json!(0.01),
+                "nonzero-usage" => events[12]["usage"]["input_tokens"] = serde_json::json!(1),
+                "model-usage" => {
+                    events[12]["modelUsage"] = serde_json::json!({"claude-sonnet-4-6": {}})
+                }
+                "permission-use" => events[12]["permission_denials"] = serde_json::json!(["Read"]),
+                "unknown-field" => events[12]["new_activity"] = serde_json::json!(true),
+                "reviewer-verdict" => {
+                    fs::write(transcript.with_file_name("review.md"), "Verdict: FAIL\n").unwrap()
+                }
+                "mixed-non-review" => store
+                    .mutate_work_item("work-1", |item| {
+                        item.attempts[0].tasks[1].kind = TaskKind::Tester;
+                        Ok(())
+                    })
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            if !matches!(
+                case,
+                "malformed-event" | "reviewer-verdict" | "mixed-non-review"
+            ) {
+                let content = events
+                    .iter()
+                    .map(serde_json::to_string)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+                    .join("\n");
+                fs::write(&transcript, format!("{content}\n")).unwrap();
+            }
+            let before = store.read_work_item("work-1").unwrap();
+            let resolver = ContentResolver::new(Some(tmp.path()));
+
+            let error = run_attempt(WorkAttemptRunConfig {
+                project_root: tmp.path(),
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                coder_mapping_inputs: None,
+                learner_run_coder: None,
+            })
+            .expect_err("deviated legacy evidence must remain blocked");
+
+            assert!(
+                error.to_string().contains(expected_error),
+                "{case} should explain its inconclusive evidence: {error:#}"
+            );
+            assert_eq!(
+                store.read_work_item("work-1").unwrap(),
+                before,
+                "{case} must not mutate the persisted round-cap Attempt"
+            );
+        }
     }
 
     #[test]
@@ -8789,7 +8988,7 @@ mod tests {
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
         fs::remove_file(
             tmp.path()
-                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.1.jsonl"),
+                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl"),
         )
         .unwrap();
         assert!(matches!(
@@ -8807,7 +9006,7 @@ mod tests {
         let store = legacy_provider_pause_fixture(tmp.path(), crate::coder::CoderKind::Claude);
         fs::remove_file(
             tmp.path()
-                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.1.jsonl"),
+                .join(".fluent/work/artifacts/work-1/attempt-1/review-provider/transcript.jsonl"),
         )
         .unwrap();
         let resolver = ContentResolver::new(Some(tmp.path()));
@@ -8939,7 +9138,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_provider_recovery_is_identity_independent() {
+    fn legacy_provider_recovery_rejects_non_claude_evidence() {
         let tmp = tempfile::tempdir().unwrap();
         let work_item_id = "other-legacy-work";
         let attempt_id = "nonstandard-resume-id";
@@ -8949,12 +9148,6 @@ mod tests {
             work_item_id,
             attempt_id,
         );
-        store
-            .mutate_work_item(work_item_id, |item| {
-                item.attempts[0].tasks[1].depends_on = Some("missing-predecessor".to_string());
-                Ok(())
-            })
-            .unwrap();
         let resolver = ContentResolver::new(Some(tmp.path()));
 
         let error = run_attempt(WorkAttemptRunConfig {
@@ -8968,14 +9161,14 @@ mod tests {
             coder_mapping_inputs: None,
             learner_run_coder: None,
         })
-        .expect_err("the public route reclassifies distinct persisted identities");
+        .expect_err("the Claude-only compatibility route rejects Codex evidence");
 
-        assert!(error.to_string().contains("no planned transition"));
+        assert!(error.to_string().contains("lacks conclusive"));
         let attempt = &store.read_work_item(work_item_id).unwrap().attempts[0];
-        assert_eq!(attempt.status, AttemptStatus::Planned);
-        assert!(attempt.pause_kind.is_none());
+        assert_eq!(attempt.status, AttemptStatus::NeedsUser);
+        assert_eq!(attempt.pause_kind, Some(PauseKind::RoundCap));
         assert_eq!(attempt.tasks[0].status, TaskStatus::Complete);
-        assert_eq!(attempt.tasks[1].status, TaskStatus::Planned);
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Failed);
     }
 
     #[test]
