@@ -1,7 +1,7 @@
 //! Fail-closed provider outage evidence parsed from canonical coder transcripts.
 
 use crate::coder::CoderKind;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -50,6 +50,116 @@ pub fn classify_provider_unavailable(
         }
     }
     classify_provider_phase(provider, transcript).then_some(ProviderUnavailable { provider })
+}
+
+/// Recognize only the preserved single-file Claude scheduler outage grammar.
+///
+/// This compatibility classifier is intentionally separate from current Task
+/// classification. It exists only so the Attempt loop can migrate historical
+/// review failures whose transcripts predate numbered provider evidence.
+pub(crate) fn classify_legacy_claude_scheduler_outage(
+    transcript: &Path,
+) -> Option<ProviderUnavailable> {
+    let actual = read_json_lines(transcript)?;
+    let expected = parse_json_lines(include_str!(
+        "../tests/fixtures/provider-transcripts/claude-scheduler-outage-structural-manifest.jsonl"
+    ))?;
+    if actual.len() != expected.len() || actual.len() != 13 {
+        return None;
+    }
+
+    let session_id = actual
+        .first()?
+        .get("session_id")?
+        .as_str()
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let normalized = actual
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| normalize_legacy_scheduler_event(event, index, &session_id))
+        .collect::<Option<Vec<_>>>()?;
+
+    (normalized == expected).then_some(ProviderUnavailable {
+        provider: CoderKind::Claude,
+    })
+}
+
+fn read_json_lines(path: &Path) -> Option<Vec<Value>> {
+    let file = File::open(path).ok()?;
+    BufReader::new(file)
+        .lines()
+        .map(|line| serde_json::from_str(&line.ok()?).ok())
+        .collect()
+}
+
+fn parse_json_lines(content: &str) -> Option<Vec<Value>> {
+    content
+        .lines()
+        .map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn normalize_legacy_scheduler_event(
+    mut event: Value,
+    index: usize,
+    session_id: &str,
+) -> Option<Value> {
+    let object = event.as_object_mut()?;
+    match index {
+        0 => {
+            remove_required_string(object, "cwd")?;
+            require_and_remove_session(object, session_id)?;
+            remove_required_string(object, "uuid")?;
+            let plugins = object.get_mut("plugins")?.as_array_mut()?;
+            for plugin in plugins {
+                let plugin = plugin.as_object_mut()?;
+                let name = plugin.get("name")?.as_str()?.to_string();
+                remove_required_string(plugin, "path")?;
+                plugin.insert(
+                    "path".to_string(),
+                    Value::String(format!("/normalized/plugins/{name}")),
+                );
+            }
+        }
+        1..=10 => {
+            remove_required_u64(object, "retry_delay_ms")?;
+            require_and_remove_session(object, session_id)?;
+            remove_required_string(object, "uuid")?;
+        }
+        11 => {
+            require_and_remove_session(object, session_id)?;
+            remove_required_string(object, "uuid")?;
+            let message = object.get_mut("message")?.as_object_mut()?;
+            remove_required_string(message, "id")?;
+        }
+        12 => {
+            remove_required_u64(object, "duration_ms")?;
+            if remove_required_u64(object, "duration_api_ms")? != 0 {
+                return None;
+            }
+            require_and_remove_session(object, session_id)?;
+            remove_required_string(object, "uuid")?;
+        }
+        _ => return None,
+    }
+    Some(event)
+}
+
+fn require_and_remove_session(object: &mut Map<String, Value>, expected: &str) -> Option<()> {
+    (remove_required_string(object, "session_id")? == expected).then_some(())
+}
+
+fn remove_required_string(object: &mut Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .remove(key)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn remove_required_u64(object: &mut Map<String, Value>, key: &str) -> Option<u64> {
+    object.remove(key)?.as_u64()
 }
 
 /// List every immutable retry transcript alongside the live transcript. A later
@@ -159,6 +269,28 @@ fn is_terminal_rate_limit(provider: CoderKind, event: &Value) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn legacy_scheduler_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider-transcripts")
+            .join(name)
+    }
+
+    #[test]
+    fn accepts_exact_legacy_scheduler_outage_transcripts() {
+        for name in [
+            "claude-scheduler-outage-a.jsonl",
+            "claude-scheduler-outage-b.jsonl",
+        ] {
+            assert_eq!(
+                classify_legacy_claude_scheduler_outage(&legacy_scheduler_fixture(name)),
+                Some(ProviderUnavailable {
+                    provider: CoderKind::Claude,
+                }),
+                "the normalized preserved transcript {name} must match"
+            );
+        }
+    }
 
     #[test]
     fn classifies_structured_unstarted_claude_outage() {

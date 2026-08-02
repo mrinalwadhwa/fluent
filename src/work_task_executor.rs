@@ -5741,6 +5741,22 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn legacy_scheduler_transcript_does_not_pause_current_task() {
+        let transcript = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider-transcripts/claude-scheduler-outage-a.jsonl");
+
+        let error = provider_pause_error(
+            Err(anyhow::anyhow!("coder failed")),
+            CoderKind::Claude,
+            Some(transcript),
+        )
+        .expect_err("legacy single-file evidence remains a current Task failure");
+
+        assert!(!error.is::<crate::provider_evidence::ProviderUnavailableError>());
+        assert_eq!(error.to_string(), "coder failed");
+    }
+
+    #[test]
     fn transcript_pump_failure_is_not_retried() {
         // A transcript-pump infrastructure failure must not spawn another coder
         // through the generic retry budget, while an ordinary coder error still
