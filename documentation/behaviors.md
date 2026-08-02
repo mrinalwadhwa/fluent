@@ -3409,12 +3409,40 @@ Test: src/claude_auth.rs (auth_handoff_names_attempt_run_recovery)
 ### B6
 
 WHEN `fluent attempt run` is invoked on an Attempt suspended with a
-pause kind whose resume is not yet implemented (`uncertain`,
-`round-cap`),
+pause kind whose resume is not implemented (`uncertain`, or a `round-cap`
+Attempt that does not match the legacy provider migration below),
 THE SYSTEM SHALL report that the pause needs its specific input and
 that resuming it is not yet supported, rather than the generic
 "cannot advance" error — and leave the Attempt suspended.
 Test: src/work_attempt_loop.rs (resume_unimplemented_kind_reports_clearly_and_leaves_suspended)
+
+## Legacy provider-pause recovery
+
+### B1
+
+WHEN `fluent attempt run` targets either preserved scheduler Attempt and every
+failed Review Task contains the accepted 13-event legacy Claude outage
+transcript with no reviewer verdict,
+THE SYSTEM SHALL reopen those exact Review Tasks as `provider-unavailable` and
+resume the same Attempt while preserving completed Tasks, candidate work, and
+accumulated artifacts.
+Test: src/work_attempt_loop.rs (preserved_scheduler_attempt_transcripts_resume_through_public_route)
+
+### B2
+
+IF any blocking Task is not a Review Task, has a reviewer verdict, or has legacy
+transcript evidence that differs in event count or order, retry sequence,
+session identity, terminal semantics, or zero-model-and-tool evidence,
+THEN THE SYSTEM SHALL leave the Attempt at `round-cap` and explain why its
+provider evidence is inconclusive.
+Test: src/work_attempt_loop.rs (legacy_scheduler_transcript_deviations_remain_round_cap)
+
+### B3
+
+WHEN a current coder Task produces only the accepted legacy Claude outage
+transcript without current numbered provider evidence,
+THE SYSTEM SHALL NOT classify that Task as `provider-unavailable`.
+Test: src/work_task_executor.rs (legacy_scheduler_transcript_does_not_pause_current_task)
 
 ## Keep-awake toggle
 

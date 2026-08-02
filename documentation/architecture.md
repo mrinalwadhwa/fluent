@@ -942,6 +942,27 @@ fire additional enter-state notifications.
 Author and reviewer Tasks inherit this
 behavior without further plumbing.
 
+`provider_evidence.rs` owns the fail-closed evidence boundary after bounded
+provider retries exhaust. Current Task execution requires every numbered retry
+transcript and the terminal transcript to contain only the provider's accepted
+launch prelude and structured rate-limit terminal record. A missing phase,
+malformed or unknown event, model output, or tool activity prevents the typed
+`provider-unavailable` pause.
+
+The Attempt loop has a separate compatibility path for historical scheduler
+Attempts paused at `round-cap`. It accepts only the preserved single-file Claude
+grammar: one initialization event, ten ordered and session-consistent
+`api_retry` events, the exact synthetic zero-token connection-refused assistant
+record, and the matching zero-cost error result. It requires every failed Task
+to be a Review Task and rejects any existing `review.md`. The parser compares
+the complete allow-listed event structure after normalizing only paths,
+identifiers, and timing metadata; changed terminal semantics or any token,
+thinking, tool, permission, model-usage, cost, or usage evidence fails closed.
+When all failed reviews match, one lock-held Work-model mutation changes only
+those Tasks and the pause kind before the normal same-Attempt resume path runs.
+Current Task execution never calls this compatibility parser, so a newly
+produced single-file transcript remains insufficient provider evidence.
+
 | Env var | Default | Purpose |
 |---|---|---|
 | `FLUENT_RATE_LIMIT_RETRY_AFTER_SECS` | 1800 | Fallback wait when no structured timing is available |
@@ -1872,6 +1893,7 @@ fluent/main/
     plan.rs                  ← Parse plan.md into groups and steps
     post_merge_review.rs     ← Post-merge review orchestration
     prep.rs                  ← Pre-flight workspace preparation
+    provider_evidence.rs     ← Classify current and legacy provider outage evidence
     queue.rs                 ← Per-Work-Item dispatch ledger (history + one active dispatch)
     review.rs                ← Review verdict parsing and state
     review_diff_command.rs   ← Review diff CLI subcommand
