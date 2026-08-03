@@ -94,12 +94,12 @@ pub enum TesterOutcome {
     HarnessError,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct TesterConfig {
     commands: Vec<TesterCommand>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct TesterCommand {
     command: String,
     test_harness: String,
@@ -107,9 +107,37 @@ struct TesterCommand {
     reject_process_leaks: bool,
 }
 
+/// Read-only Tester configuration used to defer filesystem setup until a Task
+/// has durably reserved permission to start.
+#[derive(Debug, Clone)]
+pub struct TesterPlan {
+    guarded_commands: Vec<bool>,
+}
+
+/// Read Tester configuration without creating an artifact or settlement path.
+pub fn plan(candidate_workspace: &Path) -> TesterPlan {
+    let guarded_commands = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))
+        .map(|config| {
+            config
+                .commands
+                .into_iter()
+                .map(|command| command.reject_process_leaks)
+                .collect()
+        })
+        // Execution retains the existing recoverable configuration-error path,
+        // which writes Tester evidence after the Task owns its artifact area.
+        .unwrap_or_default();
+    TesterPlan { guarded_commands }
+}
+
 /// The sandbox profile and host-owned settlement paths prepared for one Tester run.
 pub struct TesterSandbox {
     profile: Option<os::SandboxProfile>,
+    settlement_directories: Vec<Option<PathBuf>>,
+}
+
+/// Canonical settlement paths created for an authorized Tester Task.
+pub struct TesterSettlement {
     settlement_directories: Vec<Option<PathBuf>>,
 }
 
@@ -119,7 +147,7 @@ impl TesterSandbox {
     }
 
     #[cfg(test)]
-    fn settlement_directory(&self, index: usize) -> Option<PathBuf> {
+    pub(crate) fn settlement_directory(&self, index: usize) -> Option<PathBuf> {
         self.settlement_directories.get(index).cloned().flatten()
     }
 }
@@ -159,8 +187,14 @@ pub fn run(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
-    let sandbox =
-        preflight_sandbox_profile(candidate_workspace, artifact_dir, no_sandbox, resolver)?;
+    let plan = plan(candidate_workspace);
+    let sandbox = prepare_sandbox_profile(
+        candidate_workspace,
+        artifact_dir,
+        no_sandbox,
+        resolver,
+        &plan,
+    )?;
     run_with_sandbox_profile(candidate_workspace, artifact_dir, &sandbox)
 }
 
@@ -172,8 +206,14 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let sandbox =
-        preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
+    let plan = plan(candidate_workspace);
+    let sandbox = prepare_sandbox_profile(
+        candidate_workspace,
+        artifact.path(),
+        no_sandbox,
+        resolver,
+        &plan,
+    )?;
     let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
     if !problems.is_empty() {
         anyhow::bail!(
@@ -197,8 +237,14 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let sandbox =
-        preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
+    let plan = plan(candidate_workspace);
+    let sandbox = prepare_sandbox_profile(
+        candidate_workspace,
+        artifact.path(),
+        no_sandbox,
+        resolver,
+        &plan,
+    )?;
     let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
     if problems.is_empty() {
         Ok(())
@@ -223,7 +269,80 @@ pub fn preflight_sandbox_profile(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<TesterSandbox> {
-    let settlement_directories = prepare_settlement_directories(candidate_workspace, artifact_dir)?;
+    let plan = plan(candidate_workspace);
+    prepare_sandbox_profile(
+        candidate_workspace,
+        artifact_dir,
+        no_sandbox,
+        resolver,
+        &plan,
+    )
+}
+
+/// Create and canonicalize guarded settlement paths after start authorization,
+/// then render and preflight the sandbox that grants access to those paths.
+pub fn prepare_sandbox_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+    plan: &TesterPlan,
+) -> Result<TesterSandbox> {
+    let settlement = prepare_settlement_directories(artifact_dir, plan)?;
+    render_sandbox_profile(
+        candidate_workspace,
+        artifact_dir,
+        no_sandbox,
+        resolver,
+        settlement,
+    )
+}
+
+/// Create and canonicalize guarded settlement directories for an authorized
+/// Tester Task. This performs no sandbox rendering or host preflight.
+pub fn prepare_settlement_directories(
+    artifact_dir: &Path,
+    plan: &TesterPlan,
+) -> Result<TesterSettlement> {
+    let root = artifact_dir.join("commands/settlement");
+    let mut settlement_directories = Vec::with_capacity(plan.guarded_commands.len());
+    let mut created = Vec::new();
+    for (index, guarded) in plan.guarded_commands.iter().enumerate() {
+        if !guarded {
+            settlement_directories.push(None);
+            continue;
+        }
+        let directory = root.join(index.to_string());
+        let existed = directory.exists();
+        match ProcessSettlement::prepare_directory(directory.clone()) {
+            Ok(directory) => {
+                if !existed {
+                    created.push(directory.clone());
+                }
+                settlement_directories.push(Some(directory));
+            }
+            Err(error) => {
+                for created_directory in created.into_iter().rev() {
+                    let _ = fs::remove_dir_all(created_directory);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(TesterSettlement {
+        settlement_directories,
+    })
+}
+
+/// Render and preflight the sandbox that grants a prepared settlement.
+pub fn render_sandbox_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+    settlement: TesterSettlement,
+) -> Result<TesterSandbox> {
+    let settlement_directories = settlement.settlement_directories;
     if no_sandbox {
         return Ok(TesterSandbox {
             profile: None,
@@ -259,39 +378,8 @@ pub fn preflight_sandbox_profile(
                 settlement_directories,
             })
         }
-        Err(err) => {
-            eprintln!("  Warning: sandbox render failed: {err:#}; running unsandboxed");
-            Ok(TesterSandbox {
-                profile: None,
-                settlement_directories,
-            })
-        }
+        Err(err) => Err(err),
     }
-}
-
-fn prepare_settlement_directories(
-    candidate_workspace: &Path,
-    artifact_dir: &Path,
-) -> Result<Vec<Option<PathBuf>>> {
-    let config = match read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH)) {
-        Ok(config) => config,
-        // Preserve the Tester boundary's recoverable configuration error rather
-        // than turning it into a preflight failure before it can write evidence.
-        Err(_) => return Ok(Vec::new()),
-    };
-    let root = artifact_dir.join("commands/settlement");
-    config
-        .commands
-        .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            if command.reject_process_leaks {
-                ProcessSettlement::prepare_directory(root.join(index.to_string())).map(Some)
-            } else {
-                Ok(None)
-            }
-        })
-        .collect()
 }
 
 pub fn run_with_sandbox_profile(
@@ -941,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_directories_are_prepared_before_sandbox_preflight() {
+    fn guarded_tester_prepares_settlement_before_sandbox_after_reservation() {
         let workspace = TempDir::new().unwrap();
         let artifact_dir = TempDir::new().unwrap();
         make_workspace(workspace.path());

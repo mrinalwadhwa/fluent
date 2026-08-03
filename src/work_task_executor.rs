@@ -1577,27 +1577,10 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.project_root,
         &review_context.candidate_workspace_path,
     );
-    let tester_sandbox = match crate::tester::preflight_sandbox_profile(
-        &candidate_workspace,
-        &artifact_dir,
-        config.no_sandbox,
-        config.resolver,
-    ) {
-        Ok(profile) => profile,
-        Err(error) => {
-            lock_mark_task_failed_attempt_needs_user(
-                config.store,
-                config.store_lock,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &classify_task_failure(&error),
-                &crate::notify::notify,
-            )?;
-            return Err(error);
-        }
-    };
+    // Parse the Tester configuration without creating a settlement directory.
+    // The immutable plan crosses the reservation boundary so the later sandbox
+    // grants exactly the paths authorized for this Task start.
+    let tester_plan = crate::tester::plan(&candidate_workspace);
 
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here.
@@ -1615,9 +1598,10 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         )?,
     )?;
 
-    // Side-effectful setup after the reservation: create the artifact directory. A
-    // failure CAS-reverts the reservation.
-    with_reservation_rollback(
+    // Create and canonicalize every guarded settlement directory only after the
+    // durable reservation succeeds. A filesystem setup failure CAS-reverts the
+    // reservation so this Task remains recoverable.
+    let tester_settlement = with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
@@ -1625,9 +1609,35 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &reservation.receipt,
         || {
             fs::create_dir_all(&artifact_dir)?;
-            Ok(())
+            crate::tester::prepare_settlement_directories(&artifact_dir, &tester_plan)
         },
     )?;
+
+    // A sandbox render or host preflight failure is a recoverable Tester harness
+    // failure after reservation: do not launch a command or fall back to an
+    // unsandboxed boundary.
+    let tester_sandbox = match crate::tester::render_sandbox_profile(
+        &candidate_workspace,
+        &artifact_dir,
+        config.no_sandbox,
+        config.resolver,
+        tester_settlement,
+    ) {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            lock_mark_task_failed_attempt_needs_user(
+                config.store,
+                config.store_lock,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &TaskFailure::TesterHarness,
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    };
 
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     let (attempt_index, task_index) =
@@ -5741,6 +5751,54 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn tester_guarded_preflight_does_not_create_before_reservation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".fluent")).unwrap();
+        fs::write(
+            workspace.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        )
+        .unwrap();
+
+        let _plan = crate::tester::plan(workspace.path());
+
+        assert!(
+            !artifact.path().join("commands/settlement").exists(),
+            "read-only Tester planning must not create guarded settlement paths"
+        );
+    }
+
+    #[test]
+    fn guarded_tester_prepares_settlement_before_sandbox_after_reservation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".fluent")).unwrap();
+        fs::write(
+            workspace.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(None);
+        let plan = crate::tester::plan(workspace.path());
+
+        let sandbox = crate::tester::prepare_sandbox_profile(
+            workspace.path(),
+            artifact.path(),
+            true,
+            &resolver,
+            &plan,
+        )
+        .unwrap();
+
+        let directory = sandbox.settlement_directory(0).unwrap();
+        assert_eq!(
+            directory,
+            fs::canonicalize(artifact.path().join("commands/settlement/0")).unwrap()
+        );
+    }
+
+    #[test]
     fn legacy_scheduler_transcript_does_not_pause_current_task() {
         let transcript = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/provider-transcripts/claude-scheduler-outage-a.jsonl");
@@ -9237,7 +9295,7 @@ mod tests {
     }
 
     #[test]
-    fn tester_start_rejected_by_peer_terminal_creates_no_artifacts() {
+    fn tester_start_rejected_by_peer_terminal_creates_no_settlement_artifacts() {
         // A Tester start that loses the race to a peer pause rejects at the atomic
         // boundary before creating its artifact directory or launching the tester.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -9303,6 +9361,13 @@ mod tests {
         assert!(
             !project_root.join(&area).exists(),
             "a rejected tester start must not create its artifact directory"
+        );
+        assert!(
+            !project_root
+                .join(&area)
+                .join("commands/settlement")
+                .exists(),
+            "a rejected tester start must not create a settlement directory"
         );
     }
 
@@ -9448,7 +9513,7 @@ mod tests {
     }
 
     #[test]
-    fn tester_setup_failure_after_reservation_leaves_task_recoverable() {
+    fn tester_settlement_setup_failure_after_reservation_leaves_task_recoverable() {
         // The reservation succeeds, then create_dir_all fails because the artifact
         // path is occupied by a file. The Tester must roll back to Planned.
         let tmp = tempfile::TempDir::new().unwrap();
