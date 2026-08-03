@@ -1580,7 +1580,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Parse the Tester configuration without creating a settlement directory.
     // The immutable plan crosses the reservation boundary so the later sandbox
     // grants exactly the paths authorized for this Task start.
-    let tester_plan = crate::tester::plan(&candidate_workspace);
+    let tester_plan = crate::tester::plan(&candidate_workspace)?;
 
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here.
@@ -1625,16 +1625,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     ) {
         Ok(sandbox) => sandbox,
         Err(error) => {
-            lock_mark_task_failed_attempt_needs_user(
-                config.store,
-                config.store_lock,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::TesterHarness,
-                &crate::notify::notify,
-            )?;
+            settle_tester_harness_failure(&config)?;
             return Err(error);
         }
     };
@@ -1684,45 +1675,18 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         Ok(crate::tester::TesterOutcome::Passed | crate::tester::TesterOutcome::TestFailures) => {}
         Ok(crate::tester::TesterOutcome::HarnessError) => {
             let error = anyhow::anyhow!("Tester harness could not produce trustworthy evidence");
-            lock_mark_task_failed_attempt_needs_user(
-                config.store,
-                config.store_lock,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::TesterHarness,
-                &crate::notify::notify,
-            )?;
+            settle_tester_harness_failure(&config)?;
             return Err(error);
         }
         Err(error) => {
             eprintln!("  Tester error: {error:#}");
-            lock_mark_task_failed_attempt_needs_user(
-                config.store,
-                config.store_lock,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::TesterHarness,
-                &crate::notify::notify,
-            )?;
+            settle_tester_harness_failure(&config)?;
             return Err(error);
         }
     }
 
     if !results_path.is_file() {
-        lock_mark_task_failed_attempt_needs_user(
-            config.store,
-            config.store_lock,
-            config.project_root,
-            config.work_item_id,
-            config.attempt_id,
-            config.task_id,
-            &TaskFailure::TesterHarness,
-            &crate::notify::notify,
-        )?;
+        settle_tester_harness_failure(&config)?;
         bail!(
             "Tester Task {:?} completed without writing {}",
             config.task_id,
@@ -1736,19 +1700,37 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     match complete_tester_task(&config, &results_path) {
         Ok(result) => Ok(result),
         Err(error) => {
-            lock_mark_task_failed_attempt_needs_user(
-                config.store,
-                config.store_lock,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::TesterHarness,
-                &crate::notify::notify,
-            )?;
+            settle_tester_harness_failure(&config)?;
             Err(error)
         }
     }
+}
+
+/// Settle an unlaunched or failed Tester through the recoverable pause boundary.
+/// If that persistence fails, record a hard Task failure so this reservation is
+/// never left executing.
+fn settle_tester_harness_failure(config: &WorkTaskRunConfig<'_>) -> Result<()> {
+    if let Err(pause_error) = lock_mark_task_failed_attempt_needs_user(
+        config.store,
+        config.store_lock,
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+        config.task_id,
+        &TaskFailure::TesterHarness,
+        &crate::notify::notify,
+    ) {
+        lock_mark_task_failed(
+            config.store,
+            config.store_lock,
+            config.work_item_id,
+            config.attempt_id,
+            config.task_id,
+        )
+        .context("durably failing Tester Task after its recoverable pause failed")?;
+        return Err(pause_error).context("pausing Tester Task for harness recovery");
+    }
+    Ok(())
 }
 
 /// Persist a Tester Task's successful completion under the store lock, returning
@@ -5761,7 +5743,7 @@ mod tests {
         )
         .unwrap();
 
-        let _plan = crate::tester::plan(workspace.path());
+        let _plan = crate::tester::plan(workspace.path()).unwrap();
 
         assert!(
             !artifact.path().join("commands/settlement").exists(),
@@ -5780,7 +5762,7 @@ mod tests {
         )
         .unwrap();
         let resolver = ContentResolver::new(None);
-        let plan = crate::tester::plan(workspace.path());
+        let plan = crate::tester::plan(workspace.path()).unwrap();
 
         let sandbox = crate::tester::prepare_sandbox_profile(
             workspace.path(),
@@ -9579,6 +9561,68 @@ mod tests {
         assert!(
             tester.started_at.is_none(),
             "a rolled-back tester reservation clears the start timestamp"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn tester_sandbox_preflight_failure_after_reservation_pauses_attempt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+        let item = review_item();
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let workspace = project_root.join(
+            &tester
+                .review_context
+                .as_ref()
+                .unwrap()
+                .candidate_workspace_path,
+        );
+        let launched = project_root.join("launched");
+        fs::create_dir_all(workspace.join(".fluent")).unwrap();
+        fs::write(
+            workspace.join(".fluent/tester.yaml"),
+            format!(
+                "commands:\n  - command: 'touch {}'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+                launched.display()
+            ),
+        )
+        .unwrap();
+        store.create_work_item(&item).unwrap();
+
+        unsafe { std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail") };
+        let resolver = ContentResolver::new(Some(project_root));
+        let error = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: &tester.id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: false,
+            store_lock: None,
+        })
+        .expect_err("sandbox preflight failure must stop the Tester");
+        unsafe { std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT") };
+
+        assert!(error.to_string().contains("host sandbox preflight failed"));
+        assert!(!launched.exists(), "the Tester command must not launch");
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == tester.id)
+                .unwrap()
+                .status,
+            TaskStatus::NeedsUser
         );
     }
 

@@ -111,34 +111,28 @@ struct TesterCommand {
 /// has durably reserved permission to start.
 #[derive(Debug, Clone)]
 pub struct TesterPlan {
-    guarded_commands: Vec<bool>,
+    commands: Vec<TesterCommand>,
 }
 
 /// Read Tester configuration without creating an artifact or settlement path.
-pub fn plan(candidate_workspace: &Path) -> TesterPlan {
-    let guarded_commands = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))
-        .map(|config| {
-            config
-                .commands
-                .into_iter()
-                .map(|command| command.reject_process_leaks)
-                .collect()
-        })
-        // Execution retains the existing recoverable configuration-error path,
-        // which writes Tester evidence after the Task owns its artifact area.
-        .unwrap_or_default();
-    TesterPlan { guarded_commands }
+pub fn plan(candidate_workspace: &Path) -> Result<TesterPlan> {
+    let config = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
+    Ok(TesterPlan {
+        commands: config.commands,
+    })
 }
 
 /// The sandbox profile and host-owned settlement paths prepared for one Tester run.
 pub struct TesterSandbox {
     profile: Option<os::SandboxProfile>,
     settlement_directories: Vec<Option<PathBuf>>,
+    commands: Vec<TesterCommand>,
 }
 
 /// Canonical settlement paths created for an authorized Tester Task.
 pub struct TesterSettlement {
     settlement_directories: Vec<Option<PathBuf>>,
+    commands: Vec<TesterCommand>,
 }
 
 impl TesterSandbox {
@@ -187,7 +181,18 @@ pub fn run(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
-    let plan = plan(candidate_workspace);
+    let plan = match plan(candidate_workspace) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return persist_harness_error(
+                artifact_dir,
+                "tester_yaml_problem",
+                format!("Failed to read {TESTER_YAML_PATH}"),
+                format!("{error:#}"),
+                Vec::new(),
+            );
+        }
+    };
     let sandbox = prepare_sandbox_profile(
         candidate_workspace,
         artifact_dir,
@@ -206,7 +211,7 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let plan = plan(candidate_workspace);
+    let plan = plan(candidate_workspace)?;
     let sandbox = prepare_sandbox_profile(
         candidate_workspace,
         artifact.path(),
@@ -237,7 +242,7 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let plan = plan(candidate_workspace);
+    let plan = plan(candidate_workspace)?;
     let sandbox = prepare_sandbox_profile(
         candidate_workspace,
         artifact.path(),
@@ -269,7 +274,7 @@ pub fn preflight_sandbox_profile(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<TesterSandbox> {
-    let plan = plan(candidate_workspace);
+    let plan = plan(candidate_workspace)?;
     prepare_sandbox_profile(
         candidate_workspace,
         artifact_dir,
@@ -305,10 +310,10 @@ pub fn prepare_settlement_directories(
     plan: &TesterPlan,
 ) -> Result<TesterSettlement> {
     let root = artifact_dir.join("commands/settlement");
-    let mut settlement_directories = Vec::with_capacity(plan.guarded_commands.len());
+    let mut settlement_directories = Vec::with_capacity(plan.commands.len());
     let mut created = Vec::new();
-    for (index, guarded) in plan.guarded_commands.iter().enumerate() {
-        if !guarded {
+    for (index, command) in plan.commands.iter().enumerate() {
+        if !command.reject_process_leaks {
             settlement_directories.push(None);
             continue;
         }
@@ -331,6 +336,7 @@ pub fn prepare_settlement_directories(
     }
     Ok(TesterSettlement {
         settlement_directories,
+        commands: plan.commands.clone(),
     })
 }
 
@@ -342,11 +348,15 @@ pub fn render_sandbox_profile(
     resolver: &ContentResolver,
     settlement: TesterSettlement,
 ) -> Result<TesterSandbox> {
-    let settlement_directories = settlement.settlement_directories;
+    let TesterSettlement {
+        settlement_directories,
+        commands,
+    } = settlement;
     if no_sandbox {
         return Ok(TesterSandbox {
             profile: None,
             settlement_directories,
+            commands,
         });
     }
     // Test-support can force the host preflight result while macOS test runners
@@ -361,6 +371,7 @@ pub fn render_sandbox_profile(
         return Ok(TesterSandbox {
             profile: None,
             settlement_directories,
+            commands,
         });
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -376,6 +387,7 @@ pub fn render_sandbox_profile(
             Ok(TesterSandbox {
                 profile: Some(profile),
                 settlement_directories,
+                commands,
             })
         }
         Err(err) => Err(err),
@@ -387,37 +399,26 @@ pub fn run_with_sandbox_profile(
     artifact_dir: &Path,
     sandbox: &TesterSandbox,
 ) -> Result<TesterOutcome> {
-    run_with_sandbox_profile_and_collector(
+    run_with_prepared_sandbox_profile_and_collector(
         candidate_workspace,
         artifact_dir,
         sandbox.profile(),
+        &sandbox.commands,
         Some(&sandbox.settlement_directories),
         &HostProcessInventoryCollector,
     )
 }
 
-fn run_with_sandbox_profile_and_collector(
+fn run_with_prepared_sandbox_profile_and_collector(
     candidate_workspace: &Path,
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    commands: &[TesterCommand],
     settlement_directories: Option<&[Option<PathBuf>]>,
     collector: &dyn ProcessInventoryCollector,
 ) -> Result<TesterOutcome> {
     record_test_boundary(sandbox_profile.is_some());
-    let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
     let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
-    let config = match read_tester_config(&tester_yaml_path) {
-        Ok(config) => config,
-        Err(error) => {
-            return persist_harness_error(
-                artifact_dir,
-                "tester_yaml_problem",
-                format!("Failed to read {TESTER_YAML_PATH}"),
-                format!("{error:#}"),
-                Vec::new(),
-            );
-        }
-    };
     if !extractor_path.is_file() || !is_executable(&extractor_path) {
         return persist_harness_error(
             artifact_dir,
@@ -438,7 +439,7 @@ fn run_with_sandbox_profile_and_collector(
     let sandbox_path = sandbox_profile.as_ref().map(|p| &p.path);
 
     let mut command_results = Vec::new();
-    for (index, cmd) in config.commands.iter().enumerate() {
+    for (index, cmd) in commands.iter().enumerate() {
         eprintln!("  Running command {}: {}", index, cmd.command);
         let settlement = if cmd.reject_process_leaks {
             let prepared_directory = settlement_directories
@@ -447,9 +448,8 @@ fn run_with_sandbox_profile_and_collector(
                 .flatten();
             let settlement_result = match prepared_directory {
                 Some(directory) => ProcessSettlement::begin_prepared(directory, collector),
-                None => ProcessSettlement::begin(
-                    commands_dir.join("settlement").join(index.to_string()),
-                    collector,
+                None => anyhow::bail!(
+                    "guarded Tester command {index} has no prepared settlement directory"
                 ),
             };
             match settlement_result {
@@ -589,6 +589,34 @@ fn run_with_sandbox_profile_and_collector(
         } else {
             TesterOutcome::TestFailures
         },
+    )
+}
+
+#[cfg(test)]
+fn run_with_sandbox_profile_and_collector(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    sandbox_profile: Option<&os::SandboxProfile>,
+    settlement_directories: Option<&[Option<PathBuf>]>,
+    collector: &dyn ProcessInventoryCollector,
+) -> Result<TesterOutcome> {
+    let plan = plan(candidate_workspace)?;
+    let prepared = if settlement_directories.is_none() {
+        Some(prepare_settlement_directories(artifact_dir, &plan)?)
+    } else {
+        None
+    };
+    run_with_prepared_sandbox_profile_and_collector(
+        candidate_workspace,
+        artifact_dir,
+        sandbox_profile,
+        &plan.commands,
+        settlement_directories.or_else(|| {
+            prepared
+                .as_ref()
+                .map(|settlement| settlement.settlement_directories.as_slice())
+        }),
+        collector,
     )
 }
 
@@ -1048,6 +1076,56 @@ mod tests {
             directory,
             fs::canonicalize(artifact_dir.path().join("commands/settlement/0")).unwrap()
         );
+    }
+
+    #[test]
+    fn prepared_tester_plan_remains_execution_authority() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        let planned = workspace.path().join("planned-command");
+        let changed = workspace.path().join("changed-command");
+        write_tester_yaml(
+            workspace.path(),
+            &format!(
+                "commands:\n  - command: 'touch {}'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+                planned.display()
+            ),
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let plan = plan(workspace.path()).unwrap();
+        let settlement = prepare_settlement_directories(artifact_dir.path(), &plan).unwrap();
+        fs::write(
+            workspace.path().join(TESTER_YAML_PATH),
+            format!(
+                "commands:\n  - command: 'touch {}'\n    test_harness: shell-harness\n",
+                changed.display()
+            ),
+        )
+        .unwrap();
+        let sandbox = render_sandbox_profile(
+            workspace.path(),
+            artifact_dir.path(),
+            true,
+            &resolver(),
+            settlement,
+        )
+        .unwrap();
+
+        let collector = RecordingCollector::new();
+        run_with_prepared_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            sandbox.profile(),
+            &sandbox.commands,
+            Some(&sandbox.settlement_directories),
+            &collector,
+        )
+        .unwrap();
+
+        assert!(planned.is_file());
+        assert!(!changed.exists());
+        assert!(sandbox.settlement_directory(0).unwrap().is_dir());
     }
 
     #[test]

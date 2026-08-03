@@ -212,6 +212,15 @@ scheduler blocks all reviewers until the Tester completes. The Tester
 does not spawn a Coder process or write a transcript — it is a
 deterministic subprocess, not an LLM agent.
 
+For a Tester that runs as a Work Task, Fluent reads and validates its
+configuration without creating paths, then durably reserves the Task before it
+creates the Task artifact area or any guarded process-settlement directory.
+That ordering means a peer-terminal transition rejects the start without leaving
+filesystem artifacts. After reservation, Fluent creates and canonicalizes each
+guarded directory before rendering and preflighting the sandbox that grants it
+to the command. Standalone `fluent tester check` has no Work Task reservation;
+it creates its temporary artifact as part of its own command boundary.
+
 `fluent tester check` first validates the project's Tester structure and then
 runs the same sandboxed command and normalization boundary used by a Tester
 Task. It reports ordinary normalized failures as test-suite failures. Because
