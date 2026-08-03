@@ -211,15 +211,10 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let plan = plan(candidate_workspace)?;
-    let sandbox = prepare_sandbox_profile(
-        candidate_workspace,
-        artifact.path(),
-        no_sandbox,
-        resolver,
-        &plan,
-    )?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
+    // Structural diagnostics deliberately precede the fallible read-only plan:
+    // malformed configuration must not suppress independent extractor/readiness
+    // failures that an operator can repair in the same pass.
+    let problems = structural_problems(candidate_workspace, artifact.path(), None);
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -230,6 +225,14 @@ pub fn check(
                 .join("\n")
         );
     }
+    let plan = plan(candidate_workspace)?;
+    let sandbox = prepare_sandbox_profile(
+        candidate_workspace,
+        artifact.path(),
+        no_sandbox,
+        resolver,
+        &plan,
+    )?;
     run_with_sandbox_profile(candidate_workspace, artifact.path(), &sandbox)
 }
 
@@ -242,18 +245,8 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let plan = plan(candidate_workspace)?;
-    let sandbox = prepare_sandbox_profile(
-        candidate_workspace,
-        artifact.path(),
-        no_sandbox,
-        resolver,
-        &plan,
-    )?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
-    if problems.is_empty() {
-        Ok(())
-    } else {
+    let problems = structural_problems(candidate_workspace, artifact.path(), None);
+    if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
             problems
@@ -261,8 +254,17 @@ pub fn check_structural(
                 .map(|p| format!("- {p}"))
                 .collect::<Vec<_>>()
                 .join("\n")
-        );
+        )
     }
+    let plan = plan(candidate_workspace)?;
+    let _sandbox = prepare_sandbox_profile(
+        candidate_workspace,
+        artifact.path(),
+        no_sandbox,
+        resolver,
+        &plan,
+    )?;
+    Ok(())
 }
 
 /// Prepare the host-owned Tester paths, then render and preflight the production

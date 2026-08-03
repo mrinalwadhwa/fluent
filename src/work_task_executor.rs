@@ -2342,6 +2342,15 @@ fn lock_mark_task_failed_attempt_needs_user(
     failure: &TaskFailure,
     notify_fn: &dyn Fn(&str, &str),
 ) -> Result<()> {
+    #[cfg(feature = "test-support")]
+    if std::env::var("FLUENT_TEST_TESTER_PAUSE_PERSISTENCE")
+        .ok()
+        .as_deref()
+        == Some("fail")
+        && matches!(failure, TaskFailure::TesterHarness)
+    {
+        bail!("test-injected Tester pause persistence failure");
+    }
     let _lock = store_lock.map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
     mark_task_failed_attempt_needs_user(
         store,
@@ -9496,42 +9505,39 @@ mod tests {
 
     #[test]
     fn tester_settlement_setup_failure_after_reservation_leaves_task_recoverable() {
-        // The reservation succeeds, then create_dir_all fails because the artifact
-        // path is occupied by a file. The Tester must roll back to Planned.
+        // The reservation creates the first guarded settlement directory, then
+        // fails on the second. The receipt must roll the Task back to Planned and
+        // remove only the partial directory it created.
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let store = WorkModelStore::new(project_root);
-
-        let mut item = review_item_with_role("tests");
-        let area = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester".to_string();
-        item.attempts[0].tasks.push(crate::work_model::Task {
-            id: "attempt-1-tester".to_string(),
-            kind: TaskKind::Tester,
-            status: TaskStatus::Planned,
-            role: "tester".to_string(),
-            instructions: None,
-            work_item_id: "work-1".to_string(),
-            attempt_id: Some("attempt-1".to_string()),
-            workspace_access: crate::work_model::WorkspaceAccess {
-                reads: Vec::new(),
-                writes: Vec::new(),
-            },
-            artifact_area: Some(crate::work_model::TaskArtifactArea { path: area.clone() }),
-            review_context: None,
-            input_artifacts: Vec::new(),
-            depends_on: None,
-            output: None,
-            created_at: None,
-            started_at: None,
-            completed_at: None,
-        });
+        let item = review_item();
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let workspace = project_root.join(
+            &tester
+                .review_context
+                .as_ref()
+                .unwrap()
+                .candidate_workspace_path,
+        );
+        let artifact = project_root.join(&tester.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(workspace.join(".fluent")).unwrap();
+        fs::write(
+            workspace.join(".fluent/tester.yaml"),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        )
+        .unwrap();
         store.create_work_item(&item).unwrap();
 
-        // Occupy the artifact directory path with a file so create_dir_all fails
-        // after the reservation.
-        let artifact_path = project_root.join(&area);
-        fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
-        fs::write(&artifact_path, "not a directory").unwrap();
+        // Let preparation create settlement/0, but occupy settlement/1 so its
+        // creation fails after the reservation and partial setup has begun.
+        let blocked_directory = artifact.join("commands/settlement/1");
+        fs::create_dir_all(blocked_directory.parent().unwrap()).unwrap();
+        fs::write(&blocked_directory, "not a directory").unwrap();
 
         let resolver = ContentResolver::new(Some(project_root));
         let error = run_task(WorkTaskRunConfig {
@@ -9539,7 +9545,7 @@ mod tests {
             store: &store,
             work_item_id: "work-1",
             attempt_id: "attempt-1",
-            task_id: "attempt-1-tester",
+            task_id: &tester.id,
             resolver: &resolver,
             extra_args: &[],
             no_sandbox: true,
@@ -9549,6 +9555,14 @@ mod tests {
         assert!(
             !is_start_rejected(&error),
             "expected the setup error: {error}"
+        );
+        assert!(
+            !artifact.join("commands/settlement/0").exists(),
+            "receipt-scoped cleanup removes the guarded directory created before failure"
+        );
+        assert!(
+            blocked_directory.is_file(),
+            "cleanup preserves the pre-existing obstruction"
         );
 
         let stored = store.read_work_item("work-1").unwrap();
@@ -9561,6 +9575,68 @@ mod tests {
         assert!(
             tester.started_at.is_none(),
             "a rolled-back tester reservation clears the start timestamp"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn tester_post_reservation_settlement_failure_never_leaves_task_executing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+        let item = review_item();
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let workspace = project_root.join(
+            &tester
+                .review_context
+                .as_ref()
+                .unwrap()
+                .candidate_workspace_path,
+        );
+        fs::create_dir_all(workspace.join(".fluent")).unwrap();
+        fs::write(
+            workspace.join(".fluent/tester.yaml"),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        )
+        .unwrap();
+        store.create_work_item(&item).unwrap();
+
+        unsafe { std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail") };
+        unsafe { std::env::set_var("FLUENT_TEST_TESTER_PAUSE_PERSISTENCE", "fail") };
+        let resolver = ContentResolver::new(Some(project_root));
+        let error = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: &tester.id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: false,
+            store_lock: None,
+        })
+        .expect_err("sandbox preflight failure must stop the Tester");
+        unsafe { std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT") };
+        unsafe { std::env::remove_var("FLUENT_TEST_TESTER_PAUSE_PERSISTENCE") };
+
+        assert!(
+            error.to_string().contains("pausing Tester Task"),
+            "the injected pause failure must reach the Tester finalizer: {error:#}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == tester.id)
+                .unwrap()
+                .status,
+            TaskStatus::Failed,
+            "a failed pause persistence must durably settle the reserved Task"
         );
     }
 
