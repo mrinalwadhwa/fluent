@@ -15195,6 +15195,147 @@ fn learner_expertise_commit_preserves_no_change_writer_identity() {
 }
 
 #[test]
+fn work_merge_candidate_lands_after_historical_no_change_writer() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    create_completed_work_attempt(&tmp, &main_dir);
+    plan_followup_writer(&main_dir);
+    let no_change_commit = git_head(&main_dir.join("../work-6-work-1-attempt-1"));
+    let no_change_bin = tmp.path().join("bin-historical-no-change");
+    write_mock_claude(&no_change_bin, no_change_writer_mock_script());
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-2",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&no_change_bin))
+        .env("PROJECT_ROOT", &main_dir)
+        .assert()
+        .success();
+
+    let store = WorkModelStore::new(&main_dir);
+    let mut item = store.read_work_item("work-1").unwrap();
+    item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+    store.write_work_item(&item).unwrap();
+    let candidate_workspace = main_dir.join("../work-6-work-1-attempt-1");
+    fs::create_dir_all(candidate_workspace.join(".fluent/expertise")).unwrap();
+    fs::write(
+        candidate_workspace.join(".fluent/expertise/INDEX.md"),
+        "# Project Expertise Index\n",
+    )
+    .unwrap();
+
+    let later_writer_bin = tmp.path().join("bin-later-writer");
+    write_mock_claude(
+        &later_writer_bin,
+        "#!/bin/bash\nprintf 'later Writer output\\n' > later-writer.txt\ngit add -A\ngit commit -m 'Add later Writer output' >/dev/null\n",
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-write-3",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&later_writer_bin))
+        .assert()
+        .success();
+
+    let merge_bin = tmp.path().join("bin-historical-merge");
+    write_mock_claude(
+        &merge_bin,
+        r##"#!/bin/bash
+PROMPT=""
+for arg in "$@"; do
+  if [ "$NEXT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q 'You are the Learner'; then
+  mkdir -p .fluent/expertise
+  printf '%s\n' '# Historical Writer provenance' > .fluent/expertise/historical-writer.md
+  git add .fluent/expertise/historical-writer.md
+  git commit -m 'Update expertise' >/dev/null
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{"learning_summary":"none","follow_ups":[]}' > "$DRAFT"
+elif printf '%s' "$PROMPT" | grep -q 'Rebase the candidate branch'; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+else
+  printf 'Verdict: pass\n' > review.md
+fi
+"##,
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&merge_bin))
+        .assert()
+        .success();
+
+    commit_file(
+        &main_dir,
+        "target-only.txt",
+        "advance target\n",
+        "Advance target",
+    );
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&merge_bin))
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let writers = value["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["kind"] == "write")
+        .collect::<Vec<_>>();
+    assert_eq!(writers[1]["output"]["base_commit"], no_change_commit);
+    assert_eq!(writers[1]["output"]["commit"], no_change_commit);
+    assert!(writers[1]["output"]["no_change"].is_object());
+    assert_eq!(
+        value["attempts"][0]["artifacts"][1]["path"],
+        no_change_commit
+    );
+    assert_eq!(
+        value["merge_candidates"][0]["merge_state"]["status"],
+        "merged"
+    );
+    assert_eq!(
+        value["merge_candidates"][0]["candidate_commit"],
+        git_head(&main_dir)
+    );
+}
+
+#[test]
+fn work_merge_candidate_retries_same_candidate_after_provenance_failure() {
+    // This accepted-candidate shape used to fail while capture landing rewrote
+    // historical Writer provenance. It now reaches the ordinary land route with
+    // durable Writer history intact, without replacing the Attempt or repairing
+    // the Work model.
+    work_merge_candidate_lands_after_historical_no_change_writer();
+}
+
+#[test]
 fn initial_writer_rejects_no_change_declaration_without_commit() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

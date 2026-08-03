@@ -354,14 +354,12 @@ conflicts inline (additive doc edits, observation files, append-only
 state). If the agent cannot resolve a conflict, it writes a diagnostic
 to `give-up.md` in its artifact directory and exits non-zero; the Merge
 Candidate transitions to `needs-user` with the diagnostic attached. When
-the rebase succeeds, Fluent regenerates provenance: it updates every
-completed Write Task's `output.base_commit` to the rebased target commit and
-`output.commit` to the candidate tip, the Attempt's
-`artifacts[*].path` entries, and the Merge Candidate's
-`candidate_commit` to the new candidate-tip SHA. Per-task SHA fidelity
-is intentionally lossy; per-task contribution remains visible through the
-Attempt's Task list, the per-Task prompt logs, and the per-Task artifact
-directories. The agent may squash, reorder, reword, or drop redundant
+the rebase succeeds, Fluent regenerates provenance: it updates the latest
+completed Writer's `output.base_commit` to the rebased target commit and
+`output.commit` to the candidate tip, that Writer's Attempt artifact reference,
+and the Merge Candidate's `candidate_commit` to the new candidate-tip SHA.
+Earlier Writer outputs and their matching artifacts retain the commits and
+no-change evidence each Writer actually produced. The agent may squash, reorder, reword, or drop redundant
 commits during rebase as long as all pre-rebase content changes are
 preserved. No project hooks run during the rebase step; `fix-pre-merge`
 continues to own post-rebase cleanup. Re-running `fluent merge-candidate land`

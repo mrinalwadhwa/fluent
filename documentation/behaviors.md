@@ -1700,12 +1700,12 @@ Test: tests/binary.rs (work_merge_rebase_agent_crash_without_give_up_fails)
 
 WHEN the rebase agent completes the rebase successfully,
 THE SYSTEM SHALL set the new candidate-tip SHA on the Merge Candidate
-(`candidate_commit`), on every completed Write Task's `output.commit`,
-and on the Attempt's `artifacts[*].path` entries for those Tasks.
-Per-task SHA fidelity is intentionally lossy; per-task contribution
-remains visible through the Attempt's Task list and artifact directories.
-Test: tests/binary.rs (work_merge_rebase_provenance_updated_after_rebase)
-Test: src/work_merge_executor.rs (regenerate_provenance_updates_all_write_tasks_and_candidate)
+(`candidate_commit`), on the latest completed Write Task's `output.commit`,
+and on that Writer's Attempt artifact reference. Earlier Writer outputs and
+their matching artifacts SHALL preserve their original provenance, including
+verified no-change identity.
+Test: tests/binary.rs (work_merge_candidate_lands_after_historical_no_change_writer)
+Test: src/work_merge_executor.rs (regenerate_provenance_preserves_historical_no_change_writer)
 Test: src/work_merge_executor.rs (regenerate_provenance_leaves_non_write_tasks_unchanged)
 
 ### B136
@@ -1732,7 +1732,8 @@ resolves the underlying issue, then re-runs `fluent merge-candidate land` for th
 same Merge Candidate,
 THE SYSTEM SHALL re-run the rebase step from the candidate workspace in
 its current state and SHALL NOT reject the candidate solely because
-earlier provenance pointers were updated.
+earlier provenance regeneration failed before changing the target branch.
+Test: tests/binary.rs (work_merge_candidate_retries_same_candidate_after_provenance_failure)
 Test: src/work_merge_executor.rs (next_rebase_task_id_increments)
 
 ### B139
