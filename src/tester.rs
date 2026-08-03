@@ -15,6 +15,9 @@ const FAILURE_EXCERPT_MAX: usize = 500;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TesterResults {
     pub commands: Vec<CommandResult>,
+    /// Commands whose declared paths the candidate did not touch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_commands: Vec<SkippedCommand>,
     pub tests: Vec<TestResult>,
     pub summary: Summary,
     pub error: Option<TesterError>,
@@ -63,6 +66,83 @@ struct TesterConfig {
 struct TesterCommand {
     command: String,
     test_harness: String,
+    /// Paths this command exists to exercise. When set, the command runs only
+    /// for a candidate that touches one of them.
+    ///
+    /// A suite that passes because it never looked at what changed is the
+    /// expensive failure: a chart template, a compose file, or a migration
+    /// lands green on the strength of unrelated checks. Declaring the paths a
+    /// gate covers is what lets the Tester run that gate when they move.
+    #[serde(default)]
+    when_changed: Option<Vec<String>>,
+}
+
+/// A command the candidate's diff did not reach.
+///
+/// Recorded rather than dropped: a Reviewer weighing the Tester evidence has to
+/// be able to tell a gate that passed from one that never ran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedCommand {
+    pub command: String,
+    pub test_harness: String,
+    pub when_changed: Vec<String>,
+}
+
+/// Decide whether `command` covers anything in `changed_paths`.
+///
+/// An unknown change set runs every command. The gate this feature exists to
+/// enforce is that a changed path is covered, so the safe direction when the
+/// diff cannot be determined is to run more, never fewer.
+fn command_applies(command: &TesterCommand, changed_paths: Option<&[String]>) -> bool {
+    let Some(patterns) = command.when_changed.as_ref() else {
+        return true;
+    };
+    let Some(changed) = changed_paths else {
+        return true;
+    };
+    changed
+        .iter()
+        .any(|path| patterns.iter().any(|pattern| glob_matches(pattern, path)))
+}
+
+/// Match `path` against a glob supporting `?`, `*` (within one segment), and
+/// `**` (across segments).
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    glob_match_bytes(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_match_bytes(pattern: &[u8], path: &[u8]) -> bool {
+    match pattern.first() {
+        None => path.is_empty(),
+        Some(b'*') => {
+            if pattern.starts_with(b"**") {
+                let rest = &pattern[2..];
+                // `**/` also matches zero directories, so `**/x.rs` matches `x.rs`.
+                let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+                if glob_match_bytes(rest, path) {
+                    return true;
+                }
+                return (0..path.len())
+                    .any(|index| glob_match_bytes(rest, &path[index + 1..]));
+            }
+            // A single star stays inside one path segment.
+            let rest = &pattern[1..];
+            let mut consumed = 0;
+            loop {
+                if glob_match_bytes(rest, &path[consumed..]) {
+                    return true;
+                }
+                if consumed == path.len() || path[consumed] == b'/' {
+                    return false;
+                }
+                consumed += 1;
+            }
+        }
+        Some(b'?') => !path.is_empty() && path[0] != b'/' && glob_match_bytes(&pattern[1..], &path[1..]),
+        Some(expected) => {
+            !path.is_empty() && path[0] == *expected && glob_match_bytes(&pattern[1..], &path[1..])
+        }
+    }
 }
 
 fn tester_writable_roots(candidate: &Path, artifact: &Path, home: &Path) -> Vec<PathBuf> {
@@ -99,6 +179,7 @@ pub fn run(
     artifact_dir: &Path,
     no_sandbox: bool,
     resolver: &ContentResolver,
+    changed_paths: Option<&[String]>,
 ) -> Result<()> {
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
 
@@ -107,6 +188,7 @@ pub fn run(
         Err(error) => {
             let results = TesterResults {
                 commands: Vec::new(),
+                skipped_commands: Vec::new(),
                 tests: Vec::new(),
                 summary: Summary {
                     total: 0,
@@ -162,7 +244,22 @@ pub fn run(
     let sandbox_path = _sandbox_profile.as_ref().map(|p| &p.path);
 
     let mut command_results = Vec::new();
+    let mut skipped_commands = Vec::new();
     for (index, cmd) in config.commands.iter().enumerate() {
+        if !command_applies(cmd, changed_paths) {
+            let patterns = cmd.when_changed.clone().unwrap_or_default();
+            eprintln!(
+                "  Skipping command {}: the candidate touches none of {}",
+                index,
+                patterns.join(", ")
+            );
+            skipped_commands.push(SkippedCommand {
+                command: cmd.command.clone(),
+                test_harness: cmd.test_harness.clone(),
+                when_changed: patterns,
+            });
+            continue;
+        }
         eprintln!("  Running command {}: {}", index, cmd.command);
         let result = run_command(
             candidate_workspace,
@@ -185,6 +282,7 @@ pub fn run(
     if let Some(reason) = extractor_missing {
         let results = TesterResults {
             commands: command_results,
+            skipped_commands,
             tests: Vec::new(),
             summary: Summary {
                 total: 0,
@@ -207,6 +305,7 @@ pub fn run(
         Err(error) => {
             let results = TesterResults {
                 commands: command_results,
+                skipped_commands,
                 tests: Vec::new(),
                 summary: Summary {
                     total: 0,
@@ -229,6 +328,7 @@ pub fn run(
     if !duplicate_ids.is_empty() {
         let results = TesterResults {
             commands: command_results,
+            skipped_commands,
             tests: Vec::new(),
             summary: Summary {
                 total: 0,
@@ -257,6 +357,7 @@ pub fn run(
 
     let results = TesterResults {
         commands: command_results,
+        skipped_commands,
         tests,
         summary,
         error: None,
@@ -290,9 +391,8 @@ fn run_command(
 
     let start = Instant::now();
     let output = if let Some(profile) = sandbox_path {
-        Command::new("sandbox-exec")
-            .arg("-f")
-            .arg(profile)
+        Command::new(crate::os::sandbox_launcher(false))
+            .args(crate::os::sandbox_launcher_args(&profile.to_string_lossy()))
             .arg("sh")
             .arg("-c")
             .arg(command)
@@ -333,9 +433,8 @@ fn run_extractor(
     sandbox_path: Option<&PathBuf>,
 ) -> Result<Vec<TestResult>> {
     let output = if let Some(profile) = sandbox_path {
-        Command::new("sandbox-exec")
-            .arg("-f")
-            .arg(profile)
+        Command::new(crate::os::sandbox_launcher(false))
+            .args(crate::os::sandbox_launcher_args(&profile.to_string_lossy()))
             .arg(extractor_path)
             .arg(artifact_dir)
             .output()
@@ -454,6 +553,71 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+mod change_scope_tests {
+    use super::*;
+
+    fn command(when_changed: Option<&[&str]>) -> TesterCommand {
+        TesterCommand {
+            command: "cargo test".to_string(),
+            test_harness: "cargo".to_string(),
+            when_changed: when_changed
+                .map(|patterns| patterns.iter().map(|p| p.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn a_command_without_declared_paths_always_runs() {
+        assert!(command_applies(&command(None), Some(&[])));
+    }
+
+    #[test]
+    fn an_unknown_change_set_runs_every_command() {
+        assert!(command_applies(&command(Some(&["migrations/**"])), None));
+    }
+
+    #[test]
+    fn a_scoped_command_runs_when_the_candidate_touches_its_paths() {
+        let cmd = command(Some(&["migrations/**", "**/*.sql"]));
+        let changed = vec!["crates/db/queries/list.sql".to_string()];
+
+        assert!(command_applies(&cmd, Some(&changed)));
+    }
+
+    #[test]
+    fn a_scoped_command_is_skipped_when_the_candidate_touches_nothing_it_covers() {
+        let cmd = command(Some(&["migrations/**"]));
+        let changed = vec!["README.md".to_string()];
+
+        assert!(!command_applies(&cmd, Some(&changed)));
+    }
+
+    #[test]
+    fn a_single_star_stays_inside_one_path_segment() {
+        assert!(glob_matches("src/*.rs", "src/main.rs"));
+        assert!(!glob_matches("src/*.rs", "src/nested/main.rs"));
+    }
+
+    #[test]
+    fn a_double_star_crosses_segments_and_matches_none_of_them() {
+        assert!(glob_matches("**/*.sql", "a/b/c/query.sql"));
+        assert!(glob_matches("**/*.sql", "query.sql"));
+        assert!(!glob_matches("**/*.sql", "query.rs"));
+    }
+
+    #[test]
+    fn a_directory_prefix_matches_everything_beneath_it() {
+        assert!(glob_matches("charts/**", "charts/api/templates/deploy.yaml"));
+        assert!(!glob_matches("charts/**", "docs/charts.md"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_one_character_within_a_segment() {
+        assert!(glob_matches("v?/schema.sql", "v2/schema.sql"));
+        assert!(!glob_matches("v?/schema.sql", "v10/schema.sql"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -513,7 +677,7 @@ mod tests {
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert!(results.error.is_none());
@@ -534,7 +698,7 @@ mod tests {
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.commands.len(), 1);
@@ -562,7 +726,7 @@ echo '[{"id": "tests::foo", "test_harness": "cargo-nextest", "status": "pass", "
 "#,
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.tests.len(), 1);
@@ -594,7 +758,7 @@ echo '[{{"id": "tests::bar", "test_harness": "cargo-nextest", "status": "fail", 
             ),
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         let excerpt = results.tests[0].failure_excerpt.as_ref().unwrap();
@@ -631,7 +795,7 @@ echo '[{{"id": "tests::multibyte", "test_harness": "cargo-nextest", "status": "f
             ),
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         let excerpt = results.tests[0].failure_excerpt.as_ref().unwrap();
@@ -660,7 +824,7 @@ echo '[
 "#,
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.summary.total, 3);
@@ -685,7 +849,7 @@ echo '[
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
 
         let stdout = fs::read_to_string(artifact_dir.path().join("commands/0-stdout.log")).unwrap();
         let stderr = fs::read_to_string(artifact_dir.path().join("commands/0-stderr.log")).unwrap();
@@ -714,7 +878,7 @@ echo '[
 "#,
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.tests[0].test_harness, "cargo-nextest");
@@ -732,7 +896,7 @@ echo '[
         make_workspace(workspace.path());
         // No tester.yaml => tester_yaml_problem
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         let error = results.error.unwrap();
@@ -770,7 +934,7 @@ echo '[
 "#,
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         let error = results.error.as_ref().expect("should have error");
@@ -792,7 +956,7 @@ echo '[
         let artifact_dir = TempDir::new().unwrap();
         make_workspace(workspace.path());
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "tester_yaml_problem");
@@ -808,7 +972,7 @@ echo '[
         make_workspace(workspace.path());
         write_tester_yaml(workspace.path(), "not: valid: yaml: [[[");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "tester_yaml_problem");
@@ -824,7 +988,7 @@ echo '[
             "commands:\n  - command: echo hi\n    test_harness: shell-harness\n",
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_missing");
@@ -848,7 +1012,7 @@ echo '[
         perms.set_mode(0o644);
         fs::set_permissions(&extractor, perms).unwrap();
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_missing");
@@ -865,7 +1029,7 @@ echo '[
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.commands.len(), 2);
@@ -884,7 +1048,7 @@ echo '[
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        let result = run(workspace.path(), artifact_dir.path(), true, &resolver());
+        let result = run(workspace.path(), artifact_dir.path(), true, &resolver(), None);
         assert!(result.is_ok());
     }
 
@@ -902,7 +1066,7 @@ echo '[
             "#!/bin/sh\necho 'some error detail' >&2\nexit 1\n",
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_failure");
@@ -929,7 +1093,7 @@ echo '[
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho 'not json'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         assert_eq!(results.error.as_ref().unwrap().kind, "extractor_failure");
@@ -951,7 +1115,7 @@ echo '[{"id": "my_test", "test_harness": "cargo-nextest", "status": "pass", "dur
 "#,
         );
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
 
         let results_path = artifact_dir.path().join("tester-results.json");
         assert!(results_path.is_file());
@@ -979,7 +1143,7 @@ echo '[{"id": "my_test", "test_harness": "cargo-nextest", "status": "pass", "dur
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
 
         let content = fs::read_to_string(&marker_file).unwrap();
         let lines: Vec<&str> = content.trim().lines().collect();
@@ -997,7 +1161,7 @@ echo '[{"id": "my_test", "test_harness": "cargo-nextest", "status": "pass", "dur
         );
         write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
 
-        run(workspace.path(), artifact_dir.path(), true, &resolver()).unwrap();
+        run(workspace.path(), artifact_dir.path(), true, &resolver(), None).unwrap();
         let results = read_results(artifact_dir.path());
 
         let cmd = &results.commands[0];

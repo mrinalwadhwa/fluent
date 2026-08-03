@@ -24,6 +24,7 @@ use fluent::fargate_bootstrap;
 use fluent::git;
 use fluent::guidance;
 use fluent::keep_awake;
+use fluent::linux_sandbox;
 use fluent::observations;
 use fluent::os;
 use fluent::post_merge_review;
@@ -40,6 +41,15 @@ use fluent::work_task_executor::{self, WorkTaskRunConfig};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // The launcher stands in for `sandbox-exec`, not for a Fluent session, so
+    // it confines and execs before any of the setup below can run.
+    if let Some(Commands::SandboxRun { policy, command }) = &cli.command {
+        let (program, args) = command
+            .split_first()
+            .expect("clap requires at least one command word");
+        return linux_sandbox::exec_confined(Path::new(policy), Path::new(program), args);
+    }
 
     let cwd = std::env::current_dir()?;
     let sandbox_root = cli
@@ -79,7 +89,7 @@ fn main() -> Result<()> {
             std::slice::from_ref(&sandbox_root),
             coder_kind,
         )?;
-        println!("--- Rendered Seatbelt profile ---");
+        println!("--- Rendered {:?} profile ---", os::backend());
         println!("HOME         = {home}");
         println!("SANDBOX_ROOT = {}", sandbox_root.display());
         println!("---------------------------------");
@@ -129,6 +139,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Tester { command }) => {
             cmd_tester(&cwd, command, cli.no_sandbox)?;
+        }
+        Some(Commands::SandboxRun { .. }) => {
+            unreachable!("the launcher returns before any session setup runs")
         }
         Some(Commands::Scheduler { command }) => {
             cmd_scheduler(&cwd, command)?;

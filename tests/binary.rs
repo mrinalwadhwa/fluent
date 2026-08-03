@@ -15,6 +15,12 @@ fn fluent_cmd() -> LoggedCommand {
     let mut cmd = LoggedCommand::cargo_bin("fluent");
     cmd.env_remove("FLUENT_TASK_KIND");
     cmd.env("FLUENT_NO_UPDATE_CHECK", "1");
+    // These tests stand a mock `sandbox-exec` on PATH to observe how Fluent
+    // drives a sandboxed launch. Landlock is a kernel facility with no binary
+    // to replace, so the launcher stays the one a mock can stand in for.
+    // `tests/linux_sandbox.rs` covers the Landlock backend against a real
+    // kernel.
+    cmd.env("FLUENT_SANDBOX_BACKEND", "seatbelt");
     cmd
 }
 

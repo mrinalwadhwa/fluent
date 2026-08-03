@@ -2700,14 +2700,13 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(profile.unwrap().path).unwrap();
-        assert!(
-            content.contains("(allow file-write* (subpath \"/private/var/folders\"))"),
-            "non-Codex rebases retain the standard shared macOS temp grant: {content}"
-        );
-        assert!(
-            content.contains("(allow file-write* (subpath \"/private/tmp\"))"),
-            "non-Codex rebases retain the standard shared /private/tmp grant: {content}"
-        );
+        for root in crate::os::shared_temp_roots() {
+            assert!(
+                crate::os::profile_grants_write(&content, &root),
+                "non-Codex rebases retain the shared temp grant on {}: {content}",
+                root.display()
+            );
+        }
     }
 
     #[test]

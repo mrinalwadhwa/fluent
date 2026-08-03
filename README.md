@@ -15,7 +15,7 @@ You use the factory through the Fluent [skill](https://agentskills.io/) in Codex
 ### Install
 
 ```bash
-npx skills add mrinalwadhwa/fluent --skill fluent  # currently macOS only
+npx skills add mrinalwadhwa/fluent --skill fluent  # macOS and Linux
 ```
 
 Use the command above to install the Fluent skill. Start your coding agent in the project folder you want Fluent to work on, then ask it to use Fluent and describe what you want to explore, build, fix, or improve.
@@ -102,7 +102,20 @@ Within the Attempt, the Writer receives the approved Brief, Behavior Specificati
 
 Fluent does not rely on the Writer’s own test report, and it does not make every Reviewer rerun the same test suite. Instead, a separate Tester produces one independent test record that all Reviewers share.
 
-The Tester is a deterministic runner, not a coding agent. It reads one or more test commands from the project’s `.fluent/tester.yaml`, runs them sequentially in the candidate workspace, and captures each command’s output, exit code, and duration. The project’s `.fluent/extract-tester-results` executable normalizes those outputs into a single `tester-results.json` artifact. Reviewers treat that artifact as authoritative for the project’s test suite, although they can still run targeted checks for specific questions. The Behavior Reviewer also matches the `Test:` references in the Behavior Specifications against its per-test results.
+The Tester is a deterministic runner, not a coding agent. It reads one or more test commands from the project’s `.fluent/tester.yaml`, runs them sequentially in the candidate workspace, and captures each command’s output, exit code, and duration.
+
+A command can declare the paths it exists to exercise, and then runs only for a candidate that touches them:
+
+```yaml
+commands:
+  - command: ./scripts/explain-new-indexes
+    test_harness: shell-harness
+    when_changed:
+      - migrations/**
+      - "**/*.sql"
+```
+
+This is how a project attaches a gate to a file class that its main suite cannot judge — a chart template, a compose file, a migration whose index the query cannot use. Without it, such a change lands green on the strength of checks that never looked at it. A command with no `when_changed` runs every time, and when the Tester cannot determine what changed it runs every command. Commands the diff did not reach are recorded in `tester-results.json` as skipped, so a Reviewer can tell a gate that passed from one that never ran. The project’s `.fluent/extract-tester-results` executable normalizes those outputs into a single `tester-results.json` artifact. Reviewers treat that artifact as authoritative for the project’s test suite, although they can still run targeted checks for specific questions. The Behavior Reviewer also matches the `Test:` references in the Behavior Specifications against its per-test results.
 
 Once the Tester completes, Fluent runs independent Reviewers in parallel. Every Reviewer reads the approved planning documents, the Writer’s `progress.md` checklist, the candidate changes, the Tester evidence, and recorded decisions. The checklist tracks any Implementation Plan steps and review follow-ups across rounds, recording completion evidence, divergences, and notes for what comes next. Each Reviewer also loads relevant general and project Expertise, so its judgment reflects both Fluent’s review methods and what the project has learned. The built-in Reviewers include:
 

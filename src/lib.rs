@@ -20,6 +20,7 @@ pub mod land_lock;
 pub mod learner;
 pub mod lease;
 pub mod lineage_lock;
+pub mod linux_sandbox;
 pub mod notify;
 pub mod os;
 pub mod plan;

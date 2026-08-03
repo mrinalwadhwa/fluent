@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "fluent",
-    about = "Run coding agents inside a macOS Seatbelt sandbox with session continuity",
+    about = "Run coding agents inside an OS sandbox with session continuity",
     version = crate::version::version_tag_str(),
 )]
 pub struct Cli {
@@ -26,7 +26,7 @@ pub struct Cli {
     #[arg(long)]
     pub logs: bool,
 
-    /// Disable sandbox (for Fargate or Linux)
+    /// Disable sandbox (for Fargate, which confines the task itself)
     #[arg(long)]
     pub no_sandbox: bool,
 
@@ -76,6 +76,22 @@ pub enum Commands {
     Tester {
         #[command(subcommand)]
         command: TesterCommands,
+    },
+
+    /// Confine this process to a rendered policy, then run a command inside it.
+    ///
+    /// Fluent re-executes itself here rather than shelling out to a sandbox
+    /// helper, because Landlock has no launcher binary and must be applied
+    /// before the `execve` whose child it confines.
+    #[command(hide = true)]
+    SandboxRun {
+        /// Rendered policy to enforce
+        #[arg(long)]
+        policy: String,
+
+        /// Command to run, and its arguments
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
     },
 
     /// Run the sequential scheduler

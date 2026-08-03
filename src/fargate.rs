@@ -887,6 +887,28 @@ mod tests {
         );
     }
 
+    /// Put `HOME` back when the test ends. Leaving it pointed at a deleted
+    /// tempdir changes what every later test in the process renders, and
+    /// `#[serial]` only orders these against each other.
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(previous) => unsafe { std::env::set_var("HOME", previous) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn codex_overrides_include_auth_json_and_fluent_coder() {
@@ -896,7 +918,7 @@ mod tests {
         let auth_json = r#"{"auth_mode":"chatgpt","refresh_token":"tok"}"#;
         fs::write(codex_dir.join("auth.json"), auth_json).unwrap();
 
-        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let _home = HomeGuard::set(tmp.path());
         let result = coder_task_overrides(CoderKind::Codex).unwrap();
         assert!(
             result
@@ -916,7 +938,7 @@ mod tests {
     #[serial]
     fn codex_overrides_err_when_host_auth_file_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let _home = HomeGuard::set(tmp.path());
         let result = coder_task_overrides(CoderKind::Codex);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -938,7 +960,7 @@ mod tests {
         )
         .unwrap();
 
-        unsafe { std::env::set_var("HOME", tmp.path().to_str().unwrap()) };
+        let _home = HomeGuard::set(tmp.path());
         let result = coder_task_overrides(CoderKind::Codex);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

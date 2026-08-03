@@ -52,7 +52,10 @@ pub fn run(sub: Subcommand) -> Result<()> {
 
 fn ensure_macos() -> Result<()> {
     if cfg!(not(target_os = "macos")) {
-        bail!("fluent keep-awake is macOS-only");
+        // Sleep inhibition matters on a laptop that suspends mid-Attempt. The
+        // Linux hosts Fluent runs on are servers, so there is nothing to hold
+        // awake and no Linux implementation to call.
+        bail!("fluent keep-awake is macOS-only: it inhibits laptop idle sleep");
     }
     Ok(())
 }

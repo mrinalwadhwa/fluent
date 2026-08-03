@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime};
 
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
 
-fn trusted_sandbox_executable() -> &'static str {
-    "/usr/bin/sandbox-exec"
+fn trusted_sandbox_executable() -> std::ffi::OsString {
+    crate::os::sandbox_launcher(true)
 }
 
 fn claude_model() -> Option<String> {
@@ -423,15 +423,11 @@ impl SandboxedClaudeCode {
     fn build_command(&self, working_dir: &Path) -> Command {
         let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
-            let mut cmd = Command::new(if self.trusted_sandbox {
-                trusted_sandbox_executable()
-            } else {
-                "sandbox-exec"
-            });
+            let mut cmd = Command::new(crate::os::sandbox_launcher(self.trusted_sandbox));
             if self.trusted_sandbox {
                 restrict_trusted_coder_env(&mut cmd);
             }
-            cmd.args(["-f", profile]);
+            cmd.args(crate::os::sandbox_launcher_args(profile));
             cmd.arg("claude");
             cmd.arg("--dangerously-skip-permissions");
             if let Some(ref m) = model {
@@ -672,15 +668,11 @@ impl CodexCode {
 
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
         let mut cmd = if let Some(profile) = &self.sandbox_profile {
-            let mut cmd = Command::new(if self.trusted_sandbox {
-                trusted_sandbox_executable()
-            } else {
-                "sandbox-exec"
-            });
+            let mut cmd = Command::new(crate::os::sandbox_launcher(self.trusted_sandbox));
             if self.trusted_sandbox {
                 restrict_trusted_coder_env(&mut cmd);
             }
-            cmd.args(["-f", profile]);
+            cmd.args(crate::os::sandbox_launcher_args(profile));
             cmd.arg("codex");
             if let Some(ca_bundle) = codex_ca_bundle() {
                 cmd.env("SSL_CERT_FILE", ca_bundle);
@@ -731,15 +723,11 @@ impl PiCode {
     fn build_command(&self, working_dir: &Path) -> Command {
         let model = self.effective_model();
         if let Some(ref profile) = self.sandbox_profile {
-            let mut cmd = Command::new(if self.trusted_sandbox {
-                trusted_sandbox_executable()
-            } else {
-                "sandbox-exec"
-            });
+            let mut cmd = Command::new(crate::os::sandbox_launcher(self.trusted_sandbox));
             if self.trusted_sandbox {
                 restrict_trusted_coder_env(&mut cmd);
             }
-            cmd.args(["-f", profile]);
+            cmd.args(crate::os::sandbox_launcher_args(profile));
             cmd.arg("pi");
             cmd.args(["--provider", "local-openai"]);
             cmd.args(["--model", &model]);
@@ -4345,7 +4333,10 @@ mod model_default_tests {
 
     #[test]
     fn trusted_sandbox_always_uses_the_system_launcher() {
-        assert_eq!(trusted_sandbox_executable(), "/usr/bin/sandbox-exec");
+        assert_eq!(
+            trusted_sandbox_executable(),
+            crate::os::sandbox_launcher(true)
+        );
     }
 
     #[test]
@@ -4471,7 +4462,7 @@ mod model_default_tests {
 
         let cmd = coder.build_command(dir.path());
 
-        assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/sandbox-exec"));
+        assert_eq!(cmd.get_program(), crate::os::sandbox_launcher(true));
     }
 
     #[test]

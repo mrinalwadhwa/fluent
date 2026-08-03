@@ -1278,6 +1278,28 @@ fn complete_review_task(
     })
 }
 
+/// Paths the candidate changed since the Attempt's base commit.
+///
+/// `None` when the base is unrecorded or Git cannot answer, which runs every
+/// scoped command rather than silently narrowing the suite.
+fn candidate_changed_paths(workspace: &Path, base_commit: Option<&str>) -> Option<Vec<String>> {
+    let base = base_commit?;
+    let output = crate::git::run_stdout(
+        workspace,
+        &["diff", "--name-only", base, "HEAD"],
+        "listing the candidate's changed paths",
+    )
+    .ok()?;
+    Some(
+        output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 fn capture_baseline_tester(
     project_root: &Path,
     candidate_workspace: &Path,
@@ -1294,7 +1316,11 @@ fn capture_baseline_tester(
         return;
     }
     eprintln!("  Baseline tester   running on pre-write workspace");
-    if let Err(e) = crate::tester::run(candidate_workspace, &artifact_dir, no_sandbox, resolver) {
+    // The baseline runs before the Writer, so nothing has changed yet and a
+    // change set would skip every scoped command. Passing none runs them all,
+    // which is what gives a scoped gate a baseline to be compared against.
+    if let Err(e) = crate::tester::run(candidate_workspace, &artifact_dir, no_sandbox, resolver, None)
+    {
         eprintln!("  Baseline tester: run failed: {e:#}");
     }
 }
@@ -1392,11 +1418,15 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
 
     let results_path = artifact_dir.join("tester-results.json");
 
+    let changed_paths =
+        candidate_changed_paths(&candidate_workspace, review_context.base_commit.as_deref());
+
     let mut tester_result = crate::tester::run(
         &candidate_workspace,
         &artifact_dir,
         config.no_sandbox,
         config.resolver,
+        changed_paths.as_deref(),
     );
     let mut retries = 0;
     while tester_result.is_err() && retries < max_task_retries() {
@@ -1411,6 +1441,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             &artifact_dir,
             config.no_sandbox,
             config.resolver,
+            changed_paths.as_deref(),
         );
     }
 
@@ -9928,38 +9959,34 @@ mod tests {
         let profile = profile.expect("sandbox profile should be present");
         let content = fs::read_to_string(&profile.path).unwrap();
 
-        let write_grant =
-            |p: &Path| format!("(allow file-write* (subpath \"{}\"))", p.to_string_lossy());
+        let writable = |p: &Path| os::profile_grants_write(&content, p);
 
         assert!(
-            content.contains(&write_grant(&expertise_dir)),
+            writable(&expertise_dir),
             "the Learner may write .fluent/expertise; profile:\n{content}"
         );
         assert!(
-            content.contains(&write_grant(&handoff_dir)),
+            writable(&handoff_dir),
             "the Learner may write the managed handoff surface; profile:\n{content}"
         );
         assert!(
-            content.contains(&write_grant(&common_git_dir)),
+            writable(&common_git_dir),
             "the Learner may write Git metadata; profile:\n{content}"
         );
         assert!(
-            content.contains(&format!(
-                "(allow file-read*  (subpath \"{}\"))",
-                workspace.to_string_lossy()
-            )),
+            os::profile_grants_read(&content, &workspace),
             "the Learner may read the workspace; profile:\n{content}"
         );
         assert!(
-            !content.contains(&write_grant(&workspace)),
+            !writable(&workspace),
             "the Learner may not write the whole workspace; profile:\n{content}"
         );
         assert!(
-            !content.contains(&write_grant(&work_model_dir)),
+            !writable(&work_model_dir),
             "the Learner may not write the Work model; profile:\n{content}"
         );
         assert!(
-            !content.contains(&write_grant(&observations_dir)),
+            !writable(&observations_dir),
             "the Learner may not write the Observation backlog; profile:\n{content}"
         );
 
@@ -9979,20 +10006,16 @@ mod tests {
         )
         .unwrap();
         let handoff_content = fs::read_to_string(handoff_profile.path).unwrap();
-        assert!(handoff_content.contains(&write_grant(&handoff_dir)));
-        assert!(!handoff_content.contains(&write_grant(&expertise_dir)));
-        assert!(!handoff_content.contains(&write_grant(&common_git_dir)));
-        assert!(handoff_content.contains(&format!(
-            "(allow file-read*  (subpath \"{}\"))",
-            common_git_dir.to_string_lossy()
-        )));
-        assert!(handoff_content.contains(&format!(
-            "(deny file-write* (subpath \"{}\"))",
-            workspace.to_string_lossy()
-        )));
-        assert!(
-            !handoff_content.contains("(allow file-write* (subpath \"/private/var/folders\"))")
-        );
+        let handoff_writable = |p: &Path| os::profile_grants_write(&handoff_content, p);
+
+        assert!(handoff_writable(&handoff_dir));
+        assert!(!handoff_writable(&expertise_dir));
+        assert!(!handoff_writable(&common_git_dir));
+        assert!(os::profile_grants_read(&handoff_content, &common_git_dir));
+        assert!(!handoff_writable(&workspace));
+        for root in os::shared_temp_roots() {
+            assert!(!handoff_writable(&root), "{}", root.display());
+        }
     }
 
     #[test]
@@ -10039,29 +10062,25 @@ mod tests {
         )
         .unwrap();
         let content = fs::read_to_string(profile.path).unwrap();
-        let write_grant =
-            |p: &Path| format!("(allow file-write* (subpath \"{}\"))", p.to_string_lossy());
-        let deny_write =
-            |p: &Path| format!("(deny file-write* (subpath \"{}\"))", p.to_string_lossy());
+        // Seatbelt spells the denial as a rule and Landlock as the absence of a
+        // grant, so each denied root is asserted the one way both backends
+        // share: it is not writable.
+        let writable = |p: &Path| os::profile_grants_write(&content, p);
 
         assert!(
-            content.contains(&write_grant(&staging)),
+            writable(&staging),
             "only the staging surface is writable; profile:\n{content}"
         );
         assert!(
-            !content.contains(&write_grant(&expertise_dir)),
+            !writable(&expertise_dir),
             "expertise is never writable; profile:\n{content}"
         );
         assert!(
-            !content.contains(&write_grant(&workspace)),
-            "the candidate workspace is never writable; profile:\n{content}"
-        );
-        assert!(
-            content.contains(&deny_write(&workspace)),
+            !writable(&workspace),
             "the candidate workspace is denied; profile:\n{content}"
         );
         assert!(
-            content.contains(&deny_write(&common_git_dir)),
+            !writable(&common_git_dir),
             "shared Git metadata is denied; profile:\n{content}"
         );
     }
