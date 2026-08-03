@@ -1080,6 +1080,39 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn guarded_tester_grants_canonical_settlement_to_rendered_sandbox() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+
+        unsafe { std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass") };
+        let sandbox =
+            preflight_sandbox_profile(workspace.path(), artifact_dir.path(), false, &resolver())
+                .unwrap();
+        unsafe { std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT") };
+
+        let settlement = sandbox.settlement_directory(0).unwrap();
+        let profile = sandbox.profile().expect("sandbox rendering must complete");
+        let profile_content = fs::read_to_string(&profile.path).unwrap();
+        assert_eq!(
+            settlement,
+            fs::canonicalize(artifact_dir.path().join("commands/settlement/0")).unwrap()
+        );
+        assert!(
+            profile_content.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                settlement.display()
+            )),
+            "the rendered sandbox must grant the canonical guarded settlement path: {profile_content}"
+        );
+    }
+
     #[test]
     fn prepared_tester_plan_remains_execution_authority() {
         let workspace = TempDir::new().unwrap();

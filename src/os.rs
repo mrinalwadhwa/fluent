@@ -118,7 +118,7 @@ fn test_preflight_result() -> Option<Result<()>> {
         .ok()
         .as_deref()
     {
-        Some("pass") => Some(Ok(())),
+        Some("pass" | "render-pass") => Some(Ok(())),
         Some("fail") => Some(Err(HostSandboxPreflightError {
             message: "test host sandbox preflight failure".to_string(),
         }
