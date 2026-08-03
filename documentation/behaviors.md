@@ -4479,11 +4479,12 @@ in `tester.yaml`), `exit_code` (integer), `duration_ms` (integer),
 `stderr_log` (string, relative path).
 Test: src/tester.rs (tester_results_command_entry_shape)
 
-When a command enables `reject_process_leaks`, its entry MAY include
-`process_settlement` evidence with the Fluent-created settlement directory and
-any surviving scoped process records. Each record identifies its PID, process
-kind, and settlement directory. This evidence does not replace the command's
-stdout, stderr, exit code, or duration.
+WHEN a command enables `reject_process_leaks` and Fluent records
+process-settlement evidence,
+THE SYSTEM SHALL include the Fluent-created settlement directory and every
+surviving scoped process record, each identifying its PID, process kind, and
+settlement directory, without replacing the command's stdout, stderr, exit
+code, or duration.
 Test: src/tester.rs (tester_host_process_settlement_reports_scoped_leak)
 
 Each entry in `tests` SHALL have: `id` (string), `test_harness`

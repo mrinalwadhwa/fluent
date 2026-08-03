@@ -326,6 +326,17 @@ fn rollback_reservation(
     task_id: &str,
     receipt: &ReservationReceipt,
 ) -> Result<(), WorkModelStorageError> {
+    #[cfg(feature = "test-support")]
+    if std::env::var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE")
+        .ok()
+        .as_deref()
+        == Some("fail")
+    {
+        return Err(WorkModelStorageError::WriteFile {
+            path: store.work_item_path(work_item_id)?,
+            source: std::io::Error::other("test-injected Tester rollback persistence failure"),
+        });
+    }
     store.mutate_work_item(work_item_id, |item| {
         // The reservation wrote this exact Attempt/Task, so a structurally missing
         // entity during rollback is a model-integrity fault, not a tolerable
@@ -364,6 +375,20 @@ fn rollback_reservation(
     Ok(())
 }
 
+/// Identifies a setup failure whose receipt-scoped rollback could not persist.
+/// Callers must durably settle the already-reserved Task instead of returning
+/// this error through a path that could leave it executing.
+#[derive(Debug)]
+struct ReservationRollbackFailure;
+
+impl std::fmt::Display for ReservationRollbackFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "failed to roll back the reserved Task")
+    }
+}
+
+impl std::error::Error for ReservationRollbackFailure {}
+
 /// Run side-effectful setup after the reservation; on failure, CAS-revert the
 /// reservation via its receipt before returning the setup error.
 fn with_reservation_rollback<T>(
@@ -386,6 +411,7 @@ fn with_reservation_rollback<T>(
                 // typed storage error stay recoverable and the primary is never masked.
                 return Err(error
                     .context(rollback_error)
+                    .context(ReservationRollbackFailure)
                     .context("failed to normalize the reserved Task after a setup failure"));
             }
             Err(error)
@@ -1601,7 +1627,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Create and canonicalize every guarded settlement directory only after the
     // durable reservation succeeds. A filesystem setup failure CAS-reverts the
     // reservation so this Task remains recoverable.
-    let tester_settlement = with_reservation_rollback(
+    let tester_settlement = match with_reservation_rollback(
         config.store,
         config.work_item_id,
         config.attempt_id,
@@ -1611,7 +1637,25 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             fs::create_dir_all(&artifact_dir)?;
             crate::tester::prepare_settlement_directories(&artifact_dir, &tester_plan)
         },
-    )?;
+    ) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            if error.downcast_ref::<ReservationRollbackFailure>().is_some() {
+                if let Err(finalize_error) = lock_mark_task_failed(
+                    config.store,
+                    config.store_lock,
+                    config.work_item_id,
+                    config.attempt_id,
+                    config.task_id,
+                ) {
+                    return Err(error.context(finalize_error).context(
+                        "durably failing Tester Task after its reservation rollback failed",
+                    ));
+                }
+            }
+            return Err(error);
+        }
+    };
 
     // A sandbox render or host preflight failure is a recoverable Tester harness
     // failure after reservation: do not launch a command or fall back to an
@@ -9637,6 +9681,69 @@ mod tests {
                 .status,
             TaskStatus::Failed,
             "a failed pause persistence must durably settle the reserved Task"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn tester_rollback_persistence_failure_never_leaves_task_executing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let store = WorkModelStore::new(project_root);
+        let item = review_item();
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let workspace = project_root.join(
+            &tester
+                .review_context
+                .as_ref()
+                .unwrap()
+                .candidate_workspace_path,
+        );
+        let artifact = project_root.join(&tester.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(workspace.join(".fluent")).unwrap();
+        fs::write(
+            workspace.join(".fluent/tester.yaml"),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        )
+        .unwrap();
+        fs::create_dir_all(artifact.join("commands/settlement")).unwrap();
+        fs::write(artifact.join("commands/settlement/1"), "not a directory").unwrap();
+        store.create_work_item(&item).unwrap();
+
+        unsafe { std::env::set_var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE", "fail") };
+        let resolver = ContentResolver::new(Some(project_root));
+        let error = run_task(WorkTaskRunConfig {
+            project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: &tester.id,
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: true,
+            store_lock: None,
+        })
+        .expect_err("a rollback persistence failure must stop the Tester");
+        unsafe { std::env::remove_var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE") };
+
+        assert!(
+            error.to_string().contains("normalize the reserved Task"),
+            "the setup error must preserve the failed rollback context: {error:#}"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == tester.id)
+                .unwrap()
+                .status,
+            TaskStatus::Failed,
+            "a rollback persistence failure must durably settle the reserved Task"
         );
     }
 

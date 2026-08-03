@@ -311,7 +311,19 @@ pub fn prepare_settlement_directories(
     artifact_dir: &Path,
     plan: &TesterPlan,
 ) -> Result<TesterSettlement> {
+    prepare_settlement_directories_with(artifact_dir, plan, ProcessSettlement::prepare_directory)
+}
+
+fn prepare_settlement_directories_with(
+    artifact_dir: &Path,
+    plan: &TesterPlan,
+    mut prepare_directory: impl FnMut(PathBuf) -> Result<PathBuf>,
+) -> Result<TesterSettlement> {
     let root = artifact_dir.join("commands/settlement");
+    let created_parents = [artifact_dir.join("commands"), root.clone()]
+        .into_iter()
+        .filter(|path| !path.exists())
+        .collect::<Vec<_>>();
     let mut settlement_directories = Vec::with_capacity(plan.commands.len());
     let mut created = Vec::new();
     for (index, command) in plan.commands.iter().enumerate() {
@@ -321,7 +333,7 @@ pub fn prepare_settlement_directories(
         }
         let directory = root.join(index.to_string());
         let existed = directory.exists();
-        match ProcessSettlement::prepare_directory(directory.clone()) {
+        match prepare_directory(directory.clone()) {
             Ok(directory) => {
                 if !existed {
                     created.push(directory.clone());
@@ -331,6 +343,9 @@ pub fn prepare_settlement_directories(
             Err(error) => {
                 for created_directory in created.into_iter().rev() {
                     let _ = fs::remove_dir_all(created_directory);
+                }
+                for created_parent in created_parents.into_iter().rev() {
+                    let _ = fs::remove_dir(created_parent);
                 }
                 return Err(error);
             }
@@ -1161,6 +1176,37 @@ mod tests {
         assert!(planned.is_file());
         assert!(!changed.exists());
         assert!(sandbox.settlement_directory(0).unwrap().is_dir());
+    }
+
+    #[test]
+    fn settlement_preparation_removes_created_parent_directories_on_failure() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+        let plan = plan(workspace.path()).unwrap();
+        let mut calls = 0;
+
+        let error =
+            match prepare_settlement_directories_with(artifact_dir.path(), &plan, |directory| {
+                calls += 1;
+                if calls == 2 {
+                    anyhow::bail!("injected settlement preparation failure");
+                }
+                ProcessSettlement::prepare_directory(directory)
+            }) {
+                Ok(_) => panic!("the second guarded settlement setup must fail"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("injected settlement"));
+        assert!(
+            !artifact_dir.path().join("commands").exists(),
+            "cleanup removes every parent directory created by this invocation"
+        );
     }
 
     #[test]
