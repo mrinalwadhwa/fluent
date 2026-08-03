@@ -2019,15 +2019,24 @@ all reviewers consume.
 Three files form the Tester contract:
 
 - `.fluent/tester.yaml` — project's declaration of the test commands
-  Tester runs. Each entry has a `command` (shell string) and a
-  `test_harness` (parser identifier for the extractor).
+  Tester runs. Each entry has a `command` (shell string), a
+  `test_harness` (parser identifier for the extractor), and may set
+  `reject_process_leaks: true`. For a guarded command, Tester creates a
+  private fixture directory below its artifact area before it renders the
+  sandbox, exposes that directory as `TMPDIR` and
+  `FLUENT_RELEASE_TEST_ROOTS`, and collects process evidence in its host
+  process before and after the command. The command never supplies that
+  inventory. Tester reports unavailable collection as a harness error and
+  records any surviving scoped Fluent, Claude, Codex, or Pi process with its
+  PID, kind, and directory in the command's settlement evidence.
 - `.fluent/extract-tester-results` — project's executable that
   normalizes raw command output into a per-test JSON array on stdout.
   Receives the artifact directory as its single argument, reads
   `commands.json` and per-command log files, emits structured results.
 - `tester-results.json` — canonical artifact with `commands`, `tests`,
-  `summary`, and `error` fields. All five reviewers receive it via
-  `input_artifacts`.
+  `summary`, and `error` fields. A guarded command may also carry optional
+  `process_settlement` evidence without replacing its output or exit-status
+  record. All five reviewers receive it via `input_artifacts`.
 
 These contract files live at the top of `.fluent/`, not under
 `.fluent/hooks/`. Top-level `.fluent/` entries are required

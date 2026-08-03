@@ -7,6 +7,9 @@ use std::time::Instant;
 
 use crate::content::ContentResolver;
 use crate::os;
+use crate::process_settlement::{
+    HostProcessInventoryCollector, ProcessInventoryCollector, ProcessSettlement,
+};
 
 const TESTER_YAML_PATH: &str = ".fluent/tester.yaml";
 const EXTRACTOR_PATH: &str = ".fluent/extract-tester-results";
@@ -28,6 +31,21 @@ pub struct CommandResult {
     pub duration_ms: u64,
     pub stdout_log: String,
     pub stderr_log: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_settlement: Option<ProcessSettlementEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessSettlementEvidence {
+    pub settlement_directory: String,
+    pub leaks: Vec<ProcessLeak>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessLeak {
+    pub pid: u32,
+    pub kind: String,
+    pub settlement_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +103,25 @@ struct TesterConfig {
 struct TesterCommand {
     command: String,
     test_harness: String,
+    #[serde(default)]
+    reject_process_leaks: bool,
+}
+
+/// The sandbox profile and host-owned settlement paths prepared for one Tester run.
+pub struct TesterSandbox {
+    profile: Option<os::SandboxProfile>,
+    settlement_directories: Vec<Option<PathBuf>>,
+}
+
+impl TesterSandbox {
+    fn profile(&self) -> Option<&os::SandboxProfile> {
+        self.profile.as_ref()
+    }
+
+    #[cfg(test)]
+    fn settlement_directory(&self, index: usize) -> Option<PathBuf> {
+        self.settlement_directories.get(index).cloned().flatten()
+    }
 }
 
 fn tester_writable_roots(candidate: &Path, artifact: &Path, home: &Path) -> Vec<PathBuf> {
@@ -122,9 +159,9 @@ pub fn run(
     no_sandbox: bool,
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
-    let profile =
+    let sandbox =
         preflight_sandbox_profile(candidate_workspace, artifact_dir, no_sandbox, resolver)?;
-    run_with_sandbox_profile(candidate_workspace, artifact_dir, profile.as_ref())
+    run_with_sandbox_profile(candidate_workspace, artifact_dir, &sandbox)
 }
 
 /// Run the selected checkout through the production Tester boundary after first
@@ -135,9 +172,9 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let profile =
+    let sandbox =
         preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), profile.as_ref());
+    let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -148,7 +185,7 @@ pub fn check(
                 .join("\n")
         );
     }
-    run_with_sandbox_profile(candidate_workspace, artifact.path(), profile.as_ref())
+    run_with_sandbox_profile(candidate_workspace, artifact.path(), &sandbox)
 }
 
 /// Validate Tester configuration and empty-artifact extraction without running
@@ -160,9 +197,9 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let profile =
+    let sandbox =
         preflight_sandbox_profile(candidate_workspace, artifact.path(), no_sandbox, resolver)?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), profile.as_ref());
+    let problems = structural_problems(candidate_workspace, artifact.path(), sandbox.profile());
     if problems.is_empty() {
         Ok(())
     } else {
@@ -177,18 +214,21 @@ pub fn check_structural(
     }
 }
 
-/// Render and apply the Tester production boundary without creating artifacts or
-/// launching a test command. Callers that reserve Tasks use this before their
-/// durable reservation, then pass the returned profile to `run_with_sandbox_profile`
-/// so the exact probed profile encloses the workload.
+/// Prepare the host-owned Tester paths, then render and preflight the production
+/// sandbox boundary without launching a test command. Callers pass the returned
+/// boundary to `run_with_sandbox_profile` so execution uses the exact prepared paths.
 pub fn preflight_sandbox_profile(
     candidate_workspace: &Path,
     artifact_dir: &Path,
     no_sandbox: bool,
     resolver: &ContentResolver,
-) -> Result<Option<os::SandboxProfile>> {
+) -> Result<TesterSandbox> {
+    let settlement_directories = prepare_settlement_directories(candidate_workspace, artifact_dir)?;
     if no_sandbox {
-        return Ok(None);
+        return Ok(TesterSandbox {
+            profile: None,
+            settlement_directories,
+        });
     }
     // Test-support can force the host preflight result while macOS test runners
     // remain unable to apply a nested Seatbelt profile. Production never takes
@@ -199,30 +239,81 @@ pub fn preflight_sandbox_profile(
         .as_deref()
         == Some("pass")
     {
-        return Ok(None);
+        return Ok(TesterSandbox {
+            profile: None,
+            settlement_directories,
+        });
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let candidate_abs =
         fs::canonicalize(candidate_workspace).unwrap_or_else(|_| candidate_workspace.to_path_buf());
     let artifact_abs =
         fs::canonicalize(artifact_dir).unwrap_or_else(|_| artifact_dir.to_path_buf());
-    let writable_roots = tester_writable_roots(&candidate_abs, &artifact_abs, Path::new(&home));
+    let mut writable_roots = tester_writable_roots(&candidate_abs, &artifact_abs, Path::new(&home));
+    writable_roots.extend(settlement_directories.iter().flatten().cloned());
     match os::render_profile_common_only(resolver, &home, &writable_roots, &[]) {
         Ok(profile) => {
             os::preflight_profile(&profile)?;
-            Ok(Some(profile))
+            Ok(TesterSandbox {
+                profile: Some(profile),
+                settlement_directories,
+            })
         }
         Err(err) => {
             eprintln!("  Warning: sandbox render failed: {err:#}; running unsandboxed");
-            Ok(None)
+            Ok(TesterSandbox {
+                profile: None,
+                settlement_directories,
+            })
         }
     }
+}
+
+fn prepare_settlement_directories(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+) -> Result<Vec<Option<PathBuf>>> {
+    let config = match read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH)) {
+        Ok(config) => config,
+        // Preserve the Tester boundary's recoverable configuration error rather
+        // than turning it into a preflight failure before it can write evidence.
+        Err(_) => return Ok(Vec::new()),
+    };
+    let root = artifact_dir.join("commands/settlement");
+    config
+        .commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            if command.reject_process_leaks {
+                ProcessSettlement::prepare_directory(root.join(index.to_string())).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect()
 }
 
 pub fn run_with_sandbox_profile(
     candidate_workspace: &Path,
     artifact_dir: &Path,
+    sandbox: &TesterSandbox,
+) -> Result<TesterOutcome> {
+    run_with_sandbox_profile_and_collector(
+        candidate_workspace,
+        artifact_dir,
+        sandbox.profile(),
+        Some(&sandbox.settlement_directories),
+        &HostProcessInventoryCollector,
+    )
+}
+
+fn run_with_sandbox_profile_and_collector(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    settlement_directories: Option<&[Option<PathBuf>]>,
+    collector: &dyn ProcessInventoryCollector,
 ) -> Result<TesterOutcome> {
     record_test_boundary(sandbox_profile.is_some());
     let tester_yaml_path = candidate_workspace.join(TESTER_YAML_PATH);
@@ -261,14 +352,82 @@ pub fn run_with_sandbox_profile(
     let mut command_results = Vec::new();
     for (index, cmd) in config.commands.iter().enumerate() {
         eprintln!("  Running command {}: {}", index, cmd.command);
-        let result = run_command(
+        let settlement = if cmd.reject_process_leaks {
+            let prepared_directory = settlement_directories
+                .and_then(|directories| directories.get(index))
+                .cloned()
+                .flatten();
+            let settlement_result = match prepared_directory {
+                Some(directory) => ProcessSettlement::begin_prepared(directory, collector),
+                None => ProcessSettlement::begin(
+                    commands_dir.join("settlement").join(index.to_string()),
+                    collector,
+                ),
+            };
+            match settlement_result {
+                Ok(settlement) => Some(settlement),
+                Err(error) => {
+                    return persist_harness_error(
+                        artifact_dir,
+                        "process_settlement_infrastructure",
+                        "Unable to establish process-settlement baseline".to_string(),
+                        format!("{error:#}"),
+                        command_results,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let mut result = run_command(
             candidate_workspace,
             &cmd.command,
             &cmd.test_harness,
             index,
             &commands_dir,
             sandbox_path,
+            settlement
+                .as_ref()
+                .map(|settlement| settlement.directory.as_path()),
         )?;
+        if let Some(settlement) = settlement {
+            match settlement.new_processes(collector) {
+                Ok(leaks) => {
+                    for leak in &leaks {
+                        eprintln!(
+                            "  Process settlement leak: pid={} kind={} directory={}",
+                            leak.pid,
+                            leak.kind,
+                            leak.settlement_directory.display()
+                        );
+                    }
+                    result.process_settlement = Some(ProcessSettlementEvidence {
+                        settlement_directory: settlement.directory.display().to_string(),
+                        leaks: leaks
+                            .into_iter()
+                            .map(|leak| ProcessLeak {
+                                pid: leak.pid,
+                                kind: leak.kind,
+                                settlement_directory: leak
+                                    .settlement_directory
+                                    .display()
+                                    .to_string(),
+                            })
+                            .collect(),
+                    });
+                }
+                Err(error) => {
+                    command_results.push(result);
+                    return persist_harness_error(
+                        artifact_dir,
+                        "process_settlement_infrastructure",
+                        "Unable to establish post-command process-settlement inventory".to_string(),
+                        format!("{error:#}"),
+                        command_results,
+                    );
+                }
+            }
+        }
         eprintln!(
             "    exit_code={} duration={}ms",
             result.exit_code, result.duration_ms
@@ -329,11 +488,20 @@ pub fn run_with_sandbox_profile(
     };
 
     write_results(artifact_dir, &results)?;
-    Ok(if results.summary.fail == 0 {
-        TesterOutcome::Passed
-    } else {
-        TesterOutcome::TestFailures
-    })
+    Ok(
+        if results.summary.fail == 0
+            && !results.commands.iter().any(|command| {
+                command
+                    .process_settlement
+                    .as_ref()
+                    .is_some_and(|evidence| !evidence.leaks.is_empty())
+            })
+        {
+            TesterOutcome::Passed
+        } else {
+            TesterOutcome::TestFailures
+        },
+    )
 }
 
 #[cfg(feature = "test-support")]
@@ -448,25 +616,38 @@ fn run_command(
     index: usize,
     commands_dir: &Path,
     sandbox_path: Option<&PathBuf>,
+    settlement_directory: Option<&Path>,
 ) -> Result<CommandResult> {
     let stdout_path = commands_dir.join(format!("{index}-stdout.log"));
     let stderr_path = commands_dir.join(format!("{index}-stderr.log"));
 
     let start = Instant::now();
     let output = if let Some(profile) = sandbox_path {
-        Command::new("sandbox-exec")
+        let mut process = Command::new("sandbox-exec");
+        process
             .arg("-f")
             .arg(profile)
             .arg("sh")
             .arg("-c")
-            .arg(command)
+            .arg(command);
+        if let Some(directory) = settlement_directory {
+            process
+                .env("TMPDIR", directory)
+                .env("FLUENT_RELEASE_TEST_ROOTS", directory);
+        }
+        process
             .current_dir(working_dir)
             .output()
             .with_context(|| format!("spawning sandboxed command: {command}"))?
     } else {
-        Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        if let Some(directory) = settlement_directory {
+            process
+                .env("TMPDIR", directory)
+                .env("FLUENT_RELEASE_TEST_ROOTS", directory);
+        }
+        process
             .current_dir(working_dir)
             .output()
             .with_context(|| format!("spawning command: {command}"))?
@@ -488,6 +669,7 @@ fn run_command(
         duration_ms: duration.as_millis() as u64,
         stdout_log,
         stderr_log,
+        process_settlement: None,
     })
 }
 
@@ -628,7 +810,9 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_settlement::ProcessEntry;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
     use tempfile::TempDir;
 
     fn make_workspace(dir: &Path) {
@@ -659,6 +843,346 @@ mod tests {
         let path = artifact_dir.join("tester-results.json");
         let content = fs::read_to_string(&path).unwrap();
         serde_json::from_str(&content).unwrap()
+    }
+
+    struct RecordingCollector {
+        calls: Mutex<Vec<PathBuf>>,
+    }
+
+    impl RecordingCollector {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProcessInventoryCollector for RecordingCollector {
+        fn collect(&self, directory: &Path) -> Result<Vec<ProcessEntry>> {
+            self.calls.lock().unwrap().push(directory.to_path_buf());
+            Ok(Vec::new())
+        }
+    }
+
+    struct NoInventoryCollector;
+
+    impl ProcessInventoryCollector for NoInventoryCollector {
+        fn collect(&self, _: &Path) -> Result<Vec<ProcessEntry>> {
+            panic!("unguarded commands must not collect process inventory")
+        }
+    }
+
+    enum ScriptedInventory {
+        Empty,
+        Leak { pid: u32, kind: &'static str },
+        Error(&'static str),
+    }
+
+    struct ScriptedCollector {
+        inventories: Mutex<Vec<ScriptedInventory>>,
+    }
+
+    impl ScriptedCollector {
+        fn new(inventories: Vec<ScriptedInventory>) -> Self {
+            Self {
+                inventories: Mutex::new(inventories),
+            }
+        }
+    }
+
+    impl ProcessInventoryCollector for ScriptedCollector {
+        fn collect(&self, directory: &Path) -> Result<Vec<ProcessEntry>> {
+            match self.inventories.lock().unwrap().remove(0) {
+                ScriptedInventory::Empty => Ok(Vec::new()),
+                ScriptedInventory::Leak { pid, kind } => Ok(vec![ProcessEntry {
+                    pid,
+                    kind: kind.to_string(),
+                    settlement_directory: directory.to_path_buf(),
+                }]),
+                ScriptedInventory::Error(message) => anyhow::bail!(message),
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_command_receives_host_owned_settlement_directory() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        let fixture = workspace.path().join("fixture.txt");
+        write_tester_yaml(
+            workspace.path(),
+            &format!(
+                "commands:\n  - command: 'printf %s \"$TMPDIR:$FLUENT_RELEASE_TEST_ROOTS\" > {}'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+                fixture.display()
+            ),
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let collector = RecordingCollector::new();
+
+        run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        let calls = collector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let directory = &calls[0];
+        assert!(directory.is_dir());
+        assert_eq!(calls[1], *directory);
+        assert_eq!(
+            fs::read_to_string(fixture).unwrap(),
+            format!("{0}:{0}", directory.display())
+        );
+    }
+
+    #[test]
+    fn guarded_directories_are_prepared_before_sandbox_preflight() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+
+        let sandbox =
+            preflight_sandbox_profile(workspace.path(), artifact_dir.path(), true, &resolver())
+                .unwrap();
+
+        let directory = sandbox.settlement_directory(0).unwrap();
+        assert!(directory.is_dir());
+        assert_eq!(
+            directory,
+            fs::canonicalize(artifact_dir.path().join("commands/settlement/0")).unwrap()
+        );
+    }
+
+    #[test]
+    fn guarded_command_cannot_replace_host_process_inventory() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'export FLUENT_TEST_PROCESS_INVENTORY=forged; true'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let collector = RecordingCollector::new();
+
+        run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        assert_eq!(collector.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unguarded_command_retains_existing_tester_boundary() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: echo ordinary\n    test_harness: shell-harness\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+
+        run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &NoInventoryCollector,
+        )
+        .unwrap();
+
+        let results = read_results(artifact_dir.path());
+        assert_eq!(results.commands[0].exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(artifact_dir.path().join(&results.commands[0].stdout_log)).unwrap(),
+            "ordinary\n"
+        );
+    }
+
+    #[test]
+    fn unavailable_settlement_baseline_prevents_command_launch() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        let launched = workspace.path().join("launched");
+        write_tester_yaml(
+            workspace.path(),
+            &format!(
+                "commands:\n  - command: 'touch {}'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+                launched.display()
+            ),
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let collector = ScriptedCollector::new(vec![ScriptedInventory::Error("ps denied")]);
+
+        let outcome = run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TesterOutcome::HarnessError);
+        assert!(!launched.exists());
+        let results = read_results(artifact_dir.path());
+        assert_eq!(
+            results.error.unwrap().kind,
+            "process_settlement_infrastructure"
+        );
+        assert!(results.commands.is_empty());
+    }
+
+    #[test]
+    fn unavailable_post_command_inventory_preserves_command_evidence() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'echo completed; exit 42'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let collector = ScriptedCollector::new(vec![
+            ScriptedInventory::Empty,
+            ScriptedInventory::Error("lsof denied"),
+        ]);
+
+        let outcome = run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TesterOutcome::HarnessError);
+        let results = read_results(artifact_dir.path());
+        assert_eq!(
+            results.error.unwrap().kind,
+            "process_settlement_infrastructure"
+        );
+        assert_eq!(results.commands[0].exit_code, 42);
+        assert!(
+            fs::read_to_string(artifact_dir.path().join(&results.commands[0].stdout_log))
+                .unwrap()
+                .contains("completed")
+        );
+    }
+
+    #[test]
+    fn tester_host_process_settlement_reports_scoped_leak() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+        let collector = ScriptedCollector::new(vec![
+            ScriptedInventory::Empty,
+            ScriptedInventory::Leak {
+                pid: 4242,
+                kind: "codex",
+            },
+            ScriptedInventory::Leak {
+                pid: 4242,
+                kind: "codex",
+            },
+            ScriptedInventory::Leak {
+                pid: 4242,
+                kind: "codex",
+            },
+            ScriptedInventory::Leak {
+                pid: 4242,
+                kind: "codex",
+            },
+            ScriptedInventory::Leak {
+                pid: 4242,
+                kind: "codex",
+            },
+        ]);
+
+        let outcome = run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TesterOutcome::TestFailures);
+        let results = read_results(artifact_dir.path());
+        let evidence = results.commands[0].process_settlement.as_ref().unwrap();
+        assert_eq!(evidence.leaks[0].pid, 4242);
+        assert_eq!(evidence.leaks[0].kind, "codex");
+        assert_eq!(
+            evidence.leaks[0].settlement_directory,
+            evidence.settlement_directory
+        );
+    }
+
+    #[test]
+    fn tester_host_process_settlement_preserves_clean_command_result() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'echo clean-output; exit 42'\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
+        );
+        write_extractor(
+            workspace.path(),
+            "#!/bin/sh\necho '[{\"id\":\"clean\",\"test_harness\":\"shell-harness\",\"status\":\"pass\",\"duration_ms\":null,\"failure_excerpt\":null}]'\n",
+        );
+        let collector =
+            ScriptedCollector::new(vec![ScriptedInventory::Empty, ScriptedInventory::Empty]);
+
+        let outcome = run_with_sandbox_profile_and_collector(
+            workspace.path(),
+            artifact_dir.path(),
+            None,
+            None,
+            &collector,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TesterOutcome::Passed);
+        let results = read_results(artifact_dir.path());
+        assert_eq!(results.commands[0].exit_code, 42);
+        assert!(
+            fs::read_to_string(artifact_dir.path().join(&results.commands[0].stdout_log))
+                .unwrap()
+                .contains("clean-output")
+        );
+        assert_eq!(results.tests[0].id, "clean");
+        assert!(
+            results.commands[0]
+                .process_settlement
+                .as_ref()
+                .unwrap()
+                .leaks
+                .is_empty()
+        );
     }
 
     #[test]

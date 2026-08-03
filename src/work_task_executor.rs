@@ -1577,7 +1577,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         config.project_root,
         &review_context.candidate_workspace_path,
     );
-    let sandbox_profile = match crate::tester::preflight_sandbox_profile(
+    let tester_sandbox = match crate::tester::preflight_sandbox_profile(
         &candidate_workspace,
         &artifact_dir,
         config.no_sandbox,
@@ -1653,7 +1653,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let mut tester_result = crate::tester::run_with_sandbox_profile(
         &candidate_workspace,
         &artifact_dir,
-        sandbox_profile.as_ref(),
+        &tester_sandbox,
     );
     let mut retries = 0;
     while tester_result.is_err() && retries < max_task_retries() {
@@ -1666,7 +1666,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         tester_result = crate::tester::run_with_sandbox_profile(
             &candidate_workspace,
             &artifact_dir,
-            sandbox_profile.as_ref(),
+            &tester_sandbox,
         );
     }
 

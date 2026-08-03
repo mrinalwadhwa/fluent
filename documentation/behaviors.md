@@ -4479,6 +4479,13 @@ in `tester.yaml`), `exit_code` (integer), `duration_ms` (integer),
 `stderr_log` (string, relative path).
 Test: src/tester.rs (tester_results_command_entry_shape)
 
+When a command enables `reject_process_leaks`, its entry MAY include
+`process_settlement` evidence with the Fluent-created settlement directory and
+any surviving scoped process records. Each record identifies its PID, process
+kind, and settlement directory. This evidence does not replace the command's
+stdout, stderr, exit code, or duration.
+Test: src/tester.rs (tester_host_process_settlement_reports_scoped_leak)
+
 Each entry in `tests` SHALL have: `id` (string), `test_harness`
 (string identifying the source command), `status` (one of `"pass"`,
 `"fail"`, `"skipped"`, `"not_run"`), `duration_ms` (integer or
@@ -4509,7 +4516,8 @@ Test: src/tester.rs (tester_results_tests_ordered_by_test_harness_then_id)
 WHEN the `error` field is non-null,
 IT SHALL have: `kind` (one of `"tester_yaml_problem"`,
 `"extractor_missing"`, `"extractor_failure"`,
-`"duplicate_test_ids"`), `message` (string), `details` (string).
+`"duplicate_test_ids"`, `"process_settlement_infrastructure"`), `message`
+(string), `details` (string).
 Test: src/tester.rs (tester_results_error_object_shape)
 
 ### B18

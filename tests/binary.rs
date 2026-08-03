@@ -150,6 +150,25 @@ fn release_suite_process_guard_discovers_scoped_process_cwd() {
     assert!(stderr.contains(&format!("root={}", root.display())));
 }
 
+#[test]
+fn fluent_release_tester_uses_host_owned_process_settlement() {
+    let tester_yaml =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".fluent/tester.yaml"))
+            .unwrap();
+    let config: serde_yaml::Value = serde_yaml::from_str(&tester_yaml).unwrap();
+    let commands = config["commands"].as_sequence().unwrap();
+
+    assert_eq!(commands.len(), 2);
+    assert!(commands.iter().all(|command| {
+        command["reject_process_leaks"]
+            .as_bool()
+            .is_some_and(|enabled| enabled)
+    }));
+    assert!(!tester_yaml.contains("release-test-process-guard.sh"));
+    assert!(!tester_yaml.contains("FLUENT_TEST_PROCESS_INVENTORY"));
+    assert!(!tester_yaml.contains("mktemp -d"));
+}
+
 fn provider_double_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-doubles")
 }
