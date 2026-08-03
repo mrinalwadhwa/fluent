@@ -2565,12 +2565,7 @@ fn regenerate_provenance(
     accepted_base: &str,
     new_tip: &str,
 ) -> Result<()> {
-    let mut item = read_work_item_or_not_found(store, work_item_id)?;
-
-    // A frozen no-expertise identity must never be retargeted. Regenerating
-    // provenance rewrites the reviewed Writer SHA across the attempt, which is
-    // exactly the pointer move the freeze forbids, so this refuses to run rather
-    // than staging a change the model guard would reject.
+    let item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some(candidate) = item
         .merge_candidates
         .iter()
@@ -2583,51 +2578,59 @@ fn regenerate_provenance(
         )));
     }
 
-    let attempt = item
-        .attempts
-        .iter_mut()
-        .find(|a| a.id == attempt_id)
-        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    store.mutate_work_item(work_item_id, |item| {
+        let canonical_writer_id = {
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == attempt_id)
+                .ok_or_else(|| WorkModelError::AttemptNotFound {
+                    id: attempt_id.to_string(),
+                })?;
+            let canonical_writer_index = attempt
+                .tasks
+                .iter()
+                .rposition(|task| {
+                    task.kind == TaskKind::Write && task.status == TaskStatus::Complete
+                })
+                .ok_or_else(|| WorkModelError::AttemptMissingCompletedWriteTask {
+                    attempt_id: attempt_id.to_string(),
+                })?;
+            let canonical_writer = &mut attempt.tasks[canonical_writer_index];
+            let output = canonical_writer.output.as_mut().ok_or_else(|| {
+                WorkModelError::CompleteWriteTaskMissingOutput {
+                    task_id: canonical_writer.id.clone(),
+                }
+            })?;
+            output.base_commit = Some(accepted_base.to_string());
+            output.commit = new_tip.to_string();
+            canonical_writer.id.clone()
+        };
 
-    let write_task_ids: std::collections::HashSet<String> = attempt
-        .tasks
-        .iter()
-        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .map(|task| task.id.clone())
-        .collect();
-
-    for task in &mut attempt.tasks {
-        if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
-            if let Some(ref mut output) = task.output {
-                output.base_commit = Some(accepted_base.to_string());
-                output.commit = new_tip.to_string();
+        // Only the latest completed Writer supplies the current candidate. Its
+        // artifact advances with that pointer; historical Writer outputs and their
+        // artifacts remain durable evidence of what those Writers actually produced.
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("attempt selected above remains present");
+        for artifact in &mut attempt.artifacts {
+            if artifact.producer_id == canonical_writer_id {
+                artifact.path = new_tip.to_string();
             }
         }
-    }
 
-    // Only artifact references that represent Write output commits move to the
-    // new tip. Learner handoff, Tester, reviewer, and other non-Write references
-    // are preserved: rewriting them would corrupt pointers that are not commits.
-    for artifact in &mut attempt.artifacts {
-        if write_task_ids.contains(&artifact.producer_id) {
-            artifact.path = new_tip.to_string();
-        }
-    }
-
-    let candidate = item
-        .merge_candidates
-        .iter_mut()
-        .find(|c| c.id == candidate_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Merge Candidate {:?} not found in Work Item {:?}",
-                candidate_id,
-                work_item_id
-            )
-        })?;
-    candidate.candidate_commit = new_tip.to_string();
-
-    store.write_work_item(&item)?;
+        let candidate = item
+            .merge_candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| WorkModelError::MergeCandidateNotFound {
+                candidate_id: candidate_id.to_string(),
+            })?;
+        candidate.candidate_commit = new_tip.to_string();
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -2792,7 +2795,10 @@ mod tests {
     use super::*;
     use crate::content::ContentResolver;
     use crate::work_model::WorkItemAbandonment;
-    use crate::work_model::{AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkItem};
+    use crate::work_model::{
+        AttemptReviewState, AttemptStatus, NoChangeOutput, NoChangeVerification,
+        NoChangeVerificationResult, TaskArtifactArea, TaskOutput, TaskStatus, WorkItem,
+    };
 
     #[test]
     fn non_codex_rebase_sandbox_retains_shared_temp_write_grants() {
@@ -4113,8 +4119,28 @@ mod tests {
     }
 
     #[test]
-    fn regenerate_provenance_updates_all_write_tasks_and_candidate() {
+    fn regenerate_provenance_preserves_historical_no_change_writer() {
         let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        let mut item = store.read_work_item("work-1").unwrap();
+        let historical_writer = &mut item.attempts[0].tasks[0];
+        historical_writer.artifact_area = Some(TaskArtifactArea {
+            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
+        });
+        let historical_output = historical_writer.output.as_mut().unwrap();
+        historical_output.base_commit = Some("old-sha-1".to_string());
+        historical_output.no_change = Some(NoChangeOutput {
+            schema_version: 1,
+            declaration_path:
+                ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/no-change.json"
+                    .to_string(),
+            reason: "The earlier correction was already present".to_string(),
+            verification: vec![NoChangeVerification {
+                command: "cargo test historical_writer".to_string(),
+                result: NoChangeVerificationResult::Pass,
+            }],
+        });
+        store.write_work_item(&item).unwrap();
 
         regenerate_provenance(
             &store,
@@ -4129,28 +4155,19 @@ mod tests {
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
 
-        for task in &attempt.tasks {
-            if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
-                assert_eq!(
-                    task.output.as_ref().unwrap().commit,
-                    "new-tip-sha",
-                    "write task {} commit should be updated",
-                    task.id
-                );
-                assert_eq!(
-                    task.output.as_ref().unwrap().base_commit.as_deref(),
-                    Some("new-base-sha")
-                );
-            }
-        }
+        let historical_output = attempt.tasks[0].output.as_ref().unwrap();
+        assert_eq!(historical_output.base_commit.as_deref(), Some("old-sha-1"));
+        assert_eq!(historical_output.commit, "old-sha-1");
+        assert!(historical_output.no_change.is_some());
+        assert_eq!(attempt.artifacts[0].path, "old-sha-1");
 
-        for artifact in &attempt.artifacts {
-            assert_eq!(
-                artifact.path, "new-tip-sha",
-                "attempt artifact {} path should be updated",
-                artifact.producer_id
-            );
-        }
+        let canonical_output = attempt.tasks[1].output.as_ref().unwrap();
+        assert_eq!(
+            canonical_output.base_commit.as_deref(),
+            Some("new-base-sha")
+        );
+        assert_eq!(canonical_output.commit, "new-tip-sha");
+        assert_eq!(attempt.artifacts[1].path, "new-tip-sha");
 
         let candidate = item
             .merge_candidates
@@ -4158,6 +4175,46 @@ mod tests {
             .find(|c| c.id == candidate_id)
             .unwrap();
         assert_eq!(candidate.candidate_commit, "new-tip-sha");
+    }
+
+    #[test]
+    fn regenerate_provenance_rejects_invalid_candidate_atomically() {
+        let (_tmp, store, _item, candidate_id) = completed_write_item();
+
+        let mut item = store.read_work_item("work-1").unwrap();
+        let canonical_writer = &mut item.attempts[0].tasks[1];
+        canonical_writer.artifact_area = Some(TaskArtifactArea {
+            path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2".to_string(),
+        });
+        let output = canonical_writer.output.as_mut().unwrap();
+        output.base_commit = Some("old-sha-2".to_string());
+        output.no_change = Some(NoChangeOutput {
+            schema_version: 1,
+            declaration_path:
+                ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/no-change.json"
+                    .to_string(),
+            reason: "The canonical Writer made no change".to_string(),
+            verification: vec![NoChangeVerification {
+                command: "cargo test canonical_writer".to_string(),
+                result: NoChangeVerificationResult::Pass,
+            }],
+        });
+        store.write_work_item(&item).unwrap();
+        let before = store.read_work_item("work-1").unwrap();
+
+        assert!(
+            regenerate_provenance(
+                &store,
+                "work-1",
+                &candidate_id,
+                "attempt-1",
+                "new-base-sha",
+                "new-tip-sha",
+            )
+            .is_err()
+        );
+
+        assert_eq!(store.read_work_item("work-1").unwrap(), before);
     }
 
     #[test]
@@ -4205,17 +4262,14 @@ mod tests {
         let item = store.read_work_item("work-1").unwrap();
         let attempt = &item.attempts[0];
 
-        // Write tasks should be updated
-        for task in &attempt.tasks {
-            if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
-                assert_eq!(
-                    task.output.as_ref().unwrap().commit,
-                    "new-tip-sha",
-                    "write task {} should be updated",
-                    task.id
-                );
-            }
-        }
+        assert_eq!(
+            attempt.tasks[0].output.as_ref().unwrap().commit,
+            "old-sha-1"
+        );
+        assert_eq!(
+            attempt.tasks[1].output.as_ref().unwrap().commit,
+            "new-tip-sha"
+        );
 
         // Rebase task should remain unmodified
         let rebase = attempt
@@ -4262,14 +4316,23 @@ mod tests {
         let item = store.read_work_item("work-1").unwrap();
         let artifacts = &item.attempts[0].artifacts;
         for artifact in artifacts {
-            if artifact.producer_id.contains("-write-") {
+            if artifact.producer_id == "attempt-1-write-2" {
                 assert_eq!(
                     artifact.path, "new-tip-sha",
-                    "write-commit artifact {} moves to the new tip",
+                    "the canonical Writer artifact {} moves to the new tip",
                     artifact.producer_id
                 );
             }
         }
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.producer_id == "attempt-1-write-1")
+                .unwrap()
+                .path,
+            "old-sha-1",
+            "the historical Writer artifact remains truthful"
+        );
         let tester = artifacts
             .iter()
             .find(|a| a.producer_id == "attempt-1-tester")
