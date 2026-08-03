@@ -2565,6 +2565,11 @@ fn regenerate_provenance(
     accepted_base: &str,
     new_tip: &str,
 ) -> Result<()> {
+    #[cfg(feature = "test-support")]
+    if std::env::var_os("FLUENT_TEST_FAIL_CAPTURE_PROVENANCE_REGENERATION").is_some() {
+        bail!("test-only injected capture provenance regeneration failure");
+    }
+
     let item = read_work_item_or_not_found(store, work_item_id)?;
     if let Some(candidate) = item
         .merge_candidates

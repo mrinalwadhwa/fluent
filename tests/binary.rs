@@ -15194,10 +15194,8 @@ fn learner_expertise_commit_preserves_no_change_writer_identity() {
         .unwrap();
 }
 
-#[test]
-fn work_merge_candidate_lands_after_historical_no_change_writer() {
-    let tmp = TempDir::new().unwrap();
-    let main_dir = setup_git_project(&tmp);
+fn prepare_historical_no_change_candidate(tmp: &TempDir) -> (PathBuf, PathBuf, String) {
+    let main_dir = setup_git_project(tmp);
     create_completed_work_attempt(&tmp, &main_dir);
     plan_followup_writer(&main_dir);
     let no_change_commit = git_head(&main_dir.join("../work-6-work-1-attempt-1"));
@@ -15283,6 +15281,14 @@ fi
         .assert()
         .success();
 
+    (main_dir, merge_bin, no_change_commit)
+}
+
+#[test]
+fn work_merge_candidate_lands_after_historical_no_change_writer() {
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, merge_bin, no_change_commit) = prepare_historical_no_change_candidate(&tmp);
+
     commit_file(
         &main_dir,
         "target-only.txt",
@@ -15328,11 +15334,106 @@ fi
 
 #[test]
 fn work_merge_candidate_retries_same_candidate_after_provenance_failure() {
-    // This accepted-candidate shape used to fail while capture landing rewrote
-    // historical Writer provenance. It now reaches the ordinary land route with
-    // durable Writer history intact, without replacing the Attempt or repairing
-    // the Work model.
-    work_merge_candidate_lands_after_historical_no_change_writer();
+    let tmp = TempDir::new().unwrap();
+    let (main_dir, merge_bin, no_change_commit) = prepare_historical_no_change_candidate(&tmp);
+    commit_file(
+        &main_dir,
+        "target-only.txt",
+        "advance target\n",
+        "Advance target",
+    );
+    let target_before_failure = git_head(&main_dir);
+    let before_failure = read_work_show_json(&main_dir, "work-1");
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&merge_bin))
+        .env("FLUENT_TEST_FAIL_CAPTURE_PROVENANCE_REGENERATION", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "test-only injected capture provenance regeneration failure",
+        ));
+
+    let after_failure = read_work_show_json(&main_dir, "work-1");
+    let historical_before = before_failure["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap();
+    let historical_after = after_failure["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap();
+    assert_eq!(git_head(&main_dir), target_before_failure);
+    assert_eq!(
+        after_failure["merge_candidates"][0]["candidate_commit"],
+        before_failure["merge_candidates"][0]["candidate_commit"],
+        "failed provenance regeneration must not replace the canonical candidate"
+    );
+    assert_eq!(
+        historical_after["output"],
+        historical_before["output"],
+        "failed provenance regeneration must preserve the historical no-change Writer"
+    );
+    assert_eq!(
+        after_failure["attempts"][0]["artifacts"],
+        before_failure["attempts"][0]["artifacts"],
+        "failed provenance regeneration must preserve Writer artifacts"
+    );
+    assert_eq!(
+        after_failure["attempts"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "rebase")
+            .count(),
+        1,
+        "the failed first landing settled its ordinary rebase task"
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-1",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&merge_bin))
+        .assert()
+        .success();
+
+    let landed = read_work_show_json(&main_dir, "work-1");
+    let historical_writer = landed["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == "attempt-1-write-2")
+        .unwrap();
+    assert_eq!(
+        historical_writer["output"]["commit"],
+        no_change_commit
+    );
+    assert_eq!(
+        landed["merge_candidates"][0]["merge_state"]["status"],
+        "merged"
+    );
+    assert_eq!(
+        landed["merge_candidates"][0]["candidate_commit"],
+        git_head(&main_dir)
+    );
 }
 
 #[test]
