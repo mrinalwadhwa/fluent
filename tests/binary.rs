@@ -20597,6 +20597,60 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
 }
 
 #[test]
+fn attempt_evidence_attach_rejects_stale_or_owned_frontier_without_mutation() {
+    use fluent::work_model::{AttemptStatus, TaskOutput, TaskStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let candidate = git_head(&project);
+    let store = WorkModelStore::new(&project);
+    let mut item = WorkItem::planned("evidence-reject", "Reject stale host evidence");
+    item.add_initial_attempt("attempt-1").unwrap();
+    let writer = &mut item.attempts[0].tasks[0];
+    writer.status = TaskStatus::Complete;
+    writer.output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: project.display().to_string(),
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: candidate.clone(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_review_tasks("attempt-1", &["architecture"]).unwrap();
+    item.attempts[0].status = AttemptStatus::Reviewing;
+    let reviewer = item.attempts[0].tasks.last_mut().unwrap();
+    reviewer.status = TaskStatus::Complete;
+    let review_path = format!("{}/review.md", reviewer.artifact_area.as_ref().unwrap().path);
+    fs::create_dir_all(project.join(&review_path).parent().unwrap()).unwrap();
+    fs::write(project.join(&review_path), "Verdict: fail\n").unwrap();
+    store.create_work_item(&item).unwrap();
+    let before = fs::read_to_string(project.join(".fluent/work/items/evidence-reject.json")).unwrap();
+
+    let evidence = tmp.path().join("host-evidence.json");
+    fs::write(&evidence, br#"{"schema_version":1,"producer":"trusted host","check":"fluent tester check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt", "evidence", "attach", "evidence-reject", "attempt-1", "--candidate",
+            "stale-candidate", "--evidence-file", evidence.to_str().unwrap(), "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .failure();
+
+    assert_json_unchanged(
+        &project.join(".fluent/work/items/evidence-reject.json"),
+        &before,
+    );
+    assert_eq!(git_head(&project), candidate);
+    assert!(
+        !project.join(".fluent/work/artifacts/evidence-reject/attempt-1/host-evidence").exists(),
+        "rejected attachment must not publish a snapshot"
+    );
+}
+
+#[test]
 fn merge_candidate_list_prints_candidates() {
     let tmp = TempDir::new().unwrap();
     write_rich_work_item(tmp.path());

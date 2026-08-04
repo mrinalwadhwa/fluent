@@ -60,6 +60,12 @@ pub fn attach(
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     let snapshot_path = snapshot_path(work_item_id, attempt_id, &digest)?;
 
+    // Share the land boundary with Attempt execution and landing.  Acquire it
+    // before the model lock so the frontier is revalidated only after no
+    // concurrent operation can publish a candidate transition.
+    let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(project_root))
+        .context("acquire land lock before attaching host evidence")?;
+
     let recovery = store.mutate_work_item(work_item_id, |item| {
         let existing = item
             .attempts
@@ -378,6 +384,9 @@ fn publish_snapshot(project_root: &Path, relative: &str, bytes: &[u8]) -> Result
         }
         Err(error) => return Err(error.into()),
     }
+    // The Work-model write that follows may survive a power loss, so make the
+    // snapshot directory entry durable before that model can reference it.
+    fs::File::open(path.parent().expect("snapshot has a parent"))?.sync_all()?;
     Ok(())
 }
 

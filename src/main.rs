@@ -421,8 +421,6 @@ fn cmd_attempt(
                     review_artifact,
                 },
         } => {
-            let _land_lock =
-                fluent::land_lock::acquire(&fluent::land_lock::lock_path(project_root))?;
             let recovery = fluent::host_evidence::attach(
                 project_root,
                 &store,
