@@ -15,6 +15,7 @@ pub mod follow_up;
 pub mod git;
 pub mod guidance;
 pub mod hooks;
+pub mod host_evidence;
 pub mod keep_awake;
 pub mod land_lock;
 pub mod learner;

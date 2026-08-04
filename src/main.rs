@@ -11,9 +11,9 @@ use fluent::cleanup::{
     self, CleanupOptions, WorkBranchCleanup, WorkCleanupResult, WorktreeCleanup,
 };
 use fluent::cli::{
-    AttemptCommands, Cli, Commands, FargateCommands, KeepAwakeCommands, MergeCandidateCommands,
-    ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands, SkillsCommands,
-    TaskCommands, TesterCommands, WorkItemCommands,
+    AttemptCommands, AttemptEvidenceCommands, Cli, Commands, FargateCommands, KeepAwakeCommands,
+    MergeCandidateCommands, ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands,
+    SkillsCommands, TaskCommands, TesterCommands, WorkItemCommands,
 };
 use fluent::coder::CoderKind;
 use fluent::content::ContentResolver;
@@ -413,6 +413,34 @@ fn cmd_attempt(
 ) -> Result<()> {
     let store = WorkModelStore::new(project_root);
     match command {
+        AttemptCommands::Evidence {
+            command:
+                AttemptEvidenceCommands::Attach {
+                    work_item_id,
+                    attempt_id,
+                    candidate,
+                    evidence_file,
+                    review_artifact,
+                },
+        } => {
+            let _land_lock =
+                fluent::land_lock::acquire(&fluent::land_lock::lock_path(project_root))?;
+            let recovery = fluent::host_evidence::attach(
+                project_root,
+                &store,
+                &work_item_id,
+                &attempt_id,
+                &candidate,
+                Path::new(&evidence_file),
+                &review_artifact,
+            )?;
+            println!(
+                "Attached host evidence {} for Attempt {}; targeted reviews: {}",
+                recovery.attachment.digest,
+                attempt_id,
+                recovery.targeted_roles.join(", ")
+            );
+        }
         AttemptCommands::Create {
             work_item_id,
             attempt_id,

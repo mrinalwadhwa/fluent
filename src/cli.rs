@@ -309,6 +309,11 @@ pub enum WorkItemCommands {
 
 #[derive(Subcommand)]
 pub enum AttemptCommands {
+    /// Attach immutable host-run evidence and plan targeted review
+    Evidence {
+        #[command(subcommand)]
+        command: AttemptEvidenceCommands,
+    },
     /// Create a planned Attempt with an initial write Task
     Create {
         /// Work Item ID
@@ -476,6 +481,26 @@ pub enum AttemptCommands {
         /// Poll interval in seconds (default 15)
         #[arg(long, default_value_t = 15)]
         interval: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AttemptEvidenceCommands {
+    /// Attach one versioned JSON evidence document to an unchanged candidate
+    Attach {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
+        /// Exact candidate commit
+        #[arg(long)]
+        candidate: String,
+        /// Host-produced evidence document
+        #[arg(long, value_name = "PATH")]
+        evidence_file: String,
+        /// Failed review artifact this evidence addresses
+        #[arg(long, value_name = "PATH", required = true)]
+        review_artifact: Vec<String>,
     },
 }
 
