@@ -333,6 +333,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: Vec::new(),
         });
@@ -371,6 +372,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: vec!["invalid Work Item file .fluent/work/items/broken-work.json".to_string()],
         });
@@ -399,6 +401,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: Vec::new(),
         });
@@ -424,6 +427,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: Vec::new(),
         });

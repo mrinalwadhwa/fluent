@@ -34,7 +34,8 @@ use fluent::version;
 use fluent::work_attempt_loop::{self, WorkAttemptRunConfig, WorkAttemptRunOutcome};
 use fluent::work_merge_executor::{self, WorkMergeConfig};
 use fluent::work_model::{
-    self, PlanningContext, WorkItem, WorkModelStorageError, WorkModelStore, to_json_pretty,
+    self, PlanningContext, ReleaseContract, ReleaseCriterion, WorkItem, WorkModelError,
+    WorkModelStorageError, WorkModelStore, to_json_pretty,
 };
 use fluent::work_status;
 use fluent::work_task_executor::{self, WorkTaskRunConfig};
@@ -272,6 +273,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             plan_file,
             learner_mode,
             input_artifact,
+            authorize_large_scope,
+            release,
+            release_criterion,
         } => {
             let instructions = match (instructions, instructions_file) {
                 (Some(instructions), None) => Some(instructions),
@@ -287,14 +291,47 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 approach_file,
                 plan_file,
             )?;
+            let planning_scope = match planning_context.as_ref() {
+                Some(context) if context.required_plan_steps() > 0 => {
+                    let scope_limit = fluent::config::resolve_planning_config(project_root)?
+                        .scope_limit
+                        .value;
+                    context.scope_assessment(scope_limit, authorize_large_scope)
+                }
+                _ => None,
+            };
+            if let Some(scope) = &planning_scope
+                && scope.is_large()
+                && !scope.large_scope_authorized
+            {
+                bail!(
+                    "{} required plan steps exceed the configured scope limit {}; recommend at least {} independently landable slices; rerun with --authorize-large-scope only after approving the combined scope",
+                    scope.required_steps,
+                    scope.limit,
+                    scope.recommended_slices
+                );
+            }
+            let release_contract = build_release_contract(release, release_criterion)?;
             let mut item = WorkItem {
                 planning_context,
+                planning_scope,
+                release_contract,
                 instructions,
                 learner_mode: learner_mode.unwrap_or_default(),
                 ..WorkItem::planned(id, title)
             };
             store.create_work_item_with_inputs(&mut item, &input_artifact)?;
             println!("Created Work Item {}", item.id);
+            if let Some(scope) = item
+                .planning_scope
+                .as_ref()
+                .filter(|scope| scope.is_large())
+            {
+                eprintln!(
+                    "Authorized large scope: {} required steps, limit {}, {} recommended slices",
+                    scope.required_steps, scope.limit, scope.recommended_slices
+                );
+            }
             if guidance::guidance_enabled() {
                 eprintln!("{}", guidance::after_work_item_create());
             }
@@ -353,6 +390,23 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
         }
         WorkItemCommands::Authorize { id } => {
             cmd_work_item_authorize(project_root, &store, &id)?;
+        }
+        WorkItemCommands::ClassifyFinding {
+            id,
+            finding_id,
+            summary,
+            blocker_for,
+        } => {
+            let classification = store.mutate_work_item(&id, |item| {
+                let contract = item.release_contract.as_mut().ok_or_else(|| {
+                    WorkModelError::ReleaseContractRequired {
+                        work_item_id: item.id.clone(),
+                    }
+                })?;
+                let finding = contract.classify_finding(finding_id, summary, blocker_for)?;
+                Ok(finding.classification.as_str().to_string())
+            })?;
+            println!("Classified release finding for Work Item {id}: {classification}");
         }
     }
     Ok(())
@@ -2161,6 +2215,28 @@ fn read_planning_context(
 
 fn read_optional_file(path: Option<String>) -> Result<Option<String>> {
     path.map(fs::read_to_string).transpose().map_err(Into::into)
+}
+
+fn build_release_contract(release: bool, criteria: Vec<String>) -> Result<Option<ReleaseContract>> {
+    if !release {
+        return Ok(None);
+    }
+    if criteria.is_empty() {
+        bail!("release work requires at least one --release-criterion ID=STATEMENT");
+    }
+    let criteria = criteria
+        .into_iter()
+        .map(|value| {
+            let (id, statement) = value.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("invalid --release-criterion {value:?}; expected ID=STATEMENT")
+            })?;
+            Ok(ReleaseCriterion {
+                id: id.trim().to_string(),
+                statement: statement.trim().to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(ReleaseContract::new(criteria)?))
 }
 
 fn head_commit(project_root: &Path) -> Result<String> {

@@ -33,6 +33,15 @@ pub struct WorkItemStatus {
     pub next_action: Option<String>,
     pub metrics: WorkMetrics,
     pub compatibility_warnings: Vec<String>,
+    pub release: Option<ReleaseStatus>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReleaseStatus {
+    pub criteria: usize,
+    pub blockers: usize,
+    pub proposed_follow_ups: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -97,6 +106,32 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
         next_action: evidence_recovery_next_action(attempt),
         metrics: work_metrics(item, project_root),
         compatibility_warnings: item.compatibility_warnings(),
+        release: item
+            .release_contract
+            .as_ref()
+            .map(|contract| ReleaseStatus {
+                criteria: contract.criteria.len(),
+                blockers: contract
+                    .findings
+                    .iter()
+                    .filter(|finding| {
+                        matches!(
+                            finding.classification,
+                            crate::work_model::ReleaseFindingClassification::ReleaseBlocker { .. }
+                        )
+                    })
+                    .count(),
+                proposed_follow_ups: contract
+                    .findings
+                    .iter()
+                    .filter(|finding| {
+                        matches!(
+                            finding.classification,
+                            crate::work_model::ReleaseFindingClassification::ProposedFollowUp
+                        )
+                    })
+                    .count(),
+            }),
     }
 }
 
@@ -260,6 +295,12 @@ pub fn format_work_status(status: &WorkStatus) -> String {
             for warning in &row.compatibility_warnings {
                 output.push_str(&format!("  warning: {warning}\n"));
             }
+            if let Some(release) = &row.release {
+                output.push_str(&format!(
+                    "  release: criteria:{} blockers:{} proposed-follow-ups:{}\n",
+                    release.criteria, release.blockers, release.proposed_follow_ups
+                ));
+            }
             output.push_str(&format!(
                 "  metrics: rounds:{} duration:{}ms tokens:{}/{} repeated:{} artifacts:{}B avoided:{}\n",
                 row.metrics.review_rounds,
@@ -311,6 +352,12 @@ pub fn format_work_dashboard_lines(status: &WorkStatus) -> Vec<String> {
         ));
         for warning in &row.compatibility_warnings {
             lines.push(format!("  Warning: {warning}"));
+        }
+        if let Some(release) = &row.release {
+            lines.push(format!(
+                "  Release: criteria:{} blockers:{} proposed-follow-ups:{}",
+                release.criteria, release.blockers, release.proposed_follow_ups
+            ));
         }
         lines.push(String::new());
     }
@@ -931,6 +978,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: vec!["invalid work model in bad.json".to_string()],
         };
@@ -959,6 +1007,7 @@ mod tests {
                 next_action: None,
                 metrics: Default::default(),
                 compatibility_warnings: Vec::new(),
+                release: None,
             }],
             errors: Vec::new(),
         };

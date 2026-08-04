@@ -623,6 +623,26 @@ is off by default and available only as a
 positive per-land opt-in. `fluent auto-merge`, automatic scheduler lifecycle,
 automatic landing, and Fargate are outside the Local Preview.
 
+Work intake applies two host-owned expansion guards before that execution path.
+The planning guard counts required rows in the approved Plan Steps table—the
+same rows used by the progress contract—and compares them with the layered
+`planning.scope-limit` setting (default 12). Prose, optional rows, and TBD rows do
+not affect the result. Intake rejects an over-limit plan before creating the Work
+Item or input snapshots, reports the deterministic minimum slice count, and
+requires `--authorize-large-scope` to preserve an explicit authorization in the
+Work model. Planning guidance prefers separate, independently landable Work
+Items rather than this override.
+
+Release Work has a second immutable intake boundary: `--release` requires one or
+more `--release-criterion id=statement` arguments before the Work Item exists.
+The stored release contract retains those accepted criteria and append-only
+finding classifications. `work-item classify-finding` records an unmapped
+finding as `proposed-follow-up`; it records `release-blocker` only when
+`--blocker-for` names an accepted criterion. Status reports criterion, blocker,
+and proposed-follow-up totals alongside the existing review-round, duration,
+token, repeated-finding, and artifact-byte metrics. This keeps later discoveries
+visible without silently expanding release acceptance.
+
 For an uninitialized project, the bundled full skill detects the missing
 `.fluent/` directory and asks separately for a follow-up mode and coder profile.
 The curated `codex-balanced` profile saves Codex `gpt-5.6-terra` at medium

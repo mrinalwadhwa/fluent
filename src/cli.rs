@@ -274,6 +274,20 @@ pub enum WorkItemCommands {
         /// Preserve an existing managed artifact as immutable execution input
         #[arg(long, value_name = "PATH")]
         input_artifact: Vec<String>,
+
+        /// Explicitly authorize creation when required Plan steps exceed the
+        /// configured planning scope limit
+        #[arg(long)]
+        authorize_large_scope: bool,
+
+        /// Treat this Work Item as a release exercise with a fixed acceptance
+        /// contract
+        #[arg(long)]
+        release: bool,
+
+        /// Accepted release criterion in `id=statement` form (repeatable)
+        #[arg(long, value_name = "ID=STATEMENT", requires = "release")]
+        release_criterion: Vec<String>,
     },
 
     /// List stored Work Items
@@ -300,6 +314,25 @@ pub enum WorkItemCommands {
     Authorize {
         /// Work Item ID
         id: String,
+    },
+
+    /// Classify a release finding. Findings are proposed follow-ups unless
+    /// explicitly mapped to an accepted release criterion.
+    ClassifyFinding {
+        /// Release Work Item ID
+        id: String,
+
+        /// Stable finding identifier
+        #[arg(long)]
+        finding_id: String,
+
+        /// One-line finding summary
+        #[arg(long)]
+        summary: String,
+
+        /// Accepted release criterion that makes this finding a blocker
+        #[arg(long, value_name = "CRITERION_ID")]
+        blocker_for: Option<String>,
     },
 }
 

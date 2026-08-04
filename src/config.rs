@@ -33,6 +33,9 @@ pub const DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS: u32 = 1000;
 pub const DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB: u64 = 50;
 /// Built-in filesystem space reserved after a reviewer cache admission.
 pub const DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB: u64 = 50;
+/// Built-in maximum required Plan rows before Work creation needs an explicit
+/// large-scope authorization.
+pub const DEFAULT_PLANNING_SCOPE_LIMIT: u32 = 12;
 const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Which configuration layer supplied a resolved leaf.
@@ -240,6 +243,13 @@ pub struct ResolvedReviewerCacheConfig {
     pub min_free_bytes: ResolvedLeaf<u64>,
 }
 
+/// Planning intake limits resolved from project, then user, then built-in
+/// defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPlanningConfig {
+    pub scope_limit: ResolvedLeaf<u32>,
+}
+
 /// A configured follow-up or scheduler value that could not be parsed or
 /// validated. Names the configuration path and the affected key so the caller
 /// can fail closed instead of silently substituting a lower-precedence value.
@@ -412,6 +422,32 @@ pub fn resolve_reviewer_cache_config(
         &project_config_path(project_root),
         user_config_path().as_deref(),
     )
+}
+
+/// Resolve the deterministic Work-intake scope limit. A malformed configured
+/// value fails closed before a Work Item is created.
+pub fn resolve_planning_config(
+    project_root: &Path,
+) -> Result<ResolvedPlanningConfig, FollowUpConfigError> {
+    resolve_planning_config_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )
+}
+
+fn resolve_planning_config_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> Result<ResolvedPlanningConfig, FollowUpConfigError> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    Ok(ResolvedPlanningConfig {
+        scope_limit: resolve_leaf(
+            &layers,
+            &["planning", "scope-limit"],
+            DEFAULT_PLANNING_SCOPE_LIMIT,
+            convert_positive_count,
+        )?,
+    })
 }
 
 pub(crate) fn resolve_reviewer_cache_config_from(
@@ -662,6 +698,21 @@ pub fn from_config(project_root: &Path) -> CoderMappingInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planning_scope_limit_resolves_from_project_and_rejects_zero() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project.yaml");
+        std::fs::write(&project, "planning:\n  scope-limit: 7\n").unwrap();
+        let resolved = resolve_planning_config_from(&project, None).unwrap();
+        assert_eq!(resolved.scope_limit.value, 7);
+        assert_eq!(resolved.scope_limit.source, ConfigSource::Project);
+
+        std::fs::write(&project, "planning:\n  scope-limit: 0\n").unwrap();
+        let error = resolve_planning_config_from(&project, None).unwrap_err();
+        assert_eq!(error.key, "planning.scope-limit");
+        assert!(error.detail.contains("positive integer"));
+    }
 
     #[test]
     fn parses_full_config() {

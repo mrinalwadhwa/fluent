@@ -183,6 +183,40 @@ Test: src/work_model.rs (attempt_pause_kind_round_trips_through_storage)
 Test: src/work_model.rs (newer_model_writer_version_warns_and_blocks_mutation)
 Test: tests/binary.rs (read_only_commands_warn_when_model_writer_is_newer)
 
+## Planning and release guardrails
+
+### B1
+
+WHEN Work Item intake receives an approved Plan, THE SYSTEM SHALL count only
+required rows in its Steps table and compare that deterministic count with the
+layered `planning.scope-limit` configuration.
+Test: src/config.rs (planning_scope_limit_resolves_from_project_and_rejects_zero)
+Test: src/work_model.rs (planning_scope_counts_only_required_plan_rows)
+
+### B2
+
+IF required Plan rows exceed the configured scope limit and the operator has not
+passed `--authorize-large-scope`, THEN THE SYSTEM SHALL reject Work creation
+without writing Work state, report the count and limit, and recommend the minimum
+number of independently landable slices; WHEN the operator explicitly authorizes
+the scope, THE SYSTEM SHALL persist the diagnostic and authorization.
+Test: tests/binary.rs (large_scope_requires_explicit_authorization_and_records_diagnostic)
+
+### B3
+
+WHEN a release Work Item is created, THE SYSTEM SHALL require and persist one or
+more accepted release criteria before execution can begin.
+Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
+
+### B4
+
+WHEN an operator classifies a finding for release Work, THE SYSTEM SHALL keep it
+as a proposed follow-up by default; IF the operator classifies it as a release
+blocker, THEN THE SYSTEM SHALL require an exact mapping to an accepted release
+criterion and reject an unknown mapping without recording the finding.
+Test: src/work_model.rs (release_findings_fail_closed_unless_mapped_to_accepted_criteria)
+Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
+
 ## Observations management
 
 ### B1

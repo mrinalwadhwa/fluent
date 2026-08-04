@@ -3465,6 +3465,197 @@ fn work_create_item_is_visible_through_list_and_show() {
         .stdout(predicate::str::contains("  \"attempts\": []"));
 }
 
+#[test]
+fn large_scope_requires_explicit_authorization_and_records_diagnostic() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
+    fs::write(
+        tmp.path().join(".fluent/config.yaml"),
+        "planning:\n  scope-limit: 2\n",
+    )
+    .unwrap();
+    let plan_path = tmp.path().join("plan.md");
+    fs::write(
+        &plan_path,
+        "# Plan\n\n| # | State reached | Behaviors | Verification | Req? |\n\
+         |---|---------------|-----------|--------------|------|\n\
+         | 1 | First slice | A:B1 | test one | Yes |\n\
+         | 2 | Second slice | A:B2 | test two | Yes |\n\
+         | 3 | Third slice | A:B3 | test three | Yes |\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "large-work",
+            "--title",
+            "Large work",
+            "--plan-file",
+            plan_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "3 required plan steps exceed the configured scope limit 2",
+        ))
+        .stderr(predicate::str::contains(
+            "recommend at least 2 independently landable slices",
+        ))
+        .stderr(predicate::str::contains("--authorize-large-scope"));
+    assert!(
+        !tmp.path()
+            .join(".fluent/work/items/large-work.json")
+            .exists()
+    );
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "large-work",
+            "--title",
+            "Large work",
+            "--plan-file",
+            plan_path.to_str().unwrap(),
+            "--authorize-large-scope",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Authorized large scope: 3 required steps, limit 2, 2 recommended slices",
+        ));
+
+    let shown = work_item_value(tmp.path(), "large-work");
+    assert_eq!(shown["planning_scope"]["required_steps"], 3);
+    assert_eq!(shown["planning_scope"]["limit"], 2);
+    assert_eq!(shown["planning_scope"]["recommended_slices"], 2);
+    assert_eq!(shown["planning_scope"]["large_scope_authorized"], true);
+}
+
+#[test]
+fn release_findings_default_to_follow_up_and_blockers_require_criteria() {
+    let tmp = TempDir::new().unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "release-work",
+            "--title",
+            "Release work",
+            "--release",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "release work requires at least one --release-criterion",
+        ));
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "release-work",
+            "--title",
+            "Release work",
+            "--release",
+            "--release-criterion",
+            "tests-pass=Configured release tests pass",
+        ])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "classify-finding",
+            "release-work",
+            "--finding-id",
+            "docs-polish",
+            "--summary",
+            "Polish a secondary example",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("proposed-follow-up"));
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "classify-finding",
+            "release-work",
+            "--finding-id",
+            "missing-proof",
+            "--summary",
+            "Release proof is missing",
+            "--blocker-for",
+            "not-accepted",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not map to an accepted release criterion",
+        ));
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "classify-finding",
+            "release-work",
+            "--finding-id",
+            "missing-proof",
+            "--summary",
+            "Release proof is missing",
+            "--blocker-for",
+            "tests-pass",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("release-blocker"));
+
+    let shown = work_item_value(tmp.path(), "release-work");
+    assert_eq!(shown["release_contract"]["criteria"][0]["id"], "tests-pass");
+    assert_eq!(
+        shown["release_contract"]["findings"][0]["classification"]["kind"],
+        "proposed-follow-up"
+    );
+    assert_eq!(
+        shown["release_contract"]["findings"][1]["classification"]["kind"],
+        "release-blocker"
+    );
+    assert_eq!(
+        shown["release_contract"]["findings"][1]["classification"]["criterion_id"],
+        "tests-pass"
+    );
+    assert_eq!(
+        shown["release_contract"]["findings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "release: criteria:1 blockers:1 proposed-follow-ups:1",
+        ))
+        .stdout(predicate::str::contains("metrics: rounds:"))
+        .stdout(predicate::str::contains("repeated:"))
+        .stdout(predicate::str::contains("artifacts:"));
+}
+
 // -------------------------------------------------------------------------
 // Follow-up contracts: Work authorization and provenance
 // -------------------------------------------------------------------------

@@ -466,6 +466,7 @@ mod tests {
             next_action: None,
             metrics: Default::default(),
             compatibility_warnings: Vec::new(),
+            release: None,
         }
     }
 

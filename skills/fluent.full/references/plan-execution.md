@@ -150,6 +150,20 @@ fluent work-item create <work-item-id> \
 
 Do not create the Attempt or run it. That belongs to the autonomous stage in `fluent`. Stop here.
 
+Prefer separate, independently landable Work Items when a plan has many required
+Steps rows. Work intake deterministically compares those rows with the layered
+`planning.scope-limit` (default 12). If creation reports that the plan is over
+the limit, split it using the reported minimum slice count. Pass
+`--authorize-large-scope` only after the user explicitly approves keeping the
+combined scope; Fluent records that authorization with the diagnostic.
+
+For a release exercise, define acceptance before creation. Add `--release` and
+one repeatable `--release-criterion '<id>=<accepted outcome>'` per criterion to
+the create command. During the exercise, record discoveries with
+`fluent work-item classify-finding <work-item-id> --finding-id <id> --summary
+'<summary>'`. That defaults to proposed follow-up work. Add `--blocker-for
+<criterion-id>` only when the finding directly prevents an accepted criterion.
+
 ## Plan format
 
 ```markdown
@@ -206,5 +220,8 @@ Brief: [one-line summary from the brief]
     (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
   Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
 - Each step is a state the system reaches, not an activity to perform.
+- Prefer steps that form independently verifiable, independently landable slices;
+  do not group unrelated release improvements merely because they were discovered
+  in the same exercise.
 - Behavior references are area-qualified — `Feed:B1`, not `B1` — because IDs restart per area.
 - When the plan splits, each Work Item's plan lives at `.fluent/drafts/<draft-id>/items/<slug>/plan.md` and its `<work-item-id>` is `<draft-id>-<slug>`.

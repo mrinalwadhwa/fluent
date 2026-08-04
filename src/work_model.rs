@@ -287,6 +287,12 @@ pub struct WorkItem {
     pub model_writer_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_context: Option<PlanningContext>,
+    /// Deterministic intake diagnostic derived from required Plan rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_scope: Option<PlanningScopeAssessment>,
+    /// Fixed acceptance criteria and classified findings for release work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_contract: Option<ReleaseContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,6 +352,8 @@ impl PartialEq for WorkItem {
         self.id == other.id
             && self.title == other.title
             && self.planning_context == other.planning_context
+            && self.planning_scope == other.planning_scope
+            && self.release_contract == other.release_contract
             && self.instructions == other.instructions
             && self.abandonment == other.abandonment
             && self.post_merge_review_fix_depth == other.post_merge_review_fix_depth
@@ -371,6 +379,8 @@ impl Default for WorkItem {
             title: String::new(),
             model_writer_version: None,
             planning_context: None,
+            planning_scope: None,
+            release_contract: None,
             instructions: None,
             abandonment: None,
             post_merge_review_fix_depth: None,
@@ -1303,6 +1313,27 @@ impl WorkItem {
     }
 
     pub fn validate(&self) -> Result<(), WorkModelError> {
+        if let Some(scope) = &self.planning_scope {
+            let expected_slices = scope.required_steps.div_ceil(scope.limit.max(1));
+            let recorded_steps_match = self
+                .planning_context
+                .as_ref()
+                .is_some_and(|context| context.required_plan_steps() == scope.required_steps);
+            if scope.required_steps == 0
+                || scope.limit == 0
+                || scope.recommended_slices != expected_slices
+                || (scope.is_large() && !scope.large_scope_authorized)
+                || !recorded_steps_match
+            {
+                return Err(WorkModelError::InvalidPlanningScope {
+                    reason: "scope diagnostic is inconsistent or lacks large-scope authorization"
+                        .to_string(),
+                });
+            }
+        }
+        if let Some(contract) = &self.release_contract {
+            contract.validate()?;
+        }
         for attempt in &self.attempts {
             if attempt.work_item_id != self.id {
                 return Err(WorkModelError::AttemptWorkItemMismatch {
@@ -1452,6 +1483,190 @@ impl PlanningContext {
                 .combined
                 .as_ref()
                 .is_none_or(|value| value.trim().is_empty())
+    }
+
+    /// Count only required rows in the approved Plan table. This is stable
+    /// across prose rewrites and directly matches the execution progress
+    /// contract. A plan without required rows has no scope assessment.
+    pub fn scope_assessment(
+        &self,
+        limit: u32,
+        large_scope_authorized: bool,
+    ) -> Option<PlanningScopeAssessment> {
+        let required_steps = self.required_plan_steps();
+        if required_steps == 0 {
+            return None;
+        }
+        let recommended_slices = required_steps.div_ceil(limit.max(1));
+        Some(PlanningScopeAssessment {
+            required_steps,
+            limit,
+            recommended_slices,
+            large_scope_authorized,
+        })
+    }
+
+    pub fn required_plan_steps(&self) -> u32 {
+        let source = self.plan.as_deref().or(self.combined.as_deref());
+        u32::try_from(
+            source
+                .map(parse_required_plan_rows)
+                .unwrap_or_default()
+                .len(),
+        )
+        .unwrap_or(u32::MAX)
+    }
+}
+
+/// Host-derived scope diagnostic recorded at Work creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanningScopeAssessment {
+    pub required_steps: u32,
+    pub limit: u32,
+    pub recommended_slices: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub large_scope_authorized: bool,
+}
+
+impl PlanningScopeAssessment {
+    pub fn is_large(&self) -> bool {
+        self.required_steps > self.limit
+    }
+}
+
+/// One immutable release acceptance criterion approved before execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseCriterion {
+    pub id: String,
+    pub statement: String,
+}
+
+/// Whether a release finding blocks an accepted criterion or remains proposed
+/// follow-up work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReleaseFindingClassification {
+    ProposedFollowUp,
+    ReleaseBlocker { criterion_id: String },
+}
+
+impl ReleaseFindingClassification {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProposedFollowUp => "proposed-follow-up",
+            Self::ReleaseBlocker { .. } => "release-blocker",
+        }
+    }
+}
+
+/// One finding classified against the release acceptance contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseFinding {
+    pub id: String,
+    pub summary: String,
+    pub classification: ReleaseFindingClassification,
+}
+
+/// Fixed acceptance criteria plus append-only classifications discovered during
+/// a release exercise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseContract {
+    pub criteria: Vec<ReleaseCriterion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ReleaseFinding>,
+}
+
+impl ReleaseContract {
+    pub fn new(criteria: Vec<ReleaseCriterion>) -> Result<Self, WorkModelError> {
+        let contract = Self {
+            criteria,
+            findings: Vec::new(),
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    fn validate(&self) -> Result<(), WorkModelError> {
+        if self.criteria.is_empty() {
+            return Err(WorkModelError::InvalidReleaseContract {
+                reason: "release work requires at least one accepted criterion".to_string(),
+            });
+        }
+        let mut criterion_ids = HashSet::new();
+        for criterion in &self.criteria {
+            if criterion.id.trim().is_empty() || criterion.statement.trim().is_empty() {
+                return Err(WorkModelError::InvalidReleaseContract {
+                    reason: "release criteria require non-empty ids and statements".to_string(),
+                });
+            }
+            validate_id("release criterion", &criterion.id)?;
+            if !criterion_ids.insert(criterion.id.as_str()) {
+                return Err(WorkModelError::InvalidReleaseContract {
+                    reason: format!("release criterion {:?} is repeated", criterion.id),
+                });
+            }
+        }
+        let mut finding_ids = HashSet::new();
+        for finding in &self.findings {
+            if finding.id.trim().is_empty() || finding.summary.trim().is_empty() {
+                return Err(WorkModelError::InvalidReleaseContract {
+                    reason: "release findings require non-empty ids and summaries".to_string(),
+                });
+            }
+            validate_id("release finding", &finding.id)?;
+            if !finding_ids.insert(finding.id.as_str()) {
+                return Err(WorkModelError::InvalidReleaseContract {
+                    reason: format!("release finding {:?} is repeated", finding.id),
+                });
+            }
+            if let ReleaseFindingClassification::ReleaseBlocker { criterion_id } =
+                &finding.classification
+                && !criterion_ids.contains(criterion_id.as_str())
+            {
+                return Err(WorkModelError::ReleaseCriterionNotFound {
+                    criterion_id: criterion_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn classify_finding(
+        &mut self,
+        id: String,
+        summary: String,
+        blocker_for: Option<String>,
+    ) -> Result<&ReleaseFinding, WorkModelError> {
+        self.validate()?;
+        validate_id("release finding", &id)?;
+        if summary.trim().is_empty() {
+            return Err(WorkModelError::InvalidReleaseContract {
+                reason: "release findings require non-empty summaries".to_string(),
+            });
+        }
+        if self.findings.iter().any(|finding| finding.id == id) {
+            return Err(WorkModelError::ReleaseFindingAlreadyExists { id });
+        }
+        let classification = match blocker_for {
+            Some(criterion_id)
+                if self
+                    .criteria
+                    .iter()
+                    .any(|criterion| criterion.id == criterion_id) =>
+            {
+                ReleaseFindingClassification::ReleaseBlocker { criterion_id }
+            }
+            Some(criterion_id) => {
+                return Err(WorkModelError::ReleaseCriterionNotFound { criterion_id });
+            }
+            None => ReleaseFindingClassification::ProposedFollowUp,
+        };
+        self.findings.push(ReleaseFinding {
+            id,
+            summary,
+            classification,
+        });
+        Ok(self.findings.last().expect("finding was just appended"))
     }
 }
 
@@ -4074,6 +4289,21 @@ pub enum WorkModelError {
         work_item_id: String,
         reason: String,
     },
+    InvalidReleaseContract {
+        reason: String,
+    },
+    InvalidPlanningScope {
+        reason: String,
+    },
+    ReleaseContractRequired {
+        work_item_id: String,
+    },
+    ReleaseCriterionNotFound {
+        criterion_id: String,
+    },
+    ReleaseFindingAlreadyExists {
+        id: String,
+    },
     CorrectiveContextIncomplete {
         field: &'static str,
     },
@@ -4283,6 +4513,25 @@ impl fmt::Display for WorkModelError {
                 reason,
             } => {
                 write!(f, "Work Item {work_item_id:?} cannot be mutated: {reason}")
+            }
+            Self::InvalidReleaseContract { reason } => {
+                write!(f, "invalid release acceptance contract: {reason}")
+            }
+            Self::InvalidPlanningScope { reason } => {
+                write!(f, "invalid planning scope assessment: {reason}")
+            }
+            Self::ReleaseContractRequired { work_item_id } => {
+                write!(
+                    f,
+                    "Work Item {work_item_id:?} has no release acceptance contract"
+                )
+            }
+            Self::ReleaseCriterionNotFound { criterion_id } => write!(
+                f,
+                "release blocker does not map to an accepted release criterion: {criterion_id:?}"
+            ),
+            Self::ReleaseFindingAlreadyExists { id } => {
+                write!(f, "release finding {id:?} already exists")
             }
             Self::CorrectiveContextIncomplete { field } => {
                 write!(
@@ -4546,6 +4795,10 @@ struct WorkItemRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     planning_context: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    planning_scope: Option<PlanningScopeAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_contract: Option<ReleaseContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     abandonment: Option<WorkItemAbandonment>,
@@ -4636,6 +4889,8 @@ impl From<&WorkItem> for WorkItemRecord {
             model_writer_version: Some(WORK_MODEL_WRITER_VERSION.to_string()),
             storage_revision: work_item.storage_revision.get().unwrap_or(0),
             planning_context: work_item.planning_context.clone(),
+            planning_scope: work_item.planning_scope.clone(),
+            release_contract: work_item.release_contract.clone(),
             instructions: work_item.instructions.clone(),
             abandonment: work_item.abandonment.clone(),
             post_merge_review_fix_depth: work_item.post_merge_review_fix_depth,
@@ -4659,6 +4914,8 @@ impl From<WorkItemRecord> for WorkItem {
             model_writer_version: record.model_writer_version,
             storage_revision: StorageRevision::persisted(record.storage_revision),
             planning_context: record.planning_context,
+            planning_scope: record.planning_scope,
+            release_contract: record.release_contract,
             instructions: record.instructions,
             abandonment: record.abandonment,
             post_merge_review_fix_depth: record.post_merge_review_fix_depth,
@@ -5185,6 +5442,12 @@ impl WorkModelStore {
                     work_item.storage_revision.set(current.storage_revision);
                     return Ok(());
                 }
+                reject_intake_contract_change(&current_item, work_item).map_err(|source| {
+                    WorkModelStorageError::InvalidModel {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
                 // B4s: freeze a no-expertise Attempt's reviewed identity while its
                 // Learning is exposed. Reject before the transaction journal is
                 // authored so no stale-handoff pointer move ever becomes durable.
@@ -5782,6 +6045,59 @@ impl WorkModelStore {
     }
 }
 
+fn reject_intake_contract_change(
+    current: &WorkItem,
+    next: &WorkItem,
+) -> Result<(), WorkModelError> {
+    match (&current.planning_scope, &next.planning_scope) {
+        (Some(current), Some(next)) if current != next => {
+            return Err(WorkModelError::InvalidPlanningScope {
+                reason: "the recorded intake diagnostic is immutable".to_string(),
+            });
+        }
+        (Some(_), None) => {
+            return Err(WorkModelError::InvalidPlanningScope {
+                reason: "the recorded intake diagnostic cannot be removed".to_string(),
+            });
+        }
+        (None, Some(_)) if !current.attempts.is_empty() => {
+            return Err(WorkModelError::InvalidPlanningScope {
+                reason: "scope authorization must be defined before the first Attempt".to_string(),
+            });
+        }
+        _ => {}
+    }
+    match (
+        current.release_contract.as_ref(),
+        next.release_contract.as_ref(),
+    ) {
+        (Some(current), Some(next)) if current.criteria != next.criteria => {
+            Err(WorkModelError::InvalidReleaseContract {
+                reason: "accepted criteria are immutable after Work creation".to_string(),
+            })
+        }
+        (Some(current), Some(next))
+            if !next
+                .findings
+                .as_slice()
+                .starts_with(current.findings.as_slice()) =>
+        {
+            Err(WorkModelError::InvalidReleaseContract {
+                reason: "release finding classifications are append-only".to_string(),
+            })
+        }
+        (Some(_), None) => Err(WorkModelError::InvalidReleaseContract {
+            reason: "the release contract cannot be removed after Work creation".to_string(),
+        }),
+        (None, Some(_)) if !current.attempts.is_empty() => {
+            Err(WorkModelError::InvalidReleaseContract {
+                reason: "release acceptance must be defined before the first Attempt".to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 fn namespace_legacy_artifact_path(
     work_item_id: &str,
     attempt_id: &str,
@@ -6356,6 +6672,120 @@ mod tests {
 ";
         assert!(ProgressContract::from_plan(plan_no_required).is_none());
         assert!(ProgressContract::from_plan("no table here").is_none());
+    }
+
+    #[test]
+    fn planning_scope_counts_only_required_plan_rows() {
+        let context = PlanningContext {
+            plan: Some(
+                "Long prose does not change scope.\n\n\
+                 | # | State reached | Verification | Req? |\n\
+                 |---|---------------|--------------|------|\n\
+                 | 1 | Required one | test one | Yes |\n\
+                 | 2 | Optional work | test two | Optional |\n\
+                 | 3 | Required three | test three | yes |\n\
+                 | 4 | TBD | | |\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let assessment = context.scope_assessment(1, true).unwrap();
+        assert_eq!(assessment.required_steps, 2);
+        assert_eq!(assessment.recommended_slices, 2);
+        assert!(assessment.is_large());
+        assert!(assessment.large_scope_authorized);
+
+        let combined = PlanningContext {
+            combined: context.plan.clone(),
+            ..Default::default()
+        };
+        assert_eq!(combined.required_plan_steps(), 2);
+    }
+
+    #[test]
+    fn release_findings_fail_closed_unless_mapped_to_accepted_criteria() {
+        let mut contract = ReleaseContract::new(vec![ReleaseCriterion {
+            id: "tests-pass".to_string(),
+            statement: "Configured tests pass".to_string(),
+        }])
+        .unwrap();
+        let proposed = contract
+            .classify_finding(
+                "polish".to_string(),
+                "Polish secondary docs".to_string(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            proposed.classification,
+            ReleaseFindingClassification::ProposedFollowUp
+        );
+
+        let error = contract
+            .classify_finding(
+                "proof".to_string(),
+                "Proof is missing".to_string(),
+                Some("unknown".to_string()),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            WorkModelError::ReleaseCriterionNotFound {
+                criterion_id: "unknown".to_string()
+            }
+        );
+        assert_eq!(contract.findings.len(), 1);
+
+        assert!(
+            contract
+                .classify_finding("bad/id".to_string(), "Invalid identity".to_string(), None,)
+                .is_err()
+        );
+        assert_eq!(contract.findings.len(), 1);
+    }
+
+    #[test]
+    fn release_acceptance_criteria_are_immutable_after_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("release", "Release");
+        item.release_contract = Some(
+            ReleaseContract::new(vec![ReleaseCriterion {
+                id: "tests-pass".to_string(),
+                statement: "Configured tests pass".to_string(),
+            }])
+            .unwrap(),
+        );
+        store.create_work_item(&item).unwrap();
+
+        item.release_contract.as_mut().unwrap().criteria[0].statement =
+            "A different acceptance bar".to_string();
+        let error = store.write_work_item(&item).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("accepted criteria are immutable")
+        );
+
+        let stored = store.read_work_item("release").unwrap();
+        assert_eq!(
+            stored.release_contract.as_ref().unwrap().criteria[0].statement,
+            "Configured tests pass"
+        );
+
+        let mut stored = stored;
+        stored
+            .release_contract
+            .as_mut()
+            .unwrap()
+            .classify_finding("docs".to_string(), "Polish docs".to_string(), None)
+            .unwrap();
+        store.write_work_item(&stored).unwrap();
+        stored.release_contract.as_mut().unwrap().findings[0].summary =
+            "Rewrite the recorded decision".to_string();
+        let error = store.write_work_item(&stored).unwrap_err();
+        assert!(error.to_string().contains("append-only"));
     }
 
     #[test]

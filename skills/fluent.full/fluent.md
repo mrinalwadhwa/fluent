@@ -183,6 +183,9 @@ Fluent's first release is the **Local Preview**: a supervised, local-first path 
 
 - Attempts run **locally in the foreground** — you watch each round as it happens.
 - Corrective follow-up findings become **proposed follow-up Work** by default.
+- Release exercises start with stored acceptance criteria. New findings remain
+  proposed follow-ups unless they map directly to one of those criteria; use
+  `fluent work-item classify-finding` to record the decision.
 - `fluent work-item authorize <work-item-id>` authorizes and enqueues proposed
   Work. Authorization does not run an Attempt and never authorizes landing.
 - Queued Work starts only while a human explicitly runs `fluent scheduler run`.

@@ -10,7 +10,7 @@ require_in_file() {
   local phrase="$2"
   local label="$3"
 
-  if ! grep -Fq "$phrase" "$file"; then
+  if ! grep -Fq -- "$phrase" "$file"; then
     echo "${label} lacks required guidance: ${phrase}" >&2
     failures=$((failures + 1))
   fi
@@ -21,7 +21,7 @@ require_not_in_file() {
   local phrase="$2"
   local label="$3"
 
-  if grep -Fq "$phrase" "$file"; then
+  if grep -Fq -- "$phrase" "$file"; then
     echo "${label} still contains legacy-default guidance: ${phrase}" >&2
     failures=$((failures + 1))
   fi
@@ -87,6 +87,21 @@ require_in_file "$PLAN" \
   "plan-execution skill"
 require_in_file "$PLAN" \
   'items/<slug>/plan.md' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'independently landable Work Items' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'planning.scope-limit' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '--authorize-large-scope' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  '--release-criterion' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'classify-finding' \
   "plan-execution skill"
 
 require_in_file "$BUILD" \
