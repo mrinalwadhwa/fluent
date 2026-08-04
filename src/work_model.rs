@@ -2502,6 +2502,11 @@ pub struct Attempt {
     pub pause_kind: Option<PauseKind>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactRef>,
+    /// Append-only host-owned recovery frontiers for an unchanged candidate.
+    /// Historical failed Writer Tasks remain untouched; this record explains the
+    /// exceptional evidence-only route that supersedes them operationally.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_recoveries: Vec<EvidenceRecovery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2530,6 +2535,7 @@ impl Default for Attempt {
             review_state: None,
             pause_kind: None,
             artifacts: Vec::new(),
+            evidence_recoveries: Vec::new(),
             created_at: None,
             completed_at: None,
             learning: None,
@@ -2539,6 +2545,38 @@ impl Default for Attempt {
 }
 
 impl Attempt {
+    /// Record one immutable host-evidence recovery, or return the existing
+    /// recovery when the same candidate and attachment were already accepted.
+    pub fn attach_evidence_recovery(
+        &mut self,
+        recovery: EvidenceRecovery,
+    ) -> Result<EvidenceRecovery, WorkModelError> {
+        if let Some(existing) = self.evidence_recoveries.iter().find(|existing| {
+            existing.candidate_commit == recovery.candidate_commit
+                && existing.attachment == recovery.attachment
+        }) {
+            return Ok(existing.clone());
+        }
+        if self
+            .evidence_recoveries
+            .iter()
+            .any(|existing| existing.id == recovery.id || existing.is_active())
+        {
+            return Err(WorkModelError::AttemptEvidenceRecoveryConflict {
+                attempt_id: self.id.clone(),
+            });
+        }
+        self.evidence_recoveries.push(recovery.clone());
+        Ok(recovery)
+    }
+
+    pub fn active_evidence_recovery(&self) -> Option<&EvidenceRecovery> {
+        self.evidence_recoveries
+            .iter()
+            .rev()
+            .find(|recovery| recovery.is_active())
+    }
+
     /// Materialize the authoritative `## Required completion` section into the
     /// current required-progress content when this Attempt carries a progress
     /// contract and the section is not already present. Idempotent: an existing
@@ -3271,6 +3309,52 @@ pub struct ArtifactRef {
     pub path: String,
 }
 
+/// Identity of an immutable host-produced evidence snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceAttachment {
+    pub snapshot_path: String,
+    pub digest: String,
+}
+
+/// One prior failed review explicitly addressed by host evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceReviewTarget {
+    pub role: String,
+    pub prior_review_artifact: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_task_id: Option<String>,
+}
+
+/// Append-only, host-owned recovery record for an unchanged candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRecovery {
+    pub id: String,
+    pub candidate_commit: String,
+    pub attachment: EvidenceAttachment,
+    pub targets: Vec<EvidenceReviewTarget>,
+    pub state: EvidenceRecoveryState,
+    pub created_at: String,
+}
+
+impl EvidenceRecovery {
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.state,
+            EvidenceRecoveryState::Reviewing | EvidenceRecoveryState::NeedsEvidence
+        )
+    }
+}
+
+/// Current disposition of one evidence recovery frontier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceRecoveryState {
+    Reviewing,
+    NeedsEvidence,
+    CodeChange,
+    Complete,
+}
+
 /// Durable identity for exact bytes approved as Work Item execution input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItemInputArtifact {
@@ -3620,6 +3704,9 @@ pub enum WorkModelError {
     AttemptNotFound {
         id: String,
     },
+    AttemptEvidenceRecoveryConflict {
+        attempt_id: String,
+    },
     TaskNotFound {
         id: String,
     },
@@ -3748,6 +3835,12 @@ impl fmt::Display for WorkModelError {
             }
             Self::AttemptNotFound { id } => {
                 write!(f, "Attempt {id:?} not found")
+            }
+            Self::AttemptEvidenceRecoveryConflict { attempt_id } => {
+                write!(
+                    f,
+                    "Attempt {attempt_id:?} already has an active evidence recovery"
+                )
             }
             Self::TaskNotFound { id } => {
                 write!(f, "Task {id:?} not found")
@@ -4242,6 +4335,8 @@ struct AttemptRecord {
     pause_kind: Option<PauseKind>,
     #[serde(default)]
     artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    evidence_recoveries: Vec<EvidenceRecovery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4318,6 +4413,7 @@ impl AttemptRecord {
             review_state: attempt.review_state.clone(),
             pause_kind: attempt.pause_kind.clone(),
             artifacts: attempt.artifacts.clone(),
+            evidence_recoveries: attempt.evidence_recoveries.clone(),
             created_at: attempt.created_at.clone(),
             completed_at: attempt.completed_at.clone(),
             learning: attempt.learning.clone(),
@@ -4338,6 +4434,7 @@ impl From<AttemptRecord> for Attempt {
             review_state: record.review_state,
             pause_kind: record.pause_kind,
             artifacts: record.artifacts,
+            evidence_recoveries: record.evidence_recoveries,
             created_at: record.created_at,
             completed_at: record.completed_at,
             learning: record.learning,
@@ -6143,6 +6240,41 @@ random banner prose that must be ignored
             started_at: None,
             completed_at: None,
         }
+    }
+
+    #[test]
+    fn duplicate_host_evidence_attachment_is_idempotent() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            ..Attempt::default()
+        };
+        let recovery = EvidenceRecovery {
+            id: "host-evidence-123".to_string(),
+            candidate_commit: "abc123".to_string(),
+            attachment: EvidenceAttachment {
+                snapshot_path: ".fluent/work/artifacts/work/attempt-1/host-evidence/123.json"
+                    .to_string(),
+                digest: "sha256:123".to_string(),
+            },
+            targets: vec![EvidenceReviewTarget {
+                role: "tests".to_string(),
+                prior_review_artifact: ".fluent/work/artifacts/work/attempt-1/tests/review.md"
+                    .to_string(),
+                review_task_id: None,
+            }],
+            state: EvidenceRecoveryState::Reviewing,
+            created_at: "2026-08-03T17:59:47Z".to_string(),
+        };
+
+        assert_eq!(
+            attempt.attach_evidence_recovery(recovery.clone()).unwrap(),
+            recovery
+        );
+        assert_eq!(
+            attempt.attach_evidence_recovery(recovery.clone()).unwrap(),
+            recovery
+        );
+        assert_eq!(attempt.evidence_recoveries, vec![recovery]);
     }
 
     fn review_only_work_item() -> WorkItem {

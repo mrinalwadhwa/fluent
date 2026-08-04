@@ -10,7 +10,8 @@ use std::path::Path;
 
 use crate::review::{self, Verdict};
 use crate::work_model::{
-    self, ArtifactRef, Task, TaskKind, TaskStatus, WorkModelError, WorkModelStore,
+    self, ArtifactRef, EvidenceAttachment, EvidenceRecovery, EvidenceRecoveryState,
+    EvidenceReviewTarget, Task, TaskKind, TaskStatus, WorkModelError, WorkModelStore,
 };
 
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
@@ -36,25 +37,6 @@ pub enum EvidenceResult {
     Fail,
 }
 
-/// Typed, durable recovery record written beside the immutable evidence bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvidenceRecovery {
-    pub schema_version: u32,
-    pub work_item_id: String,
-    pub attempt_id: String,
-    pub candidate_commit: String,
-    pub attachment: EvidenceAttachment,
-    pub review_artifacts: Vec<String>,
-    pub targeted_roles: Vec<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvidenceAttachment {
-    pub snapshot_path: String,
-    pub digest: String,
-}
-
 pub fn attach(
     project_root: &Path,
     store: &WorkModelStore,
@@ -69,7 +51,6 @@ pub fn attach(
     let document = parse_document(&bytes)?;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     let snapshot_path = snapshot_path(work_item_id, attempt_id, &digest)?;
-    let recovery_rel = recovery_path(work_item_id, attempt_id, &digest)?;
 
     // Publish immutable bytes before the model reference. Content addressing makes
     // this safe to retry; an unused snapshot is harmless and cannot affect a
@@ -96,15 +77,28 @@ pub fn attach(
             if !roles.contains(&task.role) { roles.push(task.role.clone()); }
         }
         if roles.is_empty() { return Err(WorkModelError::AttemptNotFound { id: attempt_id.to_string() }); }
-        let marker = format!("host-evidence-recovery:{digest}");
-        if attempt.artifacts.iter().any(|a| a.producer_id == marker) {
-            let bytes = fs::read(project_root.join(&recovery_rel))
-                .map_err(|_| WorkModelError::AttemptNotFound { id: attempt_id.to_string() })?;
-            return serde_json::from_slice(&bytes)
-                .map_err(|_| WorkModelError::AttemptNotFound { id: attempt_id.to_string() });
-        }
-        let recovery = EvidenceRecovery { schema_version: 1, work_item_id: work_item_id.to_string(), attempt_id: attempt_id.to_string(), candidate_commit: candidate_commit.to_string(), attachment: EvidenceAttachment { snapshot_path: snapshot_path.clone(), digest: digest.clone() }, review_artifacts: review_artifacts.to_vec(), targeted_roles: roles.clone(), created_at: work_model::now_iso8601() };
-        attempt.artifacts.push(ArtifactRef { producer_id: marker, path: recovery_rel.clone() });
+        let recovery = attempt.attach_evidence_recovery(EvidenceRecovery {
+            id: format!("host-evidence-{}", &digest[7..19]),
+            candidate_commit: candidate_commit.to_string(),
+            attachment: EvidenceAttachment {
+                snapshot_path: snapshot_path.clone(),
+                digest: digest.clone(),
+            },
+            targets: roles
+                .iter()
+                .map(|role| EvidenceReviewTarget {
+                    role: role.clone(),
+                    prior_review_artifact: review_artifacts
+                        .iter()
+                        .find(|path| attempt.tasks.iter().any(|task| task.role == *role && review_artifact_path(task).as_deref() == Some(path.as_str())))
+                        .cloned()
+                        .unwrap_or_default(),
+                    review_task_id: None,
+                })
+                .collect(),
+            state: EvidenceRecoveryState::Reviewing,
+            created_at: work_model::now_iso8601(),
+        })?;
         for role in roles {
             let prior = attempt.tasks.iter().find(|task| task.role == role && review_artifact_path(task).as_deref().is_some_and(|path| review_artifacts.iter().any(|artifact| artifact == path))).unwrap().clone();
             let task_id = format!("{attempt_id}-evidence-{}-{role}", &digest[7..19]);
@@ -112,18 +106,21 @@ pub fn attach(
                 let mut inputs = prior.input_artifacts.clone();
                 inputs.push(ArtifactRef { producer_id: "host-evidence".to_string(), path: snapshot_path.clone() });
                 inputs.push(ArtifactRef { producer_id: prior.id.clone(), path: review_artifact_path(&prior).unwrap() });
-                attempt.tasks.push(Task { id: task_id.clone(), kind: TaskKind::Review, status: TaskStatus::Planned, role, instructions: Some("This is an evidence-targeted review. Assess the attached host evidence against the prior failed review; do not request source changes unless evidence is insufficient.".to_string()), work_item_id: work_item_id.to_string(), attempt_id: Some(attempt_id.to_string()), workspace_access: prior.workspace_access, artifact_area: Some(work_model::TaskArtifactArea { path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id) }), review_context: prior.review_context, input_artifacts: inputs, depends_on: None, output: None, created_at: Some(work_model::now_iso8601()), started_at: None, completed_at: None });
+                attempt.tasks.push(Task { id: task_id.clone(), kind: TaskKind::Review, status: TaskStatus::Planned, role: role.clone(), instructions: Some("This is an evidence-targeted review. Assess the attached host evidence against the prior failed review; do not request source changes unless evidence is insufficient.".to_string()), work_item_id: work_item_id.to_string(), attempt_id: Some(attempt_id.to_string()), workspace_access: prior.workspace_access, artifact_area: Some(work_model::TaskArtifactArea { path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id) }), review_context: prior.review_context, input_artifacts: inputs, depends_on: None, output: None, created_at: Some(work_model::now_iso8601()), started_at: None, completed_at: None });
+            }
+            if let Some(target) = attempt
+                .evidence_recoveries
+                .iter_mut()
+                .find(|entry| entry.id == recovery.id)
+                .and_then(|entry| entry.targets.iter_mut().find(|target| target.role == role))
+            {
+                target.review_task_id = Some(task_id);
             }
         }
         attempt.status = work_model::AttemptStatus::Reviewing;
         attempt.review_state = Some(work_model::AttemptReviewState::NotReviewed);
         Ok(recovery)
     })?;
-    publish_snapshot(
-        project_root,
-        &recovery_rel,
-        &serde_json::to_vec_pretty(&recovery)?,
-    )?;
     let _ = document; // validation intentionally happens before publication.
     Ok(recovery)
 }
@@ -151,14 +148,6 @@ fn snapshot_path(work: &str, attempt: &str, digest: &str) -> Result<String> {
         .context("invalid evidence digest")?;
     Ok(format!(
         ".fluent/work/artifacts/{work}/{attempt}/host-evidence/{hex}.json"
-    ))
-}
-fn recovery_path(work: &str, attempt: &str, digest: &str) -> Result<String> {
-    let hex = digest
-        .strip_prefix("sha256:")
-        .context("invalid evidence digest")?;
-    Ok(format!(
-        ".fluent/work/artifacts/{work}/{attempt}/host-evidence/{hex}.recovery.json"
     ))
 }
 fn review_artifact_path(task: &Task) -> Option<String> {

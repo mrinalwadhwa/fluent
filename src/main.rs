@@ -438,7 +438,12 @@ fn cmd_attempt(
                 "Attached host evidence {} for Attempt {}; targeted reviews: {}",
                 recovery.attachment.digest,
                 attempt_id,
-                recovery.targeted_roles.join(", ")
+                recovery
+                    .targets
+                    .iter()
+                    .map(|target| target.role.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         AttemptCommands::Create {
