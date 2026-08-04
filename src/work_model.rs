@@ -3358,10 +3358,7 @@ pub struct EvidenceRecovery {
 
 impl EvidenceRecovery {
     pub fn is_active(&self) -> bool {
-        matches!(
-            self.state,
-            EvidenceRecoveryState::Reviewing | EvidenceRecoveryState::NeedsEvidence
-        )
+        self.state == EvidenceRecoveryState::Reviewing
     }
 }
 
@@ -6296,6 +6293,45 @@ random banner prose that must be ignored
             recovery
         );
         assert_eq!(attempt.evidence_recoveries, vec![recovery]);
+    }
+
+    #[test]
+    fn evidence_needed_recovery_accepts_new_host_evidence() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            ..Attempt::default()
+        };
+        let mut prior = EvidenceRecovery {
+            id: "host-evidence-prior".to_string(),
+            candidate_commit: "abc123".to_string(),
+            attachment: EvidenceAttachment {
+                snapshot_path: ".fluent/work/artifacts/work/attempt-1/host-evidence/prior.json"
+                    .to_string(),
+                digest: "sha256:prior".to_string(),
+            },
+            targets: Vec::new(),
+            state: EvidenceRecoveryState::Reviewing,
+            created_at: "2026-08-03T17:59:47Z".to_string(),
+        };
+        attempt.attach_evidence_recovery(prior.clone()).unwrap();
+        prior.state = EvidenceRecoveryState::NeedsEvidence;
+        attempt.evidence_recoveries[0] = prior;
+
+        let next = EvidenceRecovery {
+            id: "host-evidence-next".to_string(),
+            candidate_commit: "abc123".to_string(),
+            attachment: EvidenceAttachment {
+                snapshot_path: ".fluent/work/artifacts/work/attempt-1/host-evidence/next.json"
+                    .to_string(),
+                digest: "sha256:next".to_string(),
+            },
+            targets: Vec::new(),
+            state: EvidenceRecoveryState::Reviewing,
+            created_at: "2026-08-03T18:00:47Z".to_string(),
+        };
+
+        assert_eq!(attempt.attach_evidence_recovery(next.clone()).unwrap(), next);
+        assert_eq!(attempt.evidence_recoveries.len(), 2);
     }
 
     fn review_only_work_item() -> WorkItem {
