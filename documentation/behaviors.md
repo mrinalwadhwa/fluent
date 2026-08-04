@@ -9,18 +9,31 @@ the system does, not how. EARS format.
 
 WHEN an operator attaches a valid schema-version-1 host evidence document to an
 eligible Attempt and exact candidate commit, THE SYSTEM SHALL retain immutable
-bytes and its digest, plan only the explicitly named failed reviewer roles, and
-leave the candidate and approved planning inputs unchanged.
+bytes, producer, check, result, timestamp, and digest.
 Test: tests/binary.rs (attempt_evidence_attach_preserves_exact_evidence_and_identity)
 
 ### B2
+
+WHEN an operator attaches valid host evidence to an eligible Attempt, THE SYSTEM
+SHALL plan only the explicitly named failed reviewer roles without adding a
+Writer or Tester.
+Test: tests/binary.rs (attempt_evidence_attach_plans_targeted_reviews_without_writer)
+
+### B3
+
+WHEN Fluent accepts host evidence, THE SYSTEM SHALL leave the candidate commit
+and approved planning inputs unchanged and keep the candidate unlandable until
+review and Learning complete.
+Test: tests/binary.rs (attempt_evidence_attach_preserves_candidate_and_blocks_landing)
+
+### B4
 
 IF a host evidence attachment names a stale Work Item, Attempt, candidate,
 review artifact, or a frontier owned by a live Task or landing operation, THEN
 THE SYSTEM SHALL reject it without changing Work or candidate state.
 Test: src/host_evidence.rs (stale_evidence_frontier_is_rejected_without_mutation)
 
-### B3
+### B5
 
 WHEN an evidence-targeted reviewer fails, THE SYSTEM SHALL require a
 `Disposition: evidence-needed` or `Disposition: code-change`: the first pauses

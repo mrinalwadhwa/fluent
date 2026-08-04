@@ -20606,8 +20606,18 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
     let shown = work_item_value(&project, "evidence-attach");
     let recovery = &shown["attempts"][0]["evidence_recoveries"][0];
     assert_eq!(recovery["candidate_commit"], candidate);
+    assert_eq!(
+        recovery["attachment"]["digest"],
+        format!("sha256:{:x}", Sha256::digest(evidence_bytes))
+    );
     let snapshot = project.join(recovery["attachment"]["snapshot_path"].as_str().unwrap());
-    assert_eq!(fs::read(snapshot).unwrap(), evidence_bytes);
+    assert_eq!(fs::read(&snapshot).unwrap(), evidence_bytes);
+    let retained: serde_json::Value =
+        serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(retained["producer"], "trusted host");
+    assert_eq!(retained["check"], "fluent tester check");
+    assert_eq!(retained["result"], "pass");
+    assert_eq!(retained["run_at"], "2026-08-03T17:59:47Z");
     let tasks = shown["attempts"][0]["tasks"].as_array().unwrap();
     assert_eq!(
         tasks.iter().filter(|task| task["kind"] == "write").count(),
@@ -20620,6 +20630,150 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
             .count(),
         1
     );
+}
+
+#[test]
+fn attempt_evidence_attach_plans_targeted_reviews_without_writer() {
+    use fluent::work_model::{AttemptStatus, TaskOutput, TaskStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let candidate = git_head(&project);
+    let store = WorkModelStore::new(&project);
+    let mut item = WorkItem::planned("evidence-target", "Target host evidence reviews");
+    item.add_initial_attempt("attempt-1").unwrap();
+    let writer = &mut item.attempts[0].tasks[0];
+    writer.status = TaskStatus::Complete;
+    writer.output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: project.display().to_string(),
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: candidate.clone(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_review_tasks("attempt-1", &["architecture", "tests"])
+        .unwrap();
+    item.attempts[0].status = AttemptStatus::Reviewing;
+    let paths = item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind == fluent::work_model::TaskKind::Review)
+        .map(|task| {
+            task.status = TaskStatus::Complete;
+            let path = format!("{}/review.md", task.artifact_area.as_ref().unwrap().path);
+            fs::create_dir_all(project.join(&path).parent().unwrap()).unwrap();
+            fs::write(project.join(&path), "Verdict: fail\n").unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    store.create_work_item(&item).unwrap();
+    let evidence = tmp.path().join("evidence.json");
+    fs::write(&evidence, br#"{"schema_version":1,"producer":"host","check":"check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#).unwrap();
+    let mut args = vec![
+        "attempt",
+        "evidence",
+        "attach",
+        "evidence-target",
+        "attempt-1",
+        "--candidate",
+        &candidate,
+        "--evidence-file",
+        evidence.to_str().unwrap(),
+    ];
+    for path in &paths {
+        args.push("--review-artifact");
+        args.push(path);
+    }
+    fluent_cmd()
+        .current_dir(&project)
+        .args(args)
+        .assert()
+        .success();
+
+    let shown = work_item_value(&project, "evidence-target");
+    let tasks = shown["attempts"][0]["tasks"].as_array().unwrap();
+    assert_eq!(
+        tasks.iter().filter(|task| task["kind"] == "write").count(),
+        1
+    );
+    assert_eq!(
+        tasks.iter().filter(|task| task["kind"] == "test").count(),
+        0
+    );
+    let targeted = tasks
+        .iter()
+        .filter(|task| task["evidence_review_context"].is_object())
+        .collect::<Vec<_>>();
+    assert_eq!(targeted.len(), 2);
+    assert!(targeted.iter().all(|task| {
+        paths
+            .iter()
+            .any(|path| task["evidence_review_context"]["prior_review_artifact"] == *path)
+    }));
+}
+
+#[test]
+fn attempt_evidence_attach_preserves_candidate_and_blocks_landing() {
+    // The accepted public command must not create a merge candidate or mutate
+    // either the candidate commit or the approved Work Item inputs.
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let candidate = git_head(&project);
+    let store = WorkModelStore::new(&project);
+    let mut item = fluent::work_model::WorkItem::planned("evidence-land", "Keep candidate blocked");
+    item.add_initial_attempt("attempt-1").unwrap();
+    let writer = &mut item.attempts[0].tasks[0];
+    writer.status = fluent::work_model::TaskStatus::Complete;
+    writer.output = Some(fluent::work_model::TaskOutput {
+        workspace_id: "candidate".into(),
+        workspace_path: project.display().to_string(),
+        source_branch: "main".into(),
+        base_commit: None,
+        commit: candidate.clone(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_review_tasks("attempt-1", &["architecture"])
+        .unwrap();
+    item.attempts[0].status = fluent::work_model::AttemptStatus::Reviewing;
+    let reviewer = item.attempts[0].tasks.last_mut().unwrap();
+    reviewer.status = fluent::work_model::TaskStatus::Complete;
+    let review_path = format!(
+        "{}/review.md",
+        reviewer.artifact_area.as_ref().unwrap().path
+    );
+    fs::create_dir_all(project.join(&review_path).parent().unwrap()).unwrap();
+    fs::write(project.join(&review_path), "Verdict: fail\n").unwrap();
+    store.create_work_item(&item).unwrap();
+    let before = fs::read_to_string(project.join(".fluent/work/items/evidence-land.json")).unwrap();
+    let evidence = tmp.path().join("evidence.json");
+    fs::write(&evidence, br#"{"schema_version":1,"producer":"host","check":"check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-land",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .success();
+    let shown = work_item_value(&project, "evidence-land");
+    assert_eq!(git_head(&project), candidate);
+    assert!(shown["merge_candidates"]
+        .as_array()
+        .is_none_or(Vec::is_empty));
+    let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+    assert_eq!(shown["title"], before["title"]);
 }
 
 #[test]
