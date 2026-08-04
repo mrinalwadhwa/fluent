@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
@@ -2881,14 +2882,31 @@ fn run_task_coder_with_coder(
     if task.kind == TaskKind::Write {
         materialize_required_progress_before_writer(project_root, item, attempt_id)?;
     }
-    let prompt = build_write_task_prompt_with_workspace(
-        item,
-        attempt_id,
-        task_id,
-        prior_reviews,
-        Some(workspace_path),
-        Some(project_root),
-    );
+    let prompt = if item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.writer_runs.last())
+        .is_some_and(|run| run.outcome == crate::work_model::WriterOutcome::Continue)
+    {
+        build_writer_continuation_prompt(
+            item,
+            attempt_id,
+            task_id,
+            prior_reviews,
+            workspace_path,
+            project_root,
+        )
+    } else {
+        build_write_task_prompt_with_workspace(
+            item,
+            attempt_id,
+            task_id,
+            prior_reviews,
+            Some(workspace_path),
+            Some(project_root),
+        )
+    };
 
     let transcript_path = task
         .artifact_area
@@ -2969,13 +2987,15 @@ fn run_task_coder_with_coder(
     // take its terminal outcome: an unconfirmed group sweep lands in
     // coder-supervision.json rather than being dropped with the ManagedChild, and a
     // sidecar obstruction rides along as a typed non-retryable secondary.
-    let completion = coder.run_captured_reported(
+    let session = writer_coder_session(item, attempt_id, coder_kind);
+    let completion = coder.run_captured_reported_session(
         &prompt,
         &system_prompt,
         workspace_path,
         extra_args,
         &launch_env,
         capture.as_ref(),
+        session,
     );
     let exit_code = match transcript_path.as_deref().and_then(Path::parent) {
         Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
@@ -2995,6 +3015,25 @@ fn run_task_coder_with_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn writer_coder_session<'a>(
+    item: &'a WorkItem,
+    attempt_id: &str,
+    coder_kind: CoderKind,
+) -> crate::coder::CoderSession<'a> {
+    item.attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.writer_runs.last())
+        .filter(|run| {
+            run.outcome == crate::work_model::WriterOutcome::Continue
+                && run.provider == coder_kind.as_str()
+        })
+        .and_then(|run| run.session_id.as_deref())
+        .filter(|session_id| !session_id.trim().is_empty())
+        .map(crate::coder::CoderSession::Resume)
+        .unwrap_or(crate::coder::CoderSession::FreshPersistent)
 }
 
 /// Remove only the declaration a prior launch could have left behind. The next
@@ -3212,6 +3251,124 @@ fn build_write_task_prompt_with_workspace(
         ],
     )
     .expect("write-user.md template must render with the documented context")
+}
+
+fn build_writer_continuation_prompt(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    prior_reviews: &[PathBuf],
+    workspace_path: &Path,
+    project_root: &Path,
+) -> String {
+    let progress_path = progress_md_path_for(project_root, &item.id, attempt_id);
+    let unresolved_progress = fs::read_to_string(&progress_path)
+        .ok()
+        .map(|source| unresolved_progress_excerpt(&source))
+        .filter(|source| !source.is_empty())
+        .unwrap_or_else(|| {
+            "No unresolved checklist entry was readable; inspect the progress file.".to_string()
+        });
+    let current_findings = prior_reviews
+        .iter()
+        .map(|path| {
+            let unresolved = fs::read_to_string(path)
+                .ok()
+                .map(|source| {
+                    source
+                        .lines()
+                        .filter(|line| line.trim_start().starts_with("- [ ]"))
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            if unresolved.is_empty() {
+                format!("- {}", path.display())
+            } else {
+                format!("- {}\n{}", path.display(), unresolved)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let current_findings = if current_findings.is_empty() {
+        "No review findings exist; this continuation is still before Tester and review.".to_string()
+    } else {
+        current_findings
+    };
+    let latest_change = Command::new("git")
+        .args([
+            "show",
+            "--format=fuller",
+            "--stat",
+            "--patch",
+            "--unified=3",
+            "--no-ext-diff",
+            "HEAD",
+        ])
+        .current_dir(workspace_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            const MAX_LATEST_CHANGE_CHARS: usize = 16_384;
+            let source = String::from_utf8_lossy(&output.stdout);
+            let mut bounded = source
+                .chars()
+                .take(MAX_LATEST_CHANGE_CHARS)
+                .collect::<String>();
+            if source.chars().count() > MAX_LATEST_CHANGE_CHARS {
+                bounded.push_str("\n[latest change truncated; inspect git show HEAD]\n");
+            }
+            bounded
+        })
+        .filter(|output| !output.trim().is_empty())
+        .unwrap_or_else(|| {
+            "Latest committed diff summary is unavailable; inspect HEAD in the workspace."
+                .to_string()
+        });
+    let planning = compute_planning_paths(item, project_root);
+    let brief_path = planning.brief();
+    let behaviors_path = planning.behaviors();
+    let approach_path = planning.approach();
+    let plan_path = planning.plan();
+    let template = ContentResolver::new(Some(workspace_path))
+        .resolve_content("prompts/write-continuation-user.md")
+        .expect("bundled write-continuation-user.md must resolve");
+    crate::content::render_template(
+        &template,
+        &[
+            ("work_item_id", &item.id),
+            ("work_item_title", &item.title),
+            ("attempt_id", attempt_id),
+            ("task_id", task_id),
+            ("progress_md_path", &progress_path.display().to_string()),
+            ("brief_path", &brief_path),
+            ("behaviors_path", &behaviors_path),
+            ("approach_path", &approach_path),
+            ("plan_path", &plan_path),
+            ("unresolved_progress", &unresolved_progress),
+            ("latest_change", &latest_change),
+            ("current_findings", &current_findings),
+        ],
+    )
+    .expect("write-continuation-user.md template must render with the documented context")
+}
+
+fn unresolved_progress_excerpt(source: &str) -> String {
+    let mut include_nested = false;
+    let mut unresolved = Vec::new();
+    for line in source.lines() {
+        if line.starts_with("- [ ]") {
+            include_nested = true;
+            unresolved.push(line);
+        } else if line.starts_with("- [") || line.starts_with("## ") {
+            include_nested = false;
+        } else if include_nested && (line.starts_with("  ") || line.trim().is_empty()) {
+            unresolved.push(line);
+        }
+    }
+    unresolved.join("\n")
 }
 
 #[derive(Default, Debug, Clone)]
@@ -6516,6 +6673,149 @@ mod tests {
     /// persist it as a sidecar.
     struct SupervisionReportingCoder {
         recorded_dir: Arc<Mutex<Option<PathBuf>>>,
+    }
+
+    struct SessionRecordingCoder {
+        recorded: Arc<Mutex<Option<String>>>,
+    }
+
+    impl crate::coder::Coder for SessionRecordingCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the writer route launches through the session boundary")
+        }
+
+        fn run_captured_reported_session(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+            session: crate::coder::CoderSession<'_>,
+        ) -> crate::coder::CoderRunCompletion {
+            let value = match session {
+                crate::coder::CoderSession::FreshPersistent => "fresh".to_string(),
+                crate::coder::CoderSession::Resume(id) => format!("resume:{id}"),
+                crate::coder::CoderSession::Ephemeral => "ephemeral".to_string(),
+            };
+            *self.recorded.lock().unwrap() = Some(value);
+            crate::coder::CoderRunCompletion {
+                terminal: Ok(0),
+                report: Default::default(),
+            }
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the writer route never runs interactively")
+        }
+    }
+
+    #[test]
+    fn writer_route_resumes_the_matching_recorded_provider_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Resume Writer".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0]
+            .writer_runs
+            .push(crate::work_model::WriterRun {
+                task_id: "attempt-1-write-0".to_string(),
+                outcome: crate::work_model::WriterOutcome::Continue,
+                kind: crate::work_model::WriterRunKind::Initial,
+                provider: "codex".to_string(),
+                session_id: Some("writer-thread-1".to_string()),
+                continuation: 0,
+                checked_required: 0,
+                candidate_commit: "commit-1".to_string(),
+            });
+
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded = Arc::new(Mutex::new(None));
+        let recorded_for_coder = Arc::clone(&recorded);
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Codex,
+            true,
+            None,
+            None,
+            &pump_config,
+            None,
+            None,
+            move |_sandbox, _executable| {
+                Box::new(SessionRecordingCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            recorded.lock().unwrap().as_deref(),
+            Some("resume:writer-thread-1")
+        );
+    }
+
+    #[test]
+    fn writer_session_falls_back_to_fresh_when_identity_is_unusable() {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0]
+            .writer_runs
+            .push(crate::work_model::WriterRun {
+                task_id: "attempt-1-write-0".to_string(),
+                outcome: crate::work_model::WriterOutcome::Continue,
+                kind: crate::work_model::WriterRunKind::Initial,
+                provider: "claude".to_string(),
+                session_id: Some("claude-session-1".to_string()),
+                continuation: 0,
+                checked_required: 0,
+                candidate_commit: "commit-1".to_string(),
+            });
+
+        assert_eq!(
+            writer_coder_session(&item, "attempt-1", CoderKind::Codex),
+            crate::coder::CoderSession::FreshPersistent
+        );
+        item.attempts[0].writer_runs[0].provider = "codex".to_string();
+        item.attempts[0].writer_runs[0].session_id = None;
+        assert_eq!(
+            writer_coder_session(&item, "attempt-1", CoderKind::Codex),
+            crate::coder::CoderSession::FreshPersistent
+        );
     }
 
     impl crate::coder::Coder for SupervisionReportingCoder {
@@ -11050,6 +11350,81 @@ mod tests {
             !prompt.contains("Create progress.md"),
             "follow-up-round prompt (progress.md exists) should NOT include the Create instruction; got prompt:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn continuation_prompt_contains_only_current_execution_context() {
+        let mut item = review_item();
+        item.attempts[0]
+            .writer_runs
+            .push(crate::work_model::WriterRun {
+                task_id: "attempt-1-write-0".to_string(),
+                outcome: crate::work_model::WriterOutcome::Continue,
+                kind: crate::work_model::WriterRunKind::Initial,
+                provider: "codex".to_string(),
+                session_id: Some("writer-thread-1".to_string()),
+                continuation: 0,
+                checked_required: 1,
+                candidate_commit: "commit-1".to_string(),
+            });
+        let project = tempfile::TempDir::new().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .unwrap();
+        fs::write(
+            workspace.path().join("candidate.txt"),
+            "new candidate content\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "candidate.txt"])
+            .current_dir(workspace.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Fluent Test",
+                "-c",
+                "user.email=fluent@example.test",
+                "commit",
+                "-q",
+                "-m",
+                "Add candidate",
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .unwrap();
+        let progress = progress_md_path_for(project.path(), "work-1", "attempt-1");
+        fs::create_dir_all(progress.parent().unwrap()).unwrap();
+        fs::write(
+            &progress,
+            "## Required completion\n\n- [x] step-1 — Done; Evidence: test\n- [ ] step-2 — Still open\n  - keep this constraint\n",
+        )
+        .unwrap();
+        let finding = project.path().join("review-tests.md");
+        fs::write(&finding, "- [ ] Fix the boundary\n").unwrap();
+
+        let prompt = build_writer_continuation_prompt(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            std::slice::from_ref(&finding),
+            workspace.path(),
+            project.path(),
+        );
+
+        assert!(prompt.contains("step-2 — Still open"));
+        assert!(prompt.contains("keep this constraint"));
+        assert!(!prompt.contains("step-1 — Done"));
+        assert!(prompt.contains(&finding.display().to_string()));
+        assert!(prompt.contains(&progress.display().to_string()));
+        assert!(prompt.contains("candidate.txt"));
+        assert!(prompt.contains("new candidate content"));
+        assert!(!prompt.contains("{{"));
     }
 
     #[test]

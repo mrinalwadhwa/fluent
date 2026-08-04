@@ -317,6 +317,28 @@ pub trait Coder: Send + Sync {
         ))
     }
 
+    /// Launch a Writer with explicit provider-session semantics. External coders
+    /// that do not support session continuation safely fall back to a fresh launch.
+    fn run_captured_reported_session(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+        _session: CoderSession<'_>,
+    ) -> CoderRunCompletion {
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+    }
+
     /// Launch an interactive session (no -p flag).
     fn run_interactive(
         &self,
@@ -325,6 +347,17 @@ pub trait Coder: Send + Sync {
         extra_args: &[String],
         extra_env: &[(String, String)],
     ) -> Result<i32>;
+}
+
+/// Select how an autonomous provider launch treats its conversation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoderSession<'a> {
+    /// Preserve the pre-existing stateless behavior for non-Writer roles.
+    Ephemeral,
+    /// Start a Writer session that the provider can continue later.
+    FreshPersistent,
+    /// Continue the exact provider session recorded by an earlier Writer.
+    Resume(&'a str),
 }
 
 /// Claude Code invoked via sandbox-exec.
@@ -386,6 +419,27 @@ impl Coder for SandboxedClaudeCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> CoderRunCompletion {
+        self.run_captured_reported_session(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+            CoderSession::Ephemeral,
+        )
+    }
+
+    fn run_captured_reported_session(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+        session: CoderSession<'_>,
+    ) -> CoderRunCompletion {
         if let Err(err) = ensure_not_expired_with_refresh() {
             return CoderRunCompletion::terminal_only(Err(err.into()));
         }
@@ -394,7 +448,7 @@ impl Coder for SandboxedClaudeCode {
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         run_with_transcript_retrying_reported(
             || {
-                let mut cmd = self.build_command(working_dir, true);
+                let mut cmd = self.build_writer_command(working_dir, session);
                 apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.args(["--verbose", "--output-format", "stream-json"]);
@@ -467,6 +521,14 @@ impl SandboxedClaudeCode {
             cmd
         }
     }
+
+    fn build_writer_command(&self, working_dir: &Path, session: CoderSession<'_>) -> Command {
+        let mut cmd = self.build_command(working_dir, true);
+        if let CoderSession::Resume(session_id) = session {
+            cmd.args(["--resume", session_id]);
+        }
+        cmd
+    }
 }
 
 /// Bare Claude Code (no sandbox, for Fargate/Linux/--no-sandbox).
@@ -485,6 +547,14 @@ impl BareClaudeCode {
         cmd.current_dir(working_dir);
         if autonomous {
             cmd.arg("--safe-mode");
+        }
+        cmd
+    }
+
+    fn build_writer_command(&self, working_dir: &Path, session: CoderSession<'_>) -> Command {
+        let mut cmd = self.build_command(working_dir, true);
+        if let CoderSession::Resume(session_id) = session {
+            cmd.args(["--resume", session_id]);
         }
         cmd
     }
@@ -541,6 +611,27 @@ impl Coder for BareClaudeCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> CoderRunCompletion {
+        self.run_captured_reported_session(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+            CoderSession::Ephemeral,
+        )
+    }
+
+    fn run_captured_reported_session(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+        session: CoderSession<'_>,
+    ) -> CoderRunCompletion {
         if let Err(err) = ensure_not_expired_with_refresh() {
             return CoderRunCompletion::terminal_only(Err(err.into()));
         }
@@ -551,7 +642,7 @@ impl Coder for BareClaudeCode {
         let effort = self.effort.clone();
         run_with_transcript_retrying_reported(
             || {
-                let mut cmd = self.build_command(working_dir, true);
+                let mut cmd = self.build_writer_command(working_dir, session);
                 apply_coder_env(&mut cmd, extra_env);
                 cmd.args(["--dangerously-skip-permissions"]);
                 if let Some(ref m) = model {
@@ -653,13 +744,34 @@ impl Coder for CodexCode {
         extra_env: &[(String, String)],
         capture: Option<&TranscriptCapture<'_>>,
     ) -> CoderRunCompletion {
+        self.run_captured_reported_session(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+            CoderSession::Ephemeral,
+        )
+    }
+
+    fn run_captured_reported_session(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+        session: CoderSession<'_>,
+    ) -> CoderRunCompletion {
         let want_transcript = capture.is_some();
         let transcript_file = capture.map(|c| c.path);
         let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
         run_with_transcript_retrying_reported(
             || {
-                let mut cmd = self.build_command(working_dir, true);
+                let mut cmd = self.build_writer_command(working_dir, session);
                 apply_coder_env(&mut cmd, extra_env);
                 if want_transcript {
                     cmd.arg("--json");
@@ -698,6 +810,19 @@ impl CodexCode {
     }
 
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
+        self.build_command_with_session(working_dir, exec_mode, CoderSession::Ephemeral)
+    }
+
+    fn build_writer_command(&self, working_dir: &Path, session: CoderSession<'_>) -> Command {
+        self.build_command_with_session(working_dir, true, session)
+    }
+
+    fn build_command_with_session(
+        &self,
+        working_dir: &Path,
+        exec_mode: bool,
+        session: CoderSession<'_>,
+    ) -> Command {
         let mut cmd = if let Some(profile) = &self.sandbox_profile {
             let mut cmd = Command::new(if self.trusted_sandbox {
                 trusted_sandbox_executable()
@@ -724,11 +849,16 @@ impl CodexCode {
         }
         if exec_mode {
             cmd.arg("exec");
+            if matches!(session, CoderSession::Resume(_)) {
+                cmd.arg("resume");
+            }
             // Autonomous workers must not inherit user configuration, hooks, or
             // session continuity from an interactive Codex home.
             cmd.args(["--disable", "hooks"]);
             cmd.arg("--ignore-user-config");
-            cmd.arg("--ephemeral");
+            if session == CoderSession::Ephemeral {
+                cmd.arg("--ephemeral");
+            }
         }
         cmd.args(["--cd", &working_dir.to_string_lossy()]);
         cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
@@ -737,6 +867,9 @@ impl CodexCode {
         }
         if let Some(ref effort) = self.effort {
             cmd.args(["-c", &format!("model_reasoning_effort={effort}")]);
+        }
+        if let CoderSession::Resume(session_id) = session {
+            cmd.arg(session_id);
         }
         cmd.current_dir(working_dir);
         cmd
@@ -4714,6 +4847,69 @@ mod model_default_tests {
         assert!(cmd_has_arg(&cmd, "--ephemeral"));
         assert!(cmd_has_arg(&cmd, "gpt-5"));
         assert!(cmd_has_arg(&cmd, "model_reasoning_effort=high"));
+    }
+
+    #[test]
+    fn fresh_writer_codex_command_persists_its_session() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+            executable: PathBuf::from("codex"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let cmd = coder.build_writer_command(dir.path(), CoderSession::FreshPersistent);
+
+        assert!(cmd_has_arg(&cmd, "exec"));
+        assert!(!cmd_has_arg(&cmd, "resume"));
+        assert!(!cmd_has_arg(&cmd, "--ephemeral"));
+    }
+
+    #[test]
+    fn resumed_writer_codex_command_uses_the_recorded_session() {
+        let coder = CodexCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+            effort: None,
+            executable: PathBuf::from("codex"),
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let cmd = coder.build_writer_command(dir.path(), CoderSession::Resume("writer-thread-1"));
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        let resume = args.iter().position(|arg| arg == "resume").unwrap();
+        assert_eq!(args[resume - 1], "exec");
+        assert!(
+            args[resume + 1..]
+                .iter()
+                .any(|arg| arg == "writer-thread-1")
+        );
+        assert!(!args.iter().any(|arg| arg == "--ephemeral"));
+    }
+
+    #[test]
+    fn resumed_writer_claude_command_uses_the_recorded_session() {
+        let coder = BareClaudeCode {
+            model_override: None,
+            effort: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+
+        let cmd = coder.build_writer_command(dir.path(), CoderSession::Resume("writer-session-1"));
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        let resume = args.iter().position(|arg| arg == "--resume").unwrap();
+        assert_eq!(args[resume + 1], "writer-session-1");
     }
 
     #[test]

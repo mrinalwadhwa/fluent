@@ -173,7 +173,34 @@ fn select_task(attempt: &Attempt) -> Option<&Task> {
 }
 
 fn format_attempt(attempt: &Attempt) -> String {
-    format!("{} [{}]", attempt.id, attempt_status_label(&attempt.status))
+    if attempt.writer_runs.is_empty() {
+        return format!("{} [{}]", attempt.id, attempt_status_label(&attempt.status));
+    }
+    let initial = attempt
+        .writer_runs
+        .iter()
+        .filter(|run| run.kind == crate::work_model::WriterRunKind::Initial)
+        .count();
+    let pre_review = attempt
+        .writer_runs
+        .iter()
+        .filter(|run| run.kind == crate::work_model::WriterRunKind::PreReviewContinuation)
+        .count();
+    let corrective = attempt
+        .writer_runs
+        .iter()
+        .filter(|run| run.kind == crate::work_model::WriterRunKind::Corrective)
+        .count();
+    let last = attempt
+        .writer_runs
+        .last()
+        .expect("writer runs is not empty");
+    format!(
+        "{} [{}; writers initial:{initial} pre-review:{pre_review} corrective:{corrective}; last:{}]",
+        attempt.id,
+        attempt_status_label(&attempt.status),
+        last.outcome.as_str()
+    )
 }
 
 fn format_task_with_liveness(task: &Task, item: &WorkItem, project_root: Option<&Path>) -> String {
@@ -430,6 +457,46 @@ mod tests {
         assert_eq!(row.task, "write:attempt-1-write-1 [planned]");
         assert_eq!(row.review, "-");
         assert_eq!(row.action, "task-ready");
+    }
+
+    #[test]
+    fn attempt_status_shows_writer_continuations_separately() {
+        let mut attempt = Attempt::default();
+        attempt.id = "attempt-1".to_string();
+        for (kind, continuation, outcome) in [
+            (
+                crate::work_model::WriterRunKind::Initial,
+                0,
+                crate::work_model::WriterOutcome::Continue,
+            ),
+            (
+                crate::work_model::WriterRunKind::PreReviewContinuation,
+                1,
+                crate::work_model::WriterOutcome::Continue,
+            ),
+            (
+                crate::work_model::WriterRunKind::Corrective,
+                1,
+                crate::work_model::WriterOutcome::Complete,
+            ),
+        ] {
+            attempt.writer_runs.push(crate::work_model::WriterRun {
+                task_id: format!("writer-{continuation}"),
+                outcome,
+                kind,
+                provider: "codex".to_string(),
+                session_id: Some("thread-1".to_string()),
+                continuation,
+                checked_required: 1,
+                candidate_commit: "abc123".to_string(),
+            });
+        }
+
+        let rendered = format_attempt(&attempt);
+
+        assert!(rendered.contains("pre-review:1"));
+        assert!(rendered.contains("corrective:1"));
+        assert!(rendered.contains("last:complete"));
     }
 
     #[test]

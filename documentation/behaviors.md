@@ -4749,6 +4749,50 @@ review Tasks are durable, THE SYSTEM SHALL reuse those Tasks without creating
 duplicates.
 Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_tester_or_review_tasks)
 
+### B7
+
+WHEN required progress remains incomplete and the completed Writer did not create
+a candidate commit, THE SYSTEM SHALL preserve the candidate and pause the Attempt
+before planning another Writer, Tester, or reviewer.
+Test: src/work_attempt_loop.rs (incomplete_no_change_writer_pauses_instead_of_continuing)
+
+### B8
+
+WHEN two consecutive pre-review Writer continuations create commits without
+increasing the number of required entries checked with evidence, THE SYSTEM SHALL
+preserve the candidate and pause the Attempt before planning a Tester or reviewer.
+Test: src/work_attempt_loop.rs (second_stagnant_pre_review_continuation_pauses)
+
+### B9
+
+WHEN a pre-review Writer continuation uses the same provider as the preceding
+Writer and that Writer recorded a session identity, THE SYSTEM SHALL resume that
+exact provider session.
+Test: src/work_task_executor.rs (writer_route_resumes_the_matching_recorded_provider_session)
+Test: src/coder.rs (resumed_writer_codex_command_uses_the_recorded_session)
+Test: src/coder.rs (resumed_writer_claude_command_uses_the_recorded_session)
+
+### B10
+
+IF a pre-review continuation has no usable session identity for its selected
+provider, THEN THE SYSTEM SHALL start a fresh persistent Writer session.
+Test: src/work_task_executor.rs (writer_session_falls_back_to_fresh_when_identity_is_unusable)
+Test: src/coder.rs (fresh_writer_codex_command_persists_its_session)
+
+### B11
+
+WHEN Fluent prompts a pre-review Writer continuation, THE SYSTEM SHALL provide the
+unresolved progress, latest candidate change, and current findings without
+repeating completed progress.
+Test: src/work_task_executor.rs (continuation_prompt_contains_only_current_execution_context)
+
+### B12
+
+WHEN a pre-review Writer reduces the number of required entries checked with
+evidence, THE SYSTEM SHALL preserve the new candidate commit and pause before
+planning a Tester or reviewer.
+Test: src/work_attempt_loop.rs (regressed_required_progress_pauses_before_review)
+
 ## Suite-health gate
 
 ### B1

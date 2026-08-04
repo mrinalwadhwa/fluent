@@ -131,7 +131,7 @@ pub fn after_attempt_run(
                 .to_string(),
         ),
         WorkAttemptRunOutcome::PlannedWriteRound { .. } => Some(
-            "\n→ Next: a follow-up write round was planned from failed reviewers; fluent attempt run <work-item-id> to keep iterating".to_string(),
+            "\n→ Next: a follow-up Writer round is ready; fluent attempt run <work-item-id> to continue the candidate".to_string(),
         ),
         WorkAttemptRunOutcome::NeedsUser { handoff_path } => match ctx.pause_kind {
             Some(PauseKind::Auth) => Some(format!(

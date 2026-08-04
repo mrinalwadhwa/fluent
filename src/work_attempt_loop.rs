@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -17,7 +17,8 @@ use crate::work_model::{
     ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, CoderMappingInputs,
     EvidenceRecoveryState, LearnerCommitCanonicalization, MergeCandidateMergeStatus, PauseKind,
     Task, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
-    resolve_managed_sibling_workspace_path, work_artifact_path,
+    WriterOutcome, WriterRun, WriterRunKind, resolve_managed_sibling_workspace_path,
+    work_artifact_path,
 };
 use crate::work_task_executor::{self, WorkTaskRunConfig};
 
@@ -4020,12 +4021,6 @@ fn required_progress_artifact(attempt: &Attempt) -> ArtifactRef {
     }
 }
 
-fn required_progress_requires_user(reason: &str) -> bool {
-    ["malformed", "duplicate", "unknown", "rewritten"]
-        .iter()
-        .any(|marker| reason.contains(marker))
-}
-
 fn plan_after_completed_writer(
     project_root: &Path,
     store: &WorkModelStore,
@@ -4090,11 +4085,17 @@ fn gate_required_progress_before_reviews(
         .iter()
         .position(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
-    let attempt = &item.attempts[attempt_index];
-    if attempt.progress_contract.is_none() {
+    if item.attempts[attempt_index].progress_contract.is_none() {
+        record_writer_run(
+            project_root,
+            item,
+            attempt_index,
+            WriterOutcome::Complete,
+            0,
+        );
         return Ok(None);
     }
-    let artifact = required_progress_artifact(attempt);
+    let artifact = required_progress_artifact(&item.attempts[attempt_index]);
     let path = project_root.join(&artifact.path);
     let source = match fs::read_to_string(&path) {
         Ok(source) => source,
@@ -4108,18 +4109,128 @@ fn gate_required_progress_before_reviews(
             });
         }
     };
-    let Err(reason) = attempt.reconcile_required_progress(&source) else {
-        return Ok(None);
+    let progress = match item.attempts[attempt_index].required_progress_status(&source) {
+        Ok(progress) => progress,
+        Err(reason) => {
+            return pause_required_progress_before_reviews(
+                project_root,
+                store,
+                item,
+                attempt_index,
+                attempt_id,
+                &artifact,
+                &reason,
+                0,
+            )
+            .map(Some);
+        }
     };
-
-    if !required_progress_requires_user(&reason) {
-        item.attempts[attempt_index].status = AttemptStatus::Planned;
-        item.attempts[attempt_index].pause_kind = None;
-        let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
-        store.write_work_item(item)?;
-        return Ok(Some(WorkAttemptRunOutcome::PlannedWriteRound { task_id }));
+    if progress.is_complete() {
+        record_writer_run(
+            project_root,
+            item,
+            attempt_index,
+            WriterOutcome::Complete,
+            progress.checked,
+        );
+        return Ok(None);
+    }
+    let reason = progress
+        .incomplete_reason
+        .as_deref()
+        .unwrap_or("required progress is incomplete");
+    let attempt = &item.attempts[attempt_index];
+    let task = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .expect("the completed Writer gate has a completed Writer");
+    let changed_candidate = task
+        .output
+        .as_ref()
+        .is_some_and(|output| output.base_commit.as_deref() != Some(output.commit.as_str()));
+    let previous_checked = attempt.writer_runs.last().map(|run| run.checked_required);
+    let regressed = previous_checked.is_some_and(|checked| progress.checked < checked);
+    let current_kind = writer_run_kind(attempt, task);
+    let stagnant_continuations = if current_kind == WriterRunKind::PreReviewContinuation
+        && previous_checked == Some(progress.checked)
+    {
+        1 + attempt
+            .writer_runs
+            .iter()
+            .rev()
+            .take_while(|run| {
+                run.kind == WriterRunKind::PreReviewContinuation
+                    && run.checked_required == progress.checked
+            })
+            .count()
+    } else {
+        0
+    };
+    let blocked_reason = if !changed_candidate {
+        Some(format!(
+            "Writer did not create a candidate commit while {reason}"
+        ))
+    } else if regressed {
+        Some(format!(
+            "required progress regressed from {} checked entries to {}",
+            previous_checked.unwrap_or_default(),
+            progress.checked
+        ))
+    } else if stagnant_continuations >= 2 {
+        Some(format!(
+            "two pre-review Writer continuations made no checked progress; {reason}"
+        ))
+    } else {
+        None
+    };
+    if let Some(blocked_reason) = blocked_reason {
+        return pause_required_progress_before_reviews(
+            project_root,
+            store,
+            item,
+            attempt_index,
+            attempt_id,
+            &artifact,
+            &blocked_reason,
+            progress.checked,
+        )
+        .map(Some);
     }
 
+    record_writer_run(
+        project_root,
+        item,
+        attempt_index,
+        WriterOutcome::Continue,
+        progress.checked,
+    );
+    item.attempts[attempt_index].status = AttemptStatus::Planned;
+    item.attempts[attempt_index].pause_kind = None;
+    let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
+    store.write_work_item(item)?;
+    Ok(Some(WorkAttemptRunOutcome::PlannedWriteRound { task_id }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pause_required_progress_before_reviews(
+    project_root: &Path,
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    attempt_id: &str,
+    artifact: &ArtifactRef,
+    reason: &str,
+    checked_required: usize,
+) -> Result<WorkAttemptRunOutcome> {
+    record_writer_run(
+        project_root,
+        item,
+        attempt_index,
+        WriterOutcome::Blocked,
+        checked_required,
+    );
     item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
     item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::NotReviewed);
@@ -4128,7 +4239,7 @@ fn gate_required_progress_before_reviews(
         project_root,
         &item.id,
         attempt_id,
-        &reason,
+        reason,
         &artifact.path,
     )?;
     store.mutate_work_item(&item.id, |fresh| {
@@ -4148,7 +4259,97 @@ fn gate_required_progress_before_reviews(
         }
         Ok(())
     })?;
-    Ok(Some(WorkAttemptRunOutcome::NeedsUser { handoff_path }))
+    Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path })
+}
+
+fn record_writer_run(
+    project_root: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    outcome: WriterOutcome,
+    checked_required: usize,
+) {
+    let attempt = &mut item.attempts[attempt_index];
+    let Some(task) = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return;
+    };
+    if attempt.writer_runs.iter().any(|run| run.task_id == task.id) {
+        return;
+    }
+    let session_id = task.artifact_area.as_ref().and_then(|area| {
+        writer_session_id(&project_root.join(&area.path).join("transcript.jsonl"))
+    });
+    let kind = writer_run_kind(attempt, task);
+    let continuation = match kind {
+        WriterRunKind::Initial => 0,
+        WriterRunKind::PreReviewContinuation => {
+            attempt
+                .writer_runs
+                .iter()
+                .filter(|run| run.kind == WriterRunKind::PreReviewContinuation)
+                .count() as u32
+                + 1
+        }
+        WriterRunKind::Corrective => {
+            attempt
+                .writer_runs
+                .iter()
+                .filter(|run| run.kind == WriterRunKind::Corrective)
+                .count() as u32
+                + 1
+        }
+    };
+    let candidate_commit = task
+        .output
+        .as_ref()
+        .map(|output| output.commit.clone())
+        .unwrap_or_default();
+    attempt.writer_runs.push(WriterRun {
+        task_id: task.id.clone(),
+        outcome,
+        kind,
+        provider: attempt.coder_mapping.write.coder.as_str().to_string(),
+        session_id,
+        continuation,
+        checked_required,
+        candidate_commit,
+    });
+}
+
+fn writer_run_kind(attempt: &Attempt, task: &Task) -> WriterRunKind {
+    let task_index = attempt
+        .tasks
+        .iter()
+        .position(|candidate| candidate.id == task.id)
+        .unwrap_or(attempt.tasks.len());
+    if attempt.tasks[..task_index].iter().any(is_review_phase_task) {
+        WriterRunKind::Corrective
+    } else if attempt.writer_runs.is_empty() {
+        WriterRunKind::Initial
+    } else {
+        WriterRunKind::PreReviewContinuation
+    }
+}
+
+fn writer_session_id(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .flat_map(|line| crate::transcript::parse_line(&line))
+        .find_map(|event| match event {
+            crate::transcript::Event::SessionInit { session_id, .. }
+                if !session_id.trim().is_empty() =>
+            {
+                Some(session_id)
+            }
+            _ => None,
+        })
 }
 
 fn write_required_progress_handoff(
@@ -7839,6 +8040,243 @@ mod tests {
                 .iter()
                 .all(|task| !is_review_phase_task(task))
         );
+        assert_eq!(
+            stored.attempts[0].writer_runs[0].outcome,
+            WriterOutcome::Continue
+        );
+    }
+
+    #[test]
+    fn second_stagnant_pre_review_continuation_pauses() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Finish required work");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].progress_contract = Some(crate::work_model::ProgressContract {
+            version: crate::work_model::PROGRESS_CONTRACT_VERSION,
+            required: vec![crate::work_model::RequiredProgressEntry {
+                id: "step-1".to_string(),
+                requirement: "Do the thing".to_string(),
+            }],
+        });
+        for round in 0..3 {
+            if round > 0 {
+                item.add_next_write_round(
+                    "attempt-1",
+                    vec![required_progress_artifact(&item.attempts[0])],
+                )
+                .unwrap();
+            }
+            let task_id = {
+                let task = item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .rev()
+                    .find(|task| task.kind == TaskKind::Write)
+                    .unwrap();
+                task.status = TaskStatus::Complete;
+                task.output = Some(TaskOutput {
+                    workspace_id: "candidate".to_string(),
+                    workspace_path: "candidate".to_string(),
+                    source_branch: "work/attempt-1".to_string(),
+                    base_commit: (round > 0).then(|| format!("commit-{round}")),
+                    commit: format!("commit-{}", round + 1),
+                    no_change: None,
+                    learner_canonicalization: None,
+                });
+                task.id.clone()
+            };
+            if round < 2 {
+                item.attempts[0].writer_runs.push(WriterRun {
+                    task_id,
+                    outcome: WriterOutcome::Continue,
+                    kind: if round == 0 {
+                        crate::work_model::WriterRunKind::Initial
+                    } else {
+                        crate::work_model::WriterRunKind::PreReviewContinuation
+                    },
+                    provider: "codex".to_string(),
+                    session_id: Some("writer-thread-1".to_string()),
+                    continuation: round,
+                    checked_required: 0,
+                    candidate_commit: format!("commit-{}", round + 1),
+                });
+            }
+        }
+        store.create_work_item(&item).unwrap();
+        let progress = tmp
+            .path()
+            .join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        fs::create_dir_all(progress.parent().unwrap()).unwrap();
+        fs::write(
+            progress,
+            "## Required completion\n\n- [ ] step-1 — Do the thing\n",
+        )
+        .unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            stored.attempts[0].writer_runs.last().unwrap().outcome,
+            WriterOutcome::Blocked
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+    }
+
+    #[test]
+    fn incomplete_no_change_writer_pauses_instead_of_continuing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- [ ] step-1 — Do the thing\n"),
+            true,
+        );
+        store
+            .mutate_work_item("work-1", |item| {
+                let output = item.attempts[0].tasks[0].output.as_mut().unwrap();
+                output.base_commit = Some(output.commit.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].writer_runs[0].outcome,
+            WriterOutcome::Blocked
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            1
+        );
+        assert_eq!(
+            stored.attempts[0].tasks[0].output.as_ref().unwrap().commit,
+            "abc123"
+        );
+    }
+
+    #[test]
+    fn regressed_required_progress_pauses_before_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Keep progress monotonic");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].progress_contract = Some(crate::work_model::ProgressContract {
+            version: crate::work_model::PROGRESS_CONTRACT_VERSION,
+            required: vec![
+                crate::work_model::RequiredProgressEntry {
+                    id: "step-1".to_string(),
+                    requirement: "First".to_string(),
+                },
+                crate::work_model::RequiredProgressEntry {
+                    id: "step-2".to_string(),
+                    requirement: "Second".to_string(),
+                },
+            ],
+        });
+        let first_task_id = {
+            let first = &mut item.attempts[0].tasks[0];
+            first.status = TaskStatus::Complete;
+            first.output = Some(TaskOutput {
+                workspace_id: "candidate".to_string(),
+                workspace_path: "candidate".to_string(),
+                source_branch: "work/attempt-1".to_string(),
+                base_commit: None,
+                commit: "commit-1".to_string(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            first.id.clone()
+        };
+        item.attempts[0].writer_runs.push(WriterRun {
+            task_id: first_task_id,
+            outcome: WriterOutcome::Continue,
+            kind: WriterRunKind::Initial,
+            provider: "codex".to_string(),
+            session_id: Some("thread-1".to_string()),
+            continuation: 0,
+            checked_required: 1,
+            candidate_commit: "commit-1".to_string(),
+        });
+        let artifact = required_progress_artifact(&item.attempts[0]);
+        item.add_next_write_round("attempt-1", vec![artifact])
+            .unwrap();
+        let current = item.attempts[0].tasks.last_mut().unwrap();
+        current.status = TaskStatus::Complete;
+        current.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: Some("commit-1".to_string()),
+            commit: "commit-2".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        store.create_work_item(&item).unwrap();
+        let progress = tmp
+            .path()
+            .join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        fs::create_dir_all(progress.parent().unwrap()).unwrap();
+        fs::write(
+            progress,
+            "## Required completion\n\n- [ ] step-1 — First\n- [ ] step-2 — Second\n",
+        )
+        .unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0].writer_runs.last().unwrap().outcome,
+            WriterOutcome::Blocked
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .writer_runs
+                .last()
+                .unwrap()
+                .candidate_commit,
+            "commit-2"
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
     }
 
     fn make_completed_writer_gate_fixture(
@@ -7886,6 +8324,15 @@ mod tests {
             Some("## Required completion\n\n- [x] step-1 — Do the thing; Evidence: src/x.rs\n"),
             true,
         );
+        let transcript = tmp
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(
+            transcript,
+            "{\"type\":\"thread.started\",\"thread_id\":\"writer-session-1\"}\n",
+        )
+        .unwrap();
 
         let outcome = plan_after_completed_writer(
             tmp.path(),
@@ -7908,6 +8355,16 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(stored.attempts[0].writer_runs.len(), 1);
+        assert_eq!(
+            stored.attempts[0].writer_runs[0].outcome,
+            WriterOutcome::Complete
+        );
+        assert_eq!(
+            stored.attempts[0].writer_runs[0].session_id.as_deref(),
+            Some("writer-session-1")
+        );
+        assert_eq!(stored.attempts[0].writer_runs[0].continuation, 0);
         assert_eq!(
             stored.attempts[0]
                 .tasks
@@ -7924,6 +8381,29 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn writer_session_identity_accepts_claude_and_codex_transcripts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let claude = tmp.path().join("claude.jsonl");
+        fs::write(
+            &claude,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"claude-session-1\",\"model\":\"claude\"}\n",
+        )
+        .unwrap();
+        let codex = tmp.path().join("codex.jsonl");
+        fs::write(
+            &codex,
+            "{\"type\":\"thread.started\",\"thread_id\":\"codex-thread-1\"}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            writer_session_id(&claude).as_deref(),
+            Some("claude-session-1")
+        );
+        assert_eq!(writer_session_id(&codex).as_deref(), Some("codex-thread-1"));
     }
 
     #[test]
@@ -7968,6 +8448,10 @@ mod tests {
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
         assert_eq!(stored.attempts[0].pause_kind, Some(PauseKind::Uncertain));
+        assert_eq!(
+            stored.attempts[0].writer_runs[0].outcome,
+            WriterOutcome::Blocked
+        );
         assert!(
             stored.attempts[0]
                 .tasks

@@ -1891,6 +1891,20 @@ pub struct ProgressContract {
     pub required: Vec<RequiredProgressEntry>,
 }
 
+/// Validated completion state of the authoritative required-progress manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredProgressStatus {
+    pub checked: usize,
+    pub required: usize,
+    pub incomplete_reason: Option<String>,
+}
+
+impl RequiredProgressStatus {
+    pub fn is_complete(&self) -> bool {
+        self.checked == self.required && self.incomplete_reason.is_none()
+    }
+}
+
 impl ProgressContract {
     /// Derive an immutable manifest from a Plan's markdown step table, one entry per
     /// required row (`Req?` column `Yes`). Returns `None` when the Plan has no
@@ -2514,6 +2528,10 @@ pub struct Attempt {
     /// exceptional evidence-only route that supersedes them operationally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_recoveries: Vec<EvidenceRecovery>,
+    /// Append-only host-derived Writer outcomes and provider continuation
+    /// identities. Legacy Attempts deserialize with no records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writer_runs: Vec<WriterRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2543,6 +2561,7 @@ impl Default for Attempt {
             pause_kind: None,
             artifacts: Vec::new(),
             evidence_recoveries: Vec::new(),
+            writer_runs: Vec::new(),
             created_at: None,
             completed_at: None,
             learning: None,
@@ -2663,12 +2682,33 @@ impl Attempt {
     /// is checked with evidence and any extra top-level rows are already-checked
     /// legacy `Address review finding:` metadata.
     pub fn reconcile_required_progress(&self, source: &str) -> Result<(), String> {
+        let status = self.required_progress_status(source)?;
+        match status.incomplete_reason {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
+    }
+
+    /// Validate the immutable manifest and count entries that are checked with
+    /// evidence. Structural corruption returns an error; ordinary unfinished or
+    /// missing work remains a valid incomplete status that a Writer may advance.
+    pub fn required_progress_status(&self, source: &str) -> Result<RequiredProgressStatus, String> {
         let Some(contract) = self.progress_contract.as_ref() else {
-            return Ok(());
+            return Ok(RequiredProgressStatus {
+                checked: 0,
+                required: 0,
+                incomplete_reason: None,
+            });
         };
-        let section = extract_required_completion_section(source).ok_or_else(|| {
-            format!("required progress is missing the `{REQUIRED_COMPLETION_HEADING}` section")
-        })?;
+        let Some(section) = extract_required_completion_section(source) else {
+            return Ok(RequiredProgressStatus {
+                checked: 0,
+                required: contract.required.len(),
+                incomplete_reason: Some(format!(
+                    "required progress is missing the `{REQUIRED_COMPLETION_HEADING}` section"
+                )),
+            });
+        };
 
         // Parse every top-level checklist line. Existing Attempts may contain
         // already-checked review follow-ups written by the old prompt; only that
@@ -2692,6 +2732,8 @@ impl Attempt {
             .collect();
 
         let mut seen = std::collections::HashSet::new();
+        let mut checked = 0;
+        let mut incomplete_reason = None;
         for entry in &entries {
             if !seen.insert(entry.id.as_str()) {
                 return Err(format!("duplicate required-progress entry `{}`", entry.id));
@@ -2711,30 +2753,36 @@ impl Attempt {
                 }
                 Some(_) => {}
             }
-            if !entry.checked {
-                return Err(format!(
-                    "required-progress entry `{}` is unchecked",
-                    entry.id
-                ));
-            }
-            if entry.evidence.is_empty() {
-                return Err(format!(
-                    "required-progress entry `{}` is checked without evidence",
-                    entry.id
-                ));
+            if entry.checked && !entry.evidence.is_empty() {
+                checked += 1;
+            } else if incomplete_reason.is_none() {
+                incomplete_reason = Some(if !entry.checked {
+                    format!("required-progress entry `{}` is unchecked", entry.id)
+                } else {
+                    format!(
+                        "required-progress entry `{}` is checked without evidence",
+                        entry.id
+                    )
+                });
             }
         }
 
         // Every manifest entry must be present: a deletion cannot manufacture closure.
         for required in &contract.required {
             if !seen.contains(required.id.as_str()) {
-                return Err(format!(
-                    "required-progress entry `{}` is missing from the section",
-                    required.id
-                ));
+                incomplete_reason.get_or_insert_with(|| {
+                    format!(
+                        "required-progress entry `{}` is missing from the section",
+                        required.id
+                    )
+                });
             }
         }
-        Ok(())
+        Ok(RequiredProgressStatus {
+            checked,
+            required: contract.required.len(),
+            incomplete_reason,
+        })
     }
 
     /// The single advancement-readiness contract. An Attempt's change may advance —
@@ -3336,6 +3384,52 @@ pub struct TaskOutput {
     /// no-change Writer to the current canonical candidate commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learner_canonicalization: Option<LearnerCommitCanonicalization>,
+}
+
+/// Host-derived disposition of one completed Writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriterOutcome {
+    Complete,
+    Continue,
+    Blocked,
+}
+
+impl WriterOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Continue => "continue",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// Position of a Writer run relative to the first review round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriterRunKind {
+    #[default]
+    Initial,
+    PreReviewContinuation,
+    Corrective,
+}
+
+/// Durable identity used to continue one provider session across Writer Tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterRun {
+    pub task_id: String,
+    pub outcome: WriterOutcome,
+    #[serde(default)]
+    pub kind: WriterRunKind,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub continuation: u32,
+    #[serde(default)]
+    pub checked_required: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub candidate_commit: String,
 }
 
 /// Typed provenance for a capture Learner's canonical expertise commit.
@@ -4400,6 +4494,8 @@ struct AttemptRecord {
     artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     evidence_recoveries: Vec<EvidenceRecovery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    writer_runs: Vec<WriterRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4477,6 +4573,7 @@ impl AttemptRecord {
             pause_kind: attempt.pause_kind.clone(),
             artifacts: attempt.artifacts.clone(),
             evidence_recoveries: attempt.evidence_recoveries.clone(),
+            writer_runs: attempt.writer_runs.clone(),
             created_at: attempt.created_at.clone(),
             completed_at: attempt.completed_at.clone(),
             learning: attempt.learning.clone(),
@@ -4498,6 +4595,7 @@ impl From<AttemptRecord> for Attempt {
             pause_kind: record.pause_kind,
             artifacts: record.artifacts,
             evidence_recoveries: record.evidence_recoveries,
+            writer_runs: record.writer_runs,
             created_at: record.created_at,
             completed_at: record.completed_at,
             learning: record.learning,
@@ -6004,6 +6102,33 @@ pub fn from_json<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, serde
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writer_run_round_trips_and_defaults_new_progress_fields() {
+        let run = WriterRun {
+            task_id: "attempt-1-write-2".to_string(),
+            outcome: WriterOutcome::Continue,
+            kind: WriterRunKind::PreReviewContinuation,
+            provider: "codex".to_string(),
+            session_id: Some("thread-1".to_string()),
+            continuation: 2,
+            checked_required: 3,
+            candidate_commit: "abc123".to_string(),
+        };
+        let encoded = serde_json::to_value(&run).unwrap();
+        assert_eq!(serde_json::from_value::<WriterRun>(encoded).unwrap(), run);
+
+        let legacy: WriterRun = serde_json::from_value(serde_json::json!({
+            "task_id": "attempt-1-write-1",
+            "outcome": "continue",
+            "provider": "codex",
+            "continuation": 0
+        }))
+        .unwrap();
+        assert_eq!(legacy.kind, WriterRunKind::Initial);
+        assert_eq!(legacy.checked_required, 0);
+        assert!(legacy.candidate_commit.is_empty());
+    }
 
     #[test]
     fn coder_already_ran_evidence_pending_is_non_relaunchable() {

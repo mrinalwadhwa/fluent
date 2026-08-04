@@ -82,7 +82,10 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
 
 1. The Writer produces a candidate commit and updates required progress.
 2. Fluent reconciles required progress. If approved work remains incomplete, it
-   starts another Writer continuation without running the Tester or reviewers.
+   resumes the same Writer provider session without running the Tester or
+   reviewers. The continuation receives unresolved progress, the latest candidate
+   change, and current findings. If the session identity is unavailable, Fluent
+   starts a fresh persistent Writer session.
 3. Once required progress is complete, the Tester Task runs the project's tests.
 4. Domain reviewers evaluate in parallel.
 5. After the reviewers pass, the Learner runs in the Work Item's Learner mode:
@@ -101,6 +104,9 @@ The round outcome determines what happens next:
 - Any fail — follow-up write next round, scoped to failed reviewers, except
   when a failed reviewer needs trusted host evidence for an unchanged candidate.
 - Any uncertain, or a round cap reached — Attempt records `needs-user`, pausing the loop.
+- An incomplete Writer without a new candidate commit, regressed required progress,
+  or two consecutive pre-review continuations with no newly checked required work —
+  Attempt records `needs-user` before Tester and review.
 - A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
 
 The user provides input; `fluent attempt run` resumes the loop where it left off. When the pause is `provider-unavailable`, wait for provider capacity, then run `fluent attempt run <work-item-id> [attempt-id]` without new input. Fluent retries the same unfinished Task and keeps completed peer Tasks and transcripts.

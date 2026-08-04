@@ -147,11 +147,22 @@ for divergence. Existing TaskOutput and AttemptLearning JSON records without the
 optional fields keep their legacy shape. After each completed Writer, the
 Attempt loop reconciles the current `## Required completion` section with the
 Attempt's immutable progress contract before it creates any Tester or reviewer
-Task. An unchecked or evidence-less entry creates one Writer continuation. A
-malformed, unknown, duplicate, or rewritten entry pauses for user repair. An
-Attempt without a progress contract keeps the legacy transition. Only a
-reconciled candidate reaches Tester and reviewer planning. Those Tasks use the
-Writer output that exists before Learning; after Learning, landing consumes the
+Task. An unchecked or evidence-less entry creates a pre-review Writer
+continuation only when the completed Writer created a candidate commit and the
+checked count did not regress. Fluent records each host-derived Writer outcome,
+candidate commit, checked count, provider session identity, and whether the run
+was initial, pre-review continuation, or post-review corrective work. Codex
+Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
+Claude Writers resume with `--resume <session-id>`. A missing or provider-mismatched
+identity starts a fresh persistent session. Continuation prompts contain only
+unresolved progress, the latest candidate change, and current findings. Two
+consecutive pre-review continuations that create commits without checking more
+required work pause for user inspection. A no-change incomplete Writer also
+pauses. A malformed, unknown, duplicate, rewritten, or regressed manifest pauses
+for user repair. An Attempt without a progress contract keeps the legacy
+transition. Only a reconciled candidate reaches Tester and reviewer planning.
+Those Tasks use the Writer output that exists before Learning; after Learning,
+landing consumes the
 current `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and

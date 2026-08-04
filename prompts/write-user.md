@@ -94,6 +94,8 @@ progress.md is a `- [ ]` to-do list that persists across rounds. Each item can h
 {{#if has_required_progress}}
 progress.md contains an authoritative `## Required completion` section the Fluent materialized from the Plan's required rows. Each top-level entry is exactly `- [ ] <stable-id> — <requirement>` or, once satisfied, `- [x] <stable-id> — <requirement>; Evidence: <source/test>`. You MUST preserve every stable id and its requirement text exactly — never add, remove, reorder, or reword an entry. Mark an entry `- [x]` only by appending `; Evidence: <the source file or test that proves it>` once it is genuinely complete. Keep this section limited to the materialized stable manifest; record review work under a separate `## Review follow-ups` section outside `## Required completion`. Fluent checks this section immediately after your Writer completes. If an approved entry remains unchecked or lacks evidence, Fluent starts another Writer continuation without starting the Tester or reviewers. Malformed or rewritten entries pause for user repair. Only a fully reconciled section reaches Tester and review planning.
 
+Each incomplete Writer run must create a candidate commit and must not reduce the number of entries checked with evidence. Fluent resumes the same provider session when possible and gives that continuation the unresolved progress, latest candidate change, and current findings. An incomplete no-change run, regressed checklist, or two consecutive pre-review continuations with no newly checked entry pauses for user inspection.
+
 {{/if}}
 {{#if has_progress_md}}
 1. Read progress.md at {{progress_md_path}}.
