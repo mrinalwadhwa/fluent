@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -112,7 +115,9 @@ impl std::fmt::Display for Version {
 #[derive(Debug)]
 struct LatestRelease {
     version: Version,
-    asset_url: String,
+    asset_name: String,
+    asset_url: Option<String>,
+    checksum_url: Option<String>,
 }
 
 fn query_latest_release() -> Result<LatestRelease> {
@@ -165,10 +170,21 @@ fn query_latest_release() -> Result<LatestRelease> {
         .iter()
         .find(|a| a["name"].as_str() == Some(&asset_name))
         .and_then(|a| a["browser_download_url"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("Release has no asset named {asset_name:?}"))?
-        .to_string();
+        .map(str::to_string);
 
-    Ok(LatestRelease { version, asset_url })
+    let checksum_name = format!("{asset_name}.sha256");
+    let checksum_url = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(&checksum_name))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .map(str::to_string);
+
+    Ok(LatestRelease {
+        version,
+        asset_name,
+        asset_url,
+        checksum_url,
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -194,6 +210,54 @@ fn download_file(url: &str, dest: &Path, max_time: u32) -> Result<()> {
 
     if !status.success() {
         bail!("Download failed (exit {})", status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
+fn expected_checksum(contents: &str, asset_name: &str) -> Result<String> {
+    let mut fields = contents.split_whitespace();
+    let digest = fields
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Release checksum is empty"))?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Release checksum is not a SHA-256 digest");
+    }
+    if let Some(name) = fields.next() {
+        let name = name.strip_prefix('*').unwrap_or(name);
+        if name != asset_name {
+            bail!("Release checksum names {name:?}, expected asset {asset_name:?}");
+        }
+    }
+    if fields.next().is_some() {
+        bail!("Release checksum contains unexpected fields");
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open downloaded binary {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read downloaded binary {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_checksum(binary: &Path, checksum: &Path, asset_name: &str) -> Result<()> {
+    let checksum_contents = fs::read_to_string(checksum)
+        .with_context(|| format!("Failed to read release checksum {}", checksum.display()))?;
+    let expected = expected_checksum(&checksum_contents, asset_name)?;
+    let actual = sha256_file(binary)?;
+    if actual != expected {
+        bail!("Release checksum mismatch for {asset_name}");
     }
     Ok(())
 }
@@ -308,22 +372,45 @@ pub fn perform_update() -> Result<()> {
     }
 
     eprintln!("Updating fluent {} → {} ...", current, release.version);
+    let asset_url = release
+        .asset_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Release has no asset named {:?}", release.asset_name))?;
+    let checksum_name = format!("{}.sha256", release.asset_name);
+    let checksum_url = release
+        .checksum_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Release has no asset named {checksum_name:?}"))?;
 
     let parent = bin
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Binary path has no parent directory"))?;
-    let tmp_path = parent.join(".fluent-update-tmp");
+    let binary_tmp = tempfile::Builder::new()
+        .prefix(".fluent-update-")
+        .tempfile_in(parent)
+        .context("Failed to create a temporary binary beside the installation")?;
+    let checksum_tmp = tempfile::Builder::new()
+        .prefix(".fluent-checksum-")
+        .tempfile_in(parent)
+        .context("Failed to create a temporary checksum beside the installation")?;
+    let tmp_path = binary_tmp.path().to_path_buf();
+    let checksum_tmp_path = checksum_tmp.path().to_path_buf();
 
     let download_result = (|| -> Result<()> {
-        download_file(&release.asset_url, &tmp_path, CURL_MAX_TIME_DOWNLOAD)
+        download_file(asset_url, &tmp_path, CURL_MAX_TIME_DOWNLOAD)
             .context("Failed to download the release binary")?;
+
+        download_file(checksum_url, &checksum_tmp_path, CURL_MAX_TIME_DOWNLOAD)
+            .context("Failed to download the release checksum")?;
+
+        verify_checksum(&tmp_path, &checksum_tmp_path, &release.asset_name)
+            .context("Failed to verify the release checksum")?;
 
         atomic_replace(&tmp_path, &bin)?;
         Ok(())
     })();
 
     if let Err(e) = &download_result {
-        let _ = fs::remove_file(&tmp_path);
         return Err(anyhow::anyhow!("{:#}", e));
     }
 

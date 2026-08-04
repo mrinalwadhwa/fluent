@@ -16453,6 +16453,34 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
 }
 
 #[test]
+fn work_item_rebuild_metrics_indexes_artifacts_for_fast_reads() {
+    let tmp = TempDir::new().unwrap();
+    write_work_item_json(tmp.path(), "work-1", "Inspect work item");
+    let artifact = tmp
+        .path()
+        .join(".fluent/work/artifacts/work-1/manual-evidence.bin");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::write(&artifact, vec![7_u8; 4096]).unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "rebuild-metrics", "work-1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Rebuilt persisted metrics for 1 Work Item(s)",
+        ));
+
+    let value = work_item_value(tmp.path(), "work-1");
+    assert!(value["metrics"]["artifact-bytes"].as_u64().unwrap() >= 4096);
+    assert!(
+        tmp.path()
+            .join(".fluent/work/metrics/work-1.json")
+            .is_file()
+    );
+}
+
+#[test]
 fn read_only_commands_show_future_pause_but_attempt_run_fails_closed() {
     let tmp = TempDir::new().unwrap();
     fluent_cmd()
@@ -21604,6 +21632,7 @@ fn target_triple() -> String {
 /// The fixture contains:
 /// - `repos/{owner}/{repo}/releases/latest` — GitHub API JSON
 /// - `download/v{version}/fluent-{triple}` — the binary asset
+/// - `download/v{version}/fluent-{triple}.sha256` — its checksum
 fn setup_fixture_release(dir: &Path, version: &str, binary_content: &[u8]) -> (String, String) {
     let owner = "test-owner";
     let repo = "fluent";
@@ -21617,12 +21646,24 @@ fn setup_fixture_release(dir: &Path, version: &str, binary_content: &[u8]) -> (S
     let binary_path = download_dir.join(&asset_name);
     fs::write(&binary_path, binary_content).unwrap();
 
-    let binary_url = format!("file://{}", binary_path.to_string_lossy());
+    let digest = format!("{:x}", Sha256::digest(binary_content));
+    let checksum_name = format!("{asset_name}.sha256");
+    let checksum_path = download_dir.join(&checksum_name);
+    fs::write(&checksum_path, format!("{digest}  {asset_name}\n")).unwrap();
 
-    let assets = vec![serde_json::json!({
-        "name": asset_name,
-        "browser_download_url": binary_url,
-    })];
+    let binary_url = format!("file://{}", binary_path.to_string_lossy());
+    let checksum_url = format!("file://{}", checksum_path.to_string_lossy());
+
+    let assets = vec![
+        serde_json::json!({
+            "name": asset_name,
+            "browser_download_url": binary_url,
+        }),
+        serde_json::json!({
+            "name": checksum_name,
+            "browser_download_url": checksum_url,
+        }),
+    ];
 
     let release_json = serde_json::json!({
         "tag_name": tag,
@@ -21818,6 +21859,108 @@ fn update_replace_leaves_working_binary_on_failure() {
     assert_eq!(
         preserved, original,
         "binary should be preserved when download fails"
+    );
+}
+
+#[test]
+fn update_checksum_mismatch_preserves_binary() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let (api_base, release_repo) =
+        setup_fixture_release(&fixture_dir, "999.0.0", b"expected-release");
+    let asset = fixture_dir
+        .join("download/v999.0.0")
+        .join(format!("fluent-{}", target_triple()));
+    fs::write(asset, b"tampered-release").unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env("FLUENT_API_BASE", &api_base)
+        .env("FLUENT_RELEASE_REPO", &release_repo)
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env(
+            "FLUENT_UPDATE_CACHE_PATH",
+            tmp.path().join("update-cache.json"),
+        )
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "a mismatched checksum must fail");
+    assert_eq!(fs::read(&fake_binary).unwrap(), original);
+    assert!(!bin_dir.join(".fluent-update-tmp").exists());
+    assert!(!bin_dir.join(".fluent-update-checksum-tmp").exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("checksum"),
+        "diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn update_without_checksum_asset_preserves_binary() {
+    let tmp = TempDir::new().unwrap();
+    let fixture_dir = tmp.path().join("fixture");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_binary = bin_dir.join("fluent");
+    let original = b"original-binary";
+    fs::write(&fake_binary, original).unwrap();
+
+    let asset_name = format!("fluent-{}", target_triple());
+    let asset_path = fixture_dir.join(&asset_name);
+    fs::write(&asset_path, b"new-binary").unwrap();
+    let api_dir = fixture_dir.join("repos/test-owner/fluent/releases");
+    fs::create_dir_all(&api_dir).unwrap();
+    fs::write(
+        api_dir.join("latest"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "tag_name": "v999.0.0",
+            "assets": [{
+                "name": asset_name,
+                "browser_download_url": format!("file://{}", asset_path.display()),
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .env(
+            "FLUENT_API_BASE",
+            format!("file://{}", fixture_dir.display()),
+        )
+        .env("FLUENT_RELEASE_REPO", "test-owner/fluent")
+        .env("FLUENT_BINARY_PATH", fake_binary.to_str().unwrap())
+        .env(
+            "FLUENT_UPDATE_CACHE_PATH",
+            tmp.path().join("update-cache.json"),
+        )
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .arg("update")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "a checksum-less release must fail"
+    );
+    assert_eq!(fs::read(&fake_binary).unwrap(), original);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(".sha256"),
+        "diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -25798,4 +25941,108 @@ fn scheduler_service_installation_is_current_user_scoped() {
         "service must be running after start without admin privileges"
     );
     manager.stop().unwrap();
+}
+
+#[test]
+#[serial]
+fn attempt_extend_binds_candidate_and_failed_review_bytes() {
+    use fluent::work_model::{
+        AttemptReviewState, AttemptStatus, PauseKind, TaskKind, TaskOutput, TaskStatus,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Round cap"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let workspace_rel = fluent::work_model::initial_candidate_workspace_path("work-1", "attempt-1");
+    let workspace = main_dir
+        .parent()
+        .unwrap()
+        .join(workspace_rel.trim_start_matches("../"));
+    git::run(
+        &main_dir,
+        &["worktree", "add", workspace.to_str().unwrap()],
+        "create candidate workspace",
+    )
+    .unwrap();
+    let store = WorkModelStore::new(&main_dir);
+    let mut item = store.read_work_item("work-1").unwrap();
+    item.attempts[0].tasks[0].status = TaskStatus::Complete;
+    item.attempts[0].tasks[0].output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: workspace_rel,
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: git_head(&workspace),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_next_review_tasks("attempt-1", &["tests"]).unwrap();
+    let mut review_path = None;
+    for task in item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind != TaskKind::Write)
+    {
+        task.status = TaskStatus::Complete;
+        if task.kind == TaskKind::Review {
+            let path = main_dir
+                .join(&task.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "Verdict: fail\n").unwrap();
+            review_path = Some(path);
+        }
+    }
+    item.attempts[0].status = AttemptStatus::NeedsUser;
+    item.attempts[0].pause_kind = Some(PauseKind::RoundCap);
+    item.attempts[0].review_state = Some(AttemptReviewState::Failed);
+    store.write_work_item(&item).unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "extend",
+            "work-1",
+            "attempt-1",
+            "--additional-write-rounds",
+            "1",
+        ])
+        .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cap 1 -> 2"));
+
+    let stored = store.read_work_item("work-1").unwrap();
+    let extension = &stored.attempts[0].round_cap_extensions[0];
+    assert_eq!(extension.old_cap, 1);
+    assert_eq!(extension.new_cap, 2);
+    assert_eq!(extension.failed_reviews.len(), 1);
+    assert!(extension.failed_reviews[0].digest.starts_with("sha256:"));
+    assert_eq!(stored.attempts[0].tasks.len(), 3);
+
+    fs::write(
+        review_path.unwrap(),
+        "Verdict: fail\nchanged after approval\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed-review bytes no longer match the approval",
+        ));
 }

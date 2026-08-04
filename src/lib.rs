@@ -9,6 +9,7 @@ pub mod config;
 pub mod content;
 pub mod credential;
 pub mod dashboard;
+pub mod execution;
 pub mod fargate;
 pub mod fargate_bootstrap;
 pub mod follow_up;

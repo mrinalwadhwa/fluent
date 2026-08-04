@@ -1260,6 +1260,11 @@ fn run_with_transcript_reported(
     match transcript_file {
         Some(path) => {
             cmd.stdout(Stdio::piped());
+            if let Err(error) = crate::execution::configure_identity_lock(&mut cmd, path) {
+                return CoderRunCompletion::terminal_only(Err(
+                    error.context("preparing local execution identity")
+                ));
+            }
             let child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(err) => return CoderRunCompletion::terminal_only(Err(err.into())),
@@ -1269,6 +1274,14 @@ fn run_with_transcript_reported(
             // stdout, a failed pump-thread spawn, or a `?` return — terminates and
             // reaps the coder group through the guard's cleanup.
             let mut supervisor = CoderSupervisor::new(child, child_id);
+            if let Err(error) = supervisor.track_execution(path) {
+                let terminal = Err(supervisor.finalize_setup_error(error));
+                let terminal = supervisor.settle_execution(terminal);
+                return CoderRunCompletion {
+                    report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
+                    terminal,
+                };
+            }
 
             // Finalize any stdout/pump SETUP failure explicitly through the managed
             // child — composing the setup error with any cleanup failure — rather
@@ -1280,6 +1293,7 @@ fn run_with_transcript_reported(
                 None => {
                     let terminal = Err(supervisor
                         .finalize_setup_error(anyhow::anyhow!("coder stdout was not piped")));
+                    let terminal = supervisor.settle_execution(terminal);
                     return CoderRunCompletion {
                         report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                         terminal,
@@ -1297,6 +1311,7 @@ fn run_with_transcript_reported(
                 Ok(pump) => pump,
                 Err(err) => {
                     let terminal = Err(supervisor.finalize_setup_error(anyhow::Error::new(err)));
+                    let terminal = supervisor.settle_execution(terminal);
                     return CoderRunCompletion {
                         report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                         terminal,
@@ -1304,7 +1319,8 @@ fn run_with_transcript_reported(
                 }
             };
             supervisor.attach_pump(pump);
-            let terminal = supervisor.supervise();
+            let supervised = supervisor.supervise();
+            let terminal = supervisor.settle_execution(supervised);
             CoderRunCompletion {
                 report: CoderSupervisionReport::of_launch(supervisor.launch_supervision()),
                 terminal,
@@ -1941,6 +1957,7 @@ struct CoderSupervisor {
     /// `None` until a pump is attached (the no-transcript branch never attaches
     /// one, and the transcript branch attaches it only after a successful spawn).
     pump: Option<crate::transcript_pump::PumpHandle>,
+    execution: Option<crate::execution::ExecutionHeartbeat>,
 }
 
 impl CoderSupervisor {
@@ -1948,6 +1965,7 @@ impl CoderSupervisor {
         Self {
             managed: ManagedChild::new(Box::new(SystemLeader::new(child, child_id))),
             pump: None,
+            execution: None,
         }
     }
 
@@ -1956,6 +1974,31 @@ impl CoderSupervisor {
         Self {
             managed: ManagedChild::new(leader),
             pump: None,
+            execution: None,
+        }
+    }
+
+    fn track_execution(&mut self, transcript: &Path) -> Result<()> {
+        self.execution = Some(crate::execution::ExecutionHeartbeat::start(
+            transcript,
+            self.managed.id(),
+        )?);
+        Ok(())
+    }
+
+    fn settle_execution(&mut self, terminal: Result<i32>) -> Result<i32> {
+        let settlement = self
+            .execution
+            .as_mut()
+            .map(crate::execution::ExecutionHeartbeat::settle)
+            .transpose();
+        match (terminal, settlement) {
+            (Ok(code), Ok(_)) => Ok(code),
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(error.context("settling local execution identity")),
+            (Err(error), Err(settlement)) => {
+                Err(error.context(settlement.context("settling local execution identity")))
+            }
         }
     }
 
@@ -1992,6 +2035,16 @@ impl CoderSupervisor {
     /// than an infinite poll loop.
     fn supervise(&mut self) -> Result<i32> {
         loop {
+            if let Some(execution) = self.execution.as_mut()
+                && let Err(error) = execution.heartbeat()
+            {
+                let cleanup = self.managed.terminate_and_reap();
+                let base = error.context("persisting local execution heartbeat");
+                return Err(match cleanup {
+                    Ok(_) => base,
+                    Err(cleanup) => base.context(cleanup),
+                });
+            }
             // First-fault fast path: the pump published its immutable first fault
             // (capture, preview, phase-preservation, or status persistence) before
             // attempting terminal settlement. Sweep and reap the coder NOW — only
@@ -2139,6 +2192,9 @@ impl Drop for CoderSupervisor {
             if let Some(pump) = self.pump.as_mut() {
                 pump.join();
             }
+        }
+        if let Some(execution) = self.execution.as_mut() {
+            let _ = execution.settle();
         }
     }
 }
@@ -2932,6 +2988,13 @@ mod pump_supervision_tests {
         let body = std::fs::read_to_string(&transcript).unwrap();
         assert!(body.contains("\"type\":\"a\""));
         assert!(body.contains("\"type\":\"b\""));
+        let execution: crate::execution::ExecutionRecord = serde_json::from_slice(
+            &std::fs::read(crate::execution::record_path_for_transcript(&transcript)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(execution.state, crate::execution::ExecutionState::Settled);
+        assert_eq!(execution.owner_pid, std::process::id());
+        assert!(execution.settled_at.is_some());
     }
 
     #[cfg(unix)]

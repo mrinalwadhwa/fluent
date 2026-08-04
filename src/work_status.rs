@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -54,6 +54,47 @@ pub struct WorkMetrics {
     pub repeated_findings: usize,
     pub artifact_bytes: u64,
     pub avoided_cycles: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct PersistedFilesystemMetrics {
+    schema_version: u32,
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    repeated_findings: usize,
+    #[serde(default)]
+    artifact_bytes: u64,
+    #[serde(default)]
+    unattributed_input_tokens: u64,
+    #[serde(default)]
+    unattributed_output_tokens: u64,
+    #[serde(default)]
+    unattributed_artifact_bytes: u64,
+    #[serde(default)]
+    tasks: BTreeMap<String, PersistedTaskMetrics>,
+    #[serde(default)]
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct PersistedTaskMetrics {
+    input_tokens: u64,
+    output_tokens: u64,
+    artifact_bytes: u64,
+    #[serde(default)]
+    finding_identities: Vec<String>,
+}
+
+fn persisted_metrics_path(project_root: &Path, work_item_id: &str) -> std::path::PathBuf {
+    project_root
+        .join(crate::work_model::WORK_MODEL_DIR)
+        .join("metrics")
+        .join(format!("{work_item_id}.json"))
 }
 
 pub fn load_work_status(project_root: &Path) -> Result<WorkStatus, anyhow::Error> {
@@ -136,10 +177,174 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
 }
 
 pub fn work_metrics(item: &WorkItem, project_root: Option<&Path>) -> WorkMetrics {
-    let usage_rows = project_root
-        .map(|root| local_usage_rows(item, root))
+    let persisted = project_root
+        .and_then(|root| fs::read(persisted_metrics_path(root, &item.id)).ok())
+        .and_then(|bytes| serde_json::from_slice::<PersistedFilesystemMetrics>(&bytes).ok())
+        .filter(|metrics| matches!(metrics.schema_version, 1 | 2))
         .unwrap_or_default();
-    compute_work_metrics(item, project_root, &usage_rows)
+    compute_work_metrics(item, &persisted)
+}
+
+/// Rebuild the one-file status index at an execution or explicit maintenance
+/// boundary. Status and show only read this bounded sidecar.
+pub fn refresh_persisted_metrics(project_root: &Path, item: &WorkItem) -> anyhow::Result<()> {
+    let _lock =
+        crate::lease::acquire_blocking(&persisted_metrics_lock_path(project_root, &item.id))?;
+    let usage_rows = local_usage_rows(item, project_root);
+    let mut persisted = PersistedFilesystemMetrics {
+        schema_version: 2,
+        updated_at: crate::work_model::now_iso8601(),
+        ..Default::default()
+    };
+    for row in usage_rows.iter().filter(|row| row.work_item_id == item.id) {
+        persisted.input_tokens = persisted.input_tokens.saturating_add(row.input_tokens);
+        persisted.output_tokens = persisted.output_tokens.saturating_add(row.output_tokens);
+    }
+    let artifact_root = project_root
+        .join(crate::work_model::WORK_ARTIFACTS_DIR)
+        .join(&item.id);
+    if artifact_root.is_dir() {
+        persisted.artifact_bytes = crate::prep::logical_bytes(&artifact_root).unwrap_or(0);
+    }
+
+    for task in item.attempts.iter().flat_map(|attempt| &attempt.tasks) {
+        persisted.tasks.insert(
+            task.id.clone(),
+            collect_task_metrics(project_root, item, task),
+        );
+    }
+    let task_input_tokens = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.input_tokens)
+        .fold(0_u64, u64::saturating_add);
+    let task_output_tokens = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.output_tokens)
+        .fold(0_u64, u64::saturating_add);
+    let task_artifact_bytes = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.artifact_bytes)
+        .fold(0_u64, u64::saturating_add);
+    persisted.unattributed_input_tokens = persisted.input_tokens.saturating_sub(task_input_tokens);
+    persisted.unattributed_output_tokens =
+        persisted.output_tokens.saturating_sub(task_output_tokens);
+    persisted.unattributed_artifact_bytes =
+        persisted.artifact_bytes.saturating_sub(task_artifact_bytes);
+    aggregate_persisted_metrics(&mut persisted);
+    write_persisted_metrics(project_root, item, &persisted)
+}
+
+/// Refresh only the artifact area owned by one completed Task. This keeps
+/// execution-boundary accounting proportional to the Task that just ran; the
+/// explicit rebuild command remains the recovery path for historical or
+/// manually edited artifacts outside Task areas.
+pub fn refresh_persisted_task_metrics(
+    project_root: &Path,
+    item: &WorkItem,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let _lock =
+        crate::lease::acquire_blocking(&persisted_metrics_lock_path(project_root, &item.id))?;
+    let path = persisted_metrics_path(project_root, &item.id);
+    let mut persisted = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PersistedFilesystemMetrics>(&bytes).ok())
+        .filter(|metrics| metrics.schema_version == 2)
+        .unwrap_or_else(|| PersistedFilesystemMetrics {
+            schema_version: 2,
+            ..Default::default()
+        });
+    let task = item
+        .attempts
+        .iter()
+        .flat_map(|attempt| &attempt.tasks)
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| anyhow::anyhow!("Task {task_id:?} not found while persisting metrics"))?;
+    persisted.tasks.insert(
+        task.id.clone(),
+        collect_task_metrics(project_root, item, task),
+    );
+    persisted.updated_at = crate::work_model::now_iso8601();
+    aggregate_persisted_metrics(&mut persisted);
+    write_persisted_metrics(project_root, item, &persisted)
+}
+
+fn collect_task_metrics(project_root: &Path, item: &WorkItem, task: &Task) -> PersistedTaskMetrics {
+    let Some(area) = task.artifact_area.as_ref() else {
+        return PersistedTaskMetrics::default();
+    };
+    let root = project_root.join(&area.path);
+    let mut usage_rows = Vec::new();
+    collect_local_usage_rows(&root, item, &mut usage_rows);
+    let mut metrics = PersistedTaskMetrics {
+        input_tokens: usage_rows
+            .iter()
+            .map(|row| row.input_tokens)
+            .fold(0_u64, u64::saturating_add),
+        output_tokens: usage_rows
+            .iter()
+            .map(|row| row.output_tokens)
+            .fold(0_u64, u64::saturating_add),
+        artifact_bytes: if root.is_dir() {
+            crate::prep::logical_bytes(&root).unwrap_or(0)
+        } else {
+            0
+        },
+        ..Default::default()
+    };
+    if task.kind == TaskKind::Review {
+        let source = fs::read_to_string(root.join("review.md")).unwrap_or_default();
+        metrics.finding_identities = crate::review::open_finding_titles(&source)
+            .into_iter()
+            .map(|title| crate::review::finding_identity(&task.role, &title))
+            .collect();
+    }
+    metrics
+}
+
+fn aggregate_persisted_metrics(persisted: &mut PersistedFilesystemMetrics) {
+    persisted.input_tokens = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.input_tokens)
+        .fold(persisted.unattributed_input_tokens, u64::saturating_add);
+    persisted.output_tokens = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.output_tokens)
+        .fold(persisted.unattributed_output_tokens, u64::saturating_add);
+    persisted.artifact_bytes = persisted
+        .tasks
+        .values()
+        .map(|metrics| metrics.artifact_bytes)
+        .fold(persisted.unattributed_artifact_bytes, u64::saturating_add);
+    let mut findings_seen = HashSet::new();
+    persisted.repeated_findings = persisted
+        .tasks
+        .values()
+        .flat_map(|metrics| &metrics.finding_identities)
+        .filter(|identity| !findings_seen.insert((*identity).clone()))
+        .count();
+}
+
+fn persisted_metrics_lock_path(project_root: &Path, work_item_id: &str) -> std::path::PathBuf {
+    persisted_metrics_path(project_root, work_item_id).with_extension("lock")
+}
+
+fn write_persisted_metrics(
+    project_root: &Path,
+    item: &WorkItem,
+    persisted: &PersistedFilesystemMetrics,
+) -> anyhow::Result<()> {
+    let path = persisted_metrics_path(project_root, &item.id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    crate::atomic_write::atomic_write(&path, &serde_json::to_vec_pretty(persisted)?)?;
+    Ok(())
 }
 
 pub fn work_item_show_value(
@@ -155,11 +360,7 @@ pub fn work_item_show_value(
     Ok(output)
 }
 
-fn compute_work_metrics(
-    item: &WorkItem,
-    project_root: Option<&Path>,
-    usage_rows: &[crate::usage::UsageRow],
-) -> WorkMetrics {
+fn compute_work_metrics(item: &WorkItem, persisted: &PersistedFilesystemMetrics) -> WorkMetrics {
     let mut metrics = WorkMetrics {
         review_rounds: item
             .attempts
@@ -173,6 +374,10 @@ fn compute_work_metrics(
             .flat_map(|attempt| &attempt.writer_runs)
             .filter(|run| run.kind == crate::work_model::WriterRunKind::PreReviewContinuation)
             .count(),
+        input_tokens: persisted.input_tokens,
+        output_tokens: persisted.output_tokens,
+        repeated_findings: persisted.repeated_findings,
+        artifact_bytes: persisted.artifact_bytes,
         ..Default::default()
     };
 
@@ -183,40 +388,6 @@ fn compute_work_metrics(
         .filter_map(task_duration_ms)
         .fold(0_u64, u64::saturating_add);
 
-    for row in usage_rows.iter().filter(|row| row.work_item_id == item.id) {
-        metrics.input_tokens = metrics.input_tokens.saturating_add(row.input_tokens);
-        metrics.output_tokens = metrics.output_tokens.saturating_add(row.output_tokens);
-    }
-
-    let Some(project_root) = project_root else {
-        return metrics;
-    };
-    let artifact_root = project_root
-        .join(crate::work_model::WORK_ARTIFACTS_DIR)
-        .join(&item.id);
-    if artifact_root.is_dir() {
-        metrics.artifact_bytes = crate::prep::logical_bytes(&artifact_root).unwrap_or(0);
-    }
-
-    let mut findings_seen = HashSet::new();
-    for task in item
-        .attempts
-        .iter()
-        .flat_map(|attempt| &attempt.tasks)
-        .filter(|task| task.kind == TaskKind::Review)
-    {
-        let Some(area) = task.artifact_area.as_ref() else {
-            continue;
-        };
-        let path = project_root.join(&area.path).join("review.md");
-        let source = fs::read_to_string(path).unwrap_or_default();
-        for title in crate::review::open_finding_titles(&source) {
-            let identity = crate::review::finding_identity(&task.role, &title);
-            if !findings_seen.insert(identity) {
-                metrics.repeated_findings += 1;
-            }
-        }
-    }
     metrics
 }
 
@@ -449,8 +620,7 @@ fn effective_task_status_label(
 ) -> &'static str {
     if task.status == TaskStatus::Executing {
         if let Some(root) = project_root {
-            let lock_path = crate::lease::task_lock_path(root, &item.id, &task.id);
-            if !crate::lease::is_leased(&lock_path) {
+            if !local_task_is_live(root, item, task) {
                 return "interrupted";
             }
         }
@@ -461,12 +631,21 @@ fn effective_task_status_label(
 fn is_task_live_executing(task: &Task, item: &WorkItem, project_root: Option<&Path>) -> bool {
     task.status == TaskStatus::Executing
         && match project_root {
-            Some(root) => {
-                let lock_path = crate::lease::task_lock_path(root, &item.id, &task.id);
-                crate::lease::is_leased(&lock_path)
-            }
+            Some(root) => local_task_is_live(root, item, task),
             None => true,
         }
+}
+
+fn local_task_is_live(project_root: &Path, item: &WorkItem, task: &Task) -> bool {
+    let lock_path = crate::lease::task_lock_path(project_root, &item.id, &task.id);
+    if crate::lease::is_leased(&lock_path) {
+        return true;
+    }
+    let Some(area) = task.artifact_area.as_ref() else {
+        return false;
+    };
+    let execution = crate::execution::record_path_for_artifact(project_root, &area.path);
+    crate::execution::execution_is_live(&execution).unwrap_or(true)
 }
 
 fn format_merge_state(candidate: &MergeCandidate) -> String {
@@ -747,6 +926,12 @@ mod tests {
         let mut tester = attempt.tasks[0].clone();
         tester.id = "attempt-1-test-1".to_string();
         tester.kind = TaskKind::Tester;
+        tester.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: format!(
+                "{}/metrics-work/attempt-1/attempt-1-test-1",
+                crate::work_model::WORK_ARTIFACTS_DIR
+            ),
+        });
         tester.started_at = None;
         tester.completed_at = None;
         let mut first_review = tester.clone();
@@ -793,6 +978,7 @@ mod tests {
         )
         .unwrap();
 
+        refresh_persisted_metrics(tmp.path(), &item).unwrap();
         let metrics = work_metrics(&item, Some(tmp.path()));
 
         assert_eq!(metrics.review_rounds, 1);
@@ -802,6 +988,17 @@ mod tests {
         assert_eq!(metrics.repeated_findings, 1);
         assert!(metrics.artifact_bytes > 0);
         assert_eq!(metrics.avoided_cycles, 1);
+        fs::write(usage_dir.join("late-unindexed-artifact"), vec![0_u8; 4096]).unwrap();
+        assert_eq!(
+            work_metrics(&item, Some(tmp.path())),
+            metrics,
+            "status reads the persisted sidecar and never walks artifacts"
+        );
+        refresh_persisted_task_metrics(tmp.path(), &item, "attempt-1-write-1").unwrap();
+        let incrementally_refreshed = work_metrics(&item, Some(tmp.path()));
+        assert_eq!(incrementally_refreshed.input_tokens, 120);
+        assert_eq!(incrementally_refreshed.output_tokens, 30);
+        assert!(incrementally_refreshed.artifact_bytes > metrics.artifact_bytes);
         let show = work_item_show_value(&item, tmp.path()).unwrap();
         assert_eq!(show["metrics"]["stage-duration-ms"], 2_000);
         assert_eq!(show["metrics"]["input-tokens"], 120);

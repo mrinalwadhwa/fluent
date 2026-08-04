@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
@@ -16,7 +17,8 @@ use crate::review_only_worktree;
 use crate::work_model::{
     ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, CoderMappingInputs,
     EvidenceRecoveryState, LearnerCommitCanonicalization, MergeCandidateMergeStatus, PauseKind,
-    Task, TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
+    RoundCapExtension, RoundCapExtensionRequest, RoundCapReviewArtifact, Task, TaskKind,
+    TaskOutput, TaskStatus, WorkItem, WorkModelError, WorkModelStorageError, WorkModelStore,
     WriterOutcome, WriterRun, WriterRunKind, resolve_managed_sibling_workspace_path,
     work_artifact_path,
 };
@@ -37,12 +39,143 @@ pub fn max_parallel_reviewers() -> usize {
         .max(1)
 }
 
-fn max_total_write_rounds() -> usize {
+pub(crate) fn max_total_write_rounds() -> usize {
     std::env::var("FLUENT_MAX_TOTAL_WRITE_ROUNDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_TOTAL_WRITE_ROUNDS)
         .max(1)
+}
+
+/// Verify the exact paused candidate and review bytes, then append one bounded
+/// operator approval under the same land/model lock order used by execution.
+pub fn extend_round_cap(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    additional_write_rounds: usize,
+) -> Result<RoundCapExtension> {
+    let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(project_root))
+        .map_err(|error| anyhow::anyhow!("failed to acquire land lock: {error}"))?;
+    let base_cap = max_total_write_rounds();
+    Ok(store.mutate_work_item(work_item_id, |item| {
+        let attempt_index = item
+            .attempts
+            .iter()
+            .position(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        if item.merge_candidates.iter().any(|candidate| {
+            candidate.attempt_id == attempt_id
+                && matches!(
+                    candidate.merge_state.status,
+                    MergeCandidateMergeStatus::Executing | MergeCandidateMergeStatus::Pending
+                )
+        }) {
+            return Err(round_cap_ineligible("a landing owns this Attempt"));
+        }
+        let attempt = &mut item.attempts[attempt_index];
+        if attempt.tasks.iter().any(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Planned | TaskStatus::Executing | TaskStatus::Failed
+            )
+        }) {
+            return Err(round_cap_ineligible("a live or failed Task owns this Attempt"));
+        }
+        if attempt.status != AttemptStatus::NeedsUser
+            || attempt.pause_kind != Some(PauseKind::RoundCap)
+            || attempt.review_state != Some(AttemptReviewState::Failed)
+        {
+            return Err(round_cap_ineligible(
+                "the Attempt is not paused at a failed-review write-round cap",
+            ));
+        }
+        let failed_reviews = failed_review_frontier(project_root, attempt).map_err(|error| {
+            round_cap_ineligible(format!("failed reviews cannot be resolved: {error:#}"))
+        })?;
+        if failed_reviews.is_empty() {
+            return Err(round_cap_ineligible(
+                "the paused frontier has no failed review artifacts",
+            ));
+        }
+        let write_output = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .ok_or_else(|| round_cap_ineligible("the Attempt has no completed Writer candidate"))?;
+        let workspace = resolve_managed_sibling_workspace_path(
+            project_root,
+            &write_output.workspace_path,
+            "round-cap candidate workspace",
+        )
+        .map_err(|error| {
+            round_cap_ineligible(format!("candidate workspace is unavailable: {error:#}"))
+        })?;
+        ensure_registered_worktree(project_root, &workspace).map_err(|error| {
+            round_cap_ineligible(format!("candidate workspace is unavailable: {error:#}"))
+        })?;
+        let status = git::run_stdout(
+            &workspace,
+            &["status", "--porcelain", "--untracked-files=all", "--", "."],
+            "check round-cap candidate cleanliness",
+        )
+        .map_err(|error| {
+            round_cap_ineligible(format!("candidate cannot be checked: {error:#}"))
+        })?;
+        if !status.is_empty() {
+            return Err(round_cap_ineligible("the candidate workspace is dirty"));
+        }
+        let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "resolve candidate HEAD")
+            .map_err(|error| {
+                round_cap_ineligible(format!("candidate HEAD cannot be resolved: {error:#}"))
+            })?;
+        if head != write_output.commit {
+            return Err(round_cap_ineligible(
+                "the candidate HEAD no longer matches the reviewed commit",
+            ));
+        }
+        let effective_cap = attempt.effective_write_round_cap(base_cap);
+        if let Some(extension) = attempt.round_cap_extensions.iter().find(|extension| {
+            extension.additional_write_rounds == additional_write_rounds
+                && extension.candidate_commit == head
+                && extension.failed_reviews == failed_reviews
+                && extension.new_cap == effective_cap
+        }) {
+            return Ok(extension.clone());
+        }
+        let write_rounds = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+            .count();
+        if write_rounds != effective_cap {
+            return Err(round_cap_ineligible(format!(
+                "the paused frontier has {write_rounds} Writer rounds, not its current cap {effective_cap}"
+            )));
+        }
+        attempt
+            .record_round_cap_extension(
+                base_cap,
+                RoundCapExtensionRequest {
+                    old_cap: effective_cap,
+                    additional_write_rounds,
+                    candidate_commit: head,
+                    failed_reviews,
+                },
+            )
+            .cloned()
+    })?)
+}
+
+fn round_cap_ineligible(reason: impl Into<String>) -> WorkModelError {
+    WorkModelError::RoundCapExtensionIneligible {
+        reason: reason.into(),
+    }
 }
 
 fn max_no_progress_rounds() -> usize {
@@ -123,6 +256,10 @@ pub struct WorkAttemptRunResult {
 }
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
+    run_attempt_inner(config)
+}
+
+fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     read_work_item_or_not_found(config.store, config.work_item_id)?.ensure_mutation_compatible()?;
     if let Some(inputs) = config.coder_mapping_inputs {
         let _land_lock =
@@ -152,6 +289,7 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         // terminal-state gate rejects it.
         if attempt.status == AttemptStatus::NeedsUser
             && attempt.pause_kind == Some(PauseKind::RoundCap)
+            && attempt.round_cap_extensions.is_empty()
         {
             match reclassify_legacy_provider_pause(
                 config.store,
@@ -169,7 +307,16 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
 
         match reject_terminal_attempt(attempt)? {
             TerminalCheck::Reopen => {
-                reopen_resumable_attempt(config.store, config.work_item_id, config.attempt_id)?;
+                if attempt.pause_kind == Some(PauseKind::RoundCap) {
+                    reopen_approved_round_cap_attempt(
+                        config.project_root,
+                        config.store,
+                        config.work_item_id,
+                        config.attempt_id,
+                    )?;
+                } else {
+                    reopen_resumable_attempt(config.store, config.work_item_id, config.attempt_id)?;
+                }
                 continue;
             }
             TerminalCheck::Continue => {}
@@ -414,21 +561,21 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         }
 
         {
-            let executing_tasks: Vec<String> = attempt
+            let executing_tasks: Vec<crate::work_model::Task> = attempt
                 .tasks
                 .iter()
                 .filter(|task| task.status == TaskStatus::Executing)
-                .map(|task| task.id.clone())
+                .cloned()
                 .collect();
 
             if !executing_tasks.is_empty() {
                 let mut has_live = false;
                 let mut stale_ids = Vec::new();
-                for task_id in &executing_tasks {
-                    if executing_task_is_live(config.project_root, config.work_item_id, task_id) {
+                for task in &executing_tasks {
+                    if executing_task_is_live(config.project_root, config.work_item_id, task) {
                         has_live = true;
                     } else {
-                        stale_ids.push(task_id.clone());
+                        stale_ids.push(task.id.clone());
                     }
                 }
 
@@ -789,7 +936,8 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
             | Some(PauseKind::TesterHarness)
-            | Some(PauseKind::ProviderUnavailable) => {
+            | Some(PauseKind::ProviderUnavailable)
+            | Some(PauseKind::Interrupted) => {
                 // Resume only a cleanly resumable Attempt: a hard-Failed or
                 // still-live peer Task means resuming could discard a hard
                 // failure or race a running Task. Such a mixed state needs the
@@ -811,11 +959,24 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
                  Resolve the uncertain verdicts and re-run; \
                  resuming this pause kind is not yet supported."
             ),
-            Some(PauseKind::RoundCap) => bail!(
-                "Attempt is paused at the write-round cap. \
-                 Address the failing reviews and re-run; \
-                 resuming this pause kind is not yet supported."
-            ),
+            Some(PauseKind::RoundCap) => {
+                let write_rounds = attempt
+                    .tasks
+                    .iter()
+                    .filter(|task| task.kind == TaskKind::Write)
+                    .count();
+                if attempt
+                    .round_cap_extensions
+                    .last()
+                    .is_some_and(|extension| extension.new_cap > write_rounds)
+                {
+                    Ok(TerminalCheck::Reopen)
+                } else {
+                    bail!(
+                        "Attempt is paused at the write-round cap. Approve an extension before re-running."
+                    )
+                }
+            }
             Some(PauseKind::Unknown(value)) => bail!(
                 "Attempt is paused with unknown pause kind {value:?}; upgrade Fluent before mutating this Work Item."
             ),
@@ -852,6 +1013,7 @@ fn reopen_resumable_attempt(
                     | Some(PauseKind::HostSandbox)
                     | Some(PauseKind::TesterHarness)
                     | Some(PauseKind::ProviderUnavailable)
+                    | Some(PauseKind::Interrupted)
             )
             && !attempt
                 .tasks
@@ -863,6 +1025,137 @@ fn reopen_resumable_attempt(
         Ok(())
     })?;
     Ok(())
+}
+
+fn reopen_approved_round_cap_attempt(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<()> {
+    let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(project_root))?;
+    store.mutate_work_item(work_item_id, |item| {
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        if attempt.status != AttemptStatus::NeedsUser
+            || attempt.pause_kind != Some(PauseKind::RoundCap)
+            || attempt.review_state != Some(AttemptReviewState::Failed)
+        {
+            return Err(round_cap_ineligible(
+                "the approved round-cap pause is no longer current",
+            ));
+        }
+        if attempt
+            .tasks
+            .iter()
+            .any(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Executing))
+        {
+            return Err(round_cap_ineligible(
+                "a live or failed Task owns this Attempt",
+            ));
+        }
+        let extension = attempt
+            .round_cap_extensions
+            .last()
+            .ok_or_else(|| round_cap_ineligible("the pause has no approved extension"))?;
+        let write_rounds = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+            .count();
+        if extension.new_cap <= write_rounds {
+            return Err(round_cap_ineligible(
+                "the approved Writer-round cap is exhausted",
+            ));
+        }
+        validate_round_cap_frontier(project_root, attempt, extension)?;
+        crate::work_model::reopen_attempt(attempt);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn validate_round_cap_frontier(
+    project_root: &Path,
+    attempt: &Attempt,
+    extension: &RoundCapExtension,
+) -> Result<(), WorkModelError> {
+    let failed_reviews = failed_review_frontier(project_root, attempt).map_err(|error| {
+        round_cap_ineligible(format!("failed reviews cannot be resolved: {error:#}"))
+    })?;
+    if failed_reviews != extension.failed_reviews {
+        return Err(round_cap_ineligible(
+            "the failed-review bytes no longer match the approval",
+        ));
+    }
+    let write_output = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .and_then(|task| task.output.as_ref())
+        .ok_or_else(|| round_cap_ineligible("the Attempt has no completed Writer candidate"))?;
+    if write_output.commit != extension.candidate_commit {
+        return Err(round_cap_ineligible(
+            "the reviewed candidate no longer matches the approval",
+        ));
+    }
+    let workspace = resolve_managed_sibling_workspace_path(
+        project_root,
+        &write_output.workspace_path,
+        "round-cap candidate workspace",
+    )
+    .map_err(|error| {
+        round_cap_ineligible(format!("candidate workspace is unavailable: {error:#}"))
+    })?;
+    ensure_registered_worktree(project_root, &workspace).map_err(|error| {
+        round_cap_ineligible(format!("candidate workspace is unavailable: {error:#}"))
+    })?;
+    let status = git::run_stdout(
+        &workspace,
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
+        "check round-cap candidate cleanliness",
+    )
+    .map_err(|error| round_cap_ineligible(format!("candidate cannot be checked: {error:#}")))?;
+    if !status.is_empty() {
+        return Err(round_cap_ineligible("the candidate workspace is dirty"));
+    }
+    let head = git::run_stdout(&workspace, &["rev-parse", "HEAD"], "resolve candidate HEAD")
+        .map_err(|error| {
+            round_cap_ineligible(format!("candidate HEAD cannot be resolved: {error:#}"))
+        })?;
+    if head != extension.candidate_commit {
+        return Err(round_cap_ineligible(
+            "the candidate HEAD no longer matches the approved commit",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_registered_worktree(project_root: &Path, workspace_path: &Path) -> Result<()> {
+    let expected = fs::canonicalize(workspace_path)?;
+    let output = git::run_raw(project_root, &["worktree", "list", "--porcelain"])?;
+    if !output.status.success() {
+        bail!(
+            "failed to list git worktrees: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.strip_prefix("worktree ")
+            .is_some_and(|path| fs::canonicalize(path).is_ok_and(|actual| actual == expected))
+    }) {
+        return Ok(());
+    }
+    bail!(
+        "workspace {} is not a registered git worktree",
+        workspace_path.display()
+    )
 }
 
 /// Atomically migrate only legacy review failures whose single-file transcript
@@ -977,7 +1270,7 @@ fn can_advance_loop(project_root: &Path, attempt: &Attempt) -> Result<bool> {
         .iter()
         .filter(|task| task.kind == TaskKind::Write)
         .count();
-    if total_rounds >= max_total_write_rounds() {
+    if total_rounds >= attempt.effective_write_round_cap(max_total_write_rounds()) {
         return Ok(false);
     }
     let streak = consecutive_no_progress_rounds(project_root, attempt)?;
@@ -2761,9 +3054,116 @@ fn check_no_expertise_pointer_identity(
 /// process-held lease, never by transcript age or pump-status timestamps: those
 /// are diagnostics only and carry no authority to reclaim a Task. Recovery must
 /// not resurrect or abandon a Task on the strength of how old its transcript is.
-fn executing_task_is_live(project_root: &Path, work_item_id: &str, task_id: &str) -> bool {
-    let lock_path = crate::lease::task_lock_path(project_root, work_item_id, task_id);
-    crate::lease::is_leased(&lock_path)
+fn executing_task_is_live(
+    project_root: &Path,
+    work_item_id: &str,
+    task: &crate::work_model::Task,
+) -> bool {
+    let lock_path = crate::lease::task_lock_path(project_root, work_item_id, &task.id);
+    if crate::lease::is_leased(&lock_path) {
+        return true;
+    }
+    let Some(artifact_area) = task.artifact_area.as_ref() else {
+        return false;
+    };
+    let execution = crate::execution::record_path_for_artifact(project_root, &artifact_area.path);
+    // A corrupt or unreadable identity fails closed. Replanning while Fluent cannot
+    // prove the old process group dead is more dangerous than requiring cancellation.
+    crate::execution::execution_is_live(&execution).unwrap_or(true)
+}
+
+/// Stop every locally owned coder group for one Attempt, then suspend its captured
+/// Tasks for an explicit same-Attempt resume. Process identity is verified before a
+/// signal is sent, and the Work model changes only after every group is confirmed gone.
+pub fn cancel_local_attempt(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+) -> Result<usize> {
+    let item = store.read_work_item(work_item_id)?;
+    item.ensure_not_abandoned()?;
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {attempt_id:?} not found"))?;
+    if attempt.status == AttemptStatus::NeedsUser
+        && attempt.pause_kind == Some(crate::work_model::PauseKind::Interrupted)
+    {
+        return Ok(0);
+    }
+    let executing = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Executing)
+        .cloned()
+        .collect::<Vec<_>>();
+    if executing.is_empty() {
+        bail!("Attempt {attempt_id:?} has no executing local Task to cancel");
+    }
+
+    for task in &executing {
+        let lock_path = crate::lease::task_lock_path(project_root, work_item_id, &task.id);
+        let Some(artifact_area) = task.artifact_area.as_ref() else {
+            if crate::lease::is_leased(&lock_path) {
+                bail!(
+                    "Task {:?} is live but has no artifact area for its execution identity",
+                    task.id
+                );
+            }
+            continue;
+        };
+        let execution =
+            crate::execution::record_path_for_artifact(project_root, &artifact_area.path);
+        if !execution.exists() {
+            if crate::lease::is_leased(&lock_path) {
+                bail!(
+                    "Task {:?} has not published its local execution identity yet; retry cancellation",
+                    task.id
+                );
+            }
+            continue;
+        }
+        crate::execution::cancel(&execution)
+            .with_context(|| format!("canceling local execution for Task {:?}", task.id))?;
+    }
+
+    let captured_ids = executing
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let canceled = store.mutate_work_item(work_item_id, |item| {
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let mut canceled = 0;
+        for task in &mut attempt.tasks {
+            if captured_ids.contains(task.id.as_str())
+                && matches!(task.status, TaskStatus::Executing | TaskStatus::Failed)
+                && task.output.is_none()
+            {
+                crate::work_model::set_task_terminal(task, TaskStatus::NeedsUser);
+                canceled += 1;
+            }
+        }
+        if canceled > 0 {
+            // Cancellation intentionally supersedes a generic failure concurrently
+            // reported by the owner after the signal. The verified dead process group
+            // makes this a safe, resumable operator transition.
+            attempt.status = AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(crate::work_model::PauseKind::Interrupted);
+            attempt
+                .completed_at
+                .get_or_insert_with(crate::work_model::now_iso8601);
+        }
+        Ok(canceled)
+    })?;
+    Ok(canceled)
 }
 
 /// Recover the immutable accepted base for an already-merged legacy Attempt
@@ -4637,6 +5037,13 @@ fn interpret_reviews(
             return Ok(WorkAttemptRunOutcome::ReviewOnlyFailed);
         }
         if !followup_budget_available {
+            let write_rounds = item.attempts[attempt_index]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count();
+            let round_cap_reached = write_rounds
+                >= item.attempts[attempt_index].effective_write_round_cap(max_total_write_rounds());
             // Settle the RoundCap pause through the fresh, precedence-aware reducer:
             // it persists the pause first (preserving a harder peer transition), then
             // writes and attaches the handoff only while this frontier owns the pause,
@@ -4649,7 +5056,15 @@ fn interpret_reviews(
                 AttemptReviewState::Failed,
                 crate::work_model::PauseKind::RoundCap,
                 &failed,
-                write_budget_exhausted_handoff,
+                |root, work_item_id, attempt_id, findings| {
+                    write_budget_exhausted_handoff(
+                        root,
+                        work_item_id,
+                        attempt_id,
+                        findings,
+                        round_cap_reached,
+                    )
+                },
                 &|_| {},
             );
         }
@@ -4738,6 +5153,28 @@ fn interpret_reviews(
 struct ReviewArtifact {
     artifact: ArtifactRef,
     review_path: PathBuf,
+}
+
+fn failed_review_frontier(
+    project_root: &Path,
+    attempt: &Attempt,
+) -> Result<Vec<RoundCapReviewArtifact>> {
+    let mut failed = Vec::new();
+    for artifact in latest_review_artifacts(project_root, attempt)? {
+        let bytes = fs::read(&artifact.review_path).with_context(|| {
+            format!(
+                "read latest review artifact {}",
+                artifact.review_path.display()
+            )
+        })?;
+        if review::extract_verdict(&String::from_utf8_lossy(&bytes)) == Verdict::Fail {
+            failed.push(RoundCapReviewArtifact {
+                artifact: artifact.artifact,
+                digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
+            });
+        }
+    }
+    Ok(failed)
 }
 
 fn latest_review_artifacts(
@@ -4856,6 +5293,7 @@ fn write_budget_exhausted_handoff(
     work_item_id: &str,
     attempt_id: &str,
     failed: &[ArtifactRef],
+    round_cap_reached: bool,
 ) -> Result<String> {
     let relative_path = work_artifact_path(work_item_id, attempt_id, "needs-user.md");
     let path = project_root.join(&relative_path);
@@ -4867,12 +5305,20 @@ fn write_budget_exhausted_handoff(
         .map(|artifact| format!("- {}", artifact.path))
         .collect::<Vec<_>>()
         .join("\n");
+    let recovery = if round_cap_reached {
+        format!(
+            "The current write-round ceiling was reached. To approve one to three additional Writer rounds for this exact candidate and failed-review content, run:\n\n`fluent attempt extend {work_item_id} {attempt_id} --additional-write-rounds 1`\n\nThen run `fluent attempt run {work_item_id} {attempt_id}`."
+        )
+    } else {
+        format!(
+            "Reviewers reported `Progress: no` for {} consecutive rounds. A cap extension cannot resume this pause; resolve the stalled approach before starting new work.",
+            max_no_progress_rounds()
+        )
+    };
     fs::write(
         &path,
         format!(
-            "# Attempt needs user input\n\nThe Attempt loop stopped advancing: reviewers reported `Progress: no` for {} consecutive rounds, or the total write-round ceiling of {} was reached.\n\nFailed review artifacts still need attention:\n\n{artifacts}\n",
-            max_no_progress_rounds(),
-            max_total_write_rounds()
+            "# Attempt needs user input\n\nThe Attempt loop stopped advancing. The candidate commit and review history remain unchanged.\n\n{recovery}\n\nFailed review artifacts still need attention:\n\n{artifacts}\n"
         ),
     )?;
     Ok(relative_path)
@@ -5017,12 +5463,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let work = "work-1";
-        let task = "attempt-1-write-1";
+        let task_id = "attempt-1-write-1";
+        let task = write_task(task_id, Vec::new());
 
         // A leased Task is live even though no transcript or pump status exists.
-        let lease = acquire_task_lease_eventually(root, work, task);
+        let lease = acquire_task_lease_eventually(root, work, task_id);
         assert!(
-            executing_task_is_live(root, work, task),
+            executing_task_is_live(root, work, &task),
             "a leased Task is live regardless of transcript presence or age"
         );
         drop(lease);
@@ -5034,7 +5481,7 @@ mod tests {
             .join(".fluent/work/artifacts")
             .join(work)
             .join("attempt-1")
-            .join(task);
+            .join(task_id);
         fs::create_dir_all(&artifact_dir).unwrap();
         fs::write(
             artifact_dir.join("transcript.jsonl"),
@@ -5050,7 +5497,7 @@ mod tests {
         // Freed direction: bounded retry to absorb flock release-visibility.
         let mut stale = false;
         for _ in 0..50 {
-            if !executing_task_is_live(root, work, task) {
+            if !executing_task_is_live(root, work, &task) {
                 stale = true;
                 break;
             }
@@ -5060,6 +5507,64 @@ mod tests {
             stale,
             "a released lease makes the Task stale even with a freshly written transcript"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_local_attempt_stops_owned_group_and_replans_once() {
+        use std::os::unix::process::CommandExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let artifact_path = work_artifact_path("work-1", "attempt-1", "attempt-1-write-1");
+        let transcript = tmp.path().join(&artifact_path).join("transcript.jsonl");
+        let mut task = write_task("attempt-1-write-1", Vec::new());
+        task.status = TaskStatus::Executing;
+        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: artifact_path,
+        });
+        task.started_at = Some(crate::work_model::now_iso8601());
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Cancel local execution".to_string(),
+            ..Default::default()
+        };
+        item.attempts.push(attempt_with_tasks(vec![task]));
+        item.attempts[0].status = AttemptStatus::Executing;
+        store.create_work_item(&item).unwrap();
+
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 30");
+        command.process_group(0);
+        crate::execution::configure_identity_lock(&mut command, &transcript).unwrap();
+        let mut child = command.spawn().unwrap();
+        let _heartbeat =
+            crate::execution::ExecutionHeartbeat::start(&transcript, child.id()).unwrap();
+
+        assert_eq!(
+            cancel_local_attempt(tmp.path(), &store, "work-1", "attempt-1").unwrap(),
+            1
+        );
+        let _ = child.wait();
+        let suspended = store.read_work_item("work-1").unwrap();
+        assert_eq!(suspended.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(
+            suspended.attempts[0].pause_kind,
+            Some(PauseKind::Interrupted)
+        );
+        assert_eq!(suspended.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+        assert_eq!(
+            cancel_local_attempt(tmp.path(), &store, "work-1", "attempt-1").unwrap(),
+            0,
+            "repeated cancellation must be idempotent"
+        );
+
+        reopen_resumable_attempt(&store, "work-1", "attempt-1").unwrap();
+        let resumed = store.read_work_item("work-1").unwrap();
+        assert_eq!(resumed.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(resumed.attempts[0].pause_kind, None);
+        assert_eq!(resumed.attempts[0].tasks[0].status, TaskStatus::Planned);
     }
 
     fn walk_files(root: &Path) -> Vec<PathBuf> {

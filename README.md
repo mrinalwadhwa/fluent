@@ -135,9 +135,11 @@ Once the Tester completes, Fluent runs independent Reviewers in parallel. Every 
 
 Each Reviewer writes a report that records its evidence, classifies each finding as blocking or minor, and returns `pass`, `fail`, or `uncertain`. `pass` means no blocking findings remain. `fail` means the Writer must address at least one blocking finding. `uncertain` means the Reviewer cannot confidently decide from the approved context and returns the question to the human queue.
 
-After a `fail`, Fluent starts another round. The Writer receives the failed review reports and any Tester regressions, revises the candidate, and commits the revision. The Tester reruns all declared test commands, then the affected Reviewers inspect the revision and mark earlier findings as addressed or still open. If the Attempt reaches its configured review-round limit, Fluent pauses with the evidence collected rather than continuing indefinitely.
+After a `fail`, Fluent starts another round. The Writer receives the failed review reports and any Tester regressions, revises the candidate, and commits the revision. The Tester reruns all declared test commands, then the affected Reviewers inspect the revision and mark earlier findings as addressed or still open. If the Attempt reaches its configured review-round limit, Fluent pauses with the evidence collected rather than continuing indefinitely. You can approve a bounded continuation with `fluent attempt extend <work-item-id> <attempt-id> --additional-write-rounds N`; Fluent binds that approval to the exact candidate and failed-review bytes before the same Attempt resumes.
 
 If a provider exhausts its retry budget before a model produces tokens or uses tools, Fluent pauses the Attempt as `provider-unavailable`. After provider capacity returns, run `fluent attempt run <work-item-id> [<attempt-id>]`; Fluent resumes the same unfinished Task and keeps completed peer Tasks and prior transcripts.
+
+If a local coder hangs, `fluent attempt cancel <work-item-id> <attempt-id>` stops only Fluent's recorded process group and pauses the Attempt as `interrupted`. Run the same `attempt run` command to replan the canceled Task without repeating completed work.
 
 Once the Tester and every Reviewer pass, the Learner examines the accepted change and the evidence from every round, updates Expertise when it finds something reusable, and records possible follow-ups in a handoff. The Attempt then produces a ready Merge Candidate.
 

@@ -535,6 +535,10 @@ fn preflight_write_worktree(
 /// terminal state, rather than reviving the Attempt or auto-reopening the pause.
 /// No Task was mutated and no coder or tester launched.
 pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    let project_root = config.project_root;
+    let store = config.store;
+    let work_item_id = config.work_item_id;
+    let task_id = config.task_id;
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_mutation_compatible()?;
     item.ensure_not_abandoned()?;
@@ -545,7 +549,7 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Route by kind only; the coder mapping is resolved fresh under the model
     // lock when the atomic start reserves the Task, not from this early read.
     let task_kind = item.attempts[attempt_index].tasks[task_index].kind;
-    match task_kind {
+    let result = match task_kind {
         TaskKind::Write => run_write_task(config),
         TaskKind::Review => run_review_task(config),
         TaskKind::BehaviorTests => {
@@ -556,7 +560,15 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             "Task {:?} is kind {kind}; unsupported by task run",
             config.task_id
         ),
+    };
+    if let Err(error) = read_work_item_or_not_found(store, work_item_id).and_then(|item| {
+        crate::work_status::refresh_persisted_task_metrics(project_root, &item, task_id)
+    }) {
+        eprintln!(
+            "warning: could not refresh persisted metrics for Task {task_id}: {error:#}; run `fluent work-item rebuild-metrics {work_item_id}`"
+        );
     }
+    result
 }
 
 fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
@@ -642,6 +654,14 @@ fn run_write_task_with_coder(
             return Err(error);
         }
     };
+    let claude_home = (coder_kind == CoderKind::Claude).then(|| {
+        config
+            .project_root
+            .join(".fluent/work/artifacts")
+            .join(config.work_item_id)
+            .join(config.attempt_id)
+            .join("claude-home")
+    });
     let prior_snapshot = match previous_writer_codex_session_snapshot(
         &item,
         config.attempt_id,
@@ -695,6 +715,7 @@ fn run_write_task_with_coder(
         config.no_sandbox,
         coder_kind,
         provider_readiness.codex_worker(),
+        claude_home.as_deref(),
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -787,6 +808,7 @@ fn run_write_task_with_coder(
             reservation.effort.as_deref(),
             &pump_config,
             provider_readiness.codex_worker(),
+            claude_home.as_deref(),
             sandbox_profile.as_ref(),
             coder_override,
         ),
@@ -817,6 +839,7 @@ fn run_write_task_with_coder(
                 reservation.effort.as_deref(),
                 &pump_config,
                 provider_readiness.codex_worker(),
+                claude_home.as_deref(),
                 sandbox_profile.as_ref(),
                 coder_override,
             ),
@@ -2870,6 +2893,7 @@ fn preflight_write_sandbox_profile(
     no_sandbox: bool,
     coder_kind: CoderKind,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    claude_home: Option<&Path>,
 ) -> Result<Option<os::SandboxProfile>> {
     // Test-support may exercise a nested Codex route without applying a
     // Seatbelt profile. Keep that exception explicit and feature-gated: the
@@ -2899,15 +2923,25 @@ fn preflight_write_sandbox_profile(
     if let Some(artifact_area) = task.artifact_area.as_ref() {
         writable_roots.push(project_root.join(&artifact_area.path));
     }
+    writable_roots.extend(claude_home.map(Path::to_path_buf));
 
-    let profile = os::render_profile_for_access_for_coder_with_codex_home(
-        resolver,
-        &home,
-        &writable_roots,
-        &readable_roots,
-        coder_kind,
-        codex_worker.map(|worker| worker.home()),
-    )?;
+    let profile = if coder_kind == CoderKind::Claude {
+        os::render_profile_for_access_for_autonomous_claude(
+            resolver,
+            &home,
+            &writable_roots,
+            &readable_roots,
+        )?
+    } else {
+        os::render_profile_for_access_for_coder_with_codex_home(
+            resolver,
+            &home,
+            &writable_roots,
+            &readable_roots,
+            coder_kind,
+            codex_worker.map(|worker| worker.home()),
+        )?
+    };
     #[cfg(not(test))]
     if let Some(worker) = codex_worker {
         os::preflight_codex_launcher(&profile, worker)?;
@@ -2933,6 +2967,7 @@ fn run_task_coder_with_optional_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    claude_home: Option<&Path>,
     sandbox_profile: Option<&os::SandboxProfile>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
@@ -2951,6 +2986,7 @@ fn run_task_coder_with_optional_coder(
         effort,
         pump_config,
         codex_worker,
+        claude_home,
         sandbox_profile,
         move |sandbox, _executable| match coder_override {
             Some(make) => make(sandbox),
@@ -2980,6 +3016,7 @@ fn run_task_coder_with_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    claude_home: Option<&Path>,
     sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
@@ -2996,6 +3033,11 @@ fn run_task_coder_with_coder(
     let mut launch_env: Vec<(String, String)> = Vec::new();
     if let Some(worker) = codex_worker {
         launch_env.push(worker.launch_env());
+    }
+    if let Some(home) = claude_home {
+        fs::create_dir_all(home)
+            .with_context(|| format!("creating confined Claude home {}", home.display()))?;
+        launch_env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
     }
 
     let task = item
@@ -6836,6 +6878,47 @@ mod tests {
         recorded: Arc<Mutex<Option<(PathBuf, usize)>>>,
     }
 
+    struct RecordingEnvironmentCoder {
+        recorded: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl crate::coder::Coder for RecordingEnvironmentCoder {
+        fn run(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+            _transcript_file: Option<&Path>,
+        ) -> Result<i32> {
+            unreachable!("the writer route launches through run_captured")
+        }
+
+        fn run_captured(
+            &self,
+            _prompt: &str,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            extra_env: &[(String, String)],
+            _capture: Option<&crate::coder::TranscriptCapture<'_>>,
+        ) -> Result<i32> {
+            *self.recorded.lock().unwrap() = extra_env.to_vec();
+            Ok(0)
+        }
+
+        fn run_interactive(
+            &self,
+            _system_prompt: &str,
+            _working_dir: &Path,
+            _extra_args: &[String],
+            _extra_env: &[(String, String)],
+        ) -> Result<i32> {
+            unreachable!("the writer route never runs interactively")
+        }
+    }
+
     impl crate::coder::Coder for RecordingLearnerCoder {
         fn run(
             &self,
@@ -6947,6 +7030,60 @@ mod tests {
         assert_eq!(
             *limit, 7777,
             "the resolved project pump threshold must be threaded verbatim, not defaulted"
+        );
+    }
+
+    #[test]
+    fn claude_writer_launch_uses_managed_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Confine Claude home".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let managed_home = project_root.join(".fluent/work/artifacts/work-1/attempt-1/claude-home");
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_for_coder = Arc::clone(&recorded);
+
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Claude,
+            true,
+            None,
+            None,
+            &pump_config,
+            None,
+            Some(&managed_home),
+            None,
+            move |_sandbox, _executable| {
+                Box::new(RecordingEnvironmentCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .unwrap();
+
+        assert!(managed_home.is_dir());
+        assert!(
+            recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(key, value)| { key == "HOME" && Path::new(value) == managed_home })
         );
     }
 
@@ -7063,6 +7200,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            None,
             move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -7146,6 +7284,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             None,
             move |_sandbox, _executable| {
@@ -7288,6 +7427,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            None,
             move |_sandbox, _executable| {
                 Box::new(SessionRecordingCoder {
                     recorded: recorded_for_coder,
@@ -7423,6 +7563,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            None,
             move |_sandbox, _executable| {
                 Box::new(SupervisionReportingCoder {
                     recorded_dir: recorded_for_coder,
@@ -7544,6 +7685,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             None,
             move |_sandbox, _executable| {

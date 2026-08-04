@@ -374,6 +374,16 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
             }
             Err(error) => return Err(error.into()),
         },
+        WorkItemCommands::RebuildMetrics { id } => {
+            let items = match id {
+                Some(id) => vec![store.read_work_item(&id)?],
+                None => store.list_work_items()?,
+            };
+            for item in &items {
+                work_status::refresh_persisted_metrics(project_root, item)?;
+            }
+            println!("Rebuilt persisted metrics for {} Work Item(s)", items.len());
+        }
         WorkItemCommands::Abandon { id, reason } => {
             let mut item = match store.read_work_item(&id) {
                 Ok(item) => item,
@@ -598,6 +608,27 @@ fn cmd_attempt(
                     )
                 })?;
             print!("{}", to_json_pretty(attempt)?);
+        }
+        AttemptCommands::Extend {
+            work_item_id,
+            attempt_id,
+            additional_write_rounds,
+        } => {
+            let extension = work_attempt_loop::extend_round_cap(
+                project_root,
+                &store,
+                &work_item_id,
+                &attempt_id,
+                additional_write_rounds,
+            )?;
+            println!(
+                "Approved {} additional Writer round(s) for Attempt {} (cap {} -> {})",
+                extension.additional_write_rounds, attempt_id, extension.old_cap, extension.new_cap
+            );
+            println!(
+                "Reviewed candidate remains {}. Next: fluent attempt run {work_item_id} {attempt_id}",
+                extension.candidate_commit
+            );
         }
         AttemptCommands::Run {
             work_item_id,
@@ -827,6 +858,24 @@ fn cmd_attempt(
             println!(
                 "Stop requested for Attempt {attempt_id} of Work Item {work_item_id} (Fargate)"
             );
+        }
+        AttemptCommands::Cancel {
+            work_item_id,
+            attempt_id,
+        } => {
+            let canceled = work_attempt_loop::cancel_local_attempt(
+                project_root,
+                &store,
+                &work_item_id,
+                &attempt_id,
+            )?;
+            if canceled == 0 {
+                println!("Attempt {attempt_id} is already suspended after local cancellation");
+            } else {
+                println!(
+                    "Canceled {canceled} local Task(s) for Attempt {attempt_id}; run `fluent attempt run {work_item_id}` to resume or abandon the Work Item"
+                );
+            }
         }
         AttemptCommands::Watch {
             work_item_id,

@@ -155,7 +155,10 @@ was initial, pre-review continuation, or post-review corrective work. Codex
 Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
 because that subcommand does not accept `exec`'s `--cd` option, Fluent sets the
 subprocess current directory to the candidate workspace instead. Claude Writers
-resume with `--resume <session-id>`. A missing or provider-mismatched identity
+run with an Attempt-scoped managed `HOME`; their sandbox denies the operator's
+persistent `.claude/projects` tree, so session and memory writes remain inside
+the Work artifact boundary. They resume with `--resume <session-id>`. A missing
+or provider-mismatched identity
 starts a fresh persistent session. Codex Writer Tasks copy only their generated
 `sessions/` rollout tree into the Task artifact after each launch and restore it
 into the next launch's temporary worker home. Authentication, configuration,
@@ -272,12 +275,14 @@ reviewers do not rerun full suites. The tests reviewer may run one named check
 when the evidence lacks a result needed for a concrete finding.
 
 Status and `work-item show` expose cycle-cost measurements alongside lifecycle
-state: review rounds, summed duration of completed Tasks, input/output tokens
-read from the small `usage.json` summary persisted beside each project-local
-coder transcript, repeated stable findings,
-artifact bytes, and pre-review continuation cycles that avoided premature Tester
-and review work. Local reconstruction keeps the measurements reproducible and
-prevents identically named Work Items in other projects from contaminating them.
+state: review rounds, summed duration of completed Tasks, input/output tokens,
+repeated stable findings, artifact bytes, and pre-review continuation cycles that
+avoided premature Tester and review work. Task settlement updates only that
+Task's contribution to one per-Work-Item sidecar under `.fluent/work/metrics/`;
+read-only status and show load only that bounded file and never recursively walk
+artifact trees. After an upgrade or manual artifact repair,
+`fluent work-item rebuild-metrics [id]` reconstructs the complete sidecar
+explicitly.
 
 That focused check uses one project cache keyed by the candidate commit under
 `.fluent/work/cache/reviewers/`; reviewer artifact areas never receive private
@@ -310,7 +315,24 @@ auth rejections because the tester invokes test harnesses, not a coder.
 Each failed Task writes a per-task handoff file
 (`needs-user-{task_id}.md`) so concurrent review failures preserve
 independent context. The loop reloads stored state before deciding the
-next transition. After the
+next transition.
+
+Each local coder launch also writes `execution.json` beside its transcript and
+holds an inherited `execution-owner.lock` across the process tree. The record
+contains the owner, leader, process group, heartbeat, and terminal state. `fluent
+attempt cancel <work-item-id> <attempt-id>` validates both the identity lock and
+process group before signaling, confirms the group has stopped, and records an
+`interrupted` pause. Resuming replans only canceled `NeedsUser` Tasks.
+
+At a legitimate failed-review Writer-round cap, an operator may run `fluent
+attempt extend <work-item-id> <attempt-id> --additional-write-rounds N`, where N
+is one through three. Under the land lock, Fluent verifies a clean registered
+candidate worktree, exact candidate commit, exhausted current cap, and the exact
+SHA-256-bound failed-review bytes. The append-only approval does no code work.
+Resume revalidates that frontier before reopening the same Attempt; any changed
+candidate or review content fails closed.
+
+After the
 initial write output completes it plans review Tasks for the full Work
 reviewer set. After a follow-up write output completes it derives the
 next review roles from that Task's failed review input artifacts; when
@@ -1475,6 +1497,11 @@ the platform asset `fluent-{target-triple}` and its `.sha256` file,
 verifies the checksum, and atomically replaces the binary via POSIX
 rename. After replacement, the updater shells out to the new binary's
 `skills` command so skills are always in sync with the binary.
+
+`scripts/release.sh` publishes both the binary and checksum only from a clean
+`origin/main` commit with a new tag, after formatting, compilation, and the exact
+configured Tester commands pass. `tools/install.sh` applies the same checksum
+gate before replacing an existing installation.
 
 On every command except `fluent update`, Fluent runs a cached update
 check: it queries the release source at most once per 24 hours, caches

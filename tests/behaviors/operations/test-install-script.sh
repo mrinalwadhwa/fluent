@@ -28,6 +28,10 @@ setup_fixture_release() {
   printf '#!/bin/sh\nprintf "fluent %s (abc1234)\\n"\n' "$version" \
     > "$download_dir/$ASSET_NAME"
   chmod +x "$download_dir/$ASSET_NAME"
+  local digest
+  digest="$(shasum -a 256 "$download_dir/$ASSET_NAME" | awk '{print $1}')"
+  printf '%s  %s\n' "$digest" "$ASSET_NAME" \
+    > "$download_dir/${ASSET_NAME}.sha256"
 
   local latest_file="$releases_dir/latest"
   printf '%s\n' "$tag" > "$latest_file"
@@ -207,6 +211,52 @@ test_download_failure() {
   fi
 }
 
+test_checksum_mismatch_preserves_installed_binary() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+
+  setup_fixture_release "$tmp" "0.99.0"
+  printf 'tampered\n' > "$tmp/releases/download/v0.99.0/$ASSET_NAME"
+
+  local install_dir="$tmp/home/.local/bin"
+  mkdir -p "$install_dir"
+  printf 'existing\n' > "$install_dir/fluent"
+
+  local rc=0
+  FLUENT_INSTALL_BASE_URL="file://$tmp/releases" \
+  HOME="$tmp/home" \
+    bash "$INSTALL_SCRIPT" --install-path "$install_dir" --no-modify-path \
+    > "$tmp/stdout.txt" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    printf '    FAIL: checksum mismatch should fail\n'
+    return 1
+  fi
+
+  if [ "$(cat "$install_dir/fluent")" != "existing" ]; then
+    printf '    FAIL: checksum mismatch replaced the installed binary\n'
+    return 1
+  fi
+
+  if [ -e "$install_dir/fluent.new" ] || [ -e "$install_dir/fluent.new.sha256" ]; then
+    printf '    FAIL: checksum mismatch left temporary files\n'
+    return 1
+  fi
+  local leftover
+  for leftover in "$install_dir"/.fluent.*; do
+    if [ -e "$leftover" ]; then
+      printf '    FAIL: checksum mismatch left secure temporary files\n'
+      return 1
+    fi
+  done
+
+  if ! grep -qi "checksum" "$tmp/stdout.txt"; then
+    printf '    FAIL: checksum mismatch did not report the cause\n'
+    return 1
+  fi
+}
+
 printf 'test-install-script\n\n'
 
 run_test "installs a runnable binary" test_installs_runnable_binary
@@ -214,5 +264,6 @@ run_test "unsupported platform" test_unsupported_platform
 run_test "modifies PATH" test_modifies_path
 run_test "no-modify-path warns" test_no_modify_path_warns
 run_test "download failure" test_download_failure
+run_test "checksum mismatch preserves installed binary" test_checksum_mismatch_preserves_installed_binary
 
 summarize_and_exit

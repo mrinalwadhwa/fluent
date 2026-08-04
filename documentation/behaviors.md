@@ -3,6 +3,79 @@
 Observable behaviors of the fluent system. Each statement describes what
 the system does, not how. EARS format.
 
+## Local execution recovery
+
+### B1
+
+WHEN Fluent launches a local coder Task, THE SYSTEM SHALL persist its owner,
+process-group identity, lifecycle state, and heartbeat beside the Task transcript.
+Test: src/coder.rs (successful_capture_returns_coder_exit_and_persists_bytes)
+
+### B2
+
+WHEN an operator cancels a locally executing Attempt, THE SYSTEM SHALL signal
+only the process group whose inherited identity lock matches the persisted
+record, confirm it has stopped, and pause the same Attempt as `interrupted`.
+Test: src/work_attempt_loop.rs (cancel_local_attempt_stops_owned_group_and_replans_once)
+Test: src/execution.rs (stale_record_never_signals_reused_identity)
+
+### B3
+
+WHEN an operator resumes an `interrupted` Attempt, THE SYSTEM SHALL replan each
+canceled Task once while preserving completed Tasks and prior artifacts.
+Test: src/work_attempt_loop.rs (cancel_local_attempt_stops_owned_group_and_replans_once)
+
+## Autonomous Claude confinement
+
+### B1
+
+WHEN Fluent launches an autonomous Claude Writer, THE SYSTEM SHALL set `HOME` to
+an Attempt-scoped managed artifact directory and deny reads and writes to the
+operator's persistent Claude project and memory tree.
+Test: src/work_task_executor.rs (claude_writer_launch_uses_managed_home)
+Test: src/os.rs (autonomous_claude_profile_denies_operator_project_state)
+Test: src/os.rs (autonomous_claude_profile_confines_memory_writes_to_worker_home)
+
+## Audited round-cap continuation
+
+### B1
+
+WHEN an operator approves one to three additional Writer rounds for a legitimate
+`round-cap` pause, THE SYSTEM SHALL append an approval bound to the candidate
+commit and SHA-256 digests of the current failed-review artifacts without
+planning or running a Writer.
+Test: tests/binary.rs (attempt_extend_binds_candidate_and_failed_review_bytes)
+Test: src/work_model.rs (round_cap_extension_is_bounded_idempotent_and_digest_bound)
+
+### B2
+
+IF the candidate, failed-review set, or failed-review bytes change after a
+round-cap approval, THEN THE SYSTEM SHALL reject resume without changing the
+Attempt frontier.
+Test: tests/binary.rs (attempt_extend_binds_candidate_and_failed_review_bytes)
+
+## Persisted status accounting
+
+### B1
+
+WHEN Task execution settles, THE SYSTEM SHALL update that Task's contribution to
+one persisted per-Work-Item metrics sidecar without walking unrelated Task
+artifact areas.
+Test: src/work_status.rs (metrics_are_derived_from_local_work_evidence)
+
+### B2
+
+WHEN `fluent status` or `fluent work-item show` reports cycle-cost metrics, THE
+SYSTEM SHALL read the persisted sidecar without recursively walking the Work
+Item's artifact tree.
+Test: src/work_status.rs (metrics_are_derived_from_local_work_evidence)
+
+### B3
+
+WHEN `fluent work-item rebuild-metrics` runs, THE SYSTEM SHALL rebuild persisted
+metrics for the named Work Item, or for every Work Item when no id is supplied.
+Test: tests/binary.rs (work_item_rebuild_metrics_indexes_artifacts_for_fast_reads)
+
 ## Host evidence recovery
 
 ### B1
@@ -5080,6 +5153,28 @@ THEN THE SYSTEM SHALL leave a working binary in place rather than a
 partial or corrupt one.
 Test: tests/binary.rs (update_replace_leaves_working_binary_on_failure)
 
+### B7
+
+IF the release omits the matching SHA-256 asset or the downloaded binary does
+not match it, THEN THE SYSTEM SHALL reject the update and preserve the installed
+binary byte-for-byte.
+Test: tests/binary.rs (update_checksum_mismatch_preserves_binary)
+Test: tests/binary.rs (update_without_checksum_asset_preserves_binary)
+
+### B8
+
+WHEN the release script runs from a clean commit equal to `origin/main`, the
+version tag is unused, and every release gate passes, THE SYSTEM SHALL publish
+the signed platform binary and its SHA-256 file at that exact commit.
+Test: tests/behaviors/operations/test-release-script.sh (publishes checksum at exact commit after gates)
+
+### B9
+
+IF the release source is dirty or unsynchronized, the version tag already
+exists, or a release gate fails, THEN THE SYSTEM SHALL publish no release.
+Test: tests/behaviors/operations/test-release-script.sh (rejects dirty or unsynchronized source)
+Test: tests/behaviors/operations/test-release-script.sh (rejects reused tag or failed release gate)
+
 ## Project initialization
 
 ### B1
@@ -5716,6 +5811,12 @@ IF the download fails,
 THEN THE SYSTEM SHALL report the failure and exit without leaving a
 partial binary.
 Test: tests/behaviors/operations/test-install-script.sh (download failure)
+
+### B6
+
+IF the downloaded release binary does not match its published SHA-256 checksum,
+THEN THE SYSTEM SHALL fail installation and preserve any installed binary.
+Test: tests/behaviors/operations/test-install-script.sh (checksum mismatch preserves installed binary)
 
 ---
 

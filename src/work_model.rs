@@ -26,6 +26,8 @@ const WORK_TRANSACTIONS_DIR: &str = "transactions";
 pub const WORK_ARTIFACTS_DIR: &str = ".fluent/work/artifacts";
 pub const WORK_PROGRESS_DIR: &str = ".fluent/work/progress";
 pub const WORK_MODEL_WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const MIN_ADDITIONAL_WRITE_ROUNDS: usize = 1;
+pub const MAX_ADDITIONAL_WRITE_ROUNDS: usize = 3;
 
 pub fn work_item_input_path(work_item_id: &str, index: usize, filename: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/inputs/{index:04}-{filename}")
@@ -2773,6 +2775,42 @@ pub fn resolve_coder_mapping(inputs: &CoderMappingInputs) -> Result<CoderMapping
     })
 }
 
+/// One failed review artifact bound to the exact bytes an operator approved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundCapReviewArtifact {
+    pub artifact: ArtifactRef,
+    pub digest: String,
+}
+
+/// An append-only, bounded increase to a paused Attempt's Writer-round cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundCapExtension {
+    pub id: String,
+    pub old_cap: usize,
+    pub new_cap: usize,
+    pub additional_write_rounds: usize,
+    pub candidate_commit: String,
+    pub failed_reviews: Vec<RoundCapReviewArtifact>,
+    pub approved_at: String,
+}
+
+impl RoundCapExtension {
+    fn matches_request(&self, request: &RoundCapExtensionRequest) -> bool {
+        self.old_cap == request.old_cap
+            && self.additional_write_rounds == request.additional_write_rounds
+            && self.candidate_commit == request.candidate_commit
+            && self.failed_reviews == request.failed_reviews
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundCapExtensionRequest {
+    pub old_cap: usize,
+    pub additional_write_rounds: usize,
+    pub candidate_commit: String,
+    pub failed_reviews: Vec<RoundCapReviewArtifact>,
+}
+
 /// One execution history branch for a work item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
@@ -2814,6 +2852,9 @@ pub struct Attempt {
     /// deserializes without it and stays compatible with the advancement gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_contract: Option<ProgressContract>,
+    /// Explicit approvals for legitimate write-round-cap pauses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_cap_extensions: Vec<RoundCapExtension>,
 }
 
 impl Default for Attempt {
@@ -2834,11 +2875,61 @@ impl Default for Attempt {
             completed_at: None,
             learning: None,
             progress_contract: None,
+            round_cap_extensions: Vec::new(),
         }
     }
 }
 
 impl Attempt {
+    pub fn effective_write_round_cap(&self, base_cap: usize) -> usize {
+        self.round_cap_extensions
+            .last()
+            .map(|extension| extension.new_cap)
+            .unwrap_or(base_cap)
+    }
+
+    pub fn record_round_cap_extension(
+        &mut self,
+        base_cap: usize,
+        request: RoundCapExtensionRequest,
+    ) -> Result<&RoundCapExtension, WorkModelError> {
+        if !(MIN_ADDITIONAL_WRITE_ROUNDS..=MAX_ADDITIONAL_WRITE_ROUNDS)
+            .contains(&request.additional_write_rounds)
+        {
+            return Err(WorkModelError::RoundCapExtensionIncrementOutOfRange {
+                requested: request.additional_write_rounds,
+            });
+        }
+        if let Some(index) = self
+            .round_cap_extensions
+            .iter()
+            .position(|extension| extension.matches_request(&request))
+        {
+            return Ok(&self.round_cap_extensions[index]);
+        }
+        let effective_cap = self.effective_write_round_cap(base_cap);
+        if request.old_cap != effective_cap {
+            return Err(WorkModelError::RoundCapExtensionStaleCap {
+                expected: effective_cap,
+                actual: request.old_cap,
+            });
+        }
+        let new_cap = effective_cap.saturating_add(request.additional_write_rounds);
+        self.round_cap_extensions.push(RoundCapExtension {
+            id: format!("round-cap-{effective_cap}-{new_cap}"),
+            old_cap: effective_cap,
+            new_cap,
+            additional_write_rounds: request.additional_write_rounds,
+            candidate_commit: request.candidate_commit,
+            failed_reviews: request.failed_reviews,
+            approved_at: now_iso8601(),
+        });
+        Ok(self
+            .round_cap_extensions
+            .last()
+            .expect("extension appended"))
+    }
+
     /// Return whether this is the narrowly recoverable legacy failure shape.
     /// The caller separately verifies the completed Writer's workspace is clean
     /// and still points at this candidate commit.
@@ -3305,6 +3396,9 @@ pub enum PauseKind {
     /// The provider exhausted its own bounded retries before the model used a
     /// tool or emitted tokens. Re-running resumes this exact Task.
     ProviderUnavailable,
+    /// The operator stopped a locally owned coder process group. The same Task may
+    /// resume only after Fluent verified that the prior group is gone.
+    Interrupted,
     /// A pause written by a newer Fluent version. Read-only commands preserve
     /// and display the original value; mutation remains fail-closed.
     Unknown(String),
@@ -3320,6 +3414,7 @@ impl PauseKind {
             Self::HostSandbox => "host-sandbox",
             Self::TesterHarness => "tester-harness",
             Self::ProviderUnavailable => "provider-unavailable",
+            Self::Interrupted => "interrupted",
             Self::Unknown(value) => value,
         }
     }
@@ -3352,6 +3447,7 @@ impl<'de> Deserialize<'de> for PauseKind {
             "host-sandbox" => Self::HostSandbox,
             "tester-harness" => Self::TesterHarness,
             "provider-unavailable" => Self::ProviderUnavailable,
+            "interrupted" => Self::Interrupted,
             _ => Self::Unknown(value),
         })
     }
@@ -4085,7 +4181,7 @@ fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
             | Some(PauseKind::TesterHarness) => 3,
-            Some(PauseKind::ProviderUnavailable) => 3,
+            Some(PauseKind::ProviderUnavailable) | Some(PauseKind::Interrupted) => 3,
             // RoundCap, Uncertain, or an unclassified pause is non-resumable.
             _ => 4,
         },
@@ -4168,6 +4264,16 @@ pub fn set_merge_candidate_terminal(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkModelError {
+    RoundCapExtensionIncrementOutOfRange {
+        requested: usize,
+    },
+    RoundCapExtensionStaleCap {
+        expected: usize,
+        actual: usize,
+    },
+    RoundCapExtensionIneligible {
+        reason: String,
+    },
     InvalidId {
         kind: &'static str,
         id: String,
@@ -4320,6 +4426,17 @@ pub enum WorkModelError {
 impl fmt::Display for WorkModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RoundCapExtensionIncrementOutOfRange { requested } => write!(
+                f,
+                "round-cap extensions must add {MIN_ADDITIONAL_WRITE_ROUNDS} to {MAX_ADDITIONAL_WRITE_ROUNDS} Writer rounds, not {requested}"
+            ),
+            Self::RoundCapExtensionStaleCap { expected, actual } => write!(
+                f,
+                "round-cap extension expected current cap {expected}, not stale cap {actual}"
+            ),
+            Self::RoundCapExtensionIneligible { reason } => {
+                write!(f, "round-cap extension is not eligible: {reason}")
+            }
             Self::InvalidId { kind, id } => {
                 write!(f, "{kind} id {id:?} cannot be used as a file name")
             }
@@ -4871,6 +4988,8 @@ struct AttemptRecord {
     learning: Option<AttemptLearning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     progress_contract: Option<ProgressContract>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    round_cap_extensions: Vec<RoundCapExtension>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4951,6 +5070,7 @@ impl AttemptRecord {
             completed_at: attempt.completed_at.clone(),
             learning: attempt.learning.clone(),
             progress_contract: attempt.progress_contract.clone(),
+            round_cap_extensions: attempt.round_cap_extensions.clone(),
         }
     }
 }
@@ -4973,6 +5093,7 @@ impl From<AttemptRecord> for Attempt {
             completed_at: record.completed_at,
             learning: record.learning,
             progress_contract: record.progress_contract,
+            round_cap_extensions: record.round_cap_extensions,
         }
     }
 }
@@ -12783,5 +12904,59 @@ random banner prose that must be ignored
                  fields changed and every unrelated field preserved"
             );
         }
+    }
+
+    fn round_cap_request(additional_write_rounds: usize) -> RoundCapExtensionRequest {
+        RoundCapExtensionRequest {
+            old_cap: 10,
+            additional_write_rounds,
+            candidate_commit: "candidate-commit".to_string(),
+            failed_reviews: vec![RoundCapReviewArtifact {
+                artifact: ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path: ".fluent/work/artifacts/work-1/attempt-1/review/review.md".to_string(),
+                },
+                digest: "sha256:approved".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn round_cap_extension_is_bounded_idempotent_and_digest_bound() {
+        let mut attempt = Attempt::default();
+        let first = attempt
+            .record_round_cap_extension(10, round_cap_request(2))
+            .unwrap()
+            .clone();
+        let duplicate = attempt
+            .record_round_cap_extension(10, round_cap_request(2))
+            .unwrap()
+            .clone();
+        assert_eq!(first, duplicate);
+        assert_eq!(attempt.round_cap_extensions.len(), 1);
+        assert_eq!(attempt.effective_write_round_cap(10), 12);
+        assert_eq!(first.failed_reviews[0].digest, "sha256:approved");
+
+        let error = Attempt::default()
+            .record_round_cap_extension(10, round_cap_request(4))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WorkModelError::RoundCapExtensionIncrementOutOfRange { requested: 4 }
+        ));
+    }
+
+    #[test]
+    fn legacy_attempt_omits_empty_round_cap_extensions() {
+        let attempt: Attempt = serde_json::from_str(
+            r#"{"id":"attempt-1","work_item_id":"work-1","status":"planned"}"#,
+        )
+        .unwrap();
+        assert!(attempt.round_cap_extensions.is_empty());
+        assert!(
+            !serde_json::to_string(&attempt)
+                .unwrap()
+                .contains("round_cap_extensions")
+        );
     }
 }

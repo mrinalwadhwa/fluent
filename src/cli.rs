@@ -299,6 +299,12 @@ pub enum WorkItemCommands {
         id: String,
     },
 
+    /// Rebuild persisted status metrics after upgrade or manual artifact changes
+    RebuildMetrics {
+        /// Rebuild only this Work Item; omit to rebuild all
+        id: Option<String>,
+    },
+
     /// Mark a Work Item as intentionally abandoned
     Abandon {
         /// Work Item ID
@@ -419,6 +425,17 @@ pub enum AttemptCommands {
         attempt_id: String,
     },
 
+    /// Approve a bounded, audited extension for a paused write-round cap
+    Extend {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
+        /// Writer rounds to authorize (1 through 3)
+        #[arg(long)]
+        additional_write_rounds: usize,
+    },
+
     /// Advance an Attempt through the next safe transitions
     Run {
         /// Work Item ID
@@ -499,6 +516,14 @@ pub enum AttemptCommands {
 
     /// Stop a Fargate-executed Attempt's ECS task (best-effort, idempotent).
     Stop {
+        /// Work Item ID
+        work_item_id: String,
+        /// Attempt ID
+        attempt_id: String,
+    },
+
+    /// Stop owned local coder processes and suspend the same Attempt for recovery.
+    Cancel {
         /// Work Item ID
         work_item_id: String,
         /// Attempt ID

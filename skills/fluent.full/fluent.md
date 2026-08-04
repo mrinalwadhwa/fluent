@@ -110,13 +110,23 @@ The round outcome determines what happens next:
   with human intervention. Do not rerun the Learner or land the candidate.
 - Any fail — follow-up write next round, scoped to failed reviewers, except
   when a failed reviewer needs trusted host evidence for an unchanged candidate.
-- Any uncertain, or a round cap reached — Attempt records `needs-user`, pausing the loop.
+- Any uncertain verdict — Attempt records `needs-user`, pausing the loop.
+- A Writer-round cap reached — inspect the candidate and failed reviews. If the
+  frontier is legitimate, approve one to three more rounds with `fluent attempt
+  extend <work-item-id> <attempt-id> --additional-write-rounds N`, then resume.
+  Fluent binds the approval to the candidate and exact review bytes.
 - An incomplete Writer without a new candidate commit, regressed required progress,
   or two consecutive pre-review continuations with no newly checked required work —
   Attempt records `needs-user` before Tester and review.
 - A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
 
-The user provides input; `fluent attempt run` resumes the loop where it left off. When the pause is `provider-unavailable`, wait for provider capacity, then run `fluent attempt run <work-item-id> [attempt-id]` without new input. Fluent retries the same unfinished Task and keeps completed peer Tasks and transcripts.
+The user provides input; `fluent attempt run` resumes the loop where it left off.
+When the pause is `provider-unavailable`, wait for provider capacity, then run
+`fluent attempt run <work-item-id> [attempt-id]` without new input. For a hung or
+interrupted local coder, run `fluent attempt cancel <work-item-id> <attempt-id>`;
+after Fluent confirms its owned process group stopped, the same `attempt run`
+command replans only the canceled Task. Fluent keeps completed peer Tasks and
+prior transcripts.
 
 ### Recover a host-evidence finding
 
@@ -151,6 +161,10 @@ interactive Codex configuration or hooks. If Fluent pauses an Attempt for Codex
 authentication, run `codex login`, then resume the same work with `fluent attempt
 run <work-item-id> [attempt-id]`. Interactive Codex sessions continue to use the
 user's normal configuration and hooks.
+
+Autonomous Claude Writers use an Attempt-scoped managed home. Their sandbox
+blocks the operator's persistent Claude project and memory tree; do not copy
+memory or session state from `~/.claude/projects` into a Work Item manually.
 
 For unrelated work that can proceed in parallel, create independent Work Items.
 
@@ -277,7 +291,9 @@ verdicts, transcripts, logs, and structured evidence.
 measurements: review rounds, completed-stage duration, local transcript tokens,
 repeated findings, artifact bytes, and pre-review cycles avoided. Use these to
 spot a Work Item whose context or review loop is growing before starting another
-expensive round.
+expensive round. These commands read one persisted sidecar instead of walking
+artifact trees. After upgrading an existing project or manually repairing
+artifacts, run `fluent work-item rebuild-metrics [work-item-id]` once.
 
 After creating or repairing a project Tester, run `fluent tester check` before spending review work. It validates the Tester and runs it through the production Tester boundary. If this standalone check reports a harness error, repair the configuration, extractor, or sandbox problem and rerun `fluent tester check`; it creates no Attempt to resume. If a production Tester Task pauses an existing Attempt for a harness error, repair the problem and resume with `fluent attempt run <work-item-id> [<attempt-id>]`; the same Tester retries without rerunning an already completed Writer. For SwiftPM nested-sandbox failures, disable SwiftPM's inner sandbox and use writable project-local cache paths. Fluent leaves project test configuration and scripts unchanged.
 

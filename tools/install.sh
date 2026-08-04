@@ -3,6 +3,15 @@ set -eu
 
 FLUENT_REPO="mrinalwadhwa/fluent"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
+FLUENT_INSTALL_TMP=""
+FLUENT_CHECKSUM_TMP=""
+
+cleanup_downloads() {
+  [ -z "$FLUENT_INSTALL_TMP" ] || rm -f "$FLUENT_INSTALL_TMP"
+  [ -z "$FLUENT_CHECKSUM_TMP" ] || rm -f "$FLUENT_CHECKSUM_TMP"
+}
+
+trap cleanup_downloads EXIT HUP INT TERM
 
 say() {
   printf 'fluent-install: %s\n' "$1"
@@ -83,6 +92,56 @@ download_asset() {
     "$_url"
 }
 
+sha256_file() {
+  local _path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$_path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$_path" | awk '{print $1}'
+  else
+    printf 'sha256sum or shasum is required but not found\n' >&2
+    return 1
+  fi
+}
+
+verify_checksum() {
+  local _binary="$1"
+  local _checksum="$2"
+  local _asset_name="$3"
+  local _expected _name _extra _actual
+
+  if ! read -r _expected _name _extra < "$_checksum"; then
+    printf 'release checksum is empty\n' >&2
+    return 1
+  fi
+  case "$_expected" in
+    *[!0-9A-Fa-f]*|'')
+      printf 'release checksum is not a SHA-256 digest\n' >&2
+      return 1
+      ;;
+  esac
+  if [ "${#_expected}" -ne 64 ]; then
+    printf 'release checksum is not a SHA-256 digest\n' >&2
+    return 1
+  fi
+  _name="${_name#\*}"
+  if [ -n "$_name" ] && [ "$_name" != "$_asset_name" ]; then
+    printf 'release checksum names a different asset\n' >&2
+    return 1
+  fi
+  if [ -n "${_extra:-}" ]; then
+    printf 'release checksum contains unexpected fields\n' >&2
+    return 1
+  fi
+
+  _actual="$(sha256_file "$_binary")" || return 1
+  if [ "$(printf '%s' "$_actual" | tr '[:upper:]' '[:lower:]')" != \
+    "$(printf '%s' "$_expected" | tr '[:upper:]' '[:lower:]')" ]; then
+    printf 'release checksum mismatch\n' >&2
+    return 1
+  fi
+}
+
 modify_path() {
   local _install_dir="$1"
   local _profile
@@ -138,6 +197,7 @@ main() {
   done
 
   required curl
+  required mktemp
 
   local _triple
   _triple="$(detect_triple)" || err "unsupported platform: $(uname -s) $(uname -m)"
@@ -159,15 +219,30 @@ main() {
 
   mkdir -p "$_install_dir"
 
-  local _tmp="${_install_dir}/fluent.new"
+  FLUENT_INSTALL_TMP="$(mktemp "${_install_dir}/.fluent.new.XXXXXX")"
+  FLUENT_CHECKSUM_TMP="$(mktemp "${_install_dir}/.fluent.sha256.XXXXXX")"
+  local _tmp="$FLUENT_INSTALL_TMP"
+  local _checksum_tmp="$FLUENT_CHECKSUM_TMP"
 
   if ! download_asset "$_base_url" "$_tag" "$_asset_name" "$_tmp"; then
-    rm -f "$_tmp"
+    rm -f "$_tmp" "$_checksum_tmp"
     err "download failed"
   fi
 
+  if ! download_asset "$_base_url" "$_tag" "${_asset_name}.sha256" "$_checksum_tmp"; then
+    rm -f "$_tmp" "$_checksum_tmp"
+    err "checksum download failed"
+  fi
+
+  if ! verify_checksum "$_tmp" "$_checksum_tmp" "$_asset_name"; then
+    rm -f "$_tmp" "$_checksum_tmp"
+    err "checksum verification failed"
+  fi
+  rm -f "$_checksum_tmp"
+
   chmod 0755 "$_tmp"
   mv "$_tmp" "${_install_dir}/fluent"
+  FLUENT_INSTALL_TMP=""
 
   say "installed fluent ${_tag} to ${_install_dir}/fluent"
 

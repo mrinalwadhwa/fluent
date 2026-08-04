@@ -243,6 +243,50 @@ pub fn render_profile_for_access_for_coder_with_codex_home(
     )
 }
 
+/// Render an autonomous Claude profile whose mutable provider state lives under
+/// a Fluent-managed home. The operator's project/session tree is denied even
+/// though the shared profile keeps legacy interactive Claude grants.
+pub fn render_profile_for_access_for_autonomous_claude(
+    resolver: &ContentResolver,
+    source_home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+) -> Result<SandboxProfile> {
+    let profile = render_profile_for_access(
+        resolver,
+        source_home,
+        writable_roots,
+        readable_roots,
+        &[],
+        Some(CoderKind::Claude),
+        None,
+    )?;
+    let source_home = PathBuf::from(source_home);
+    let canonical_source_home =
+        std::fs::canonicalize(&source_home).unwrap_or_else(|_| source_home.clone());
+    let mut source_projects = vec![source_home.join(".claude/projects")];
+    let canonical_projects = canonical_source_home.join(".claude/projects");
+    if canonical_projects != source_projects[0] {
+        source_projects.push(canonical_projects);
+    }
+    let deny = source_projects
+        .iter()
+        .flat_map(|projects| {
+            [
+                format!("(deny file-read* (subpath {}))", sbpl_string(projects)),
+                format!("(deny file-write* (subpath {}))", sbpl_string(projects)),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // File rules are resolved by the most specific matching operation and
+    // filter. Keep these explicit denials after the shared Claude grants so a
+    // broad home or macOS temp allowance cannot win for the project tree.
+    let content = format!("{}\n{deny}\n", std::fs::read_to_string(&profile.path)?);
+    std::fs::write(&profile.path, content)?;
+    Ok(profile)
+}
+
 /// Render a coder profile with explicit write denials that override broad
 /// common temporary-directory grants.
 pub fn render_profile_for_access_for_coder_with_denied_writes(
@@ -787,5 +831,74 @@ mod tests {
         let content = std::fs::read_to_string(&profile.path).unwrap();
         assert!(content.contains("Claude Code CLI -- profile-specific Seatbelt rules"));
         assert!(!content.contains("Codex CLI -- profile-specific Seatbelt rules"));
+    }
+
+    #[test]
+    fn autonomous_claude_profile_denies_operator_project_state() {
+        let resolver = ContentResolver::new(None);
+        let worker_home = PathBuf::from("/workspace/artifacts/claude-home");
+        let profile = render_profile_for_access_for_autonomous_claude(
+            &resolver,
+            "/Users/operator",
+            &[PathBuf::from("/workspace/candidate"), worker_home.clone()],
+            &[],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(
+            content.contains("(deny file-read* (subpath \"/Users/operator/.claude/projects\"))")
+        );
+        assert!(
+            content.contains("(deny file-write* (subpath \"/Users/operator/.claude/projects\"))")
+        );
+        assert!(content.contains(&format!(
+            "(allow file-write* (subpath {}))",
+            sbpl_string(&worker_home)
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn autonomous_claude_profile_confines_memory_writes_to_worker_home() {
+        let source = tempfile::tempdir().unwrap();
+        let managed = tempfile::tempdir().unwrap();
+        let source_memory = source.path().join(".claude/projects/project/memory");
+        let worker_home = managed.path().join("claude-home");
+        std::fs::create_dir_all(&source_memory).unwrap();
+        std::fs::create_dir_all(worker_home.join(".claude/projects/project/memory")).unwrap();
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_for_access_for_autonomous_claude(
+            &resolver,
+            &source.path().to_string_lossy(),
+            std::slice::from_ref(&worker_home),
+            &[],
+        )
+        .unwrap();
+        if let Err(error) = preflight_profile(&profile) {
+            if error.to_string().contains("Operation not permitted") {
+                // A parent Seatbelt profile cannot apply a nested profile. The
+                // production host preflight and unsandboxed macOS CI exercise the
+                // command-level assertions below.
+                return;
+            }
+            panic!("autonomous Claude profile preflight failed: {error:#}");
+        }
+
+        let managed_status = Command::new(sandbox_exec_program())
+            .args(["-f", profile.path.to_str().unwrap(), "/usr/bin/touch"])
+            .arg(worker_home.join(".claude/projects/project/memory/managed"))
+            .status()
+            .unwrap();
+        assert!(managed_status.success());
+
+        let escaped = source_memory.join("escaped");
+        let escaped_status = Command::new(sandbox_exec_program())
+            .args(["-f", profile.path.to_str().unwrap(), "/usr/bin/touch"])
+            .arg(&escaped)
+            .status()
+            .unwrap();
+        assert!(!escaped_status.success());
+        assert!(!escaped.exists());
     }
 }
