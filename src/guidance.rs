@@ -464,6 +464,7 @@ mod tests {
             merge: "-".to_string(),
             action: action.to_string(),
             next_action: None,
+            metrics: Default::default(),
         }
     }
 

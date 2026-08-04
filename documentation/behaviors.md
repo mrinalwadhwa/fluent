@@ -4804,6 +4804,34 @@ evidence, THE SYSTEM SHALL preserve the new candidate commit and pause before
 planning a Tester or reviewer.
 Test: src/work_attempt_loop.rs (regressed_required_progress_pauses_before_review)
 
+### B13
+
+WHEN Fluent prepares a Writer continuation or reviewer, THE SYSTEM SHALL write a
+bounded generated context containing the candidate and base commits, changed
+files, unresolved steps, deduplicated current findings, passing Tester evidence,
+executed commands, and historical artifact paths, and SHALL report omitted item
+counts when any bounded collection is truncated.
+Test: src/work_task_executor.rs (execution_context_is_bounded_and_reports_omissions)
+Test: src/work_task_executor.rs (execution_context_deduplicates_findings_and_summarizes_evidence)
+
+### B14
+
+WHEN generated execution context references historical evidence, THE SYSTEM
+SHALL leave each full historical artifact intact and inject its path rather than
+its full contents into the continuation or review prompt.
+Test: src/work_task_executor.rs (execution_context_is_bounded_and_reports_omissions)
+Test: src/work_task_executor.rs (continuation_prompt_contains_only_current_execution_context)
+
+### B15
+
+WHEN Fluent reports status or shows a Work Item, THE SYSTEM SHALL expose review
+rounds, completed-stage duration, local transcript token use, repeated findings,
+artifact bytes, and pre-review cycles avoided, deriving measurements only from
+that Work Item's stored model and project-local artifacts.
+Test: src/work_status.rs (metrics_are_derived_from_local_work_evidence)
+Test: src/usage.rs (task_usage_is_persisted_beside_the_transcript)
+Test: tests/binary.rs (work_show_outputs_pretty_json_for_one_work_item)
+
 ## Suite-health gate
 
 ### B1

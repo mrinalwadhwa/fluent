@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -41,6 +41,13 @@ pub struct WorkTaskRunResult {
 
 const NO_CHANGE_DECLARATION_FILE: &str = "no-change.json";
 const REVIEW_ARTIFACT_WARN_BYTES: u64 = 16 * 1024 * 1024;
+const EXECUTION_CONTEXT_MAX_BYTES: usize = 128 * 1024;
+const EXECUTION_CONTEXT_MAX_CHANGED_FILES: usize = 100;
+const EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS: usize = 25;
+const EXECUTION_CONTEXT_MAX_FINDINGS: usize = 25;
+const EXECUTION_CONTEXT_MAX_EVIDENCE: usize = 25;
+const EXECUTION_CONTEXT_MAX_COMMANDS: usize = 25;
+const EXECUTION_CONTEXT_MAX_ARTIFACTS: usize = 50;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -48,6 +55,48 @@ struct ReviewArtifactUsage {
     artifact_bytes: u64,
     managed_cache_bytes: u64,
     warning: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ExecutionContextV1 {
+    schema_version: u32,
+    candidate_commit: String,
+    base_commit: Option<String>,
+    changed_files: Vec<String>,
+    unresolved_steps: Vec<String>,
+    current_findings: Vec<ExecutionContextFinding>,
+    passing_evidence: Vec<ExecutionContextEvidence>,
+    executed_commands: Vec<String>,
+    historical_artifacts: Vec<String>,
+    omitted: ExecutionContextOmitted,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ExecutionContextOmitted {
+    changed_files: usize,
+    unresolved_steps: usize,
+    current_findings: usize,
+    passing_evidence: usize,
+    executed_commands: usize,
+    historical_artifacts: usize,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ExecutionContextFinding {
+    role: String,
+    identity: String,
+    title: String,
+    artifact: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ExecutionContextEvidence {
+    path: String,
+    summary: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2955,7 +3004,7 @@ fn run_task_coder_with_coder(
             prior_reviews,
             workspace_path,
             project_root,
-        )
+        )?
     } else {
         build_write_task_prompt_with_workspace(
             item,
@@ -3319,73 +3368,41 @@ fn build_writer_continuation_prompt(
     prior_reviews: &[PathBuf],
     workspace_path: &Path,
     project_root: &Path,
-) -> String {
+) -> Result<String> {
     let progress_path = progress_md_path_for(project_root, &item.id, attempt_id);
-    let unresolved_progress = fs::read_to_string(&progress_path)
+    let unresolved_steps = fs::read_to_string(&progress_path)
         .ok()
-        .map(|source| unresolved_progress_excerpt(&source))
-        .filter(|source| !source.is_empty())
-        .unwrap_or_else(|| {
-            "No unresolved checklist entry was readable; inspect the progress file.".to_string()
-        });
-    let current_findings = prior_reviews
-        .iter()
-        .map(|path| {
-            let unresolved = fs::read_to_string(path)
-                .ok()
-                .map(|source| {
-                    source
-                        .lines()
-                        .filter(|line| line.trim_start().starts_with("- [ ]"))
-                        .take(20)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
-            if unresolved.is_empty() {
-                format!("- {}", path.display())
-            } else {
-                format!("- {}\n{}", path.display(), unresolved)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let current_findings = if current_findings.is_empty() {
-        "No review findings exist; this continuation is still before Tester and review.".to_string()
+        .map(|source| unresolved_progress_steps(&source))
+        .unwrap_or_default();
+    let unresolved_progress = if unresolved_steps.is_empty() {
+        "No unresolved checklist entry was readable; inspect the progress file.".to_string()
     } else {
-        current_findings
+        unresolved_steps
+            .iter()
+            .map(|step| format!("- [ ] {step}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
-    let latest_change = Command::new("git")
-        .args([
-            "show",
-            "--format=fuller",
-            "--stat",
-            "--patch",
-            "--unified=3",
-            "--no-ext-diff",
-            "HEAD",
-        ])
-        .current_dir(workspace_path)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            const MAX_LATEST_CHANGE_CHARS: usize = 16_384;
-            let source = String::from_utf8_lossy(&output.stdout);
-            let mut bounded = source
-                .chars()
-                .take(MAX_LATEST_CHANGE_CHARS)
-                .collect::<String>();
-            if source.chars().count() > MAX_LATEST_CHANGE_CHARS {
-                bounded.push_str("\n[latest change truncated; inspect git show HEAD]\n");
-            }
-            bounded
-        })
-        .filter(|output| !output.trim().is_empty())
-        .unwrap_or_else(|| {
-            "Latest committed diff summary is unavailable; inspect HEAD in the workspace."
-                .to_string()
-        });
+    let task = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+        .ok_or_else(|| anyhow::anyhow!("continuation Task {task_id:?} not found"))?;
+    let artifact_area = task.artifact_area.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("continuation Task {task_id:?} must declare an artifact area")
+    })?;
+    let artifact_dir = project_root.join(&artifact_area.path);
+    let candidate_commit = git_stdout(workspace_path, &["rev-parse", "HEAD"]);
+    let base_commit = git_stdout(workspace_path, &["rev-parse", "HEAD^"]);
+    let context_path = write_execution_context(
+        &artifact_dir,
+        workspace_path,
+        &candidate_commit,
+        Some(base_commit.as_str()),
+        &unresolved_steps,
+        prior_reviews,
+    )?;
     let planning = compute_planning_paths(item, project_root);
     let brief_path = planning.brief();
     let behaviors_path = planning.behaviors();
@@ -3407,27 +3424,235 @@ fn build_writer_continuation_prompt(
             ("approach_path", &approach_path),
             ("plan_path", &plan_path),
             ("unresolved_progress", &unresolved_progress),
-            ("latest_change", &latest_change),
-            ("current_findings", &current_findings),
+            (
+                "execution_context_path",
+                &context_path.display().to_string(),
+            ),
         ],
     )
-    .expect("write-continuation-user.md template must render with the documented context")
+    .context("write-continuation-user.md template must render with the documented context")
 }
 
-fn unresolved_progress_excerpt(source: &str) -> String {
+fn unresolved_progress_steps(source: &str) -> Vec<String> {
     let mut include_nested = false;
     let mut unresolved = Vec::new();
     for line in source.lines() {
         if line.starts_with("- [ ]") {
             include_nested = true;
-            unresolved.push(line);
+            unresolved.push(line.trim_start_matches("- [ ]").trim_start().to_string());
         } else if line.starts_with("- [") || line.starts_with("## ") {
             include_nested = false;
         } else if include_nested && (line.starts_with("  ") || line.trim().is_empty()) {
-            unresolved.push(line);
+            if let Some(step) = unresolved.last_mut() {
+                step.push('\n');
+                step.push_str(line);
+            }
         }
     }
-    unresolved.join("\n")
+    unresolved
+}
+
+fn git_stdout(workspace: &Path, args: &[&str]) -> String {
+    Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn write_execution_context(
+    artifact_dir: &Path,
+    workspace: &Path,
+    candidate_commit: &str,
+    base_commit: Option<&str>,
+    unresolved_steps: &[String],
+    input_artifacts: &[PathBuf],
+) -> Result<PathBuf> {
+    let changed_files = if let Some(base_commit) = base_commit.filter(|value| !value.is_empty()) {
+        git_stdout(
+            workspace,
+            &["diff", "--name-only", base_commit, candidate_commit],
+        )
+    } else {
+        git_stdout(
+            workspace,
+            &[
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "HEAD",
+            ],
+        )
+    }
+    .lines()
+    .filter(|line| !line.is_empty())
+    .map(|line| truncate_utf8(line, 240))
+    .collect::<Vec<_>>();
+    let unresolved_steps = unresolved_steps
+        .iter()
+        .map(|step| truncate_utf8(step, 500))
+        .collect::<Vec<_>>();
+    let current_findings = execution_context_findings(input_artifacts);
+    let (passing_evidence, executed_commands) =
+        execution_context_evidence(input_artifacts, candidate_commit);
+    let historical_artifacts = input_artifacts
+        .iter()
+        .map(|path| truncate_utf8(&path.display().to_string(), 240))
+        .collect::<Vec<_>>();
+    let (changed_files, omitted_changed_files) =
+        bounded_vec(changed_files, EXECUTION_CONTEXT_MAX_CHANGED_FILES);
+    let (unresolved_steps, omitted_unresolved_steps) =
+        bounded_vec(unresolved_steps, EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS);
+    let (current_findings, omitted_current_findings) =
+        bounded_vec(current_findings, EXECUTION_CONTEXT_MAX_FINDINGS);
+    let (passing_evidence, omitted_passing_evidence) =
+        bounded_vec(passing_evidence, EXECUTION_CONTEXT_MAX_EVIDENCE);
+    let (executed_commands, omitted_executed_commands) =
+        bounded_vec(executed_commands, EXECUTION_CONTEXT_MAX_COMMANDS);
+    let (historical_artifacts, omitted_historical_artifacts) =
+        bounded_vec(historical_artifacts, EXECUTION_CONTEXT_MAX_ARTIFACTS);
+    let mut context = ExecutionContextV1 {
+        schema_version: 1,
+        candidate_commit: truncate_utf8(candidate_commit, 128),
+        base_commit: base_commit
+            .filter(|value| !value.is_empty())
+            .map(|value| truncate_utf8(value, 128)),
+        changed_files,
+        unresolved_steps,
+        current_findings,
+        passing_evidence,
+        executed_commands,
+        historical_artifacts,
+        omitted: ExecutionContextOmitted {
+            changed_files: omitted_changed_files,
+            unresolved_steps: omitted_unresolved_steps,
+            current_findings: omitted_current_findings,
+            passing_evidence: omitted_passing_evidence,
+            executed_commands: omitted_executed_commands,
+            historical_artifacts: omitted_historical_artifacts,
+        },
+    };
+    let serialized = bounded_execution_context_json(&mut context)?;
+    fs::create_dir_all(artifact_dir)?;
+    let path = artifact_dir.join("execution-context.json");
+    crate::atomic_write::atomic_write(&path, serialized.as_bytes())?;
+    Ok(path)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn bounded_vec<T>(mut values: Vec<T>, max: usize) -> (Vec<T>, usize) {
+    let omitted = values.len().saturating_sub(max);
+    values.truncate(max);
+    (values, omitted)
+}
+
+fn bounded_execution_context_json(context: &mut ExecutionContextV1) -> Result<String> {
+    loop {
+        let serialized = to_json_pretty(context)?;
+        if serialized.len() <= EXECUTION_CONTEXT_MAX_BYTES {
+            return Ok(serialized);
+        }
+        if context.historical_artifacts.pop().is_some() {
+            context.omitted.historical_artifacts += 1;
+        } else if context.current_findings.pop().is_some() {
+            context.omitted.current_findings += 1;
+        } else if context.executed_commands.pop().is_some() {
+            context.omitted.executed_commands += 1;
+        } else if context.changed_files.pop().is_some() {
+            context.omitted.changed_files += 1;
+        } else if context.unresolved_steps.pop().is_some() {
+            context.omitted.unresolved_steps += 1;
+        } else if context.passing_evidence.pop().is_some() {
+            context.omitted.passing_evidence += 1;
+        } else {
+            anyhow::bail!("execution context core exceeds {EXECUTION_CONTEXT_MAX_BYTES} bytes");
+        }
+    }
+}
+
+fn execution_context_findings(input_artifacts: &[PathBuf]) -> Vec<ExecutionContextFinding> {
+    let mut findings = BTreeMap::new();
+    for path in input_artifacts.iter().filter(|path| {
+        path.file_name().is_some_and(|name| {
+            name == "review.md" || name.to_string_lossy().starts_with("review-")
+        })
+    }) {
+        let role = crate::review::REVIEWERS
+            .iter()
+            .find(|role| {
+                path.display()
+                    .to_string()
+                    .contains(&format!("review-{role}"))
+            })
+            .copied()
+            .unwrap_or("unknown")
+            .to_string();
+        let source = fs::read_to_string(path).unwrap_or_default();
+        for title in crate::review::open_finding_titles(&source) {
+            let identity = crate::review::finding_identity(&role, &title);
+            findings
+                .entry((role.clone(), identity.clone()))
+                .or_insert(ExecutionContextFinding {
+                    role: truncate_utf8(&role, 64),
+                    identity: truncate_utf8(&identity, 128),
+                    title: truncate_utf8(&title, 400),
+                    artifact: truncate_utf8(&path.display().to_string(), 240),
+                });
+        }
+    }
+    findings.into_values().collect()
+}
+
+fn execution_context_evidence(
+    input_artifacts: &[PathBuf],
+    candidate_commit: &str,
+) -> (Vec<ExecutionContextEvidence>, Vec<String>) {
+    let mut evidence = Vec::new();
+    let mut commands = BTreeSet::new();
+    for path in input_artifacts.iter().filter(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "tester-results.json")
+    }) {
+        let Ok(source) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+            continue;
+        };
+        for command in value["commands"].as_array().into_iter().flatten() {
+            if let Some(command) = command["command"].as_str() {
+                commands.insert(truncate_utf8(command, 500));
+            }
+        }
+        if value["candidate_commit"].as_str() == Some(candidate_commit)
+            && value["error"].is_null()
+            && value["summary"]["fail"].as_u64() == Some(0)
+        {
+            evidence.push(ExecutionContextEvidence {
+                path: truncate_utf8(&path.display().to_string(), 240),
+                summary: format!(
+                    "{} passing tests",
+                    value["summary"]["pass"].as_u64().unwrap_or(0)
+                ),
+            });
+        }
+    }
+    (evidence, commands.into_iter().collect())
 }
 
 #[derive(Default, Debug, Clone)]
@@ -4878,7 +5103,6 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     let evidence_candidate_commit = evidence_context
         .map(|context| context.candidate_commit.as_str())
         .unwrap_or("");
-    let reviewer_prior_reviews_list = prior_reviews_block(&reviewer_prior_reviews, "");
     let reviewer_has_prior_reviews = if reviewer_prior_reviews.is_empty() {
         ""
     } else {
@@ -4950,6 +5174,31 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         candidate_reviewer_cache_dir(input.project_root, &review_context.candidate_commit)
             .display()
             .to_string();
+    let unresolved_steps = fs::read_to_string(&reviewer_progress_md_path)
+        .ok()
+        .map(|source| unresolved_progress_steps(&source))
+        .unwrap_or_default();
+    let context_base_commit = review_context.base_commit.clone().or_else(|| {
+        let base = git_stdout(
+            candidate_workspace,
+            &[
+                "merge-base",
+                &review_context.source_branch,
+                &review_context.candidate_commit,
+            ],
+        );
+        (!base.is_empty()).then_some(base)
+    });
+    let execution_context_path = write_execution_context(
+        input.artifact_dir,
+        candidate_workspace,
+        &review_context.candidate_commit,
+        context_base_commit.as_deref(),
+        &unresolved_steps,
+        input.input_artifacts,
+    )?
+    .display()
+    .to_string();
 
     let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
 
@@ -4993,7 +5242,6 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("is_review_behaviors", is_review_behaviors_value),
             ("is_review_architecture", is_review_architecture_value),
             ("is_review_documentation", is_review_documentation_value),
-            ("prior_reviews_list", &reviewer_prior_reviews_list),
             ("work_item_inputs_list", &work_item_inputs_list),
             (
                 "candidate_workspace_path",
@@ -5011,6 +5259,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("review_path", &review_path_display),
             ("artifact_dir", &artifact_dir_display),
             ("reviewer_cache_dir", &reviewer_cache_dir),
+            ("execution_context_path", &execution_context_path),
             ("decisions_path", &decisions_path),
         ],
     )
@@ -10670,7 +10919,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_prompt_uses_distinct_bullets_for_optional_inputs() {
+    fn reviewer_prompt_uses_generated_context_for_prior_findings() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let workspace = tmp.path().join("candidate");
@@ -10694,7 +10943,7 @@ mod tests {
             artifact_dir: &artifact_dir,
             review_path: &artifact_dir.join("review.md"),
             readable_workspaces: std::slice::from_ref(&workspace),
-            input_artifacts: &[input_path, prior_review],
+            input_artifacts: &[input_path, prior_review.clone()],
             review_only: false,
         })
         .unwrap();
@@ -10702,7 +10951,12 @@ mod tests {
         assert!(
             prompts
                 .review_prompt
-                .contains("- Read each prior review file")
+                .contains("Treat the deduplicated current findings in the generated context")
+        );
+        assert!(
+            !prompts
+                .review_prompt
+                .contains(&prior_review.display().to_string())
         );
         assert!(
             prompts
@@ -11077,11 +11331,135 @@ mod tests {
             "prompt should tell reviewer not to write to candidate"
         );
         assert!(prompts.review_prompt.contains("exact candidate commit"));
+        let execution_context = artifact_dir.join("execution-context.json");
+        assert!(execution_context.is_file());
+        assert!(
+            prompts
+                .review_prompt
+                .contains(&execution_context.display().to_string())
+        );
         assert!(!prompts.review_prompt.contains(".fluent/runs/"));
         // System prompt is now thin (identity + lifecycle); build cache + artifact details live in the user message.
         assert!(!prompts.system_prompt.contains("CARGO_TARGET_DIR"));
         assert!(!prompts.system_prompt.contains("pre-populated"));
         assert!(!prompts.system_prompt.contains(".fluent/runs/"));
+    }
+
+    #[test]
+    fn execution_context_deduplicates_findings_and_summarizes_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let artifact = tmp.path().join("artifact");
+        let first_review = tmp.path().join("attempt-1-review-tests/review.md");
+        let second_review = tmp.path().join("attempt-2-review-tests/review.md");
+        let tester = tmp.path().join("tester-results.json");
+        let stale_tester = tmp.path().join("prior/tester-results.json");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(first_review.parent().unwrap()).unwrap();
+        fs::create_dir_all(second_review.parent().unwrap()).unwrap();
+        fs::write(
+            &first_review,
+            "Verdict: fail\n\n- [ ] Fix duplicate boundary (blocking)\n",
+        )
+        .unwrap();
+        fs::write(
+            &second_review,
+            "Verdict: fail\n\n- [ ] Fix duplicate boundary (blocking)\n",
+        )
+        .unwrap();
+        fs::write(
+            &tester,
+            r#"{
+  "candidate_commit": "abc123",
+  "commands": [{"command": "cargo nextest run", "exit_code": 0}],
+  "tests": [{"id": "boundary", "status": "pass"}],
+  "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+  "error": null
+}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(stale_tester.parent().unwrap()).unwrap();
+        fs::write(
+            &stale_tester,
+            r#"{
+  "candidate_commit": "stale123",
+  "commands": [{"command": "cargo nextest run", "exit_code": 0}],
+  "tests": [{"id": "boundary", "status": "pass"}],
+  "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+  "error": null
+}"#,
+        )
+        .unwrap();
+
+        let context_path = write_execution_context(
+            &artifact,
+            &workspace,
+            "abc123",
+            Some("base123"),
+            &["finish context schema".to_string()],
+            &[first_review, second_review, tester, stale_tester],
+        )
+        .unwrap();
+        let context: ExecutionContextV1 =
+            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+
+        assert_eq!(context.current_findings.len(), 1);
+        assert_eq!(context.current_findings[0].role, "tests");
+        assert!(context.current_findings[0].identity.starts_with("sha256:"));
+        assert_eq!(context.passing_evidence.len(), 1);
+        assert_eq!(context.passing_evidence[0].summary, "1 passing tests");
+        assert_eq!(context.executed_commands, ["cargo nextest run"]);
+        assert_eq!(context.historical_artifacts.len(), 4);
+        assert_eq!(context.omitted.current_findings, 0);
+    }
+
+    #[test]
+    fn execution_context_is_bounded_and_reports_omissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let artifact = tmp.path().join("artifact");
+        let review = tmp.path().join("attempt-review-tests/review.md");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(review.parent().unwrap()).unwrap();
+        let findings = (0..100)
+            .map(|index| {
+                format!(
+                    "- [ ] Finding {index}: {} (blocking)",
+                    "context that must not be reinjected ".repeat(100)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&review, format!("Verdict: fail\n\n{findings}\n")).unwrap();
+        let mut inputs = vec![review];
+        inputs.extend((0..200).map(|index| tmp.path().join(format!("history-{index}.json"))));
+        let unresolved = (0..100)
+            .map(|index| format!("step {index}: {}", "large unresolved detail ".repeat(100)))
+            .collect::<Vec<_>>();
+
+        let context_path = write_execution_context(
+            &artifact,
+            &workspace,
+            "abc123",
+            Some("base123"),
+            &unresolved,
+            &inputs,
+        )
+        .unwrap();
+        let source = fs::read_to_string(&context_path).unwrap();
+        let context: ExecutionContextV1 = serde_json::from_str(&source).unwrap();
+
+        assert!(source.len() <= EXECUTION_CONTEXT_MAX_BYTES);
+        assert!(context.unresolved_steps.len() <= EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS);
+        assert!(context.current_findings.len() <= EXECUTION_CONTEXT_MAX_FINDINGS);
+        assert!(context.historical_artifacts.len() <= EXECUTION_CONTEXT_MAX_ARTIFACTS);
+        assert!(context.omitted.unresolved_steps > 0);
+        assert!(context.omitted.current_findings > 0);
+        assert!(context.omitted.historical_artifacts > 0);
+        assert!(
+            inputs[0].is_file(),
+            "historical review evidence remains intact"
+        );
     }
 
     #[test]
@@ -11689,16 +12067,38 @@ mod tests {
             std::slice::from_ref(&finding),
             workspace.path(),
             project.path(),
-        );
+        )
+        .unwrap();
 
         assert!(prompt.contains("step-2 — Still open"));
         assert!(prompt.contains("keep this constraint"));
         assert!(!prompt.contains("step-1 — Done"));
-        assert!(prompt.contains(&finding.display().to_string()));
         assert!(prompt.contains(&progress.display().to_string()));
-        assert!(prompt.contains("candidate.txt"));
-        assert!(prompt.contains("new candidate content"));
+        let context_path = project.path().join(
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution-context.json",
+        );
+        assert!(prompt.contains(&context_path.display().to_string()));
+        assert!(!prompt.contains("new candidate content"));
+        assert!(!prompt.contains("Fix the boundary"));
         assert!(!prompt.contains("{{"));
+
+        let context: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+        assert_eq!(context["schema-version"], 1);
+        assert_eq!(context["candidate-commit"].as_str().unwrap().len(), 40);
+        assert_eq!(
+            context["changed-files"],
+            serde_json::json!(["candidate.txt"])
+        );
+        assert_eq!(
+            context["unresolved-steps"],
+            serde_json::json!(["step-2 — Still open\n  - keep this constraint"])
+        );
+        assert_eq!(context["current-findings"][0]["title"], "Fix the boundary");
+        assert_eq!(
+            context["historical-artifacts"],
+            serde_json::json!([finding.display().to_string()])
+        );
     }
 
     #[test]

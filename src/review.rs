@@ -13,6 +13,49 @@ pub const REVIEWERS: &[&str] = &[
     "tests",
 ];
 
+/// Return a stable identity for one open finding within a reviewer role.
+pub fn finding_identity(role: &str, title: &str) -> String {
+    let title_without_status = title
+        .rfind(" (")
+        .and_then(|start| {
+            let suffix = title[start..].to_ascii_lowercase();
+            (suffix.ends_with(')')
+                && ["blocking", "minor", "partial"]
+                    .iter()
+                    .any(|marker| suffix.contains(marker)))
+            .then_some(&title[..start])
+        })
+        .unwrap_or(title);
+    let normalized = title_without_status
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::follow_up::content_digest(format!("{role}\n{normalized}").as_bytes())
+}
+
+/// Extract unchecked finding titles from a review report.
+pub fn open_finding_titles(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("- [ ]"))
+        .map(|line| {
+            line.trim_start()
+                .trim_start_matches("- [ ]")
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
 /// Verdict from a single reviewer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -322,6 +365,23 @@ pub fn extract_progress(content: &str) -> Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finding_identity_ignores_review_status_annotations() {
+        let blocking = finding_identity("tests", "Fix stable boundary (blocking)");
+        let partial = finding_identity(
+            "tests",
+            "Fix stable boundary (blocking, partial — assertion still missing)",
+        );
+        let minor = finding_identity("tests", "Fix stable boundary (minor)");
+
+        assert_eq!(blocking, partial);
+        assert_eq!(blocking, minor);
+        assert_ne!(
+            blocking,
+            finding_identity("architecture", "Fix stable boundary")
+        );
+    }
 
     #[test]
     fn test_extract_verdict_pass() {

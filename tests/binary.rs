@@ -16255,6 +16255,9 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
     assert!(stdout.starts_with("{\n"));
     assert!(stdout.contains("  \"id\": \"work-1\""));
     assert!(stdout.contains("  \"title\": \"Inspect work item\""));
+    assert!(stdout.contains("  \"metrics\": {"));
+    assert!(stdout.contains("    \"review-rounds\": 0"));
+    assert!(stdout.contains("    \"artifact-bytes\": 0"));
     assert!(stdout.ends_with('\n'));
 }
 

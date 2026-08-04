@@ -356,12 +356,25 @@ pub fn log_usage_from_transcript(
         return;
     }
 
+    if let Err(error) = persist_task_usage(transcript_path, &rows) {
+        eprintln!("warning: task usage persistence failed: {error}");
+    }
+
     if let Err(e) = append_rows(&rows) {
         eprintln!("warning: usage logging failed: {e}");
     }
     if let Err(e) = recompute_summary() {
         eprintln!("warning: usage summary update failed: {e}");
     }
+}
+
+fn persist_task_usage(transcript_path: &Path, rows: &[UsageRow]) -> Result<()> {
+    let artifact_dir = transcript_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("transcript path has no artifact directory"))?;
+    let path = artifact_dir.join("usage.json");
+    crate::atomic_write::atomic_write(&path, serde_json::to_string_pretty(rows)?.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -969,5 +982,33 @@ mod tests {
         fs::write(&path, "").unwrap();
 
         log_usage_from_transcript(&path, "claude", "wi-1", "a1", "t1");
+    }
+
+    #[test]
+    fn task_usage_is_persisted_beside_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        fs::write(&transcript, "").unwrap();
+        let rows = vec![UsageRow {
+            ts: "2026-08-03T10:00:00Z".to_string(),
+            coder: "codex".to_string(),
+            work_item_id: "work-1".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            task_id: "attempt-1-write-1".to_string(),
+            model: "gpt-5".to_string(),
+            input_tokens: 120,
+            output_tokens: 30,
+            cached_input_tokens: 0,
+            reasoning_output_tokens: None,
+            duration_ms: Some(2_000),
+        }];
+
+        persist_task_usage(&transcript, &rows).unwrap();
+
+        let stored: Vec<UsageRow> =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("usage.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].input_tokens, 120);
     }
 }

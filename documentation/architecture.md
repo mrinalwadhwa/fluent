@@ -155,7 +155,14 @@ was initial, pre-review continuation, or post-review corrective work. Codex
 Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
 Claude Writers resume with `--resume <session-id>`. A missing or provider-mismatched
 identity starts a fresh persistent session. Continuation prompts contain only
-unresolved progress, the latest candidate change, and current findings. Two
+unresolved progress plus a path to a generated `execution-context.json`. The
+versioned context records candidate/base commits, changed files, unresolved
+steps, current findings deduplicated by role and stable identity, passing Tester
+evidence, executed commands, and historical artifact paths. Its collections and
+serialized size are bounded; omission counts make truncation visible. Full
+historical artifacts remain unchanged for audit and are opened by path only when
+needed. Review prompts use the same generated context instead of reinjecting
+prior review bodies. Two
 consecutive pre-review continuations that create commits without checking more
 required work pause for user inspection. A no-change incomplete Writer also
 pauses. A malformed, unknown, duplicate, rewritten, or regressed manifest pauses
@@ -257,6 +264,14 @@ exact candidate commit. Reviewers consume that result as their default
 executable evidence. Architecture, behaviors, skills, and documentation
 reviewers do not rerun full suites. The tests reviewer may run one named check
 when the evidence lacks a result needed for a concrete finding.
+
+Status and `work-item show` expose cycle-cost measurements alongside lifecycle
+state: review rounds, summed duration of completed Tasks, input/output tokens
+read from the small `usage.json` summary persisted beside each project-local
+coder transcript, repeated stable findings,
+artifact bytes, and pre-review continuation cycles that avoided premature Tester
+and review work. Local reconstruction keeps the measurements reproducible and
+prevents identically named Work Items in other projects from contaminating them.
 
 That focused check uses one project cache keyed by the candidate commit under
 `.fluent/work/cache/reviewers/`; reviewer artifact areas never receive private

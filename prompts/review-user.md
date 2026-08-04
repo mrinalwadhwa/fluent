@@ -30,16 +30,22 @@ failed review at {{evidence_prior_review_path}} for commit
 2. Read Behaviors at {{behaviors_path}} — EARS statements describing observable changes in behavior.
 3. Read Approach at {{approach_path}} — technical direction the implementation should have followed.
 4. Read Plan at {{plan_path}} — incremental steps the implementation should have followed.
-5. Read the expertise indexes. Each index is a list of expertise files you can load as needed in Phase 3.
+5. Read the generated current context at {{execution_context_path}}. It contains
+   exact candidate/base commits, changed files, unresolved steps, deduplicated
+   current findings, passing evidence, executed commands, and historical artifact
+   paths. Open a historical artifact only when the current review needs its detail.
+6. Read the expertise indexes. Each index is a list of expertise files you can load as needed in Phase 3.
    - {{general_expertise_index}} — architecture, testing, documentation, tooling
 {{#if has_project_expertise_index}}
    - {{project_expertise_index}} — workspace-specific decisions, conventions, patterns
 {{/if}}
 {{#if decisions_path}}
-6. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
+7. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
 {{/if}}
 {{#if has_prior_reviews}}
-- Read each prior review file. The list below is the complete set of {{role}} reviews from the most recent prior round: {{prior_reviews_list}}
+- Treat the deduplicated current findings in the generated context as the prior
+  findings for this role. The context names the source artifact for each finding;
+  open that file only when the summarized title is insufficient to decide it.
 {{/if}}
 {{#if has_work_item_inputs}}
 - Read each preserved Work Item input. These immutable files are authoritative review inputs: {{work_item_inputs_list}}
@@ -73,7 +79,7 @@ failed review at {{evidence_prior_review_path}} for commit
    - Verify that user-facing docs read like polished prose, not a restated version of behaviors.md's EARS statements.
 {{/if}}
    {{#if has_prior_reviews}}
-   - For each finding in the prior reviews you read in Phase 1, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
+   - For each current finding for this role in the generated context, mark `- [x]` if the Writer addressed it; `- [ ]` if not. For partial credit, mark `- [ ]` and add "(partial — what's still incomplete)" to the title.
    - Add any new finding you identified as `- [ ]`.
    {{else}}
    - List each finding as `- [ ]`.

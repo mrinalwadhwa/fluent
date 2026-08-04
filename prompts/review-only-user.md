@@ -13,13 +13,17 @@ Review the codebase at {{candidate_workspace_path}}.
 ## Phase 1 — Understand the Work Item
 
 1. Read Brief at {{brief_path}} — what to review and why.
-2. Read the expertise indexes. Each index is a list of expertise files you can load as needed in Phase 3.
+2. Read the generated current context at {{execution_context_path}}. It contains
+   exact candidate/base commits, changed files, unresolved steps, deduplicated
+   current findings, passing evidence, executed commands, and historical artifact
+   paths. Open a historical artifact only when the current review needs its detail.
+3. Read the expertise indexes. Each index is a list of expertise files you can load as needed in Phase 3.
    - {{general_expertise_index}} — architecture, testing, documentation, tooling
 {{#if has_project_expertise_index}}
    - {{project_expertise_index}} — workspace-specific decisions, conventions, patterns
 {{/if}}
 {{#if decisions_path}}
-3. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
+4. Read recorded decisions at {{decisions_path}} — project-accepted choices not to flag in findings.
 {{/if}}
 {{#if has_work_item_inputs}}
 

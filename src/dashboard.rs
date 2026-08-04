@@ -331,6 +331,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: Vec::new(),
         });
@@ -367,6 +368,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: vec!["invalid Work Item file .fluent/work/items/broken-work.json".to_string()],
         });
@@ -393,6 +395,7 @@ mod tests {
                 merge: "pending review:pending".to_string(),
                 action: "learner-not-ready".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: Vec::new(),
         });
@@ -416,6 +419,7 @@ mod tests {
                 merge: "pending review:pending".to_string(),
                 action: "learner-blocked".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: Vec::new(),
         });

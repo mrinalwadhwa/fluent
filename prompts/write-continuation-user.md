@@ -8,19 +8,17 @@ Reference paths:
 - Behaviors: {{behaviors_path}}
 - Approach: {{approach_path}}
 - Plan: {{plan_path}}
+- Generated current context: {{execution_context_path}}
+
+Read the generated context first. It contains the exact candidate/base commits,
+changed files, unresolved steps, deduplicated current findings, passing Tester
+evidence, executed commands, and paths to historical artifacts. Inspect those
+paths or run `git show HEAD` only when you need the underlying detail.
 
 ## Unresolved work
 
 Progress file: {{progress_md_path}}
 
 {{unresolved_progress}}
-
-## Latest candidate change
-
-{{latest_change}}
-
-## Current findings
-
-{{current_findings}}
 
 Implement the unresolved work test-first. Make at least one candidate commit and update only genuinely completed required-progress entries with concrete evidence. Do not start or simulate Tester, reviewer, Learner, landing, or Fluent orchestration work.

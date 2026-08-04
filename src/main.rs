@@ -318,7 +318,8 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
         }
         WorkItemCommands::Show { id } => match store.read_work_item(&id) {
             Ok(item) => {
-                print!("{}", to_json_pretty(&item)?);
+                let output = work_status::work_item_show_value(&item, project_root)?;
+                print!("{}", to_json_pretty(&output)?);
                 if guidance::guidance_enabled() {
                     let row = work_status::summarize_work_item(&item, Some(project_root));
                     if let Some(hint) = guidance::next_action_for_status_row(&row) {

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 
 use crate::work_model::{
@@ -29,6 +31,19 @@ pub struct WorkItemStatus {
     pub action: String,
     /// An exact operator command for exceptional recovery states.
     pub next_action: Option<String>,
+    pub metrics: WorkMetrics,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct WorkMetrics {
+    pub review_rounds: usize,
+    pub stage_duration_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub repeated_findings: usize,
+    pub artifact_bytes: u64,
+    pub avoided_cycles: usize,
 }
 
 pub fn load_work_status(project_root: &Path) -> Result<WorkStatus, anyhow::Error> {
@@ -79,6 +94,131 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
         action: action_label_with_liveness(item, attempt, merge_candidate, project_root)
             .to_string(),
         next_action: evidence_recovery_next_action(attempt),
+        metrics: work_metrics(item, project_root),
+    }
+}
+
+pub fn work_metrics(item: &WorkItem, project_root: Option<&Path>) -> WorkMetrics {
+    let usage_rows = project_root
+        .map(|root| local_usage_rows(item, root))
+        .unwrap_or_default();
+    compute_work_metrics(item, project_root, &usage_rows)
+}
+
+pub fn work_item_show_value(
+    item: &WorkItem,
+    project_root: &Path,
+) -> serde_json::Result<serde_json::Value> {
+    let mut output = serde_json::to_value(item)?;
+    output["metrics"] = serde_json::to_value(work_metrics(item, Some(project_root)))?;
+    Ok(output)
+}
+
+fn compute_work_metrics(
+    item: &WorkItem,
+    project_root: Option<&Path>,
+    usage_rows: &[crate::usage::UsageRow],
+) -> WorkMetrics {
+    let mut metrics = WorkMetrics {
+        review_rounds: item
+            .attempts
+            .iter()
+            .flat_map(|attempt| &attempt.tasks)
+            .filter(|task| task.kind == TaskKind::Tester)
+            .count(),
+        avoided_cycles: item
+            .attempts
+            .iter()
+            .flat_map(|attempt| &attempt.writer_runs)
+            .filter(|run| run.kind == crate::work_model::WriterRunKind::PreReviewContinuation)
+            .count(),
+        ..Default::default()
+    };
+
+    metrics.stage_duration_ms = item
+        .attempts
+        .iter()
+        .flat_map(|attempt| &attempt.tasks)
+        .filter_map(task_duration_ms)
+        .fold(0_u64, u64::saturating_add);
+
+    for row in usage_rows.iter().filter(|row| row.work_item_id == item.id) {
+        metrics.input_tokens = metrics.input_tokens.saturating_add(row.input_tokens);
+        metrics.output_tokens = metrics.output_tokens.saturating_add(row.output_tokens);
+    }
+
+    let Some(project_root) = project_root else {
+        return metrics;
+    };
+    let artifact_root = project_root
+        .join(crate::work_model::WORK_ARTIFACTS_DIR)
+        .join(&item.id);
+    if artifact_root.is_dir() {
+        metrics.artifact_bytes = crate::prep::logical_bytes(&artifact_root).unwrap_or(0);
+    }
+
+    let mut findings_seen = HashSet::new();
+    for task in item
+        .attempts
+        .iter()
+        .flat_map(|attempt| &attempt.tasks)
+        .filter(|task| task.kind == TaskKind::Review)
+    {
+        let Some(area) = task.artifact_area.as_ref() else {
+            continue;
+        };
+        let path = project_root.join(&area.path).join("review.md");
+        let source = fs::read_to_string(path).unwrap_or_default();
+        for title in crate::review::open_finding_titles(&source) {
+            let identity = crate::review::finding_identity(&task.role, &title);
+            if !findings_seen.insert(identity) {
+                metrics.repeated_findings += 1;
+            }
+        }
+    }
+    metrics
+}
+
+fn task_duration_ms(task: &Task) -> Option<u64> {
+    let started = chrono::DateTime::parse_from_rfc3339(task.started_at.as_deref()?).ok()?;
+    let completed = chrono::DateTime::parse_from_rfc3339(task.completed_at.as_deref()?).ok()?;
+    u64::try_from((completed - started).num_milliseconds()).ok()
+}
+
+fn local_usage_rows(item: &WorkItem, project_root: &Path) -> Vec<crate::usage::UsageRow> {
+    let root = project_root
+        .join(crate::work_model::WORK_ARTIFACTS_DIR)
+        .join(&item.id);
+    let mut rows = Vec::new();
+    collect_local_usage_rows(&root, item, &mut rows);
+    rows
+}
+
+fn collect_local_usage_rows(
+    directory: &Path,
+    item: &WorkItem,
+    rows: &mut Vec<crate::usage::UsageRow>,
+) {
+    let usage_path = directory.join("usage.json");
+    if usage_path.is_file() {
+        let local_rows = fs::read_to_string(&usage_path)
+            .ok()
+            .and_then(|source| serde_json::from_str::<Vec<crate::usage::UsageRow>>(&source).ok())
+            .unwrap_or_default();
+        rows.extend(
+            local_rows
+                .into_iter()
+                .filter(|row| row.work_item_id == item.id),
+        );
+    }
+
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_local_usage_rows(&entry.path(), item, rows);
+        }
     }
 }
 
@@ -111,6 +251,16 @@ pub fn format_work_status(status: &WorkStatus) -> String {
                 row.action,
                 row.title
             ));
+            output.push_str(&format!(
+                "  metrics: rounds:{} duration:{}ms tokens:{}/{} repeated:{} artifacts:{}B avoided:{}\n",
+                row.metrics.review_rounds,
+                row.metrics.stage_duration_ms,
+                row.metrics.input_tokens,
+                row.metrics.output_tokens,
+                row.metrics.repeated_findings,
+                row.metrics.artifact_bytes,
+                row.metrics.avoided_cycles
+            ));
         }
     }
 
@@ -140,6 +290,16 @@ pub fn format_work_dashboard_lines(status: &WorkStatus) -> Vec<String> {
         lines.push(format!("  Review: {}", row.review));
         lines.push(format!("  Merge Candidate: {}", row.merge_candidate));
         lines.push(format!("  Merge: {}", row.merge));
+        lines.push(format!(
+            "  Metrics: rounds {} · duration {}ms · tokens {}/{} · repeated {} · artifacts {}B · avoided {}",
+            row.metrics.review_rounds,
+            row.metrics.stage_duration_ms,
+            row.metrics.input_tokens,
+            row.metrics.output_tokens,
+            row.metrics.repeated_findings,
+            row.metrics.artifact_bytes,
+            row.metrics.avoided_cycles
+        ));
         lines.push(String::new());
     }
     if !status.errors.is_empty() {
@@ -460,6 +620,92 @@ mod tests {
     }
 
     #[test]
+    fn metrics_are_derived_from_local_work_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut item = WorkItem {
+            id: "metrics-work".to_string(),
+            title: "Measure cycle cost".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.tasks[0].started_at = Some("2026-08-03T10:00:00Z".to_string());
+        attempt.tasks[0].completed_at = Some("2026-08-03T10:00:02Z".to_string());
+        attempt.writer_runs.push(crate::work_model::WriterRun {
+            task_id: attempt.tasks[0].id.clone(),
+            outcome: crate::work_model::WriterOutcome::Continue,
+            kind: crate::work_model::WriterRunKind::PreReviewContinuation,
+            provider: "codex".to_string(),
+            session_id: Some("thread-1".to_string()),
+            continuation: 1,
+            checked_required: 1,
+            candidate_commit: "abc123".to_string(),
+        });
+
+        let mut tester = attempt.tasks[0].clone();
+        tester.id = "attempt-1-test-1".to_string();
+        tester.kind = TaskKind::Tester;
+        tester.started_at = None;
+        tester.completed_at = None;
+        let mut first_review = tester.clone();
+        first_review.id = "attempt-1-review-tests-1".to_string();
+        first_review.kind = TaskKind::Review;
+        first_review.role = "tests".to_string();
+        first_review.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: format!(
+                "{}/metrics-work/attempt-1/attempt-1-review-tests-1",
+                crate::work_model::WORK_ARTIFACTS_DIR
+            ),
+        });
+        let mut second_review = first_review.clone();
+        second_review.id = "attempt-1-review-tests-2".to_string();
+        second_review.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: format!(
+                "{}/metrics-work/attempt-1/attempt-1-review-tests-2",
+                crate::work_model::WORK_ARTIFACTS_DIR
+            ),
+        });
+        attempt.tasks.extend([tester, first_review, second_review]);
+
+        for task_id in ["attempt-1-review-tests-1", "attempt-1-review-tests-2"] {
+            let dir = tmp
+                .path()
+                .join(crate::work_model::WORK_ARTIFACTS_DIR)
+                .join("metrics-work/attempt-1")
+                .join(task_id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("review.md"),
+                "Verdict: fail\n\n- [ ] Fix stable boundary (blocking)\n",
+            )
+            .unwrap();
+        }
+        let usage_dir = tmp
+            .path()
+            .join(crate::work_model::WORK_ARTIFACTS_DIR)
+            .join("metrics-work/attempt-1/attempt-1-write-1");
+        fs::create_dir_all(&usage_dir).unwrap();
+        fs::write(
+            usage_dir.join("usage.json"),
+            r#"[{"ts":"2026-08-03T10:00:02Z","coder":"codex","work_item_id":"metrics-work","attempt_id":"attempt-1","task_id":"attempt-1-write-1","model":"gpt-5","input_tokens":120,"output_tokens":30,"cached_input_tokens":0}]"#,
+        )
+        .unwrap();
+
+        let metrics = work_metrics(&item, Some(tmp.path()));
+
+        assert_eq!(metrics.review_rounds, 1);
+        assert_eq!(metrics.stage_duration_ms, 2_000);
+        assert_eq!(metrics.input_tokens, 120);
+        assert_eq!(metrics.output_tokens, 30);
+        assert_eq!(metrics.repeated_findings, 1);
+        assert!(metrics.artifact_bytes > 0);
+        assert_eq!(metrics.avoided_cycles, 1);
+        let show = work_item_show_value(&item, tmp.path()).unwrap();
+        assert_eq!(show["metrics"]["stage-duration-ms"], 2_000);
+        assert_eq!(show["metrics"]["input-tokens"], 120);
+    }
+
+    #[test]
     fn attempt_status_shows_writer_continuations_separately() {
         let mut attempt = Attempt::default();
         attempt.id = "attempt-1".to_string();
@@ -628,6 +874,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: vec!["invalid work model in bad.json".to_string()],
         };
@@ -654,6 +901,7 @@ mod tests {
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
                 next_action: None,
+                metrics: Default::default(),
             }],
             errors: Vec::new(),
         };
