@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
@@ -189,6 +188,12 @@ struct TaskStartReservation {
     model: Option<String>,
     effort: Option<String>,
     receipt: ReservationReceipt,
+}
+
+#[cfg(all(test, feature = "test-support"))]
+thread_local! {
+    static TEST_TESTER_ROLLBACK_PERSISTENCE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn plan_coder_kind(item: &WorkItem, attempt_id: &str, task_kind: TaskKind) -> Result<CoderKind> {
@@ -385,12 +390,8 @@ fn rollback_reservation(
     task_id: &str,
     receipt: &ReservationReceipt,
 ) -> Result<(), WorkModelStorageError> {
-    #[cfg(feature = "test-support")]
-    if std::env::var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE")
-        .ok()
-        .as_deref()
-        == Some("fail")
-    {
+    #[cfg(all(test, feature = "test-support"))]
+    if TEST_TESTER_ROLLBACK_PERSISTENCE_FAILURE.with(std::cell::Cell::get) {
         return Err(WorkModelStorageError::WriteFile {
             path: store.work_item_path(work_item_id)?,
             source: std::io::Error::other("test-injected Tester rollback persistence failure"),
@@ -1661,6 +1662,16 @@ fn capture_baseline_tester(
 }
 
 fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    run_tester_task_with_settlement_preparer(config, crate::tester::prepare_settlement_directories)
+}
+
+fn run_tester_task_with_settlement_preparer(
+    config: WorkTaskRunConfig<'_>,
+    prepare_settlement: impl FnOnce(
+        &Path,
+        &crate::tester::TesterPlan,
+    ) -> Result<crate::tester::TesterSettlement>,
+) -> Result<WorkTaskRunResult> {
     let lock_path =
         crate::lease::task_lock_path(config.project_root, config.work_item_id, config.task_id);
     let _lease = crate::lease::acquire(&lock_path)
@@ -1738,7 +1749,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         &reservation.receipt,
         || {
             fs::create_dir_all(&artifact_dir)?;
-            crate::tester::prepare_settlement_directories(&artifact_dir, &tester_plan)
+            prepare_settlement(&artifact_dir, &tester_plan)
         },
     ) {
         Ok(settlement) => settlement,
@@ -3454,13 +3465,7 @@ fn unresolved_progress_steps(source: &str) -> Vec<String> {
 }
 
 fn git_stdout(workspace: &Path, args: &[&str]) -> String {
-    Command::new("git")
-        .args(args)
-        .current_dir(workspace)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::git::run_stdout(workspace, args, "building bounded execution context")
         .unwrap_or_default()
 }
 
@@ -10521,32 +10526,32 @@ mod tests {
                 .unwrap()
                 .candidate_workspace_path,
         );
-        let artifact = project_root.join(&tester.artifact_area.as_ref().unwrap().path);
         fs::create_dir_all(workspace.join(".fluent")).unwrap();
         fs::write(
             workspace.join(".fluent/tester.yaml"),
             "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
         )
         .unwrap();
-        fs::create_dir_all(artifact.join("commands/settlement")).unwrap();
-        fs::write(artifact.join("commands/settlement/1"), "not a directory").unwrap();
         store.create_work_item(&item).unwrap();
 
-        unsafe { std::env::set_var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE", "fail") };
+        TEST_TESTER_ROLLBACK_PERSISTENCE_FAILURE.with(|value| value.set(true));
         let resolver = ContentResolver::new(Some(project_root));
-        let error = run_task(WorkTaskRunConfig {
-            project_root,
-            store: &store,
-            work_item_id: "work-1",
-            attempt_id: "attempt-1",
-            task_id: &tester.id,
-            resolver: &resolver,
-            extra_args: &[],
-            no_sandbox: true,
-            store_lock: None,
-        })
+        let error = run_tester_task_with_settlement_preparer(
+            WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: &tester.id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            |_, _| anyhow::bail!("test-injected Tester settlement preparation failure"),
+        )
         .expect_err("a rollback persistence failure must stop the Tester");
-        unsafe { std::env::remove_var("FLUENT_TEST_TESTER_ROLLBACK_PERSISTENCE") };
+        TEST_TESTER_ROLLBACK_PERSISTENCE_FAILURE.with(|value| value.set(false));
 
         assert!(
             error.to_string().contains("normalize the reserved Task"),
@@ -12022,23 +12027,26 @@ mod tests {
             });
         let project = tempfile::TempDir::new().unwrap();
         let workspace = tempfile::TempDir::new().unwrap();
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initializing test repository",
+        )
+        .unwrap();
         fs::write(
             workspace.path().join("candidate.txt"),
             "new candidate content\n",
         )
         .unwrap();
-        Command::new("git")
-            .args(["add", "candidate.txt"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
+        crate::git::run(
+            workspace.path(),
+            &["add", "candidate.txt"],
+            "staging test candidate",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &[
                 "-c",
                 "user.name=Fluent Test",
                 "-c",
@@ -12047,10 +12055,10 @@ mod tests {
                 "-q",
                 "-m",
                 "Add candidate",
-            ])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+            ],
+            "committing test candidate",
+        )
+        .unwrap();
         let progress = progress_md_path_for(project.path(), "work-1", "attempt-1");
         fs::create_dir_all(progress.parent().unwrap()).unwrap();
         fs::write(

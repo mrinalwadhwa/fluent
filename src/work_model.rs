@@ -6701,6 +6701,83 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(combined.required_plan_steps(), 2);
+
+        let boundary = context.scope_assessment(2, false).unwrap();
+        assert!(!boundary.is_large());
+        assert_eq!(boundary.recommended_slices, 1);
+    }
+
+    #[test]
+    fn planning_scope_assessment_is_immutable_after_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("bounded", "Bounded work");
+        item.planning_context = Some(PlanningContext {
+            plan: Some(
+                "| # | State reached | Req? |\n\
+                 |---|---------------|------|\n\
+                 | 1 | First | Yes |\n\
+                 | 2 | Second | Yes |\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+        item.planning_scope = item
+            .planning_context
+            .as_ref()
+            .and_then(|context| context.scope_assessment(2, false));
+        store.create_work_item(&item).unwrap();
+
+        item.planning_scope.as_mut().unwrap().limit = 3;
+        let error = store.write_work_item(&item).unwrap_err();
+        assert!(error.to_string().contains("intake diagnostic is immutable"));
+
+        let stored = store.read_work_item("bounded").unwrap();
+        assert_eq!(stored.planning_scope.unwrap().limit, 2);
+    }
+
+    #[test]
+    fn intake_contracts_cannot_be_added_after_first_attempt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("started", "Started work");
+        store.create_work_item(&item).unwrap();
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.write_work_item(&item).unwrap();
+
+        let plan = PlanningContext {
+            plan: Some(
+                "| # | State reached | Req? |\n\
+                 |---|---------------|------|\n\
+                 | 1 | First | Yes |\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        item.planning_scope = plan.scope_assessment(12, false);
+        item.planning_context = Some(plan);
+        let scope_error = store.write_work_item(&item).unwrap_err();
+        assert!(
+            scope_error
+                .to_string()
+                .contains("scope authorization must be defined before the first Attempt")
+        );
+
+        item.planning_context = None;
+        item.planning_scope = None;
+        item.release_contract = Some(
+            ReleaseContract::new(vec![ReleaseCriterion {
+                id: "tests-pass".to_string(),
+                statement: "Configured tests pass".to_string(),
+            }])
+            .unwrap(),
+        );
+        let release_error = store.write_work_item(&item).unwrap_err();
+        assert!(
+            release_error
+                .to_string()
+                .contains("release acceptance must be defined before the first Attempt")
+        );
     }
 
     #[test]

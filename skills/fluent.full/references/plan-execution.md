@@ -159,10 +159,26 @@ combined scope; Fluent records that authorization with the diagnostic.
 
 For a release exercise, define acceptance before creation. Add `--release` and
 one repeatable `--release-criterion '<id>=<accepted outcome>'` per criterion to
-the create command. During the exercise, record discoveries with
-`fluent work-item classify-finding <work-item-id> --finding-id <id> --summary
-'<summary>'`. That defaults to proposed follow-up work. Add `--blocker-for
-<criterion-id>` only when the finding directly prevents an accepted criterion.
+the create command:
+
+```sh
+fluent work-item create <work-item-id> \
+  --title '<title>' \
+  --plan-file <plan-path> \
+  --release \
+  --release-criterion '<id>=<accepted outcome>'
+```
+
+During the exercise, record discoveries as proposed follow-up work by default:
+
+```sh
+fluent work-item classify-finding <work-item-id> \
+  --finding-id <id> \
+  --summary '<summary>'
+```
+
+Add `--blocker-for <criterion-id>` only when the finding directly prevents an
+accepted criterion.
 
 ## Plan format
 

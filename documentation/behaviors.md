@@ -155,16 +155,21 @@ Test: tests/binary.rs (version_flag_matches_version_subcommand)
 
 WHEN a stored Attempt contains `host-sandbox`, `tester-harness`, or an unknown
 future pause-kind string, THE SYSTEM SHALL deserialize the Work Item without
-discarding or rewriting that string, and read-only status, list, and show commands
-SHALL display the state with an upgrade warning for the unknown value.
+discarding or rewriting that string.
 Test: src/work_model.rs (known_and_future_pause_kinds_preserve_their_wire_values)
 Test: src/work_model.rs (host_sandbox_pause_round_trips_through_storage)
 Test: src/work_model.rs (tester_harness_pause_round_trips_through_storage)
 Test: src/work_model.rs (unknown_pause_is_readable_but_mutation_fails_closed)
+
+### B2
+
+WHEN a stored Attempt contains an unknown future pause-kind string, THE SYSTEM
+SHALL display the state through read-only status, list, and show commands with an
+upgrade warning.
 Test: src/work_status.rs (unknown_pause_is_visible_with_upgrade_warning)
 Test: tests/binary.rs (read_only_commands_show_future_pause_but_attempt_run_fails_closed)
 
-### B2
+### B3
 
 WHEN a Work Item contains an unknown pause kind, THE SYSTEM SHALL reject Task,
 Attempt, landing, model, and cleanup mutations before changing that Work Item or
@@ -173,15 +178,24 @@ Test: src/work_model.rs (unknown_pause_is_readable_but_mutation_fails_closed)
 Test: src/cleanup.rs (unknown_pause_work_item_is_not_a_cleanup_candidate)
 Test: tests/binary.rs (read_only_commands_show_future_pause_but_attempt_run_fails_closed)
 
-### B3
+### B4
 
 WHEN Fluent writes a Work Item record, THE SYSTEM SHALL record the current Fluent
-package version as its model writer version; IF an installed binary reads a Work
-Item written by a newer semantic version, THEN read-only commands SHALL warn and
-mutating operations SHALL fail closed until Fluent is upgraded.
+package version as its model writer version.
 Test: src/work_model.rs (attempt_pause_kind_round_trips_through_storage)
+
+### B5
+
+IF an installed binary reads a Work Item written by a newer semantic version,
+THEN read-only commands SHALL display an upgrade warning.
 Test: src/work_model.rs (newer_model_writer_version_warns_and_blocks_mutation)
 Test: tests/binary.rs (read_only_commands_warn_when_model_writer_is_newer)
+
+### B6
+
+IF an installed binary tries to mutate a Work Item written by a newer semantic
+version, THEN THE SYSTEM SHALL reject the mutation until Fluent is upgraded.
+Test: src/work_model.rs (newer_model_writer_version_warns_and_blocks_mutation)
 
 ## Planning and release guardrails
 
@@ -198,22 +212,33 @@ Test: src/work_model.rs (planning_scope_counts_only_required_plan_rows)
 IF required Plan rows exceed the configured scope limit and the operator has not
 passed `--authorize-large-scope`, THEN THE SYSTEM SHALL reject Work creation
 without writing Work state, report the count and limit, and recommend the minimum
-number of independently landable slices; WHEN the operator explicitly authorizes
-the scope, THE SYSTEM SHALL persist the diagnostic and authorization.
+number of independently landable slices.
 Test: tests/binary.rs (large_scope_requires_explicit_authorization_and_records_diagnostic)
 
 ### B3
+
+WHEN the operator explicitly authorizes a Plan above the configured scope limit,
+THE SYSTEM SHALL persist the scope diagnostic and authorization.
+Test: tests/binary.rs (large_scope_requires_explicit_authorization_and_records_diagnostic)
+
+### B4
 
 WHEN a release Work Item is created, THE SYSTEM SHALL require and persist one or
 more accepted release criteria before execution can begin.
 Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
 
-### B4
+### B5
 
 WHEN an operator classifies a finding for release Work, THE SYSTEM SHALL keep it
-as a proposed follow-up by default; IF the operator classifies it as a release
-blocker, THEN THE SYSTEM SHALL require an exact mapping to an accepted release
-criterion and reject an unknown mapping without recording the finding.
+as a proposed follow-up by default.
+Test: src/work_model.rs (release_findings_fail_closed_unless_mapped_to_accepted_criteria)
+Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
+
+### B6
+
+IF the operator classifies a finding as a release blocker, THEN THE SYSTEM SHALL
+require an exact mapping to an accepted release criterion and reject an unknown
+mapping without recording the finding.
 Test: src/work_model.rs (release_findings_fail_closed_unless_mapped_to_accepted_criteria)
 Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
 

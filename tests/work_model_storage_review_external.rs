@@ -207,7 +207,8 @@ fn reviewer_storage_writes_documented_deterministic_json() {
         fs::read_to_string(path).unwrap(),
         r#"{
   "id": "work-review",
-  "title": "Review durable storage"
+  "title": "Review durable storage",
+  "model_writer_version": "0.1.4"
 }
 "#
     );

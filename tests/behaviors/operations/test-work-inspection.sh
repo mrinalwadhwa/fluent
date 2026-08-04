@@ -244,11 +244,15 @@ test_work_show_outputs_pretty_json() {
 
   OUTPUT="$("$FLUENT_BIN" work-item show work-alpha 2>&1)"
   RESULT=0
-  assert_contains "$OUTPUT" '{' || RESULT=1
-  assert_contains "$OUTPUT" '  "id": "work-alpha",' || RESULT=1
-  assert_contains "$OUTPUT" '  "title": "Alpha title",' || RESULT=1
-  assert_contains "$OUTPUT" '  "attempts": []' || RESULT=1
-  assert_contains "$OUTPUT" '}' || RESULT=1
+  if ! jq -e '
+    .id == "work-alpha" and
+    .title == "Alpha title" and
+    .attempts == []
+  ' <<< "$OUTPUT" > /dev/null; then
+    printf '    FAIL: output is not the expected Work Item JSON\n'
+    printf '    Output:\n%s\n' "$OUTPUT"
+    RESULT=1
+  fi
 
   cleanup_test_project
   return $RESULT

@@ -340,8 +340,8 @@ test_dashboard_surfaces_needs_user_work() {
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
   assert_contains "$OUTPUT" "Actionable" || RESULT=1
   assert_contains "$OUTPUT" "work-needs-user - Needs User Work" || RESULT=1
-  assert_contains "$OUTPUT" "needs-user" || RESULT=1
-  assert_contains "$OUTPUT" "Attempt: attempt-needs-user [needs-user]" || RESULT=1
+  assert_contains "$OUTPUT" "Attempt: attempt-needs-user" || RESULT=1
+  assert_contains "$OUTPUT" "needs-user; pause:uncertain" || RESULT=1
   return $RESULT
 }
 

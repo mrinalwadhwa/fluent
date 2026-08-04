@@ -165,22 +165,29 @@ pub(crate) struct ProcessSettlement {
 
 impl ProcessSettlement {
     pub(crate) fn prepare_directory(directory: PathBuf) -> Result<PathBuf> {
+        let existed = directory.exists();
         std::fs::create_dir_all(&directory)
             .with_context(|| format!("creating settlement directory {}", directory.display()))?;
-        std::fs::canonicalize(&directory).with_context(|| {
-            format!(
-                "canonicalizing settlement directory {}",
+        if !directory.is_dir() {
+            anyhow::bail!(
+                "settlement path {} exists but is not a directory",
                 directory.display()
-            )
-        })
-    }
-
-    pub(crate) fn begin(
-        directory: PathBuf,
-        collector: &dyn ProcessInventoryCollector,
-    ) -> Result<Self> {
-        let directory = Self::prepare_directory(directory)?;
-        Self::begin_prepared(directory, collector)
+            );
+        }
+        match std::fs::canonicalize(&directory) {
+            Ok(directory) => Ok(directory),
+            Err(source) => {
+                if !existed {
+                    let _ = std::fs::remove_dir_all(&directory);
+                }
+                Err(source).with_context(|| {
+                    format!(
+                        "canonicalizing settlement directory {}",
+                        directory.display()
+                    )
+                })
+            }
+        }
     }
 
     pub(crate) fn begin_prepared(

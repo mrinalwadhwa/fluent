@@ -162,15 +162,14 @@ evidence, executed commands, and historical artifact paths. Its collections and
 serialized size are bounded; omission counts make truncation visible. Full
 historical artifacts remain unchanged for audit and are opened by path only when
 needed. Review prompts use the same generated context instead of reinjecting
-prior review bodies. Two
-consecutive pre-review continuations that create commits without checking more
+prior review bodies. Two consecutive pre-review continuations that create
+commits without checking more
 required work pause for user inspection. A no-change incomplete Writer also
 pauses. A malformed, unknown, duplicate, rewritten, or regressed manifest pauses
 for user repair. An Attempt without a progress contract keeps the legacy
 transition. Only a reconciled candidate reaches Tester and reviewer planning.
 Those Tasks use the Writer output that exists before Learning; after Learning,
-landing consumes the
-current `TaskOutput.commit`.
+landing consumes the current `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and
 untracked changes outside `.fluent/`. If it finds any, it reports Git's
@@ -350,9 +349,16 @@ write Task. Uncertain verdicts without failures mark the Attempt
 
 ### Host evidence recovery
 
-An operator can attach trusted host-run proof to an unchanged candidate with
-`fluent attempt evidence attach <work-item> <attempt> --candidate <sha>
---evidence-file <path> --review-artifact <path>...`. The evidence file is a
+An operator can attach trusted host-run proof to an unchanged candidate:
+
+```sh
+fluent attempt evidence attach <work-item> <attempt> \
+  --candidate <sha> \
+  --evidence-file <path> \
+  --review-artifact <path>...
+```
+
+The evidence file is a
 schema-version-1 JSON document containing `producer`, `check`,
 `working_directory`, `result` (`pass` or `fail`), RFC3339 `run_at`, and captured
 `output`. Fluent validates and snapshots its exact bytes under the Attempt's

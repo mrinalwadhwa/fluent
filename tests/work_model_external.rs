@@ -638,7 +638,8 @@ fn work_model_store_writes_deterministic_pretty_json() {
         content,
         r#"{
   "id": "work-1",
-  "title": "Add durable model storage"
+  "title": "Add durable model storage",
+  "model_writer_version": "0.1.4"
 }
 "#
     );
@@ -664,8 +665,8 @@ fn work_model_store_writes_deterministic_pretty_json() {
 
 #[test]
 fn capture_mode_preserves_minimal_work_item_json() {
-    // The default `capture` Learner mode is omitted from the split record so a
-    // minimal Work Item stays byte-identical to legacy `{id, title}` storage.
+    // The default `capture` Learner mode is omitted from the split record while
+    // every successful write stamps the current model writer version.
     let temp = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(temp.path());
 
@@ -683,7 +684,8 @@ fn capture_mode_preserves_minimal_work_item_json() {
         content,
         r#"{
   "id": "work-1",
-  "title": "Add durable model storage"
+  "title": "Add durable model storage",
+  "model_writer_version": "0.1.4"
 }
 "#
     );
