@@ -3,6 +3,33 @@
 Observable behaviors of the fluent system. Each statement describes what
 the system does, not how. EARS format.
 
+## Dashboard operator console
+
+### B1
+
+WHEN `fluent dashboard` opens, THE SYSTEM SHALL show grouped Current Work and
+select the first Work Item that needs attention, is running, or is ready.
+Test: src/dashboard.rs (dashboard_opens_on_current_work)
+
+### B2
+
+WHEN an operator navigates, filters, refreshes, or resizes the dashboard, THE
+SYSTEM SHALL preserve its selected Work Item when it remains visible and select
+the nearest remaining row when it does not.
+Test: src/dashboard.rs (selection_survives_refresh_reorder_and_filter)
+
+### B3
+
+WHEN the dashboard refresh fails after a successful load, THE SYSTEM SHALL keep
+the displayed snapshot and label it stale until a later successful refresh.
+Test: src/dashboard.rs (failed_poll_keeps_snapshot_and_marks_it_stale)
+
+### B4
+
+WHEN the dashboard receives navigation, view, help, copy, or refresh input,
+THE SYSTEM SHALL not modify stored Work state.
+Test: src/dashboard.rs (dashboard_controls_leave_work_state_unchanged)
+
 ## Local execution recovery
 
 ### B1

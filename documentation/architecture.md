@@ -420,6 +420,18 @@ but later status and show commands emit no next action for that row, avoiding an
 inspection self-loop and allowing other actionable Work to surface. The boundary
 returns valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
+`fluent dashboard` projects those rows into a read-only operator console. Its
+snapshot keeps Current Work grouped as Needs you, Running, and Ready, with
+Terminal Work available through the All Work view. The console stores selection
+by Work Item ID, so a successful refresh preserves a visible selection across
+reordering. It uses a wide list-and-detail layout at 100 columns, separate list
+and detail panes from 60 columns, and a resize message below the minimum size.
+The event loop refreshes the read-only snapshot every two seconds or on request,
+retains and labels the last successful snapshot after a read failure, and draws
+only when visible state changes. `dashboard.rs` owns terminal setup and the
+event loop; `dashboard/snapshot.rs`, `dashboard/app.rs`, and
+`dashboard/render.rs` respectively own projection, interaction state, and pure
+Ratatui rendering.
 Next-action guidance consumes these rows directly. A `merge-ready` row renders
 `merge-candidate show` and `merge-candidate land` with both its Work Item ID and
 Merge Candidate ID. A ready `attempt run` outcome uses the command's Work Item
@@ -2018,7 +2030,8 @@ fluent/main/
     coder.rs                 ← Coder trait + Claude/Codex implementations
     content.rs               ← Runtime content resolution (project → user → bundled)
     credential.rs            ← Keychain credential injection
-    dashboard.rs             ← Live TUI for Work Item activity
+    dashboard.rs             ← Operator-console entry point and terminal session
+    dashboard/               ← Snapshot projection, interaction state, rendering
     fargate.rs               ← Fargate launch, watch, stop, and pull for Work execution
     fargate_bootstrap.rs     ← JIT Fargate setup (CFN, base + project image builds)
     follow_up.rs             ← Land-gated follow-up materialization: pending operation, journal, corrective host gate, derived Work intake
