@@ -19,29 +19,64 @@ const DATA_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    mouse_enabled: bool,
+    cleanup: TerminalCleanup,
+}
+
+struct TerminalCleanup {
+    raw: bool,
+    alternate: bool,
+    mouse: bool,
+}
+impl TerminalCleanup {
+    fn restore(&mut self) {
+        let mut stdout = io::stdout();
+        if self.mouse {
+            let _ = crossterm::execute!(stdout, crossterm::event::DisableMouseCapture);
+            self.mouse = false;
+        }
+        if self.alternate {
+            let _ = crossterm::execute!(stdout, LeaveAlternateScreen);
+            self.alternate = false;
+        }
+        if self.raw {
+            let _ = disable_raw_mode();
+            self.raw = false;
+        }
+    }
+}
+impl Drop for TerminalCleanup {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 impl TerminalSession {
     fn open() -> Result<Self> {
+        let mut cleanup = TerminalCleanup {
+            raw: false,
+            alternate: false,
+            mouse: false,
+        };
         enable_raw_mode()?;
+        cleanup.raw = true;
         let mut stdout = io::stdout();
+        cleanup.alternate = true;
+        cleanup.mouse = true;
         if let Err(error) = crossterm::execute!(
             stdout,
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture
         ) {
-            let _ = disable_raw_mode();
             return Err(error.into());
         }
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
-            mouse_enabled: true,
+            cleanup,
         })
     }
 
     fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()> {
-        if self.mouse_enabled != enabled {
+        if self.cleanup.mouse != enabled {
             if enabled {
                 crossterm::execute!(
                     self.terminal.backend_mut(),
@@ -53,7 +88,7 @@ impl TerminalSession {
                     crossterm::event::DisableMouseCapture
                 )?;
             }
-            self.mouse_enabled = enabled;
+            self.cleanup.mouse = enabled;
         }
         Ok(())
     }
@@ -61,16 +96,6 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = if self.mouse_enabled {
-            crossterm::execute!(
-                self.terminal.backend_mut(),
-                crossterm::event::DisableMouseCapture,
-                LeaveAlternateScreen
-            )
-        } else {
-            crossterm::execute!(self.terminal.backend_mut(), LeaveAlternateScreen)
-        };
-        let _ = disable_raw_mode();
         let _ = self.terminal.show_cursor();
     }
 }
@@ -105,7 +130,7 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
                 _ => {}
             }
         }
-        if Instant::now() >= next_poll {
+        if poll_due(Instant::now(), next_poll) {
             refresh(search_root, &mut app);
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
@@ -114,6 +139,10 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn poll_due(now: Instant, deadline: Instant) -> bool {
+    now >= deadline
 }
 
 fn refresh(root: &Path, app: &mut App) {
@@ -213,10 +242,14 @@ mod tests {
     #[test]
     fn wide_layout_shows_list_and_detail() {
         let app = app(vec![row("work", "task-ready")]);
-        let rendered = text(&app, 100, 24);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| render::draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_text(buffer);
         assert!(rendered.contains("Current Work"));
         assert!(rendered.contains("Work Item detail"));
         assert!(rendered.contains("Attempt: attempt [running]"));
+        assert!(buffer[(42, 4)].symbol().contains('│'));
     }
     #[test]
     fn detail_shows_canonical_next_action() {
@@ -235,7 +268,7 @@ mod tests {
         let mut app = app(vec![row("need", "failed"), row("run", "executing")]);
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(app.selected_id(), Some("run"));
-        assert_eq!(app.list_scroll, 3);
+        assert_eq!(app.list_scroll, 0);
     }
     #[test]
     fn selection_survives_refresh_reorder_and_filter() {
@@ -289,8 +322,11 @@ mod tests {
         let mut app = app(vec![status]);
         app.resize(80, 15);
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(app.detail_scroll, 1);
+        for _ in 0..40 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        assert!(app.detail_scroll > 0);
+        assert!(text(&app, 80, 15).contains("Warning: warning 29"));
     }
     #[test]
     fn refresh_key_requests_immediate_poll() {
@@ -337,11 +373,13 @@ mod tests {
         let mut app = app((0..24)
             .map(|n| row(&format!("work-{n}"), "planned"))
             .collect());
+        app.resize(80, 15);
         for _ in 0..23 {
             app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         }
         assert_eq!(app.selected_id(), Some("work-23"));
         assert!(app.list_scroll > 0);
+        assert!(text(&app, 80, 15).contains("work-23"));
     }
     #[test]
     fn all_work_adds_terminal_group() {
@@ -363,7 +401,19 @@ mod tests {
         status.metrics.input_tokens = 42;
         status.release = Some(Default::default());
         let rendered = text(&app(vec![status]), 100, 24);
-        for value in ["ID: work", "Metrics:", "Warning: legacy state", "Release:"] {
+        for value in [
+            "work title",
+            "ID: work",
+            "Action: planned",
+            "Attempt: attempt [running]",
+            "Task: write [running]",
+            "Review: pending",
+            "Merge Candidate: candidate",
+            "Merge: pending",
+            "Metrics:",
+            "Warning: legacy state",
+            "Release:",
+        ] {
             assert!(rendered.contains(value), "missing {value}");
         }
     }
@@ -371,9 +421,15 @@ mod tests {
     fn long_and_wide_character_content_stays_within_regions() {
         let mut status = row("識別子", "planned");
         status.title = "e\u{301}識別子 with a very long title that must truncate".into();
-        let rendered = text(&app(vec![status]), 60, 15);
+        let app = app(vec![status]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| render::draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_text(buffer);
         assert!(rendered.contains("…"));
-        assert_eq!(rendered.lines().count(), 15);
+        for y in 4..22 {
+            assert!(buffer[(42, y)].symbol().contains('│'));
+        }
     }
     #[test]
     fn resize_preserves_selection_and_changes_layout() {
@@ -419,12 +475,13 @@ mod tests {
             vec![row("work", "planned")],
             (0..20).map(|n| format!("error {n}")).collect(),
         );
+        app.resize(80, 15);
         for _ in 0..22 {
             app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         }
         assert_eq!(
             app.list_scroll as usize,
-            app.snapshot.list_line_count(false) - 1
+            render::scroll_bounds(&app).list_max_scroll as usize
         );
         assert!(text(&app, 80, 15).contains("error 19"));
     }
@@ -442,5 +499,11 @@ mod tests {
         app.resize(80, 24);
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(text(&app, 80, 24).contains("Esc list  j/k scroll"));
+    }
+    #[test]
+    fn scheduled_poll_waits_for_its_deadline() {
+        let now = Instant::now();
+        assert!(!poll_due(now, now + DATA_POLL_INTERVAL));
+        assert!(poll_due(now + DATA_POLL_INTERVAL, now + DATA_POLL_INTERVAL));
     }
 }

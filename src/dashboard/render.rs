@@ -11,6 +11,42 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollBounds {
+    pub list_height: u16,
+    pub list_max_scroll: u16,
+    pub detail_max_scroll: u16,
+}
+
+pub fn scroll_bounds(app: &App) -> ScrollBounds {
+    if app.size.0 < 60 || app.size.1 < 15 {
+        return ScrollBounds::default();
+    }
+    let body_height = app.size.1.saturating_sub(4);
+    let inner_height = body_height.saturating_sub(2);
+    let list_width = if app.size.0 >= 100 {
+        app.size.0.saturating_mul(43) / 100
+    } else {
+        app.size.0
+    }
+    .saturating_sub(2);
+    let detail_width = if app.size.0 >= 100 {
+        app.size
+            .0
+            .saturating_sub(app.size.0.saturating_mul(43) / 100)
+    } else {
+        app.size.0
+    }
+    .saturating_sub(2);
+    let list_lines = list_lines(app, list_width).len() as u16;
+    let detail_lines = wrapped_detail_line_count(app, detail_width);
+    ScrollBounds {
+        list_height: inner_height,
+        list_max_scroll: list_lines.saturating_sub(inner_height),
+        detail_max_scroll: detail_lines.saturating_sub(inner_height),
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 60 || area.height < 15 {
@@ -77,6 +113,15 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 fn list(frame: &mut Frame, area: Rect, app: &App) {
+    let lines = list_lines(app, area.width.saturating_sub(2));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((app.list_scroll, 0))
+            .block(Block::default().borders(Borders::ALL).title(" Work Items ")),
+        area,
+    );
+}
+fn list_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for (group, rows) in app.snapshot.groups(app.all_work()) {
         lines.push(Line::styled(
@@ -91,11 +136,15 @@ fn list(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 "  "
             };
+            let available = width.saturating_sub(6) as usize;
+            let id_width = available.min(14).max(1);
+            let action_width = available.saturating_sub(id_width).min(12).max(1);
+            let title_width = available.saturating_sub(id_width + action_width).max(1);
             lines.push(Line::from(format!(
                 "{marker}{} — {} [{}]",
-                compact(&row.status.id, 14),
-                compact(&row.status.title, 20),
-                compact(&row.status.action, 12)
+                compact(&row.status.id, id_width),
+                compact(&row.status.title, title_width),
+                compact(&row.status.action, action_width)
             )));
         }
     }
@@ -114,12 +163,7 @@ fn list(frame: &mut Frame, area: Rect, app: &App) {
         )));
         lines.extend(app.snapshot.errors.iter().map(|e| Line::from(e.clone())));
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((app.list_scroll, 0))
-            .block(Block::default().borders(Borders::ALL).title(" Work Items ")),
-        area,
-    );
+    lines
 }
 fn detail(frame: &mut Frame, area: Rect, app: &App) {
     let selected = app
@@ -142,6 +186,28 @@ fn detail(frame: &mut Frame, area: Rect, app: &App) {
             ),
         area,
     );
+}
+fn wrapped_detail_line_count(app: &App, width: u16) -> u16 {
+    let Some(row) = app
+        .selected_id()
+        .and_then(|id| app.snapshot.rows.iter().find(|row| row.status.id == id))
+    else {
+        return 1;
+    };
+    let width = width.max(1) as usize;
+    detail_lines(row)
+        .iter()
+        .map(|line| {
+            let value = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            UnicodeWidthStr::width(value.as_str())
+                .max(1)
+                .div_ceil(width)
+        })
+        .sum::<usize>() as u16
 }
 fn detail_lines(row: &DashboardRow) -> Vec<Line<'static>> {
     let status = &row.status;

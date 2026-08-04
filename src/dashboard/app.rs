@@ -1,3 +1,4 @@
+use super::render;
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -61,6 +62,7 @@ impl App {
     }
     pub fn resize(&mut self, width: u16, height: u16) {
         self.size = (width, height);
+        self.clamp_scrolls();
         self.dirty = true;
     }
     pub fn refresh(&mut self, snapshot: DashboardSnapshot) {
@@ -72,10 +74,12 @@ impl App {
         self.snapshot = snapshot;
         self.stale_error = None;
         self.reconcile_selection(prior);
+        self.clamp_scrolls();
         self.dirty = true;
     }
     pub fn refresh_failed(&mut self, error: String) {
         self.stale_error = Some(error);
+        self.clamp_scrolls();
         self.dirty = true;
     }
     fn reconcile_selection(&mut self, preferred: Option<String>) {
@@ -102,10 +106,7 @@ impl App {
         self.selected_index =
             (self.selected_index as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
         self.selected = Some(rows[self.selected_index].status.id.clone());
-        self.list_scroll = self
-            .snapshot
-            .selected_line(self.all_work, &rows[self.selected_index].status.id)
-            .unwrap_or_default() as u16;
+        self.keep_selection_visible();
         self.detail_scroll = 0;
         self.dirty = true;
     }
@@ -129,6 +130,7 @@ impl App {
             KeyCode::Char('a') => {
                 self.all_work = !self.all_work;
                 self.reconcile_selection(self.selected.clone());
+                self.clamp_scrolls();
                 self.dirty = true;
             }
             KeyCode::Char('r') => return Effect::Refresh,
@@ -146,12 +148,7 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Up | KeyCode::Char('k') if self.pane == Pane::List => {
-                let selected_line = self
-                    .selected
-                    .as_deref()
-                    .and_then(|id| self.snapshot.selected_line(self.all_work, id))
-                    .unwrap_or_default() as u16;
-                if self.list_scroll > selected_line {
+                if self.list_scroll > 0 {
                     self.list_scroll = self.list_scroll.saturating_sub(1);
                     self.dirty = true;
                 } else {
@@ -167,10 +164,7 @@ impl App {
                 if self.selected_index < last {
                     self.move_selection(1);
                 } else {
-                    let max_scroll = self
-                        .snapshot
-                        .list_line_count(self.all_work)
-                        .saturating_sub(1) as u16;
+                    let max_scroll = render::scroll_bounds(self).list_max_scroll;
                     if self.list_scroll < max_scroll {
                         self.list_scroll += 1;
                         self.dirty = true;
@@ -182,11 +176,39 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.detail_scroll = self.detail_scroll.saturating_add(1);
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_add(1)
+                    .min(render::scroll_bounds(self).detail_max_scroll);
                 self.dirty = true;
             }
             _ => {}
         }
         Effect::None
+    }
+
+    fn keep_selection_visible(&mut self) {
+        let bounds = render::scroll_bounds(self);
+        let Some(line) = self
+            .selected
+            .as_deref()
+            .and_then(|id| self.snapshot.selected_line(self.all_work, id))
+            .map(|line| line as u16)
+        else {
+            return;
+        };
+        if line < self.list_scroll {
+            self.list_scroll = line;
+        } else if bounds.list_height > 0 && line >= self.list_scroll + bounds.list_height {
+            self.list_scroll = line + 1 - bounds.list_height;
+        }
+        self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
+    }
+
+    fn clamp_scrolls(&mut self) {
+        let bounds = render::scroll_bounds(self);
+        self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
+        self.detail_scroll = self.detail_scroll.min(bounds.detail_max_scroll);
+        self.keep_selection_visible();
     }
 }

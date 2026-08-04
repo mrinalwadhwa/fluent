@@ -2949,6 +2949,25 @@ dashboard::tests::empty_project_has_no_selection
 
 ### B3
 
+WHEN Work Item detail is visible, THE SYSTEM SHALL show the selected Work Item's
+identifier, title, action, Attempt, Task, review, Merge Candidate, merge state,
+metrics, compatibility warnings, and release summary when those values exist.
+Test: dashboard::tests::detail_shows_selected_work_state
+
+### B4
+
+WHEN canonical status guidance supplies a next action for the selected Work Item,
+THE SYSTEM SHALL show that exact guidance in Work Item detail.
+Test: dashboard::tests::detail_shows_canonical_next_action
+
+### B5
+
+WHEN canonical status guidance supplies no next action for the selected Work Item,
+THE SYSTEM SHALL label the detail as having no operator action.
+Test: dashboard::tests::detail_does_not_invent_next_action
+
+### B6
+
 WHEN a non-empty view opens, the console SHALL select the first Work Item. The
 operator can use Up/`k` and Down/`j` to reach every row and list diagnostic;
 selection survives a refresh, filtering, reordering, and terminal resize by ID,
@@ -2958,7 +2977,7 @@ dashboard::tests::overflow_rows_remain_navigable,
 dashboard::tests::selection_survives_refresh_reorder_and_filter,
 dashboard::tests::removed_selection_uses_nearest_remaining_row
 
-### B4
+### B7
 
 WHILE the console runs, it SHALL poll stored Work state about every two seconds
 and on `r`. A successful changed refresh replaces the snapshot; a failed refresh
@@ -2972,7 +2991,7 @@ dashboard::tests::failed_poll_keeps_snapshot_and_marks_it_stale,
 dashboard::tests::work_read_errors_remain_available_with_overflow,
 dashboard::tests::idle_dashboard_does_not_request_repaint
 
-### B5
+### B8
 
 WHEN the terminal is at least 100 columns wide and 15 rows high, the console
 SHALL show its grouped list and selected Work Item detail side by side. From 60

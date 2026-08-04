@@ -83,20 +83,6 @@ impl DashboardSnapshot {
         })
         .collect()
     }
-    pub fn list_line_count(&self, all: bool) -> usize {
-        let group_lines = self
-            .groups(all)
-            .into_iter()
-            .map(|(_, rows)| rows.len() + 1)
-            .sum::<usize>();
-        let empty_lines = usize::from(group_lines == 0);
-        let error_lines = if self.errors.is_empty() {
-            0
-        } else {
-            self.errors.len() + 1
-        };
-        group_lines + empty_lines + error_lines
-    }
     pub fn selected_line(&self, all: bool, id: &str) -> Option<usize> {
         let mut line = 0;
         for (_, rows) in self.groups(all) {
