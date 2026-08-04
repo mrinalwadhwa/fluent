@@ -15,29 +15,104 @@ Test: tests/binary.rs (attempt_evidence_attach_preserves_exact_evidence_and_iden
 ### B2
 
 WHEN an operator attaches valid host evidence to an eligible Attempt, THE SYSTEM
-SHALL plan only the explicitly named failed reviewer roles without adding a
-Writer or Tester.
+SHALL plan the explicitly named failed reviewer roles and no other reviewer roles.
 Test: tests/binary.rs (attempt_evidence_attach_plans_targeted_reviews_without_writer)
 
 ### B3
 
-WHEN Fluent accepts host evidence, THE SYSTEM SHALL leave the candidate commit
-and approved planning inputs unchanged and keep the candidate unlandable until
-review and Learning complete.
-Test: tests/binary.rs (attempt_evidence_attach_preserves_candidate_and_blocks_landing)
+WHEN an operator attaches valid host evidence to an eligible Attempt, THE SYSTEM
+SHALL add no Writer.
+Test: tests/binary.rs (attempt_evidence_attach_plans_targeted_reviews_without_writer)
 
 ### B4
+
+WHEN an operator attaches valid host evidence to an eligible Attempt, THE SYSTEM
+SHALL add no Tester.
+Test: tests/binary.rs (attempt_evidence_attach_plans_targeted_reviews_without_writer)
+
+### B5
+
+WHEN Fluent accepts host evidence, THE SYSTEM SHALL leave the candidate commit
+unchanged.
+Test: tests/binary.rs (attempt_evidence_attach_preserves_candidate_commit)
+
+### B6
+
+WHEN Fluent accepts host evidence, THE SYSTEM SHALL leave every approved
+planning input unchanged.
+Test: tests/binary.rs (attempt_evidence_attach_preserves_approved_planning_inputs)
+
+### B7
+
+WHEN Fluent accepts host evidence, THE SYSTEM SHALL keep the unchanged candidate
+unlandable until evidence-targeted review and Learning complete.
+Test: tests/binary.rs (attempt_evidence_attach_keeps_candidate_unlandable)
+Test: src/work_attempt_loop.rs (evidence_targeted_reviews_advance_unchanged_candidate_to_learning)
+
+### B8
 
 IF a host evidence attachment names a stale Work Item, Attempt, candidate,
 review artifact, or a frontier owned by a live Task or landing operation, THEN
 THE SYSTEM SHALL reject it without changing Work or candidate state.
-Test: src/host_evidence.rs (stale_evidence_frontier_is_rejected_without_mutation)
+Test: tests/binary.rs (attempt_evidence_attach_rejects_stale_or_owned_frontier_without_mutation)
+Test: tests/binary.rs (attempt_evidence_attach_rejects_live_task_owner_without_mutation)
+Test: tests/binary.rs (attempt_evidence_attach_revalidates_after_landing_owner_releases_lock)
 
-### B5
+### B9
 
-WHEN an evidence-targeted reviewer fails, THE SYSTEM SHALL require a
-`Disposition: evidence-needed` or `Disposition: code-change`: the first pauses
-for further host evidence and the second resumes the ordinary Writer path.
+WHEN an evidence-targeted reviewer fails with `Disposition: evidence-needed`,
+THE SYSTEM SHALL pause the same Attempt for further host evidence without
+planning a Writer.
+Test: src/work_attempt_loop.rs (evidence_needed_review_pauses_without_writer_round)
+
+### B10
+
+WHEN an evidence-targeted reviewer fails with `Disposition: code-change`, THE
+SYSTEM SHALL resume the ordinary Writer path with that finding.
+Test: src/work_attempt_loop.rs (code_change_evidence_review_plans_ordinary_writer)
+
+### B11
+
+WHEN an evidence-targeted reviewer passes, THE SYSTEM SHALL preserve the prior
+Writer history.
+Test: src/work_attempt_loop.rs (evidence_targeted_review_pass_preserves_writer_and_tester)
+
+### B12
+
+WHEN an evidence-targeted reviewer passes, THE SYSTEM SHALL preserve the prior
+Tester history.
+Test: src/work_attempt_loop.rs (evidence_targeted_review_pass_preserves_writer_and_tester)
+
+### B13
+
+WHEN an evidence-targeted reviewer passes, THE SYSTEM SHALL complete that
+recovery frontier.
+Test: src/work_attempt_loop.rs (evidence_targeted_review_pass_preserves_writer_and_tester)
+
+### B14
+
+IF a failed Attempt ends in a no-output Writer whose exact inputs are the failed
+review artifacts named by the attachment, THEN THE SYSTEM SHALL recover in that
+same Attempt.
+Test: tests/binary.rs (attempt_evidence_attach_recovers_failed_no_change_writer_in_same_attempt)
+
+### B15
+
+IF a failed Attempt does not end in a no-output Writer whose exact inputs are the
+failed review artifacts named by the attachment, THEN THE SYSTEM SHALL reject
+the attachment without mutation.
+Test: tests/binary.rs (attempt_evidence_attach_rejects_ineligible_failed_attempt)
+
+### B16
+
+WHEN an evidence-only recovery needs more host evidence, THE SYSTEM SHALL show
+its recovery history and the exact next attachment command.
+Test: tests/binary.rs (work_show_explains_evidence_only_recovery_history_and_next_action)
+
+### B17
+
+WHEN an evidence-targeted reviewer fails, THE SYSTEM SHALL accept only the typed
+dispositions `evidence-needed` and `code-change`.
 Test: src/review.rs (evidence_targeted_disposition_is_fail_only_and_typed)
 
 ## Test harnesses

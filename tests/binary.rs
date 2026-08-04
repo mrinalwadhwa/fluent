@@ -15401,13 +15401,11 @@ fn work_merge_candidate_retries_same_candidate_after_provenance_failure() {
         "failed provenance regeneration must not replace the canonical candidate"
     );
     assert_eq!(
-        historical_after["output"],
-        historical_before["output"],
+        historical_after["output"], historical_before["output"],
         "failed provenance regeneration must preserve the historical no-change Writer"
     );
     assert_eq!(
-        after_failure["attempts"][0]["artifacts"],
-        before_failure["attempts"][0]["artifacts"],
+        after_failure["attempts"][0]["artifacts"], before_failure["attempts"][0]["artifacts"],
         "failed provenance regeneration must preserve Writer artifacts"
     );
     assert_eq!(
@@ -15441,10 +15439,7 @@ fn work_merge_candidate_retries_same_candidate_after_provenance_failure() {
         .iter()
         .find(|task| task["id"] == "attempt-1-write-2")
         .unwrap();
-    assert_eq!(
-        historical_writer["output"]["commit"],
-        no_change_commit
-    );
+    assert_eq!(historical_writer["output"]["commit"], no_change_commit);
     assert_eq!(
         landed["merge_candidates"][0]["merge_state"]["status"],
         "merged"
@@ -20714,15 +20709,21 @@ fn attempt_evidence_attach_plans_targeted_reviews_without_writer() {
     }));
 }
 
-#[test]
-fn attempt_evidence_attach_preserves_candidate_and_blocks_landing() {
-    // The accepted public command must not create a merge candidate or mutate
-    // either the candidate commit or the approved Work Item inputs.
-    let tmp = TempDir::new().unwrap();
-    let project = setup_git_project(&tmp);
+fn setup_candidate_preservation_fixture(
+    tmp: &TempDir,
+) -> (PathBuf, String, serde_json::Value, serde_json::Value) {
+    let project = setup_git_project(tmp);
     let candidate = git_head(&project);
     let store = WorkModelStore::new(&project);
     let mut item = fluent::work_model::WorkItem::planned("evidence-land", "Keep candidate blocked");
+    item.planning_context = Some(fluent::work_model::PlanningContext {
+        brief: Some("Approved brief bytes".to_string()),
+        behaviors: Some("Approved behavior bytes".to_string()),
+        approach: Some("Approved approach bytes".to_string()),
+        plan: Some("Approved plan bytes".to_string()),
+        combined: None,
+    });
+    item.instructions = Some("Approved execution instructions".to_string());
     item.add_initial_attempt("attempt-1").unwrap();
     let writer = &mut item.attempts[0].tasks[0];
     writer.status = fluent::work_model::TaskStatus::Complete;
@@ -20768,12 +20769,41 @@ fn attempt_evidence_attach_preserves_candidate_and_blocks_landing() {
         .assert()
         .success();
     let shown = work_item_value(&project, "evidence-land");
-    assert_eq!(git_head(&project), candidate);
-    assert!(shown["merge_candidates"]
-        .as_array()
-        .is_none_or(Vec::is_empty));
     let before: serde_json::Value = serde_json::from_str(&before).unwrap();
+    (project, candidate, before, shown)
+}
+
+#[test]
+fn attempt_evidence_attach_preserves_candidate_commit() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, _, _) = setup_candidate_preservation_fixture(&tmp);
+
+    assert_eq!(git_head(&project), candidate);
+}
+
+#[test]
+fn attempt_evidence_attach_preserves_approved_planning_inputs() {
+    let tmp = TempDir::new().unwrap();
+    let (_, _, before, shown) = setup_candidate_preservation_fixture(&tmp);
+
     assert_eq!(shown["title"], before["title"]);
+    assert_eq!(shown["planning_context"], before["planning_context"]);
+    assert_eq!(shown["instructions"], before["instructions"]);
+    assert_eq!(shown["input_artifacts"], before["input_artifacts"]);
+}
+
+#[test]
+fn attempt_evidence_attach_keeps_candidate_unlandable() {
+    let tmp = TempDir::new().unwrap();
+    let (_, _, _, shown) = setup_candidate_preservation_fixture(&tmp);
+
+    assert!(
+        shown["merge_candidates"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    assert_eq!(shown["attempts"][0]["status"], "reviewing");
+    assert_eq!(shown["attempts"][0]["review_state"], "not-reviewed");
 }
 
 #[test]
@@ -20843,6 +20873,349 @@ fn attempt_evidence_attach_rejects_stale_or_owned_frontier_without_mutation() {
             .exists(),
         "rejected attachment must not publish a snapshot"
     );
+}
+
+fn setup_failed_evidence_recovery_fixture(
+    tmp: &TempDir,
+    work_item_id: &str,
+) -> (PathBuf, String, String, PathBuf) {
+    use fluent::work_model::{
+        ArtifactRef, AttemptStatus, TaskOutput, TaskStatus, WorkItem, WorkModelStore,
+    };
+
+    let project = setup_git_project(tmp);
+    let candidate = git_head(&project);
+    let store = WorkModelStore::new(&project);
+    let mut item = WorkItem::planned(work_item_id, "Recover failed evidence-only Writer");
+    item.add_initial_attempt("attempt-1").unwrap();
+    let writer = &mut item.attempts[0].tasks[0];
+    writer.status = TaskStatus::Complete;
+    writer.output = Some(TaskOutput {
+        workspace_id: "candidate".to_string(),
+        workspace_path: project.display().to_string(),
+        source_branch: "main".to_string(),
+        base_commit: None,
+        commit: candidate.clone(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_review_tasks("attempt-1", &["architecture"])
+        .unwrap();
+    let reviewer = item.attempts[0].tasks.last_mut().unwrap();
+    reviewer.status = TaskStatus::Complete;
+    let review_path = format!(
+        "{}/review.md",
+        reviewer.artifact_area.as_ref().unwrap().path
+    );
+    fs::create_dir_all(project.join(&review_path).parent().unwrap()).unwrap();
+    fs::write(
+        project.join(&review_path),
+        "Verdict: fail\n\n## Findings\n- [ ] Need host proof\n",
+    )
+    .unwrap();
+    let reviewer_id = reviewer.id.clone();
+    item.add_next_write_round(
+        "attempt-1",
+        vec![ArtifactRef {
+            producer_id: reviewer_id,
+            path: review_path.clone(),
+        }],
+    )
+    .unwrap();
+    let failed_writer = item.attempts[0].tasks.last_mut().unwrap();
+    failed_writer.status = TaskStatus::Failed;
+    failed_writer.output = None;
+    item.attempts[0].status = AttemptStatus::Failed;
+    store.create_work_item(&item).unwrap();
+
+    let evidence = tmp.path().join(format!("{work_item_id}-evidence.json"));
+    fs::write(&evidence, br#"{"schema_version":1,"producer":"host","check":"check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#).unwrap();
+    (project, candidate, review_path, evidence)
+}
+
+#[test]
+fn attempt_evidence_attach_recovers_failed_no_change_writer_in_same_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, review_path, evidence) =
+        setup_failed_evidence_recovery_fixture(&tmp, "evidence-recover");
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-recover",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .success();
+
+    let shown = work_item_value(&project, "evidence-recover");
+    let attempt = &shown["attempts"][0];
+    assert_eq!(attempt["status"], "reviewing");
+    assert_eq!(
+        attempt["evidence_recoveries"][0]["candidate_commit"],
+        candidate
+    );
+    assert_eq!(
+        attempt["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "write")
+            .count(),
+        2,
+        "the failed Writer remains historical; attachment adds no Writer"
+    );
+    let tasks = attempt["tasks"].as_array().unwrap();
+    assert!(tasks.iter().any(|task| {
+        task["kind"] == "write" && task["status"] == "failed" && task["output"].is_null()
+    }));
+    assert!(
+        tasks
+            .iter()
+            .any(|task| task["evidence_review_context"].is_object())
+    );
+}
+
+#[test]
+fn attempt_evidence_attach_rejects_ineligible_failed_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, review_path, evidence) =
+        setup_failed_evidence_recovery_fixture(&tmp, "evidence-ineligible");
+    let store = fluent::work_model::WorkModelStore::new(&project);
+    store
+        .mutate_work_item("evidence-ineligible", |item| {
+            item.attempts[0]
+                .tasks
+                .last_mut()
+                .unwrap()
+                .input_artifacts
+                .clear();
+            Ok(())
+        })
+        .unwrap();
+    let item_path = project.join(".fluent/work/items/evidence-ineligible.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-ineligible",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .failure();
+
+    assert_json_unchanged(&item_path, &before);
+    assert!(
+        !project
+            .join(".fluent/work/artifacts/evidence-ineligible/attempt-1/host-evidence")
+            .exists()
+    );
+}
+
+#[test]
+fn attempt_evidence_attach_rejects_live_task_owner_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, review_path, evidence) =
+        setup_failed_evidence_recovery_fixture(&tmp, "evidence-live-task");
+    let store = fluent::work_model::WorkModelStore::new(&project);
+    let live_task_id = "attempt-1-write-2";
+    store
+        .mutate_work_item("evidence-live-task", |item| {
+            item.attempts[0].tasks[2].status = fluent::work_model::TaskStatus::Executing;
+            Ok(())
+        })
+        .unwrap();
+    let lock_path = fluent::lease::task_lock_path(&project, "evidence-live-task", live_task_id);
+    let _lease = fluent::lease::acquire(&lock_path).unwrap();
+    assert!(fluent::lease::is_leased(&lock_path));
+    let item_path = project.join(".fluent/work/items/evidence-live-task.json");
+    let before = fs::read_to_string(&item_path).unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-live-task",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .failure();
+
+    assert_json_unchanged(&item_path, &before);
+}
+
+#[cfg(unix)]
+#[test]
+fn attempt_evidence_attach_revalidates_after_landing_owner_releases_lock() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, review_path, evidence) =
+        setup_failed_evidence_recovery_fixture(&tmp, "evidence-landing");
+    let land_guard = fluent::land_lock::acquire(&fluent::land_lock::lock_path(&project)).unwrap();
+    let started = tmp.path().join("attachment-started");
+    let mut command = Command::new("sh");
+    let mut child = command
+        .current_dir(&project)
+        .args([
+            "-c",
+            "touch \"$1\"; shift; exec \"$@\"",
+            "evidence-attach-wrapper",
+            started.to_str().unwrap(),
+            env!("CARGO_BIN_EXE_fluent"),
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-landing",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("PI_API_KEY")
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(started.exists(), "attachment process did not start");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "attachment must wait while the landing owner holds the shared boundary"
+    );
+
+    let item_path = project.join(".fluent/work/items/evidence-landing.json");
+    let after_landing_owner = fs::read_to_string(&item_path).unwrap();
+    git::run(
+        &project,
+        &["commit", "--allow-empty", "-m", "Advance landing frontier"],
+        "advance landing frontier",
+    )
+    .unwrap();
+    assert_ne!(git_head(&project), candidate);
+    drop(land_guard);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "attachment must reject the frontier published by the landing owner"
+    );
+    assert_json_unchanged(&item_path, &after_landing_owner);
+    assert!(
+        !project
+            .join(".fluent/work/artifacts/evidence-landing/attempt-1/host-evidence")
+            .exists()
+    );
+}
+
+#[test]
+fn work_show_explains_evidence_only_recovery_history_and_next_action() {
+    let tmp = TempDir::new().unwrap();
+    let (project, candidate, review_path, evidence) =
+        setup_failed_evidence_recovery_fixture(&tmp, "evidence-show");
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-show",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
+        ])
+        .assert()
+        .success();
+    let store = fluent::work_model::WorkModelStore::new(&project);
+    let targeted_path = store
+        .mutate_work_item("evidence-show", |item| {
+            let targeted = item.attempts[0].tasks.last_mut().unwrap();
+            targeted.status = fluent::work_model::TaskStatus::Complete;
+            Ok(targeted.artifact_area.as_ref().unwrap().path.clone())
+        })
+        .unwrap();
+    fs::create_dir_all(project.join(&targeted_path)).unwrap();
+    fs::write(
+        project.join(&targeted_path).join("review.md"),
+        "Verdict: fail\nDisposition: evidence-needed\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "run",
+            "evidence-show",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&project)
+        .args(["work-item", "show", "evidence-show"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let attempt = &shown["attempts"][0];
+    assert_eq!(attempt["status"], "needs-user");
+    assert_eq!(attempt["pause_kind"], "uncertain");
+    assert_eq!(attempt["evidence_recoveries"][0]["state"], "needs-evidence");
+    assert!(attempt["tasks"].as_array().unwrap().iter().any(|task| {
+        task["kind"] == "write" && task["status"] == "failed" && task["output"].is_null()
+    }));
+    assert_eq!(
+        attempt["evidence_recoveries"][0]["targets"][0]["prior_review_artifact"],
+        review_path
+    );
+    let guidance = String::from_utf8(output.stderr).unwrap();
+    assert!(guidance.contains("fluent attempt evidence attach evidence-show attempt-1"));
+    assert!(guidance.contains(&candidate));
+    assert!(guidance.contains(&review_path));
 }
 
 #[test]

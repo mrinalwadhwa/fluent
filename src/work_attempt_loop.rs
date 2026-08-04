@@ -5898,6 +5898,185 @@ mod tests {
         (store, item)
     }
 
+    fn add_evidence_targeted_review(
+        project_root: &Path,
+        store: &WorkModelStore,
+        content: &str,
+    ) -> String {
+        let task_id = "attempt-1-evidence-abc-behaviors";
+        let artifact_path = work_artifact_path("work-1", "attempt-1", task_id);
+        let artifact_dir = project_root.join(&artifact_path);
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(artifact_dir.join("review.md"), content).unwrap();
+
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                let prior = attempt
+                    .tasks
+                    .iter()
+                    .find(|task| task.role == "behaviors" && task.kind == TaskKind::Review)
+                    .cloned()
+                    .unwrap();
+                let prior_review_artifact =
+                    format!("{}/review.md", prior.artifact_area.as_ref().unwrap().path);
+                attempt
+                    .evidence_recoveries
+                    .push(crate::work_model::EvidenceRecovery {
+                        id: "host-evidence-abc".to_string(),
+                        candidate_commit: "abc123".to_string(),
+                        attachment: crate::work_model::EvidenceAttachment {
+                            snapshot_path:
+                                ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
+                                    .to_string(),
+                            digest: "sha256:abc".to_string(),
+                        },
+                        targets: vec![crate::work_model::EvidenceReviewTarget {
+                            role: "behaviors".to_string(),
+                            prior_review_artifact: prior_review_artifact.clone(),
+                            review_task_id: Some(task_id.to_string()),
+                        }],
+                        state: EvidenceRecoveryState::Reviewing,
+                        created_at: "2026-08-03T00:00:00Z".to_string(),
+                    });
+                let mut targeted = review_task_with_artifact(task_id, "behaviors", &artifact_path);
+                targeted.evidence_review_context = Some(crate::work_model::EvidenceReviewContext {
+                    recovery_id: "host-evidence-abc".to_string(),
+                    candidate_commit: "abc123".to_string(),
+                    attachment: crate::work_model::EvidenceAttachment {
+                        snapshot_path:
+                            ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
+                                .to_string(),
+                        digest: "sha256:abc".to_string(),
+                    },
+                    prior_review_artifact,
+                });
+                attempt.tasks.push(targeted);
+                attempt.status = AttemptStatus::Reviewing;
+                attempt.review_state = Some(AttemptReviewState::NotReviewed);
+                Ok(())
+            })
+            .unwrap();
+        task_id.to_string()
+    }
+
+    #[test]
+    fn evidence_targeted_review_pass_preserves_writer_and_tester() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "FAIL", Some(passing_tester_json()));
+        add_evidence_targeted_review(tmp.path(), &store, "Verdict: pass\n");
+        let before = store.read_work_item("work-1").unwrap();
+        let before_writers = before.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+            .count();
+        let before_testers = before.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Tester)
+            .count();
+
+        let outcome =
+            interpret_reviews(tmp.path(), &store, before, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            before_writers
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Tester)
+                .count(),
+            before_testers
+        );
+        assert_eq!(
+            stored.attempts[0].evidence_recoveries[0].state,
+            EvidenceRecoveryState::Complete
+        );
+    }
+
+    #[test]
+    fn evidence_needed_review_pauses_without_writer_round() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "FAIL", Some(passing_tester_json()));
+        add_evidence_targeted_review(
+            tmp.path(),
+            &store,
+            "Verdict: fail\nDisposition: evidence-needed\n",
+        );
+        let before = store.read_work_item("work-1").unwrap();
+        let writer_count = before.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+            .count();
+
+        let outcome =
+            interpret_reviews(tmp.path(), &store, before, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(stored.attempts[0].pause_kind, Some(PauseKind::Uncertain));
+        assert_eq!(
+            stored.attempts[0].evidence_recoveries[0].state,
+            EvidenceRecoveryState::NeedsEvidence
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            writer_count
+        );
+    }
+
+    #[test]
+    fn code_change_evidence_review_plans_ordinary_writer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "FAIL", Some(passing_tester_json()));
+        let targeted_id = add_evidence_targeted_review(
+            tmp.path(),
+            &store,
+            "Verdict: fail\nDisposition: code-change\n",
+        );
+        let before = store.read_work_item("work-1").unwrap();
+
+        let outcome =
+            interpret_reviews(tmp.path(), &store, before, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedWriteRound { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        let writer = stored.attempts[0].tasks.last().unwrap();
+        assert_eq!(writer.kind, TaskKind::Write);
+        assert_eq!(writer.status, TaskStatus::Planned);
+        assert_eq!(writer.input_artifacts.len(), 1);
+        assert_eq!(writer.input_artifacts[0].producer_id, targeted_id);
+        assert_eq!(
+            stored.attempts[0].evidence_recoveries[0].state,
+            EvidenceRecoveryState::CodeChange
+        );
+    }
+
     fn passing_tester_json() -> &'static str {
         r#"{
             "commands": [],
@@ -6440,6 +6619,92 @@ mod tests {
             .unwrap();
             Ok(())
         }
+    }
+
+    #[test]
+    fn evidence_targeted_reviews_advance_unchanged_candidate_to_learning() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, candidate) =
+            make_learner_passing_fixture(tmp.path(), 1);
+        let targeted_id = "attempt-1-evidence-abc-tests";
+        let targeted_path = work_artifact_path("work-1", "attempt-1", targeted_id);
+        fs::create_dir_all(project_root.join(&targeted_path)).unwrap();
+        fs::write(
+            project_root.join(&targeted_path).join("review.md"),
+            "Verdict: pass\n",
+        )
+        .unwrap();
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                let prior = attempt
+                    .tasks
+                    .iter()
+                    .find(|task| task.kind == TaskKind::Review && task.role == "tests")
+                    .cloned()
+                    .unwrap();
+                let prior_review_artifact =
+                    format!("{}/review.md", prior.artifact_area.as_ref().unwrap().path);
+                let attachment = crate::work_model::EvidenceAttachment {
+                    snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
+                        .to_string(),
+                    digest: "sha256:abc".to_string(),
+                };
+                attempt
+                    .evidence_recoveries
+                    .push(crate::work_model::EvidenceRecovery {
+                        id: "host-evidence-abc".to_string(),
+                        candidate_commit: candidate.clone(),
+                        attachment: attachment.clone(),
+                        targets: vec![crate::work_model::EvidenceReviewTarget {
+                            role: "tests".to_string(),
+                            prior_review_artifact: prior_review_artifact.clone(),
+                            review_task_id: Some(targeted_id.to_string()),
+                        }],
+                        state: EvidenceRecoveryState::Reviewing,
+                        created_at: "2026-08-03T00:00:00Z".to_string(),
+                    });
+                let mut targeted = review_task_with_artifact(targeted_id, "tests", &targeted_path);
+                targeted.review_context.as_mut().unwrap().candidate_commit = candidate.clone();
+                targeted.evidence_review_context = Some(crate::work_model::EvidenceReviewContext {
+                    recovery_id: "host-evidence-abc".to_string(),
+                    candidate_commit: candidate.clone(),
+                    attachment,
+                    prior_review_artifact,
+                });
+                attempt.tasks.push(targeted);
+                attempt.status = AttemptStatus::Reviewing;
+                attempt.review_state = Some(AttemptReviewState::NotReviewed);
+                Ok(())
+            })
+            .unwrap();
+
+        let run_coder = draft_only_coder(r#"{"learning_summary":"learned","follow_ups":[]}"#);
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+                codex_worker: None,
+                no_sandbox: false,
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_succeeded());
+        assert_eq!(
+            stored.attempts[0].evidence_recoveries[0].state,
+            EvidenceRecoveryState::Complete
+        );
+        assert_eq!(stored.merge_candidates[0].candidate_commit, candidate);
     }
 
     #[test]
