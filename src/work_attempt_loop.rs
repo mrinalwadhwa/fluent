@@ -1760,7 +1760,17 @@ fn prepare_learner_run(
         Vec::new()
     } else {
         let mut roots = vec![project_root.to_path_buf(), workspace_path.clone()];
-        roots.push(crate::worktree::git_common_dir(&workspace_path)?);
+        // A post-land retry is anchored to the durable merged commit in an
+        // isolated bundle. Its retained candidate may have malformed Git
+        // metadata, but it still belongs to the target repository whose common
+        // Git directory must remain denied. Resolve that boundary from the
+        // healthy target instead of consulting the retained candidate.
+        let git_boundary = if handoff_only {
+            project_root
+        } else {
+            workspace_path.as_path()
+        };
+        roots.push(crate::worktree::git_common_dir(git_boundary)?);
         roots.sort();
         roots.dedup();
         roots

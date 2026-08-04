@@ -25,7 +25,7 @@ snapshot() {
   printf '%s\n' "$candidate_pids" | awk 'NF && !seen[$0]++' | while read -r pid; do
     command="$(/bin/ps -p "$pid" -o command= 2>/dev/null || true)"
     if [ -z "$command" ]; then
-      command="$(/usr/sbin/lsof -p "$pid" 2>/dev/null | awk 'NR == 2 { print $1 }')"
+      command="$({ /usr/sbin/lsof -p "$pid" 2>/dev/null || true; } | awk 'NR == 2 { print $1 }')"
     fi
     case "$command" in
       *fluent*|*claude*|*codex*|*/pi\ *|pi\ *|*/pi|pi) ;;
@@ -34,7 +34,7 @@ snapshot() {
     IFS=: read -r -a root_list <<< "$roots"
     for root in "${root_list[@]}"; do
       root="$(cd "$root" && pwd -P)"
-      cwd="$(/usr/sbin/lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+      cwd="$({ /usr/sbin/lsof -a -p "$pid" -d cwd -Fn 2>/dev/null || true; } | sed -n 's/^n//p')"
       case "$cwd/" in
         "$root"/*) ;;
         *) continue ;;

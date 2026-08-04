@@ -5860,6 +5860,12 @@ fn pre_land_no_expertise_retry_runs_only_learner_and_preserves_mode() {
     );
     assert_eq!(before["learner_mode"], "no-expertise");
 
+    // The first confined Learner cannot write the fixture's shared temporary
+    // counter. Let the host record that the relaunch condition has been met so
+    // the retry exercises only the Learner rather than depending on a write
+    // outside its admitted scratch directory.
+    fs::write(&counter, "retry\n").unwrap();
+
     // Retry: only the Learner runs again.
     fluent_cmd()
         .current_dir(&main_dir)
@@ -9445,6 +9451,10 @@ fn rerun_learner_trusted(
     cmd.current_dir(main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
         .env("PATH", mock_path(bin_dir))
+        .env(
+            "FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        )
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY");
     for (key, value) in extra_env {
