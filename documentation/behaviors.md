@@ -748,24 +748,25 @@ Test: tests/binary.rs (work_task_run_completes_review_task_with_fail_verdict_art
 WHEN Fluent launches a Work-model `review` Task,
 THE SYSTEM SHALL name the Work review artifact path, the exact
 filesystem `review.md` path the reviewer must write, and the reviewer
-artifact directory; SHALL tell the reviewer that the candidate's
-existing build outputs are readable; SHALL tell the reviewer that the
-reviewer artifact directory has been pre-populated with the writer's
-build outputs for warm-start incremental builds; and SHALL include Cargo
-guidance to set `CARGO_TARGET_DIR` under the reviewer artifact
-directory.
+artifact directory; SHALL identify Tester results as host-owned evidence
+for the exact candidate commit; SHALL prohibit full-suite reruns; and SHALL
+limit the tests reviewer to one named missing evidence check using the
+candidate-keyed shared cache rather than the artifact directory.
 Test: src/work_task_executor.rs (work_review_prompt_names_work_artifacts_and_writable_outputs)
+Test: src/work_task_executor.rs (work_review_prompt_renders_role_conditional_blocks)
 
 ### B41
 
-WHEN Fluent plans to launch an Attempt-time review Task and the
+WHEN Fluent plans to launch an Attempt-time tests review Task and the
 candidate workspace contains a recognized toolchain marker file
 (`Cargo.toml`, `package.json`, `pom.xml`, or `build.gradle`),
 THE SYSTEM SHALL copy that toolchain's canonical build directories from
-the candidate workspace into the reviewer's artifact directory before
-launching the reviewer.
+the candidate workspace into one cache keyed by the exact candidate commit
+before launching the reviewer and SHALL create no private build directory in
+any review artifact area.
 Test: src/prep.rs (copies_existing_dirs_and_skips_missing)
 Test: src/prep.rs (copies_multiple_node_dirs)
+Test: src/work_task_executor.rs (parallel_reviewers_share_one_cache_and_create_no_private_targets)
 
 ### B42
 
@@ -790,8 +791,11 @@ WHEN `.fluent/hooks/prepare-pre-review` exists and is executable in
 the candidate workspace,
 THE SYSTEM SHALL run that hook instead of the built-in auto-prep, with
 `FLUENT_REVIEWER_ARTIFACT_DIR` set in the env and CWD = candidate
-workspace.
+workspace; SHALL move any canonical cache output into the candidate-keyed
+shared cache after admission; and SHALL leave non-cache hook evidence in the
+artifact area.
 Test: src/hooks.rs (passes_reviewer_artifact_dir_via_env)
+Test: src/work_task_executor.rs (custom_hook_moves_cache_out_of_reviewer_artifact)
 
 ### B45
 
@@ -1483,12 +1487,10 @@ Test: src/work_model.rs (post_merge_review_attempt_round_trips_through_storage)
 ### B99
 
 WHEN a review Task in a review-only Attempt is about to run,
-THE SYSTEM SHALL pre-populate the reviewer's artifact directory with
-copies of the workspace's existing build outputs (using the same warm-
-cache mechanism that candidate-review uses) so the reviewer can run
-ephemeral verification builds without contending with peer reviewers or
-mutating the workspace.
-Untestable: Requires a candidate workspace with a detected toolchain build directory at review time; mechanism is the same as `prepare_reviewer_build_cache` for candidate-review.
+THE SYSTEM SHALL use existing exact-commit evidence by default, SHALL permit the
+tests reviewer at most one named missing evidence check, and SHALL NOT provision
+a shared or artifact-local build cache from the source checkout.
+Test: src/work_task_executor.rs (work_review_prompt_omits_diff_command_for_review_only_without_base_commit)
 
 ### B100
 
@@ -4582,7 +4584,8 @@ Test: src/work_task_executor.rs (writer_prompt_omits_bootstrap_when_both_files_p
 WHEN `tester-results.json` is written,
 THE SYSTEM SHALL include exactly these top-level fields: `commands`
 (array), `tests` (array), `summary` (object), `error` (object or
-null). No other top-level fields.
+null). A standalone Tester result SHALL omit `candidate_commit`; a Work Task
+Tester result SHALL add it only through the host binding described below.
 Test: src/tester.rs (tester_results_top_level_shape)
 
 Each entry in `commands` SHALL have: `command` (string, as declared
@@ -4705,6 +4708,14 @@ THE SYSTEM SHALL instruct that every emitted test `id` be globally
 unique across all commands and harnesses, prefixing with the binary,
 file, or section when a test name recurs.
 Test: src/work_task_executor.rs (extract_tester_results_bootstrap_requires_unique_ids)
+
+### B23
+
+WHEN a Work Task Tester produces normalized evidence, THE SYSTEM SHALL bind the
+result atomically and idempotently to that Task's exact candidate commit before
+reviewers can consume it, and SHALL fail closed if evidence is already bound to
+a different commit.
+Test: src/tester.rs (tester_results_bind_once_to_the_exact_candidate_commit)
 
 ## Pre-review completion gate
 
@@ -6532,16 +6543,21 @@ Test: tests/binary.rs (rebase_codex_auth_preflight_precedes_task_creation)
 
 ### B1
 
-WHEN Fluent prepares a Reviewer Task, THE SYSTEM SHALL reclaim canonical build
-cache directories from terminal Reviewer Tasks before admitting a warm cache.
-Test: src/work_task_executor.rs (reviewer_cache_admission_reclaims_terminal_caches_first)
+WHEN Fluent prepares a tests Reviewer Task, THE SYSTEM SHALL retire
+candidate-keyed caches no longer referenced by nonterminal Work before
+admitting a warm cache, while preserving a cache referenced by any nonterminal
+Work Item.
+Test: src/work_task_executor.rs (candidate_cache_retires_once_work_is_terminal)
+Test: src/work_task_executor.rs (candidate_cache_remains_while_work_is_nonterminal)
 
 ### B2
 
 WHEN the prospective managed reviewer cache fits the configured project budget
-and host free-space floor, THE SYSTEM SHALL copy the candidate's canonical
-build-cache directories into that Reviewer's artifact area.
+and host free-space floor, THE SYSTEM SHALL make the candidate's canonical
+build-cache directories available in one cache keyed by the exact candidate
+commit and SHALL reuse that cache for parallel review work.
 Test: src/work_task_executor.rs (reviewer_cache_admission_warms_within_project_budget)
+Test: src/work_task_executor.rs (parallel_reviewers_share_one_cache_and_create_no_private_targets)
 
 ### B3
 
@@ -6556,11 +6572,13 @@ Test: src/work_task_executor.rs (reviewer_cache_free_space_failure_starts_cold)
 
 ### B4
 
-WHEN a Reviewer Task becomes terminal, THE SYSTEM SHALL remove only canonical
-build-cache directories from its artifact area and preserve review evidence,
-logs, transcripts, and noncanonical hook output.
+WHEN a Reviewer Task settles, THE SYSTEM SHALL write structured artifact byte
+accounting, warn when the artifact exceeds its size threshold or contains a
+managed build cache, and preserve review evidence, logs, transcripts, and
+noncanonical hook output without creating a private cache there.
 Test: src/work_task_executor.rs (prepare_pre_review_reclaims_only_canonical_cache_dirs)
 Test: src/work_task_executor.rs (failed_prepare_pre_review_removes_managed_cache)
+Test: src/work_task_executor.rs (review_artifact_usage_records_bytes_and_warns_on_private_cache)
 
 ## Generated commit wording
 

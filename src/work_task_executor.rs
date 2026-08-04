@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -40,6 +40,15 @@ pub struct WorkTaskRunResult {
 }
 
 const NO_CHANGE_DECLARATION_FILE: &str = "no-change.json";
+const REVIEW_ARTIFACT_WARN_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ReviewArtifactUsage {
+    artifact_bytes: u64,
+    managed_cache_bytes: u64,
+    warning: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct NoChangeDeclaration {
@@ -1057,6 +1066,8 @@ fn run_review_task_with_coder(
         .clone()
         .expect("review context validated present while planning the start");
     let candidate_commit = review_context.candidate_commit.clone();
+    let reviewer_cache_dir = (role == "tests" && !attempt_kind.is_review_only_like())
+        .then(|| candidate_reviewer_cache_dir(config.project_root, &candidate_commit));
     let artifact_area = plan
         .task
         .artifact_area
@@ -1117,6 +1128,7 @@ fn run_review_task_with_coder(
         &workspace_reads,
         &input_artifacts,
         &artifact_dir,
+        reviewer_cache_dir.as_deref(),
         config.resolver,
         config.no_sandbox,
         plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
@@ -1214,11 +1226,15 @@ fn run_review_task_with_coder(
     };
     let readable_workspace_paths = readable_workspaces.paths();
 
-    if let Some(candidate_path) = readable_workspace_paths.first() {
+    if let (Some(candidate_path), Some(cache_dir)) = (
+        readable_workspace_paths.first(),
+        reviewer_cache_dir.as_deref(),
+    ) {
         prepare_reviewer_build_cache(
             config.project_root,
             candidate_path,
             &artifact_dir,
+            cache_dir,
             config.work_item_id,
             config.attempt_id,
             config.task_id,
@@ -1304,8 +1320,44 @@ fn run_review_task_with_coder(
         &review_path,
         &crate::notify::notify,
     );
-    reclaim_reviewer_cache_after_terminal(&config, &artifact_dir, cache_reporter);
+    if let Err(error) = record_review_artifact_usage(&artifact_dir, cache_reporter) {
+        cache_reporter(&format!(
+            "  Review artifacts  {} accounting failed: {error:#}",
+            config.task_id
+        ));
+    }
     outcome
+}
+
+fn record_review_artifact_usage(artifact_dir: &Path, reporter: &dyn Fn(&str)) -> Result<()> {
+    let usage_path = artifact_dir.join("artifact-usage.json");
+    if usage_path.is_file() {
+        fs::remove_file(&usage_path)?;
+    }
+    let artifact_bytes = prep::logical_bytes(artifact_dir)?;
+    let managed_cache_bytes = prep::managed_cache_bytes(artifact_dir)?;
+    let warning = if managed_cache_bytes > 0 {
+        Some(format!(
+            "review artifact contains {managed_cache_bytes} bytes of managed build cache"
+        ))
+    } else if artifact_bytes > REVIEW_ARTIFACT_WARN_BYTES {
+        Some(format!(
+            "review artifact exceeds {} bytes",
+            REVIEW_ARTIFACT_WARN_BYTES
+        ))
+    } else {
+        None
+    };
+    let usage = ReviewArtifactUsage {
+        artifact_bytes,
+        managed_cache_bytes,
+        warning,
+    };
+    crate::atomic_write::atomic_write(&usage_path, to_json_pretty(&usage)?.as_bytes())?;
+    if let Some(warning) = &usage.warning {
+        reporter(&format!("  Review artifacts  warning: {warning}"));
+    }
+    Ok(())
 }
 
 /// A terminal review failure that a supported resume can retry: an expired auth
@@ -1680,7 +1732,7 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
         find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
             .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", config.task_id))?;
     let task = &item.attempts[attempt_index].tasks[task_index];
-    let _review_context = task.review_context.as_ref().ok_or_else(|| {
+    let review_context = task.review_context.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Tester Task {:?} must declare review context",
             config.task_id
@@ -1728,6 +1780,13 @@ fn run_tester_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             settle_tester_harness_failure(&config)?;
             return Err(error);
         }
+    }
+
+    if let Err(error) =
+        crate::tester::bind_candidate_commit(&artifact_dir, &review_context.candidate_commit)
+    {
+        settle_tester_harness_failure(&config)?;
+        return Err(error);
     }
 
     if !results_path.is_file() {
@@ -4657,6 +4716,15 @@ fn run_review_coder_with_coder(
         input_artifacts,
         review_only,
     })?;
+    let reviewer_cache_dir = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .filter(|attempt| !attempt.kind.is_review_only_like())
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+        .filter(|task| task.role == "tests")
+        .and_then(|task| task.review_context.as_ref())
+        .map(|context| candidate_reviewer_cache_dir(project_root, &context.candidate_commit));
 
     let (sandbox, _sandbox_profile) = if let Some(profile) = sandbox_profile {
         (
@@ -4678,7 +4746,7 @@ fn run_review_coder_with_coder(
             coder_kind,
             resolver,
             artifact_dir,
-            &[],
+            &reviewer_cache_dir.into_iter().collect::<Vec<_>>(),
             &readable_roots,
             codex_worker.map(|worker| worker.home()),
         )?
@@ -4878,6 +4946,10 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
             .display()
             .to_string();
+    let reviewer_cache_dir =
+        candidate_reviewer_cache_dir(input.project_root, &review_context.candidate_commit)
+            .display()
+            .to_string();
 
     let resolver = ContentResolver::new(input.readable_workspaces.first().map(|p| p.as_path()));
 
@@ -4938,6 +5010,7 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("progress_md_path", &reviewer_progress_md_path),
             ("review_path", &review_path_display),
             ("artifact_dir", &artifact_dir_display),
+            ("reviewer_cache_dir", &reviewer_cache_dir),
             ("decisions_path", &decisions_path),
         ],
     )
@@ -4989,10 +5062,19 @@ fn decisions_path(readable_workspaces: &[PathBuf]) -> String {
         .unwrap_or_default()
 }
 
+fn candidate_reviewer_cache_dir(project_root: &Path, candidate_commit: &str) -> PathBuf {
+    let digest = crate::follow_up::content_digest(candidate_commit.as_bytes());
+    let key = digest
+        .strip_prefix("sha256:")
+        .expect("content digest has a sha256 prefix");
+    project_root.join(".fluent/work/cache/reviewers").join(key)
+}
+
 fn prepare_reviewer_build_cache(
     project_root: &Path,
     candidate_workspace: &Path,
     artifact_dir: &Path,
+    cache_dir: &Path,
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
@@ -5005,6 +5087,7 @@ fn prepare_reviewer_build_cache(
             project_root,
             candidate_workspace,
             artifact_dir,
+            cache_dir,
             work_item_id,
             attempt_id,
             task_id,
@@ -5015,7 +5098,7 @@ fn prepare_reviewer_build_cache(
         admit_reviewer_build_cache_with_admission(
             project_root,
             candidate_workspace,
-            artifact_dir,
+            cache_dir,
             toolchain,
             task_id,
             admission,
@@ -5032,6 +5115,7 @@ fn prepare_reviewer_hook_cache(
     project_root: &Path,
     candidate_workspace: &Path,
     artifact_dir: &Path,
+    cache_dir: &Path,
     work_item_id: &str,
     attempt_id: &str,
     task_id: &str,
@@ -5042,7 +5126,21 @@ fn prepare_reviewer_hook_cache(
         Ok(lock) => {
             let store = WorkModelStore::new(project_root);
             match cache_admission.reclaim_terminal_caches(project_root, &store) {
-                Ok(()) => Some((lock, store)),
+                Ok(()) => match prep::managed_cache_bytes(cache_dir) {
+                    Ok(bytes) if bytes > 0 => {
+                        reporter(&format!(
+                            "  Reviewer prep     {task_id} reusing shared candidate cache"
+                        ));
+                        return;
+                    }
+                    Ok(_) => Some((lock, store)),
+                    Err(error) => {
+                        reporter(&format!(
+                            "  Reviewer prep     {task_id} starting cold: cache inspection failed: {error:#}"
+                        ));
+                        None
+                    }
+                },
                 Err(error) => {
                     reporter(&format!(
                         "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
@@ -5095,6 +5193,7 @@ fn prepare_reviewer_hook_cache(
             admit_hook_reviewer_cache_with_admission(
                 project_root,
                 artifact_dir,
+                cache_dir,
                 task_id,
                 &store,
                 cache_admission,
@@ -5126,6 +5225,10 @@ fn reviewer_cache_lock_path(project_root: &Path) -> PathBuf {
     project_root.join(".fluent/work/locks/reviewer-cache.lock")
 }
 
+fn reviewer_cache_root(project_root: &Path) -> PathBuf {
+    project_root.join(".fluent/work/cache/reviewers")
+}
+
 fn task_is_terminal(task: &crate::work_model::Task) -> bool {
     matches!(
         task.status,
@@ -5145,7 +5248,56 @@ fn reviewer_cache_artifact_dir(
 }
 
 fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore) -> Result<()> {
-    for item in store.list_work_items()? {
+    let items = store.list_work_items()?;
+    let mut active_keys = HashSet::new();
+    for item in &items {
+        if !crate::cleanup::work_item_is_cleanable(item) {
+            for context in item
+                .attempts
+                .iter()
+                .flat_map(|attempt| &attempt.tasks)
+                .filter(|task| task.kind == TaskKind::Review)
+                .filter_map(|task| task.review_context.as_ref())
+            {
+                if let Some(key) =
+                    candidate_reviewer_cache_dir(project_root, &context.candidate_commit)
+                        .file_name()
+                {
+                    active_keys.insert(key.to_os_string());
+                }
+            }
+        }
+    }
+
+    let root = reviewer_cache_root(project_root);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read candidate reviewer cache root"),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                bail!(
+                    "candidate reviewer cache cannot be a symlink: {}",
+                    path.display()
+                );
+            }
+            if metadata.is_dir() && !active_keys.contains(&entry.file_name()) {
+                fs::remove_dir_all(&path).with_context(|| {
+                    format!("remove retired candidate reviewer cache {}", path.display())
+                })?;
+            }
+        }
+    }
+
+    // Continue retiring canonical caches produced by older Fluent versions once
+    // their individual Reviewer Tasks are terminal. New runs never place these
+    // directories in artifact areas.
+    for item in &items {
         for attempt in &item.attempts {
             for task in &attempt.tasks {
                 if task.kind != TaskKind::Review || !task_is_terminal(task) {
@@ -5163,19 +5315,26 @@ fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore)
 
 fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> Result<u64> {
     let mut total = 0_u64;
-    for item in store.list_work_items()? {
-        for attempt in &item.attempts {
-            for task in &attempt.tasks {
-                if task.kind != TaskKind::Review {
-                    continue;
-                }
-                let artifact_dir = reviewer_cache_artifact_dir(project_root, task)?;
-                if artifact_dir.exists() {
-                    total = total
-                        .checked_add(prep::managed_cache_bytes(&artifact_dir)?)
-                        .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
-                }
-            }
+    let _ = store;
+    let root = reviewer_cache_root(project_root);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("read candidate reviewer cache root"),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "candidate reviewer cache cannot be a symlink: {}",
+                entry.path().display()
+            );
+        }
+        if metadata.is_dir() {
+            total = total
+                .checked_add(prep::managed_cache_bytes(&entry.path())?)
+                .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
         }
     }
     Ok(total)
@@ -5226,6 +5385,9 @@ fn admit_reviewer_build_cache_with_admission(
     let store = WorkModelStore::new(project_root);
     let decision = (|| -> Result<Option<&'static str>> {
         admission.reclaim_terminal_caches(project_root, &store)?;
+        if prep::managed_cache_bytes(artifact_dir)? > 0 {
+            return Ok(None);
+        }
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
         let current = admission.managed_cache_total(project_root, &store)?;
@@ -5236,13 +5398,19 @@ fn admit_reviewer_build_cache_with_admission(
         if total > limits.max_project_bytes.value {
             return Ok(Some("project cache budget"));
         }
-        let free = admission.filesystem_free_bytes(artifact_dir)?;
+        let free = admission.filesystem_free_bytes(project_root)?;
         let required = prospective
             .checked_add(limits.min_free_bytes.value)
             .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
         if free < required {
             return Ok(Some("host free-space floor"));
         }
+        fs::create_dir_all(artifact_dir).with_context(|| {
+            format!(
+                "create candidate reviewer cache at {}",
+                artifact_dir.display()
+            )
+        })?;
         prep::populate_reviewer_cache(candidate_workspace, artifact_dir, toolchain)?;
         Ok(None)
     })();
@@ -5267,6 +5435,7 @@ fn admit_reviewer_build_cache_with_admission(
 fn admit_hook_reviewer_cache_with_admission(
     project_root: &Path,
     artifact_dir: &Path,
+    cache_dir: &Path,
     task_id: &str,
     store: &WorkModelStore,
     admission: &dyn ReviewerCacheAdmission,
@@ -5276,17 +5445,30 @@ fn admit_hook_reviewer_cache_with_admission(
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
         let current = admission.managed_cache_total(project_root, store)?;
-        if current > limits.max_project_bytes.value {
+        let replacing = prep::managed_cache_bytes(cache_dir)?;
+        let prospective = prep::managed_cache_bytes(artifact_dir)?;
+        let total = current
+            .checked_sub(replacing)
+            .and_then(|current| current.checked_add(prospective))
+            .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
+        if total > limits.max_project_bytes.value {
             return Ok(Some("project cache budget"));
         }
-        let free = admission.filesystem_free_bytes(artifact_dir)?;
-        if free < limits.min_free_bytes.value {
+        let free = admission.filesystem_free_bytes(project_root)?;
+        let required = prospective
+            .checked_add(limits.min_free_bytes.value)
+            .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
+        if free < required {
             return Ok(Some("host free-space floor"));
         }
+        prep::populate_managed_cache(artifact_dir, cache_dir)?;
+        prep::remove_managed_cache_dirs(artifact_dir)?;
         Ok(None)
     })();
     match decision {
-        Ok(None) => reporter("  Reviewer prep     admitted prepare-pre-review managed cache"),
+        Ok(None) => {
+            reporter("  Reviewer prep     admitted shared prepare-pre-review managed cache")
+        }
         Ok(Some(reason)) => {
             if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
                 eprintln!(
@@ -5307,38 +5489,6 @@ fn admit_hook_reviewer_cache_with_admission(
             }
             reporter(&format!(
                 "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
-            ));
-        }
-    }
-}
-
-fn reclaim_reviewer_cache_after_terminal(
-    config: &WorkTaskRunConfig<'_>,
-    artifact_dir: &Path,
-    reporter: &dyn Fn(&str),
-) {
-    let terminal = config
-        .store
-        .read_work_item(config.work_item_id)
-        .ok()
-        .and_then(|item| {
-            item.attempts
-                .iter()
-                .find(|attempt| attempt.id == config.attempt_id)
-                .and_then(|attempt| {
-                    attempt
-                        .tasks
-                        .iter()
-                        .find(|task| task.id == config.task_id)
-                        .map(task_is_terminal)
-                })
-        })
-        .unwrap_or(false);
-    if terminal {
-        if let Err(error) = prep::remove_managed_cache_dirs(artifact_dir) {
-            reporter(&format!(
-                "  Reviewer prep     retained cache {}: {error:#}",
-                artifact_dir.display()
             ));
         }
     }
@@ -5370,6 +5520,7 @@ fn preflight_review_sandbox_profile(
     workspace_refs: &[WorkspaceRef],
     input_artifacts: &[PathBuf],
     artifact_dir: &Path,
+    reviewer_cache_dir: Option<&Path>,
     resolver: &ContentResolver,
     no_sandbox: bool,
     coder_kind: CoderKind,
@@ -5400,10 +5551,12 @@ fn preflight_review_sandbox_profile(
         readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
     }
     let home = std::env::var("HOME").unwrap_or_default();
+    let mut writable_roots = vec![artifact_dir.to_path_buf()];
+    writable_roots.extend(reviewer_cache_dir.map(Path::to_path_buf));
     let profile = os::render_profile_for_access_for_coder_with_codex_home(
         resolver,
         &home,
-        &[artifact_dir.to_path_buf()],
+        &writable_roots,
         &readable_roots,
         coder_kind,
         codex_worker.map(|worker| worker.home()),
@@ -7500,6 +7653,7 @@ mod tests {
         let artifact_relative =
             crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
         let artifact = project.join(&artifact_relative);
+        let cache = candidate_reviewer_cache_dir(project, "abc123");
         fs::create_dir_all(&artifact).unwrap();
         fs::create_dir_all(project.join(".fluent/hooks")).unwrap();
         fs::create_dir_all(project.join(".fluent")).unwrap();
@@ -7551,6 +7705,7 @@ mod tests {
             project,
             project,
             &artifact,
+            &cache,
             "work-1",
             "attempt-1",
             "review-1",
@@ -7571,6 +7726,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
         let artifact = project.join("review-artifact");
+        let cache = candidate_reviewer_cache_dir(project, "abc123");
         fs::create_dir_all(&artifact).unwrap();
         fs::create_dir_all(project.join(".fluent/hooks")).unwrap();
         let hook = project.join(".fluent/hooks/prepare-pre-review");
@@ -7588,6 +7744,7 @@ mod tests {
             project,
             project,
             &artifact,
+            &cache,
             "work-1",
             "attempt-1",
             "review-1",
@@ -7666,6 +7823,7 @@ mod tests {
 
     struct CacheObservingReviewCoder {
         saw_warm_cache: Arc<Mutex<bool>>,
+        cache_dir: PathBuf,
     }
 
     impl crate::coder::Coder for CacheObservingReviewCoder {
@@ -7690,7 +7848,8 @@ mod tests {
             _extra_env: &[(String, String)],
             _capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> Result<i32> {
-            *self.saw_warm_cache.lock().unwrap() = working_dir.join("target/output").is_file();
+            *self.saw_warm_cache.lock().unwrap() = self.cache_dir.join("target/output").is_file();
+            assert!(!working_dir.join("target").exists());
             fs::write(working_dir.join("review.md"), "review evidence")?;
             Ok(0)
         }
@@ -7712,10 +7871,15 @@ mod tests {
         store: WorkModelStore,
         review_task_id: String,
         artifact_dir: PathBuf,
+        cache_dir: PathBuf,
     }
 
     impl ReviewerCacheRouteFixture {
         fn new(config: &str) -> Self {
+            Self::new_with_hook(config, None)
+        }
+
+        fn new_with_hook(config: &str, hook_body: Option<&str>) -> Self {
             let tmp = tempfile::TempDir::new().unwrap();
             let project_root = tmp.path().join("project");
             fs::create_dir_all(&project_root).unwrap();
@@ -7729,14 +7893,40 @@ mod tests {
                 "[package]\nname = \"cache-route\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
             )
             .unwrap();
-            fs::create_dir_all(project_root.join("target")).unwrap();
-            fs::write(project_root.join("target/output"), "candidate cache").unwrap();
+            fs::write(project_root.join(".gitignore"), "/target/\n").unwrap();
             fs::create_dir_all(project_root.join(".fluent")).unwrap();
             fs::write(project_root.join(".fluent/config.yaml"), config).unwrap();
+            if let Some(body) = hook_body {
+                let hook_dir = project_root.join(".fluent/hooks");
+                fs::create_dir_all(&hook_dir).unwrap();
+                let hook = hook_dir.join("prepare-pre-review");
+                fs::write(&hook, body).unwrap();
+                let mut permissions = fs::metadata(&hook).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&hook, permissions).unwrap();
+            }
             git(&["add", "."]);
             git(&["commit", "-q", "-m", "baseline"]);
             let head =
                 crate::git::run_stdout(&project_root, &["rev-parse", "HEAD"], "head").unwrap();
+
+            let candidate_path = tmp.path().join("work-6-work-1-attempt-1");
+            crate::git::run(
+                &project_root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "cache-route-candidate",
+                    candidate_path.to_str().unwrap(),
+                    "HEAD",
+                ],
+                "create candidate worktree",
+            )
+            .unwrap();
+            fs::create_dir_all(candidate_path.join("target")).unwrap();
+            fs::write(candidate_path.join("target/output"), "candidate cache").unwrap();
 
             let store = WorkModelStore::new(&project_root);
             let mut item = WorkItem {
@@ -7744,15 +7934,43 @@ mod tests {
                 title: "Reviewer cache route".to_string(),
                 ..Default::default()
             };
-            item.add_review_only_attempt("attempt-1", &["architecture"], "main", head.trim(), true)
+            item.add_initial_attempt("attempt-1").unwrap();
+            let write = &mut item.attempts[0].tasks[0];
+            let workspace = write.workspace_access.writes[0].clone();
+            write.status = TaskStatus::Complete;
+            write.output = Some(TaskOutput {
+                workspace_id: workspace.id,
+                workspace_path: workspace.path,
+                source_branch: "main".to_string(),
+                base_commit: None,
+                commit: head.trim().to_string(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            item.add_review_tasks("attempt-1", &["tests"]).unwrap();
+            let review_task_id = "attempt-1-review-tests".to_string();
+            let review_task = item.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == review_task_id)
                 .unwrap();
-            let review_task_id = "attempt-1-review-architecture".to_string();
+            for input in &review_task.input_artifacts {
+                let path = project_root.join(&input.path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let content = if path.file_name().unwrap() == "tester-results.json" {
+                    format!("{{\"candidate_commit\":\"{}\"}}\n", head.trim())
+                } else {
+                    "# Progress\n".to_string()
+                };
+                fs::write(path, content).unwrap();
+            }
             let artifact_dir = project_root.join(crate::work_model::work_artifact_path(
                 "work-1",
                 "attempt-1",
                 &review_task_id,
             ));
             store.create_work_item(&item).unwrap();
+            let cache_dir = candidate_reviewer_cache_dir(&project_root, head.trim());
 
             Self {
                 _tmp: tmp,
@@ -7760,11 +7978,22 @@ mod tests {
                 store,
                 review_task_id,
                 artifact_dir,
+                cache_dir,
             }
         }
 
         fn run(&self, admission: &dyn ReviewerCacheAdmission) -> bool {
             self.run_with_messages(admission).0
+        }
+
+        fn review_status(&self) -> TaskStatus {
+            self.store.read_work_item("work-1").unwrap().attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == self.review_task_id)
+                .unwrap()
+                .status
+                .clone()
         }
 
         fn run_with_messages(&self, admission: &dyn ReviewerCacheAdmission) -> (bool, Vec<String>) {
@@ -7775,6 +8004,7 @@ mod tests {
             let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
                 Box::new(CacheObservingReviewCoder {
                     saw_warm_cache: Arc::clone(&saw_warm_cache_for_coder),
+                    cache_dir: self.cache_dir.clone(),
                 })
             };
             let resolver = ContentResolver::new(Some(&self.project_root));
@@ -7851,11 +8081,7 @@ mod tests {
                 && message.contains("project cache budget")
         }));
         assert!(fixture.artifact_dir.join("review.md").is_file());
-        assert_eq!(
-            fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
-            AttemptStatus::Complete,
-            "cold admission must not pause the review"
-        );
+        assert_eq!(fixture.review_status(), TaskStatus::Complete);
     }
 
     #[test]
@@ -7911,11 +8137,7 @@ mod tests {
                 && message.contains("starting cold")
                 && message.contains("host free-space floor")
         }));
-        assert_eq!(
-            fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
-            AttemptStatus::Complete,
-            "cold admission must not pause the review"
-        );
+        assert_eq!(fixture.review_status(), TaskStatus::Complete);
     }
 
     #[test]
@@ -7994,11 +8216,7 @@ mod tests {
                 && message.contains("cache admission check failed")
                 && message.contains("synthetic reclamation failure")
         }));
-        assert_eq!(
-            fixture.store.read_work_item("work-1").unwrap().attempts[0].status,
-            AttemptStatus::Complete,
-            "a cold Reviewer continues when terminal-cache reclamation fails"
-        );
+        assert_eq!(fixture.review_status(), TaskStatus::Complete);
     }
 
     #[test]
@@ -8211,6 +8429,87 @@ mod tests {
     }
 
     #[test]
+    fn parallel_reviewers_share_one_cache_and_create_no_private_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let candidate = project.join("candidate");
+        let shared_cache = candidate_reviewer_cache_dir(project, "abc123");
+        let architecture_artifact = project.join("architecture-artifact");
+        let tests_artifact = project.join("tests-artifact");
+        fs::create_dir_all(candidate.join("target")).unwrap();
+        fs::write(candidate.join("target/output"), "candidate cache").unwrap();
+        fs::create_dir_all(&architecture_artifact).unwrap();
+        fs::create_dir_all(&tests_artifact).unwrap();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        )
+        .unwrap();
+        WorkModelStore::new(project)
+            .create_work_item(&review_item())
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            for task_id in ["review-architecture", "review-tests"] {
+                scope.spawn(|| {
+                    admit_reviewer_build_cache_with_admission(
+                        project,
+                        &candidate,
+                        &shared_cache,
+                        &prep::TOOLCHAINS[0],
+                        task_id,
+                        &FilesystemReviewerCacheAdmission,
+                        &report_reviewer_cache,
+                    );
+                });
+            }
+        });
+
+        assert!(shared_cache.join("target/output").is_file());
+        assert!(!architecture_artifact.join("target").exists());
+        assert!(!tests_artifact.join("target").exists());
+        assert_eq!(
+            managed_reviewer_cache_total(project, &WorkModelStore::new(project)).unwrap(),
+            15
+        );
+    }
+
+    #[test]
+    fn review_artifact_usage_records_bytes_and_warns_on_private_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("review-artifact");
+        fs::create_dir_all(artifact.join("target")).unwrap();
+        fs::write(artifact.join("review.md"), "Verdict: pass\n").unwrap();
+        fs::write(artifact.join("target/output"), "private cache").unwrap();
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let messages_for_reporter = Arc::clone(&messages);
+
+        record_review_artifact_usage(&artifact, &move |message| {
+            messages_for_reporter
+                .lock()
+                .unwrap()
+                .push(message.to_string())
+        })
+        .unwrap();
+
+        let usage: ReviewArtifactUsage = serde_json::from_str(
+            &fs::read_to_string(artifact.join("artifact-usage.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(usage.managed_cache_bytes, 13);
+        assert!(usage.artifact_bytes >= usage.managed_cache_bytes);
+        assert!(usage.warning.unwrap().contains("managed build cache"));
+        assert!(
+            messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.contains("Review artifacts  warning"))
+        );
+    }
+
+    #[test]
     fn reviewer_cache_reclamation_skips_executing_tasks() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
@@ -8299,7 +8598,50 @@ mod tests {
     }
 
     #[test]
-    fn terminal_reviewer_reclaims_cache_and_retains_evidence() {
+    fn candidate_cache_remains_while_work_is_nonterminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let cache = candidate_reviewer_cache_dir(project, "abc123");
+        fs::create_dir_all(cache.join("target")).unwrap();
+        fs::write(cache.join("target/output"), "cache").unwrap();
+
+        let store = WorkModelStore::new(project);
+        let mut item = review_item();
+        for task in &mut item.attempts[0].tasks {
+            if task.kind == TaskKind::Review {
+                task.status = TaskStatus::Executing;
+            }
+        }
+        store.create_work_item(&item).unwrap();
+
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        assert!(cache.join("target/output").is_file());
+    }
+
+    #[test]
+    fn candidate_cache_retires_once_work_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let cache = candidate_reviewer_cache_dir(project, "abc123");
+        fs::create_dir_all(cache.join("target")).unwrap();
+        fs::write(cache.join("target/output"), "cache").unwrap();
+
+        let store = WorkModelStore::new(project);
+        let mut item = review_item();
+        for task in &mut item.attempts[0].tasks {
+            task.status = TaskStatus::Complete;
+        }
+        item.attempts[0].status = AttemptStatus::Complete;
+        item.attempts[0].review_state = Some(crate::work_model::AttemptReviewState::Passed);
+        store.create_work_item(&item).unwrap();
+
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn reviewer_artifact_retains_evidence_without_private_cache() {
         let fixture = ReviewerCacheRouteFixture::new(
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
         );
@@ -8319,21 +8661,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_reviewer_reclaims_admitted_custom_hook_cache() {
-        let fixture = ReviewerCacheRouteFixture::new(
+    fn custom_hook_moves_cache_out_of_reviewer_artifact() {
+        let fixture = ReviewerCacheRouteFixture::new_with_hook(
             "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+            Some(
+                "#!/bin/sh\nmkdir -p \"$FLUENT_REVIEWER_ARTIFACT_DIR/target\"\nprintf cache > \"$FLUENT_REVIEWER_ARTIFACT_DIR/target/output\"\nprintf hook-output > \"$FLUENT_REVIEWER_ARTIFACT_DIR/hook-note\"\n",
+            ),
         );
-        let hook_dir = fixture.project_root.join(".fluent/hooks");
-        fs::create_dir_all(&hook_dir).unwrap();
-        let hook = hook_dir.join("prepare-pre-review");
-        fs::write(
-            &hook,
-            "#!/bin/sh\nmkdir -p \"$FLUENT_REVIEWER_ARTIFACT_DIR/target\"\nprintf cache > \"$FLUENT_REVIEWER_ARTIFACT_DIR/target/output\"\nprintf hook-output > \"$FLUENT_REVIEWER_ARTIFACT_DIR/hook-note\"\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&hook).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&hook, permissions).unwrap();
         let admission = SyntheticReviewerCacheAdmission {
             reclaim: Ok(()),
             total: Ok(0),
@@ -8346,8 +8680,9 @@ mod tests {
         );
         assert!(
             !fixture.artifact_dir.join("target").exists(),
-            "terminal settlement must reclaim the hook-created canonical cache"
+            "the hook-created canonical cache must leave the artifact area"
         );
+        assert!(fixture.cache_dir.join("target/output").is_file());
         assert_eq!(
             fs::read_to_string(fixture.artifact_dir.join("hook-note")).unwrap(),
             "hook-output"
@@ -8355,93 +8690,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(fixture.artifact_dir.join("review.md")).unwrap(),
             "review evidence"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reviewer_cache_cleanup_failure_preserves_outcome_and_retries() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path();
-        let artifact_relative =
-            crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
-        let artifact = project.join(&artifact_relative);
-        fs::create_dir_all(artifact.join("target")).unwrap();
-        fs::write(artifact.join("target/output"), "cache").unwrap();
-        fs::write(artifact.join("review.md"), "review evidence").unwrap();
-
-        let store = WorkModelStore::new(project);
-        let mut item = WorkItem {
-            id: "work-1".to_string(),
-            title: "Cleanup retry".to_string(),
-            ..Default::default()
-        };
-        item.add_initial_attempt("attempt-1").unwrap();
-        let task = &mut item.attempts[0].tasks[0];
-        task.id = "review-1".to_string();
-        task.kind = TaskKind::Review;
-        task.status = TaskStatus::Complete;
-        task.workspace_access.writes.clear();
-        task.workspace_access.reads.push(WorkspaceRef {
-            id: "candidate".to_string(),
-            path: "candidate".to_string(),
-        });
-        task.review_context = Some(crate::work_model::ReviewContext {
-            candidate_workspace_id: "candidate".to_string(),
-            candidate_workspace_path: "candidate".to_string(),
-            source_branch: "main".to_string(),
-            candidate_commit: "abc123".to_string(),
-            base_commit: None,
-        });
-        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
-            path: artifact_relative,
-        });
-        store.create_work_item(&item).unwrap();
-
-        let resolver = ContentResolver::new(Some(project));
-        let config = WorkTaskRunConfig {
-            project_root: project,
-            store: &store,
-            work_item_id: "work-1",
-            attempt_id: "attempt-1",
-            task_id: "review-1",
-            resolver: &resolver,
-            extra_args: &[],
-            no_sandbox: true,
-            store_lock: None,
-        };
-        let original_permissions = fs::metadata(&artifact).unwrap().permissions();
-        let mut blocked_permissions = original_permissions.clone();
-        blocked_permissions.set_mode(0o555);
-        fs::set_permissions(&artifact, blocked_permissions).unwrap();
-        let messages = Arc::new(Mutex::new(Vec::new()));
-        let messages_for_reporter = Arc::clone(&messages);
-        reclaim_reviewer_cache_after_terminal(&config, &artifact, &move |message| {
-            messages_for_reporter
-                .lock()
-                .unwrap()
-                .push(message.to_string())
-        });
-        fs::set_permissions(&artifact, original_permissions).unwrap();
-
-        assert!(artifact.join("target").exists());
-        assert_eq!(
-            store.read_work_item("work-1").unwrap().attempts[0].tasks[0].status,
-            TaskStatus::Complete,
-            "a cleanup failure must not rewrite the terminal outcome"
-        );
-        assert_eq!(
-            fs::read_to_string(artifact.join("review.md")).unwrap(),
-            "review evidence"
-        );
-        assert!(messages.lock().unwrap().iter().any(|message| {
-            message.contains("retained cache") && message.contains(&artifact.display().to_string())
-        }));
-
-        reclaim_terminal_reviewer_caches(project, &store).unwrap();
-        assert!(
-            !artifact.join("target").exists(),
-            "the next admission must retry terminal cache reclamation"
         );
     }
 
@@ -10807,20 +11055,28 @@ mod tests {
                 .review_prompt
                 .contains(&review_path.display().to_string())
         );
+        let shared_cache = candidate_reviewer_cache_dir(project_root, "abc123");
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
-        assert!(prompts.review_prompt.contains("cargo build"));
         assert!(
-            prompts.review_prompt.contains("may READ the candidate"),
-            "prompt should tell reviewer they can read candidate build outputs"
+            prompts
+                .review_prompt
+                .contains(&shared_cache.display().to_string())
+        );
+        assert!(
+            !prompts
+                .review_prompt
+                .contains(&artifact_dir.join("target").display().to_string())
+        );
+        assert!(
+            prompts
+                .review_prompt
+                .contains("one named missing evidence check")
         );
         assert!(
             prompts.review_prompt.contains("Do not edit or commit"),
             "prompt should tell reviewer not to write to candidate"
         );
-        assert!(
-            prompts.review_prompt.contains("pre-populated"),
-            "prompt should mention pre-populated warm cache"
-        );
+        assert!(prompts.review_prompt.contains("exact candidate commit"));
         assert!(!prompts.review_prompt.contains(".fluent/runs/"));
         // System prompt is now thin (identity + lifecycle); build cache + artifact details live in the user message.
         assert!(!prompts.system_prompt.contains("CARGO_TARGET_DIR"));
@@ -10864,6 +11120,13 @@ mod tests {
         assert!(
             prompts.review_prompt.contains("tester-results.json"),
             "behaviors reviewer should see tester-results.json instructions"
+        );
+        assert!(!prompts.review_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(!prompts.review_prompt.contains("cargo test"));
+        assert!(
+            prompts
+                .review_prompt
+                .contains("Do not rerun the full suite")
         );
 
         // Other role blocks are NOT rendered.
@@ -11018,6 +11281,17 @@ mod tests {
                 .review_prompt
                 .contains("Run the review diff command"),
             "review-only without base_commit should skip the diff step"
+        );
+        assert!(
+            prompts
+                .review_prompt
+                .contains("one named missing evidence check")
+        );
+        assert!(!prompts.review_prompt.contains("CARGO_TARGET_DIR"));
+        assert!(
+            !prompts
+                .review_prompt
+                .contains(".fluent/work/cache/reviewers")
         );
     }
 

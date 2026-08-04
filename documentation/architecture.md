@@ -252,28 +252,27 @@ The `behaviors.md` format supports two markers on EARS statements:
 - `Test:` — names a test that verifies the behavior.
 - `Untestable:` — marks a behavior as genuinely untestable with a reason.
 
-Before launching each review Task, Fluent may pre-populate the reviewer's
-artifact directory with the candidate's build outputs so reviewers start
-with a warm build cache. It serializes admission with a project-level lock,
-first removes canonical cache directories from terminal reviewer Tasks, and
-then accounts for the remaining managed caches. The copy proceeds only when
-the prospective logical bytes fit both `reviewer-cache.max-project-gib` and
-`reviewer-cache.min-free-gib`; each setting layers project configuration over
-user configuration over a 50 GiB default. Invalid configuration, failed
-accounting, unavailable filesystem capacity, or either exceeded limit starts
-that reviewer cold without pausing the Attempt. Fluent detects toolchains from
-marker files (`Cargo.toml`, `package.json`, `pom.xml`, `build.gradle`) and
-copies canonical directories using reflink, hardlink, or deep copy in that
-order. A `.fluent/hooks/prepare-pre-review` hook still overrides built-in
-detection, but runs under that same lock after terminal-cache reclamation. Its
-noncanonical output is always retained; canonical cache directories it creates
-are retained only when their post-hook accounting fits both limits, otherwise
-they are removed and the reviewer continues cold. When a Reviewer Task becomes terminal, Fluent removes only its
-canonical cache directories (`target`, `node_modules`, `dist`, `.next`,
-`build`, `.gradle`) and retains review evidence, hook output, logs, and
-transcripts; a later admission retries any failed cleanup. Review-only and
-post-merge review Attempts skip built-in cache preparation because they review
-the source checkout, not a candidate with writer-produced build outputs.
+The Tester produces host-owned `tester-results.json` and binds it once to the
+exact candidate commit. Reviewers consume that result as their default
+executable evidence. Architecture, behaviors, skills, and documentation
+reviewers do not rerun full suites. The tests reviewer may run one named check
+when the evidence lacks a result needed for a concrete finding.
+
+That focused check uses one project cache keyed by the candidate commit under
+`.fluent/work/cache/reviewers/`; reviewer artifact areas never receive private
+build trees. Admission is serialized by a project lock and accounts for the
+shared caches against `reviewer-cache.max-project-gib` and
+`reviewer-cache.min-free-gib`. Invalid configuration, failed accounting,
+unavailable capacity, or an exceeded limit starts the reviewer cold without
+pausing the Attempt. Toolchain detection and reflink, hardlink, then deep-copy
+fallbacks remain unchanged. A custom `prepare-pre-review` hook still writes
+through its artifact contract, but admitted canonical cache directories are
+relocated to the shared candidate cache while diagnostic hook output remains in
+the artifact. Caches remain while any nonterminal Work references their commit
+and retire when no such Work remains. Each settled review records artifact byte
+usage and warns about oversized artifacts or a private managed cache.
+Review-only and post-merge review Attempts do not provision caches from the
+source checkout.
 
 `fluent attempt run <work-item-id> <attempt-id>` is the first
 Attempt-level orchestration path. It advances one Attempt by running the
@@ -438,12 +437,10 @@ reviewer role directly. If the candidate workspace contains
 `.fluent/expertise/decisions.md`, the prompt names that absolute path so
 reviewers do not resolve decisions relative to their artifact directory.
 Reviewers treat the candidate workspace as read-only and write only merge
-review artifacts; scratch tests, suggested patches, and proposed
-documentation edits belong in those artifacts, not in the candidate
-workspace. Fluent sets `CARGO_TARGET_DIR` in each reviewer's environment
-to a path under that reviewer's artifact directory, so build outputs go to
-`.fluent/work/artifacts/<work-item-id>/<attempt-id>/<candidate-id>/merge/reviews/<role>/target/`
-without reviewer cooperation. The reviewer sandbox grants read access to
+review artifacts; suggested patches and proposed documentation edits belong
+in those artifacts, not in the candidate workspace. Review artifacts do not
+receive private build caches; executable suite evidence comes from the
+host-owned Tester boundary. The reviewer sandbox grants read access to
 the whole `.fluent/work/artifacts/<work-item-id>/<attempt-id>/` subtree
 so merge-check and prior-review artifacts are readable. After reviewers exit, merge execution checks each reviewer
 worktree for staged, unstaged, untracked, and ignored file changes,

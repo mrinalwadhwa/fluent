@@ -73,6 +73,32 @@ pub fn populate_reviewer_cache(
     Ok(())
 }
 
+/// Copy every canonical managed cache directory found directly below `source`
+/// into `destination`. This is used to relocate custom reviewer-hook caches out
+/// of durable artifact areas without copying unrelated hook evidence.
+pub fn populate_managed_cache(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination).with_context(|| {
+        format!(
+            "failed to create managed cache destination {}",
+            destination.display()
+        )
+    })?;
+    for src in managed_cache_dirs(source)? {
+        let name = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("managed cache has no directory name"))?;
+        let dst = destination.join(name);
+        copy_dir_with_fallback(&src, &dst).with_context(|| {
+            format!(
+                "failed to relocate managed reviewer cache {} to {}",
+                src.display(),
+                dst.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Return the canonical build-cache directories present directly under `root`.
 fn managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
@@ -138,6 +164,11 @@ pub fn toolchain_cache_bytes(root: &Path, toolchain: &Toolchain) -> Result<u64> 
         }
     }
     Ok(total)
+}
+
+/// Sum regular-file lengths below `root` without following symlinks.
+pub fn logical_bytes(root: &Path) -> Result<u64> {
+    directory_logical_bytes(root)
 }
 
 fn directory_logical_bytes(path: &Path) -> Result<u64> {

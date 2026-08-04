@@ -72,11 +72,14 @@ The Task completes when the review report exists at {{review_path}}.
 
 Do not edit or commit in {{candidate_workspace_path}}. Multiple reviewers run against it concurrently.
 
-### Build cache and writable outputs
+### Executable evidence
 
-- You may READ the workspace's existing build outputs (binaries, compiled artifacts, installed dependencies) freely.
-- Fluent has pre-populated your reviewer artifact directory at {{artifact_dir}} with copies of those build outputs for warm-start incremental builds. When you need to build new outputs (for example, ephemeral tests to verify a finding), redirect them there.
-- For Cargo: `CARGO_TARGET_DIR="{{artifact_dir}}/target" cargo build` (or cargo test). If a binary you need already exists in the workspace, invoke it directly from the workspace instead of recompiling.
+- Use existing exact-commit evidence before running another command.
+- Do not rerun a full suite.
+{{#if is_review_tests}}
+- For a concrete finding that lacks one result, you may run one named missing evidence check. Review-only work does not provision a shared build cache; keep build outputs outside {{artifact_dir}}.
+{{/if}}
+- Keep review.md, logs, transcripts, and small diagnostic text in {{artifact_dir}}. Do not create build caches there.
 
 {{#if decisions_path}}
 ### Do not flag against recorded decisions

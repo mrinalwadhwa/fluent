@@ -176,6 +176,13 @@ When sharing a result in a code review or task handoff, reference the saved path
 
 Use a runner with per-test isolation and parallel execution. Isolation runs each test in its own process so global state — env vars, filesystem, in-process singletons — can't leak between them. Parallelism distributes the suite across cores so it stays fast enough to run often.
 
+During a Fluent review, treat the host-owned Tester result for the exact
+candidate commit as the default suite evidence. Do not rerun the full suite in
+each domain review. If the tests reviewer needs one omitted result to decide a
+concrete finding, run one named check through the candidate-keyed shared cache
+and record the command and result; never put a build cache in the review
+artifact directory.
+
 For Rust, `cargo nextest run` does both — it spawns each test in its own process and parallelizes aggressively. Equivalent runners exist for other ecosystems (pytest-xdist for Python, jest with worker processes for JavaScript). Look for a "slow test" indicator in the runner's output — those are the wall-clock floor and worth tightening.
 
 Run tests in parallel by default. The runner picks a sensible thread count automatically; serializing (e.g., `--test-threads=1`, `--runInBand`) trades real time for an isolation property the tests should provide themselves. If a test fails under parallel execution because it shares global state, fix the test — or scope its state per-test — rather than serializing the suite.

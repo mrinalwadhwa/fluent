@@ -257,7 +257,11 @@ The writer produces tests alongside code. When committing a candidate:
 The Tester Task runs only after a completed Writer has satisfied the Work Item's
 required-progress contract. Incomplete work continues on the Writer path and
 does not spend a Tester or review cycle. The Tester then produces
-`tester-results.json` for reviewers.
+`tester-results.json`, which the host binds to the exact candidate commit for
+reviewers. Domain reviewers use that evidence instead of rerunning the full
+suite. Only the tests reviewer may run one named missing check, using the
+candidate-keyed shared cache; reviewer artifact directories are reserved for
+verdicts, transcripts, logs, and structured evidence.
 
 After creating or repairing a project Tester, run `fluent tester check` before spending review work. It validates the Tester and runs it through the production Tester boundary. If this standalone check reports a harness error, repair the configuration, extractor, or sandbox problem and rerun `fluent tester check`; it creates no Attempt to resume. If a production Tester Task pauses an existing Attempt for a harness error, repair the problem and resume with `fluent attempt run <work-item-id> [<attempt-id>]`; the same Tester retries without rerunning an already completed Writer. For SwiftPM nested-sandbox failures, disable SwiftPM's inner sandbox and use writable project-local cache paths. Fluent leaves project test configuration and scripts unchanged.
 

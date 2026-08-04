@@ -241,7 +241,7 @@ fn retains_for_follow_up_recovery(project_root: &Path, work_item: &WorkItem) -> 
     })
 }
 
-fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
+pub(crate) fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
     if work_item.abandonment.is_some() {
         return work_item_has_no_active_execution(work_item);
     }

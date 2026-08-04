@@ -17,6 +17,8 @@ const FAILURE_EXCERPT_MAX: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TesterResults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_commit: Option<String>,
     pub commands: Vec<CommandResult>,
     pub tests: Vec<TestResult>,
     pub summary: Summary,
@@ -586,6 +588,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
     };
 
     let results = TesterResults {
+        candidate_commit: None,
         commands: command_results,
         tests,
         summary,
@@ -661,6 +664,7 @@ fn persist_harness_error(
     write_results(
         artifact_dir,
         &TesterResults {
+            candidate_commit: None,
             commands,
             tests: Vec::new(),
             summary: Summary {
@@ -925,6 +929,29 @@ fn write_results(artifact_dir: &Path, results: &TesterResults) -> Result<()> {
     Ok(())
 }
 
+/// Bind host-produced Tester evidence to the exact candidate commit once.
+/// Repeating the same binding is idempotent; a conflicting binding fails closed.
+pub fn bind_candidate_commit(artifact_dir: &Path, candidate_commit: &str) -> Result<()> {
+    anyhow::ensure!(
+        !candidate_commit.trim().is_empty(),
+        "candidate commit must not be empty"
+    );
+    let path = artifact_dir.join("tester-results.json");
+    let source = fs::read(&path)
+        .with_context(|| format!("failed to read Tester evidence at {}", path.display()))?;
+    let mut results: TesterResults = serde_json::from_slice(&source)
+        .with_context(|| format!("failed to parse Tester evidence at {}", path.display()))?;
+    match results.candidate_commit.as_deref() {
+        Some(existing) if existing != candidate_commit => anyhow::bail!(
+            "Tester evidence is already bound to candidate {existing}, not {candidate_commit}"
+        ),
+        Some(_) => return Ok(()),
+        None => {}
+    }
+    results.candidate_commit = Some(candidate_commit.to_string());
+    write_results(artifact_dir, &results)
+}
+
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -943,6 +970,39 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tester_results_bind_once_to_the_exact_candidate_commit() {
+        let artifact = TempDir::new().unwrap();
+        write_results(
+            artifact.path(),
+            &TesterResults {
+                candidate_commit: None,
+                commands: Vec::new(),
+                tests: Vec::new(),
+                summary: Summary {
+                    total: 0,
+                    pass: 0,
+                    fail: 0,
+                    skipped: 0,
+                },
+                error: None,
+            },
+        )
+        .unwrap();
+
+        bind_candidate_commit(artifact.path(), "candidate-abc").unwrap();
+        assert_eq!(
+            read_results(artifact.path()).candidate_commit.as_deref(),
+            Some("candidate-abc")
+        );
+        let error = bind_candidate_commit(artifact.path(), "candidate-def").unwrap_err();
+        assert!(error.to_string().contains("candidate-abc"));
+        assert_eq!(
+            read_results(artifact.path()).candidate_commit.as_deref(),
+            Some("candidate-abc")
+        );
+    }
     use crate::process_settlement::ProcessEntry;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
