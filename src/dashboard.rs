@@ -125,6 +125,7 @@ fn refresh(root: &Path, app: &mut App) {
 mod tests {
     use super::*;
     use crate::work_status::WorkItemStatus;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     fn row(id: &str, action: &str) -> WorkItemStatus {
@@ -221,5 +222,67 @@ mod tests {
     fn detail_does_not_invent_next_action() {
         let app = app(vec![row("work", "executing")]);
         assert!(text(&app, 100, 24).contains("No operator action"));
+    }
+    #[test]
+    fn selection_moves_across_groups_and_scrolls() {
+        let mut app = app(vec![row("need", "failed"), row("run", "executing")]);
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.selected_id(), Some("run"));
+        assert_eq!(app.list_scroll, 1);
+    }
+    #[test]
+    fn selection_survives_refresh_reorder_and_filter() {
+        let mut app = app(vec![row("first", "planned"), row("selected", "planned")]);
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        app.refresh(snapshot::DashboardSnapshot::from_status(
+            crate::work_status::WorkStatus {
+                rows: vec![row("selected", "executing"), row("first", "planned")],
+                errors: vec![],
+            },
+        ));
+        assert_eq!(app.selected_id(), Some("selected"));
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.selected_id(), Some("selected"));
+    }
+    #[test]
+    fn removed_selection_uses_nearest_remaining_row() {
+        let mut app = app(vec![
+            row("first", "planned"),
+            row("selected", "planned"),
+            row("last", "planned"),
+        ]);
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        app.refresh(snapshot::DashboardSnapshot::from_status(
+            crate::work_status::WorkStatus {
+                rows: vec![row("first", "planned"), row("last", "planned")],
+                errors: vec![],
+            },
+        ));
+        assert_eq!(app.selected_id(), Some("last"));
+    }
+    #[test]
+    fn narrow_layout_switches_between_list_and_detail() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.resize(80, 24);
+        assert!(text(&app, 80, 24).contains("Work Items"));
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(text(&app, 80, 24).contains("Work Item detail"));
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(text(&app, 80, 24).contains("Work Items"));
+    }
+    #[test]
+    fn undersized_terminal_shows_resize_message() {
+        let app = app(vec![row("work", "planned")]);
+        assert!(text(&app, 59, 14).contains("Resize terminal"));
+    }
+    #[test]
+    fn overflow_detail_remains_navigable() {
+        let mut status = row("work", "planned");
+        status.compatibility_warnings = (0..30).map(|n| format!("warning {n}")).collect();
+        let mut app = app(vec![status]);
+        app.resize(80, 15);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.detail_scroll, 1);
     }
 }
