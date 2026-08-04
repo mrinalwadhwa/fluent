@@ -310,6 +310,9 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 println!("{:<24} TITLE", "ID");
                 for item in items {
                     println!("{:<24} {}", item.id, item.title);
+                    for warning in item.compatibility_warnings() {
+                        eprintln!("Warning: {warning}");
+                    }
                 }
                 if guidance::guidance_enabled() {
                     eprintln!("{}", guidance::after_work_item_list());

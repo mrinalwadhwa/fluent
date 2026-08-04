@@ -32,6 +32,7 @@ pub struct WorkItemStatus {
     /// An exact operator command for exceptional recovery states.
     pub next_action: Option<String>,
     pub metrics: WorkMetrics,
+    pub compatibility_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -95,6 +96,7 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
             .to_string(),
         next_action: evidence_recovery_next_action(attempt),
         metrics: work_metrics(item, project_root),
+        compatibility_warnings: item.compatibility_warnings(),
     }
 }
 
@@ -111,6 +113,10 @@ pub fn work_item_show_value(
 ) -> serde_json::Result<serde_json::Value> {
     let mut output = serde_json::to_value(item)?;
     output["metrics"] = serde_json::to_value(work_metrics(item, Some(project_root)))?;
+    let warnings = item.compatibility_warnings();
+    if !warnings.is_empty() {
+        output["compatibility-warnings"] = serde_json::to_value(warnings)?;
+    }
     Ok(output)
 }
 
@@ -251,6 +257,9 @@ pub fn format_work_status(status: &WorkStatus) -> String {
                 row.action,
                 row.title
             ));
+            for warning in &row.compatibility_warnings {
+                output.push_str(&format!("  warning: {warning}\n"));
+            }
             output.push_str(&format!(
                 "  metrics: rounds:{} duration:{}ms tokens:{}/{} repeated:{} artifacts:{}B avoided:{}\n",
                 row.metrics.review_rounds,
@@ -300,6 +309,9 @@ pub fn format_work_dashboard_lines(status: &WorkStatus) -> Vec<String> {
             row.metrics.artifact_bytes,
             row.metrics.avoided_cycles
         ));
+        for warning in &row.compatibility_warnings {
+            lines.push(format!("  Warning: {warning}"));
+        }
         lines.push(String::new());
     }
     if !status.errors.is_empty() {
@@ -333,8 +345,18 @@ fn select_task(attempt: &Attempt) -> Option<&Task> {
 }
 
 fn format_attempt(attempt: &Attempt) -> String {
+    let pause = attempt
+        .pause_kind
+        .as_ref()
+        .map(|kind| format!("; pause:{}", kind.as_str()))
+        .unwrap_or_default();
     if attempt.writer_runs.is_empty() {
-        return format!("{} [{}]", attempt.id, attempt_status_label(&attempt.status));
+        return format!(
+            "{} [{}{}]",
+            attempt.id,
+            attempt_status_label(&attempt.status),
+            pause
+        );
     }
     let initial = attempt
         .writer_runs
@@ -356,9 +378,10 @@ fn format_attempt(attempt: &Attempt) -> String {
         .last()
         .expect("writer runs is not empty");
     format!(
-        "{} [{}; writers initial:{initial} pre-review:{pre_review} corrective:{corrective}; last:{}]",
+        "{} [{}{}; writers initial:{initial} pre-review:{pre_review} corrective:{corrective}; last:{}]",
         attempt.id,
         attempt_status_label(&attempt.status),
+        pause,
         last.outcome.as_str()
     )
 }
@@ -620,6 +643,38 @@ mod tests {
     }
 
     #[test]
+    fn unknown_pause_is_visible_with_upgrade_warning() {
+        let mut item = WorkItem {
+            id: "future-work".to_string(),
+            title: "Future state".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(crate::work_model::PauseKind::Unknown(
+            "future-pause".to_string(),
+        ));
+
+        let row = summarize_work_item(&item, None);
+        let status = WorkStatus {
+            rows: vec![row],
+            errors: Vec::new(),
+        };
+        let output = format_work_status(&status);
+
+        assert!(output.contains("pause:future-pause"));
+        assert!(output.contains("upgrade Fluent before mutation"));
+        let show = work_item_show_value(&item, Path::new(".")).unwrap();
+        assert_eq!(show["attempts"][0]["pause_kind"], "future-pause");
+        assert!(
+            show["compatibility-warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("upgrade Fluent")
+        );
+    }
+
+    #[test]
     fn metrics_are_derived_from_local_work_evidence() {
         let tmp = tempfile::tempdir().unwrap();
         let mut item = WorkItem {
@@ -875,6 +930,7 @@ mod tests {
                 action: "task-ready".to_string(),
                 next_action: None,
                 metrics: Default::default(),
+                compatibility_warnings: Vec::new(),
             }],
             errors: vec!["invalid work model in bad.json".to_string()],
         };
@@ -902,6 +958,7 @@ mod tests {
                 action: "task-ready".to_string(),
                 next_action: None,
                 metrics: Default::default(),
+                compatibility_warnings: Vec::new(),
             }],
             errors: Vec::new(),
         };

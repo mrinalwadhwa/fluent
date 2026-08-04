@@ -1264,6 +1264,19 @@ references remain relative to the source root, for example
 prefix, Work Item ID, and Attempt ID so valid hyphenated IDs remain
 globally distinct.
 
+Each Work Item root record stores `model_writer_version`, the Fluent package
+version that last wrote the split aggregate. `PauseKind` uses a string-preserving
+decoder: known values become typed variants, while an unrecognized value remains
+an `Unknown(String)` and serializes back to the exact same string. Assembly and
+validation therefore remain available to read-only status, list, and show
+commands. Those surfaces display the unknown value and an upgrade warning; they
+also warn when the recorded writer semantic version is newer than the installed
+binary. Mutation compatibility is a separate gate, checked before Task or
+Attempt execution, landing, locked model reducers, ordinary model writes, and
+cleanup eligibility. It rejects an unknown pause or newer writer version before
+candidate, artifact, Git, or model effects, preventing an older binary from
+silently normalizing state it does not understand.
+
 The Work storage contract is:
 
 ```

@@ -465,6 +465,7 @@ mod tests {
             action: action.to_string(),
             next_action: None,
             metrics: Default::default(),
+            compatibility_warnings: Vec::new(),
         }
     }
 

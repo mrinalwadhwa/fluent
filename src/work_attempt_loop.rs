@@ -123,6 +123,7 @@ pub struct WorkAttemptRunResult {
 }
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
+    read_work_item_or_not_found(config.store, config.work_item_id)?.ensure_mutation_compatible()?;
     if let Some(inputs) = config.coder_mapping_inputs {
         let _land_lock =
             crate::land_lock::acquire(&crate::land_lock::lock_path(config.project_root))?;
@@ -783,7 +784,7 @@ enum TerminalCheck {
 fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
     match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
-        AttemptStatus::NeedsUser => match attempt.pause_kind {
+        AttemptStatus::NeedsUser => match attempt.pause_kind.as_ref() {
             Some(PauseKind::Auth)
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
@@ -814,6 +815,9 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
                 "Attempt is paused at the write-round cap. \
                  Address the failing reviews and re-run; \
                  resuming this pause kind is not yet supported."
+            ),
+            Some(PauseKind::Unknown(value)) => bail!(
+                "Attempt is paused with unknown pause kind {value:?}; upgrade Fluent before mutating this Work Item."
             ),
             None => bail!("Attempt needs user input before it can advance"),
         },
@@ -4408,9 +4412,13 @@ fn settle_review_pause(
             .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
                 id: attempt_id.to_string(),
             })?;
-        crate::work_model::transition_attempt(attempt, AttemptStatus::NeedsUser, Some(pause_kind));
-        let owns =
-            attempt.status == AttemptStatus::NeedsUser && attempt.pause_kind == Some(pause_kind);
+        crate::work_model::transition_attempt(
+            attempt,
+            AttemptStatus::NeedsUser,
+            Some(pause_kind.clone()),
+        );
+        let owns = attempt.status == AttemptStatus::NeedsUser
+            && attempt.pause_kind.as_ref() == Some(&pause_kind);
         if owns {
             attempt.review_state = Some(review_state);
         }
@@ -4441,8 +4449,8 @@ fn settle_review_pause(
             .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
                 id: attempt_id.to_string(),
             })?;
-        let still_owns =
-            attempt.status == AttemptStatus::NeedsUser && attempt.pause_kind == Some(pause_kind);
+        let still_owns = attempt.status == AttemptStatus::NeedsUser
+            && attempt.pause_kind.as_ref() == Some(&pause_kind);
         if still_owns && !attempt.artifacts.iter().any(|a| a.path == handoff_path) {
             attempt.artifacts.push(ArtifactRef {
                 producer_id: "attempt-loop".to_string(),

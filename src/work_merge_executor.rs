@@ -72,6 +72,7 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
         .map_err(|e| anyhow::anyhow!("failed to acquire land lock: {e}"))?;
 
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+    item.ensure_mutation_compatible()?;
     item.ensure_not_abandoned()?;
     let candidate = item
         .merge_candidates

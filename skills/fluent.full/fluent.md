@@ -40,6 +40,11 @@ command.
 
 Run `fluent status` or `fluent work-item list` to see current Work. If stored Work Items exist, inspect the relevant one with `fluent work-item show <work-item-id>`. Continue the latest non-terminal Attempt when the next action is clear, or present the `needs-user` handoff when an Attempt or Merge Candidate asks for user input.
 
+If status, list, or show warns that a Work Item has an unknown pause kind or was
+written by a newer Fluent version, keep the Work Item read-only. Upgrade Fluent
+before running a Task, Attempt, landing, cleanup, or any command that would
+rewrite its model; compatibility gates intentionally reject those mutations.
+
 If `fluent status` shows a `merge-ready` Merge Candidate, inspect it with
 `fluent merge-candidate show <work-item-id> <merge-candidate-id>`. Present it
 to the user for inspection. Run `fluent merge-candidate land <work-item-id>`

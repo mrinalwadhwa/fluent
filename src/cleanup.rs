@@ -242,6 +242,9 @@ fn retains_for_follow_up_recovery(project_root: &Path, work_item: &WorkItem) -> 
 }
 
 pub(crate) fn work_item_is_cleanable(work_item: &WorkItem) -> bool {
+    if !work_item.compatibility_warnings().is_empty() {
+        return false;
+    }
     if work_item.abandonment.is_some() {
         return work_item_has_no_active_execution(work_item);
     }
@@ -727,6 +730,21 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, "work-stale");
+    }
+
+    #[test]
+    fn unknown_pause_work_item_is_not_a_cleanup_candidate() {
+        let mut item = WorkItem::planned("future-work", "Future work");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.abandonment = Some(crate::work_model::WorkItemAbandonment {
+            reason: Some("superseded".to_string()),
+        });
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(crate::work_model::PauseKind::Unknown(
+            "future-pause".to_string(),
+        ));
+
+        assert!(!work_item_is_cleanable(&item));
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub const WORK_MERGE_CANDIDATES_DIR: &str = "merge-candidates";
 const WORK_TRANSACTIONS_DIR: &str = "transactions";
 pub const WORK_ARTIFACTS_DIR: &str = ".fluent/work/artifacts";
 pub const WORK_PROGRESS_DIR: &str = ".fluent/work/progress";
+pub const WORK_MODEL_WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn work_item_input_path(work_item_id: &str, index: usize, filename: &str) -> String {
     format!("{WORK_ARTIFACTS_DIR}/{work_item_id}/inputs/{index:04}-{filename}")
@@ -281,6 +282,9 @@ impl FromStr for LearnerMode {
 pub struct WorkItem {
     pub id: String,
     pub title: String,
+    /// Fluent version that most recently wrote this Work Item's model records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_writer_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_context: Option<PlanningContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,6 +369,7 @@ impl Default for WorkItem {
         Self {
             id: String::new(),
             title: String::new(),
+            model_writer_version: None,
             planning_context: None,
             instructions: None,
             abandonment: None,
@@ -385,6 +390,40 @@ impl Default for WorkItem {
 }
 
 impl WorkItem {
+    pub fn compatibility_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self
+            .model_writer_version
+            .as_deref()
+            .is_some_and(|writer| version_is_newer(writer, WORK_MODEL_WRITER_VERSION))
+        {
+            warnings.push(format!(
+                "Work Item was written by Fluent {}; installed Fluent {} is older; upgrade before mutation",
+                self.model_writer_version.as_deref().unwrap_or("unknown"),
+                WORK_MODEL_WRITER_VERSION
+            ));
+        }
+        for attempt in &self.attempts {
+            if let Some(PauseKind::Unknown(value)) = attempt.pause_kind.as_ref() {
+                warnings.push(format!(
+                    "Attempt {} uses unknown pause kind {:?}; upgrade Fluent before mutation",
+                    attempt.id, value
+                ));
+            }
+        }
+        warnings
+    }
+
+    pub fn ensure_mutation_compatible(&self) -> Result<(), WorkModelError> {
+        if let Some(warning) = self.compatibility_warnings().into_iter().next() {
+            return Err(WorkModelError::UnsupportedStoredState {
+                work_item_id: self.id.clone(),
+                reason: warning,
+            });
+        }
+        Ok(())
+    }
+
     fn preserved_input_refs(&self) -> Vec<ArtifactRef> {
         self.input_artifacts
             .iter()
@@ -1341,6 +1380,20 @@ impl WorkItem {
             })?;
         attempt.learning_advancement_readiness()
     }
+}
+
+fn version_is_newer(writer: &str, installed: &str) -> bool {
+    fn triplet(value: &str) -> Option<(u64, u64, u64)> {
+        let core = value.split_once('-').map_or(value, |(core, _)| core);
+        let mut parts = core.split('.');
+        let parsed = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        parts.next().is_none().then_some(parsed)
+    }
+    matches!((triplet(writer), triplet(installed)), (Some(writer), Some(installed)) if writer > installed)
 }
 
 /// Durable marker that a Work Item was explicitly abandoned.
@@ -3016,8 +3069,7 @@ fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
 }
 
 /// Why an Attempt suspended to `NeedsUser`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PauseKind {
     Auth,
     Uncertain,
@@ -3038,6 +3090,56 @@ pub enum PauseKind {
     /// The provider exhausted its own bounded retries before the model used a
     /// tool or emitted tokens. Re-running resumes this exact Task.
     ProviderUnavailable,
+    /// A pause written by a newer Fluent version. Read-only commands preserve
+    /// and display the original value; mutation remains fail-closed.
+    Unknown(String),
+}
+
+impl PauseKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Auth => "auth",
+            Self::Uncertain => "uncertain",
+            Self::RoundCap => "round-cap",
+            Self::TranscriptPump => "transcript-pump",
+            Self::HostSandbox => "host-sandbox",
+            Self::TesterHarness => "tester-harness",
+            Self::ProviderUnavailable => "provider-unavailable",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
+}
+
+impl Serialize for PauseKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PauseKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "auth" => Self::Auth,
+            "uncertain" => Self::Uncertain,
+            "round-cap" => Self::RoundCap,
+            "transcript-pump" => Self::TranscriptPump,
+            "host-sandbox" => Self::HostSandbox,
+            "tester-harness" => Self::TesterHarness,
+            "provider-unavailable" => Self::ProviderUnavailable,
+            _ => Self::Unknown(value),
+        })
+    }
 }
 
 /// Coarse attempt lifecycle state.
@@ -3968,6 +4070,10 @@ pub enum WorkModelError {
     WorkNotExecutionReady {
         work_item_id: String,
     },
+    UnsupportedStoredState {
+        work_item_id: String,
+        reason: String,
+    },
     CorrectiveContextIncomplete {
         field: &'static str,
     },
@@ -4171,6 +4277,12 @@ impl fmt::Display for WorkModelError {
                     f,
                     "Work Item {work_item_id:?} is proposed; human authorization is required before an Attempt can be created or run"
                 )
+            }
+            Self::UnsupportedStoredState {
+                work_item_id,
+                reason,
+            } => {
+                write!(f, "Work Item {work_item_id:?} cannot be mutated: {reason}")
             }
             Self::CorrectiveContextIncomplete { field } => {
                 write!(
@@ -4427,6 +4539,8 @@ pub struct WorkModelStore {
 struct WorkItemRecord {
     id: String,
     title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_writer_version: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     storage_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4519,6 +4633,7 @@ impl From<&WorkItem> for WorkItemRecord {
         Self {
             id: work_item.id.clone(),
             title: work_item.title.clone(),
+            model_writer_version: Some(WORK_MODEL_WRITER_VERSION.to_string()),
             storage_revision: work_item.storage_revision.get().unwrap_or(0),
             planning_context: work_item.planning_context.clone(),
             instructions: work_item.instructions.clone(),
@@ -4541,6 +4656,7 @@ impl From<WorkItemRecord> for WorkItem {
         Self {
             id: record.id,
             title: record.title,
+            model_writer_version: record.model_writer_version,
             storage_revision: StorageRevision::persisted(record.storage_revision),
             planning_context: record.planning_context,
             instructions: record.instructions,
@@ -4953,6 +5069,12 @@ impl WorkModelStore {
         let path = self.work_item_path(id)?;
         let _lock = self.lock_work_item_model(id)?;
         let mut work_item = self.read_work_item_under_model_lock(id)?;
+        work_item.ensure_mutation_compatible().map_err(|source| {
+            WorkModelStorageError::InvalidModel {
+                path: path.clone(),
+                source,
+            }
+        })?;
         let output =
             reducer(&mut work_item).map_err(|source| WorkModelStorageError::InvalidModel {
                 path: path.clone(),
@@ -4971,6 +5093,14 @@ impl WorkModelStore {
         create_new: bool,
     ) -> Result<(), WorkModelStorageError> {
         let path = self.work_item_path(&work_item.id)?;
+        if !create_new {
+            work_item.ensure_mutation_compatible().map_err(|source| {
+                WorkModelStorageError::InvalidModel {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        }
         work_item
             .validate()
             .map_err(|source| WorkModelStorageError::InvalidModel {
@@ -8324,7 +8454,7 @@ random banner prose that must be ignored
             PauseKind::TranscriptPump,
         ] {
             let mut work_item = host_sandbox_paused_candidate_work_item();
-            suspend_attempt(&mut work_item.attempts[0], pause);
+            suspend_attempt(&mut work_item.attempts[0], pause.clone());
             assert_eq!(
                 work_item.validate().unwrap_err(),
                 WorkModelError::MergeCandidateAttemptReviewsNotPassed {
@@ -10468,6 +10598,10 @@ random banner prose that must be ignored
         store.create_work_item(&item).unwrap();
 
         let read = store.read_work_item("work-pause").unwrap();
+        assert_eq!(
+            read.model_writer_version.as_deref(),
+            Some(WORK_MODEL_WRITER_VERSION)
+        );
         assert_eq!(read.attempts[0].status, AttemptStatus::NeedsUser);
         assert_eq!(read.attempts[0].pause_kind, Some(PauseKind::Auth));
         assert!(read.attempts[0].completed_at.is_some());
@@ -10489,6 +10623,100 @@ random banner prose that must be ignored
             Some(PauseKind::HostSandbox),
             "the explicit host-sandbox pause survives durable storage"
         );
+    }
+
+    #[test]
+    fn tester_harness_pause_round_trips_through_storage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("tester-harness-pause", "Tester harness pause");
+        item.add_initial_attempt("attempt-1").unwrap();
+        suspend_attempt(&mut item.attempts[0], PauseKind::TesterHarness);
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        store.create_work_item(&item).unwrap();
+
+        let read = store.read_work_item("tester-harness-pause").unwrap();
+        assert_eq!(read.attempts[0].pause_kind, Some(PauseKind::TesterHarness));
+    }
+
+    #[test]
+    fn known_and_future_pause_kinds_preserve_their_wire_values() {
+        for value in ["host-sandbox", "tester-harness", "future-pause"] {
+            let parsed: PauseKind = serde_json::from_str(&format!("\"{value}\"")).unwrap();
+            assert_eq!(parsed.as_str(), value);
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                format!("\"{value}\"")
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<PauseKind>("\"future-pause\"").unwrap(),
+            PauseKind::Unknown("future-pause".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_pause_is_readable_but_mutation_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("future-pause-work", "Future pause");
+        item.add_initial_attempt("attempt-1").unwrap();
+        suspend_attempt(&mut item.attempts[0], PauseKind::HostSandbox);
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        store.create_work_item(&item).unwrap();
+
+        let attempt_path = store
+            .work_attempt_path("future-pause-work", "attempt-1")
+            .unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&attempt_path).unwrap()).unwrap();
+        record["pause_kind"] = serde_json::json!("future-pause");
+        fs::write(
+            &attempt_path,
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+
+        let read = store.read_work_item("future-pause-work").unwrap();
+        assert_eq!(
+            read.attempts[0].pause_kind,
+            Some(PauseKind::Unknown("future-pause".to_string()))
+        );
+        assert!(read.compatibility_warnings()[0].contains("future-pause"));
+        let mut reducer_ran = false;
+        let error = store
+            .mutate_work_item("future-pause-work", |_| {
+                reducer_ran = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(!reducer_ran);
+        assert!(error.to_string().contains("upgrade Fluent before mutation"));
+        assert_eq!(
+            fs::read_to_string(&attempt_path).unwrap(),
+            serde_json::to_string_pretty(&record).unwrap()
+        );
+    }
+
+    #[test]
+    fn newer_model_writer_version_warns_and_blocks_mutation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let item = WorkItem::planned("newer-writer", "Newer writer");
+        store.create_work_item(&item).unwrap();
+        let item_path = store.work_item_path("newer-writer").unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+        record["model_writer_version"] = serde_json::json!("999.0.0");
+        fs::write(&item_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let read = store.read_work_item("newer-writer").unwrap();
+        assert_eq!(read.model_writer_version.as_deref(), Some("999.0.0"));
+        assert!(read.compatibility_warnings()[0].contains("installed Fluent"));
+        let error = store
+            .mutate_work_item("newer-writer", |_| Ok(()))
+            .unwrap_err();
+        assert!(error.to_string().contains("999.0.0"));
     }
 
     #[test]

@@ -149,6 +149,40 @@ THE SYSTEM SHALL print the same version and build commit output as
 `fluent version`.
 Test: tests/binary.rs (version_flag_matches_version_subcommand)
 
+## Work-model compatibility
+
+### B1
+
+WHEN a stored Attempt contains `host-sandbox`, `tester-harness`, or an unknown
+future pause-kind string, THE SYSTEM SHALL deserialize the Work Item without
+discarding or rewriting that string, and read-only status, list, and show commands
+SHALL display the state with an upgrade warning for the unknown value.
+Test: src/work_model.rs (known_and_future_pause_kinds_preserve_their_wire_values)
+Test: src/work_model.rs (host_sandbox_pause_round_trips_through_storage)
+Test: src/work_model.rs (tester_harness_pause_round_trips_through_storage)
+Test: src/work_model.rs (unknown_pause_is_readable_but_mutation_fails_closed)
+Test: src/work_status.rs (unknown_pause_is_visible_with_upgrade_warning)
+Test: tests/binary.rs (read_only_commands_show_future_pause_but_attempt_run_fails_closed)
+
+### B2
+
+WHEN a Work Item contains an unknown pause kind, THE SYSTEM SHALL reject Task,
+Attempt, landing, model, and cleanup mutations before changing that Work Item or
+its candidate, while retaining read-only inspection.
+Test: src/work_model.rs (unknown_pause_is_readable_but_mutation_fails_closed)
+Test: src/cleanup.rs (unknown_pause_work_item_is_not_a_cleanup_candidate)
+Test: tests/binary.rs (read_only_commands_show_future_pause_but_attempt_run_fails_closed)
+
+### B3
+
+WHEN Fluent writes a Work Item record, THE SYSTEM SHALL record the current Fluent
+package version as its model writer version; IF an installed binary reads a Work
+Item written by a newer semantic version, THEN read-only commands SHALL warn and
+mutating operations SHALL fail closed until Fluent is upgraded.
+Test: src/work_model.rs (attempt_pause_kind_round_trips_through_storage)
+Test: src/work_model.rs (newer_model_writer_version_warns_and_blocks_mutation)
+Test: tests/binary.rs (read_only_commands_warn_when_model_writer_is_newer)
+
 ## Observations management
 
 ### B1

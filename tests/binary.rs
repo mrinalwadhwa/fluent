@@ -16262,6 +16262,112 @@ fn work_show_outputs_pretty_json_for_one_work_item() {
 }
 
 #[test]
+fn read_only_commands_show_future_pause_but_attempt_run_fails_closed() {
+    let tmp = TempDir::new().unwrap();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "future-work",
+            "--title",
+            "Future work",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "future-work", "attempt-1"])
+        .assert()
+        .success();
+    let attempt_path = tmp
+        .path()
+        .join(".fluent/work/attempts/future-work/attempt-1.json");
+    let mut attempt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&attempt_path).unwrap()).unwrap();
+    attempt["status"] = serde_json::json!("needs-user");
+    attempt["pause_kind"] = serde_json::json!("future-pause");
+    fs::write(
+        &attempt_path,
+        serde_json::to_string_pretty(&attempt).unwrap(),
+    )
+    .unwrap();
+    let before = fs::read(&attempt_path).unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pause:future-pause"))
+        .stdout(predicate::str::contains("upgrade Fluent before mutation"));
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "show", "future-work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"pause_kind\": \"future-pause\""))
+        .stdout(predicate::str::contains("compatibility-warnings"));
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("future-work"))
+        .stderr(predicate::str::contains("upgrade Fluent before mutation"));
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "run", "future-work", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("upgrade Fluent before mutation"));
+    assert_eq!(fs::read(&attempt_path).unwrap(), before);
+}
+
+#[test]
+fn read_only_commands_warn_when_model_writer_is_newer() {
+    let tmp = TempDir::new().unwrap();
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "create", "newer-work", "--title", "Newer work"])
+        .assert()
+        .success();
+    let item_path = tmp.path().join(".fluent/work/items/newer-work.json");
+    let mut item: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&item_path).unwrap()).unwrap();
+    item["model_writer_version"] = serde_json::json!("999.0.0");
+    fs::write(&item_path, serde_json::to_string_pretty(&item).unwrap()).unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed Fluent"))
+        .stdout(predicate::str::contains("999.0.0"));
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["work-item", "show", "newer-work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"model_writer_version\": \"999.0.0\"",
+        ))
+        .stdout(predicate::str::contains("compatibility-warnings"));
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["attempt", "create", "newer-work", "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("installed Fluent"));
+    assert!(
+        !tmp.path()
+            .join(".fluent/work/attempts/newer-work/attempt-1.json")
+            .exists()
+    );
+}
+
+#[test]
 fn work_show_missing_item_reports_not_found() {
     let tmp = TempDir::new().unwrap();
 
