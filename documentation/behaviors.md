@@ -11,18 +11,21 @@ WHEN an operator attaches a valid schema-version-1 host evidence document to an
 eligible Attempt and exact candidate commit, THE SYSTEM SHALL retain immutable
 bytes and its digest, plan only the explicitly named failed reviewer roles, and
 leave the candidate and approved planning inputs unchanged.
+Test: tests/binary.rs (attempt_evidence_attach_preserves_exact_evidence_and_identity)
 
 ### B2
 
 IF a host evidence attachment names a stale Work Item, Attempt, candidate,
 review artifact, or a frontier owned by a live Task or landing operation, THEN
 THE SYSTEM SHALL reject it without changing Work or candidate state.
+Test: src/host_evidence.rs (stale_evidence_frontier_is_rejected_without_mutation)
 
 ### B3
 
 WHEN an evidence-targeted reviewer fails, THE SYSTEM SHALL require a
 `Disposition: evidence-needed` or `Disposition: code-change`: the first pauses
 for further host evidence and the second resumes the ordinary Writer path.
+Test: src/review.rs (evidence_targeted_disposition_is_fail_only_and_typed)
 
 ## Test harnesses
 

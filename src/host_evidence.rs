@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Component, Path};
 
@@ -219,7 +219,22 @@ fn validate_evidence_frontier(
             && task.input_artifacts.iter().map(|input| &input.path).collect::<std::collections::HashSet<_>>()
                 == review_artifacts.iter().collect()
     });
-    if !(attempt.status == work_model::AttemptStatus::Reviewing || is_legacy) {
+    let is_paused_evidence_recovery = attempt.status == work_model::AttemptStatus::NeedsUser
+        && attempt.pause_kind == Some(work_model::PauseKind::Uncertain)
+        && attempt.evidence_recoveries.last().is_some_and(|recovery| {
+            recovery.state == EvidenceRecoveryState::NeedsEvidence
+                && recovery.candidate_commit == candidate_commit
+                && attempt.tasks.iter().any(|task| {
+                    task.evidence_review_context.as_ref().is_some_and(|context| {
+                        context.recovery_id == recovery.id
+                            && recovery.targets.iter().any(|target| target.role == task.role)
+                    })
+                })
+        });
+    if !(attempt.status == work_model::AttemptStatus::Reviewing
+        || is_legacy
+        || is_paused_evidence_recovery)
+    {
         return Err(rejected());
     }
     let mut selected = Vec::new();
@@ -236,6 +251,13 @@ fn validate_evidence_frontier(
                 later.kind == TaskKind::Review && later.role == task.role && later.status == TaskStatus::Complete
             })
             || selected.iter().any(|prior: &Task| prior.role == task.role)
+            || (is_paused_evidence_recovery
+                && !task.evidence_review_context.as_ref().is_some_and(|context| {
+                    attempt.evidence_recoveries.last().is_some_and(|recovery| {
+                        context.recovery_id == recovery.id
+                            && recovery.state == EvidenceRecoveryState::NeedsEvidence
+                    })
+                }))
         {
             return Err(rejected());
         }
@@ -337,17 +359,21 @@ fn publish_snapshot(project_root: &Path, relative: &str, bytes: &[u8]) -> Result
         }
     }
     let path = project_root.join(relative_path);
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
+    match tempfile::NamedTempFile::new_in(path.parent().expect("snapshot has a parent")) {
         Ok(mut file) => {
             file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
-                bail!("evidence snapshot path must not be a symlink");
-            }
-            if fs::read(&path)? != bytes {
-                bail!("evidence snapshot digest collision at {}", path.display());
+            file.as_file().sync_all()?;
+            match file.persist_noclobber(&path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                        bail!("evidence snapshot path must not be a symlink");
+                    }
+                    if fs::read(&path)? != bytes {
+                        bail!("evidence snapshot digest collision at {}", path.display());
+                    }
+                }
+                Err(error) => return Err(error.error.into()),
             }
         }
         Err(error) => return Err(error.into()),
@@ -403,6 +429,35 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn stale_evidence_frontier_is_rejected_without_mutation() {
+        let root = tempfile::TempDir::new().unwrap();
+        let mut item = work_model::WorkItem::planned("work-1", "Attach host evidence");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(work_model::TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: root.path().display().to_string(),
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: "old-candidate".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+
+        let before = item.clone();
+        assert!(validate_evidence_frontier(
+            root.path(),
+            &item,
+            "attempt-1",
+            "new-candidate",
+            &["review.md".to_string()],
+        )
+        .is_err());
+        assert_eq!(item, before);
     }
 
     #[cfg(unix)]

@@ -4330,7 +4330,7 @@ fn latest_review_artifacts(
         let Some(last_write_index) = attempt
             .tasks
             .iter()
-            .rposition(|task| task.kind == TaskKind::Write)
+            .rposition(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
         else {
             return Ok(Vec::new());
         };
@@ -5213,6 +5213,44 @@ mod tests {
             error
                 .to_string()
                 .contains("Task artifact area path must stay under .fluent/work/artifacts")
+        );
+    }
+
+    #[test]
+    fn latest_review_artifacts_retains_non_targeted_legacy_reviews() {
+        let writer = write_task("attempt-1-write-1", Vec::new());
+        let tests = review_task_with_artifact(
+            "attempt-1-review-tests",
+            "tests",
+            ".fluent/work/artifacts/work-1/attempt-1/review-tests",
+        );
+        let architecture = review_task_with_artifact(
+            "attempt-1-review-architecture",
+            "architecture",
+            ".fluent/work/artifacts/work-1/attempt-1/review-architecture",
+        );
+        let mut failed_writer = write_task("attempt-1-write-2", Vec::new());
+        failed_writer.status = TaskStatus::Failed;
+        failed_writer.output = None;
+        let replacement = review_task_with_artifact(
+            "attempt-1-evidence-tests",
+            "tests",
+            ".fluent/work/artifacts/work-1/attempt-1/evidence-tests",
+        );
+        let attempt = attempt_with_tasks(vec![
+            writer,
+            tests,
+            architecture,
+            failed_writer,
+            replacement,
+        ]);
+
+        let artifacts = latest_review_artifacts(Path::new("/tmp/project"), &attempt).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].artifact.producer_id, "attempt-1-evidence-tests");
+        assert_eq!(
+            artifacts[1].artifact.producer_id,
+            "attempt-1-review-architecture"
         );
     }
 
