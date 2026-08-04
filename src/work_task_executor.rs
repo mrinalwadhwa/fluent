@@ -4642,6 +4642,17 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
     };
 
     let reviewer_prior_reviews = prior_reviews_only(input.input_artifacts);
+    let evidence_context = task.evidence_review_context.as_ref();
+    let evidence_review_context = evidence_context.map(|_| "yes").unwrap_or("");
+    let evidence_snapshot_path = evidence_context
+        .map(|context| context.attachment.snapshot_path.as_str())
+        .unwrap_or("");
+    let evidence_prior_review_path = evidence_context
+        .map(|context| context.prior_review_artifact.as_str())
+        .unwrap_or("");
+    let evidence_candidate_commit = evidence_context
+        .map(|context| context.candidate_commit.as_str())
+        .unwrap_or("");
     let reviewer_prior_reviews_list = prior_reviews_block(&reviewer_prior_reviews, "");
     let reviewer_has_prior_reviews = if reviewer_prior_reviews.is_empty() {
         ""
@@ -4761,6 +4772,10 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ),
             ("source_branch", &review_context.source_branch),
             ("candidate_commit", &review_context.candidate_commit),
+            ("evidence_review_context", evidence_review_context),
+            ("evidence_snapshot_path", evidence_snapshot_path),
+            ("evidence_prior_review_path", evidence_prior_review_path),
+            ("evidence_candidate_commit", evidence_candidate_commit),
             ("review_diff_command", &review_diff_command),
             ("tester_results_path", &tester_results_path),
             ("progress_md_path", &reviewer_progress_md_path),
@@ -7100,6 +7115,7 @@ mod tests {
                 candidate_commit: "abc123".to_string(),
                 base_commit: None,
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -8777,6 +8793,7 @@ mod tests {
                 path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1".to_string(),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -8838,6 +8855,7 @@ mod tests {
                 path: area.to_string(),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -8897,6 +8915,7 @@ mod tests {
                 path: area.to_string(),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9355,6 +9374,7 @@ mod tests {
             },
             artifact_area: Some(crate::work_model::TaskArtifactArea { path: area.clone() }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -10016,6 +10036,44 @@ mod tests {
             .find(|task| task.kind == TaskKind::Tester)
             .expect("corrective Attempt has a Tester Task");
         assert_eq!(tester.instructions.as_deref(), Some(context.as_str()));
+    }
+
+    #[test]
+    fn evidence_targeted_review_prompt_names_immutable_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("work-6-work-1-attempt-1");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut item = corrective_review_item("tests");
+        let task = item.attempts[0]
+            .tasks
+            .iter_mut()
+            .find(|task| task.kind == TaskKind::Review)
+            .unwrap();
+        task.evidence_review_context = Some(crate::work_model::EvidenceReviewContext {
+            recovery_id: "host-evidence-1".to_string(),
+            candidate_commit: "abc123".to_string(),
+            attachment: crate::work_model::EvidenceAttachment {
+                snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/proof.json".to_string(),
+                digest: "sha256:proof".to_string(),
+            },
+            prior_review_artifact: ".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md".to_string(),
+        });
+        let artifact_dir = project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-tests",
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &artifact_dir.join("review.md"),
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: &[],
+            review_only: false,
+        }).unwrap();
+        assert!(prompts.review_prompt.contains("Evidence-targeted review"));
+        assert!(prompts.review_prompt.contains("host-evidence/proof.json"));
+        assert!(prompts.review_prompt.contains("Disposition: evidence-needed"));
     }
 
     #[test]
@@ -12825,6 +12883,7 @@ mod tests {
                 candidate_commit: "abc123".to_string(),
                 base_commit: None,
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,

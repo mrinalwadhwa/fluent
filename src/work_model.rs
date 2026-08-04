@@ -557,6 +557,7 @@ impl WorkItem {
                     path: artifact_path,
                 }),
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts,
                 depends_on: None,
                 output: None,
@@ -672,6 +673,7 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                     base_commit: None,
                 }),
+                evidence_review_context: None,
                 input_artifacts: preserved_inputs.clone(),
                 depends_on: None,
                 output: None,
@@ -751,6 +753,7 @@ impl WorkItem {
                 candidate_commit: source_commit.clone(),
                 base_commit: base_commit.clone(),
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -790,6 +793,7 @@ impl WorkItem {
                     candidate_commit: source_commit.clone(),
                     base_commit: base_commit.clone(),
                 }),
+                evidence_review_context: None,
                 input_artifacts: {
                     let mut inputs = preserved_inputs.clone();
                     inputs.push(tester_results_artifact);
@@ -933,6 +937,7 @@ impl WorkItem {
                     candidate_commit: write_output.commit.clone(),
                     base_commit: None,
                 }),
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -996,6 +1001,7 @@ impl WorkItem {
                     candidate_commit: write_output.commit.clone(),
                     base_commit: None,
                 }),
+                evidence_review_context: None,
                 input_artifacts: task_input_artifacts,
                 depends_on: Some(tester_task_id.clone()),
                 output: None,
@@ -1074,6 +1080,7 @@ impl WorkItem {
                 path: work_artifact_path(&self.id, attempt_id, &task_id),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts,
             depends_on: None,
             output: None,
@@ -3003,6 +3010,10 @@ pub struct Task {
     pub artifact_area: Option<TaskArtifactArea>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_context: Option<ReviewContext>,
+    /// Host-owned context for a review that adjudicates evidence without a
+    /// candidate change. Ordinary reviews deliberately omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_review_context: Option<EvidenceReviewContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_artifacts: Vec<ArtifactRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3015,6 +3026,15 @@ pub struct Task {
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+}
+
+/// Immutable inputs and identity for an evidence-targeted reviewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceReviewContext {
+    pub recovery_id: String,
+    pub candidate_commit: String,
+    pub attachment: EvidenceAttachment,
+    pub prior_review_artifact: String,
 }
 
 impl Task {
@@ -6233,6 +6253,7 @@ random banner prose that must be ignored
                 path: ".fluent/tasks/task-1".to_string(),
             }),
             review_context,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -6636,6 +6657,7 @@ random banner prose that must be ignored
                 candidate_commit: "abc123".to_string(),
                 base_commit: None,
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: Some("attempt-1-behavior-tests".to_string()),
             output: None,
@@ -6669,6 +6691,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -6844,6 +6867,7 @@ random banner prose that must be ignored
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -7594,6 +7618,7 @@ random banner prose that must be ignored
                             candidate_commit: "commit-initial".to_string(),
                             base_commit: None,
                         }),
+                        evidence_review_context: None,
                         input_artifacts: Vec::new(),
                         depends_on: None,
                         output: None,
@@ -7621,6 +7646,7 @@ random banner prose that must be ignored
                             candidate_commit: "commit-initial".to_string(),
                             base_commit: None,
                         }),
+                        evidence_review_context: None,
                         input_artifacts: Vec::new(),
                         depends_on: None,
                         output: None,
@@ -8402,6 +8428,7 @@ random banner prose that must be ignored
                             candidate_commit: "commit-initial".to_string(),
                             base_commit: None,
                         }),
+                        evidence_review_context: None,
                         input_artifacts: Vec::new(),
                         depends_on: None,
                         output: None,
@@ -8462,6 +8489,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: Some(TaskOutput {
@@ -9036,6 +9064,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9065,6 +9094,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9191,6 +9221,7 @@ random banner prose that must be ignored
                 path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2".to_string(),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: Some(TaskOutput {
@@ -9588,6 +9619,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9617,6 +9649,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9648,6 +9681,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -9774,6 +9808,7 @@ random banner prose that must be ignored
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -11152,6 +11187,7 @@ random banner prose that must be ignored
                 candidate_commit: "commit-initial".to_string(),
                 base_commit: None,
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -11398,6 +11434,7 @@ random banner prose that must be ignored
                 candidate_commit: "commit-initial".to_string(),
                 base_commit: None,
             }),
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,

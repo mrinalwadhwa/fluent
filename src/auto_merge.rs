@@ -314,6 +314,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: vec![],
                     depends_on: None,
                     output: Some(TaskOutput {

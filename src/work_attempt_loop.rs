@@ -15,7 +15,7 @@ use crate::review_diff_command;
 use crate::review_only_worktree;
 use crate::work_model::{
     ArtifactRef, Attempt, AttemptLearning, AttemptReviewState, AttemptStatus, CoderMappingInputs,
-    LearnerCommitCanonicalization, MergeCandidateMergeStatus, PauseKind, Task, TaskKind,
+    EvidenceRecoveryState, LearnerCommitCanonicalization, MergeCandidateMergeStatus, PauseKind, Task, TaskKind,
     TaskOutput, TaskStatus, WorkItem, WorkModelStorageError, WorkModelStore,
     resolve_managed_sibling_workspace_path, work_artifact_path,
 };
@@ -455,7 +455,16 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
         if let Some(task) = attempt
             .tasks
             .iter()
-            .find(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsUser))
+            .find(|task| {
+                matches!(task.status, TaskStatus::Failed | TaskStatus::NeedsUser)
+                    && !attempt.active_evidence_recovery().is_some_and(|recovery| {
+                        task.kind == TaskKind::Write
+                            || recovery.targets.iter().any(|target| {
+                                target.prior_review_artifact
+                                    == task.artifact_area.as_ref().map(|area| format!("{}/review.md", area.path)).unwrap_or_default()
+                            })
+                    })
+            })
         {
             bail!(
                 "Attempt {:?} cannot advance because Task {:?} is {}",
@@ -4088,6 +4097,55 @@ fn interpret_reviews(
         .position(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
 
+    if let Some(recovery) = item.attempts[attempt_index].active_evidence_recovery().cloned() {
+        let targeted = item.attempts[attempt_index]
+            .tasks
+            .iter()
+            .filter(|task| task.evidence_review_context.as_ref().is_some_and(|context| context.recovery_id == recovery.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if targeted.iter().all(|task| task.status == TaskStatus::Complete) {
+            let failed = targeted.iter().find(|task| {
+                let path = task.artifact_area.as_ref().map(|area| project_root.join(&area.path).join("review.md"));
+                path.as_ref().is_some_and(|path| fs::read_to_string(path).map(|text| review::extract_verdict(&text) == Verdict::Fail).unwrap_or(false))
+            });
+            if let Some(task) = failed {
+                let path = task.artifact_area.as_ref().map(|area| project_root.join(&area.path).join("review.md")).unwrap();
+                let content = fs::read_to_string(path).unwrap_or_default();
+                let disposition = review::extract_evidence_disposition(&content);
+                match disposition {
+                    Some(review::EvidenceDisposition::EvidenceNeeded) => {
+                        item.attempts[attempt_index].evidence_recoveries.iter_mut().find(|entry| entry.id == recovery.id).unwrap().state = EvidenceRecoveryState::NeedsEvidence;
+                        item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+                        item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
+                        store.write_work_item(&item)?;
+                        return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path: recovery.attachment.snapshot_path });
+                    }
+                    Some(review::EvidenceDisposition::CodeChange) => {
+                        item.attempts[attempt_index].evidence_recoveries.iter_mut().find(|entry| entry.id == recovery.id).unwrap().state = EvidenceRecoveryState::CodeChange;
+                        let artifact = ArtifactRef { producer_id: task.id.clone(), path: format!("{}/review.md", task.artifact_area.as_ref().unwrap().path) };
+                        item.attempts[attempt_index].status = AttemptStatus::Planned;
+                        item.attempts[attempt_index].pause_kind = None;
+                        let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
+                        store.write_work_item(&item)?;
+                        return Ok(WorkAttemptRunOutcome::PlannedWriteRound { task_id });
+                    }
+                    None => {
+                        item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+                        item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
+                        store.write_work_item(&item)?;
+                        return Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path: recovery.attachment.snapshot_path });
+                    }
+                }
+            }
+            item.attempts[attempt_index]
+                .evidence_recoveries
+                .iter_mut()
+                .find(|entry| entry.id == recovery.id)
+                .unwrap()
+                .state = EvidenceRecoveryState::Complete;
+        }
+    }
     let review_artifacts = latest_review_artifacts(project_root, &item.attempts[attempt_index])?;
     if review_artifacts.is_empty() {
         bail!("Attempt {:?} has no completed review artifacts", attempt_id);
@@ -4274,9 +4332,14 @@ fn latest_review_artifacts(
         };
         last_write_index + 1
     };
-    attempt.tasks[start..]
+    let mut latest_by_role = std::collections::BTreeMap::new();
+    for task in attempt.tasks[start..]
         .iter()
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
+    {
+        latest_by_role.insert(task.role.clone(), task);
+    }
+    latest_by_role.into_values()
         .filter_map(|task| task.artifact_area.as_ref().map(|area| (task, area)))
         .map(|(task, area)| {
             let artifact_dir =
@@ -5029,6 +5092,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -5050,6 +5114,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -5079,6 +5144,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -5102,6 +5168,7 @@ mod tests {
                     path: "../outside-review-artifacts".to_string(),
                 }),
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -5348,6 +5415,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts,
             depends_on: None,
             output: None,
@@ -5383,6 +5451,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -5430,6 +5499,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -5473,6 +5543,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -5498,6 +5569,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -5524,6 +5596,7 @@ mod tests {
                 path: artifact_path.to_string(),
             }),
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,
@@ -8362,6 +8435,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -8383,6 +8457,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -8488,6 +8563,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: Some(TaskOutput {
@@ -8517,6 +8593,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -9195,6 +9272,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -9244,6 +9322,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,
@@ -9285,6 +9364,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -9306,6 +9386,7 @@ mod tests {
                     },
                     artifact_area: None,
                     review_context: None,
+                    evidence_review_context: None,
                     input_artifacts: Vec::new(),
                     depends_on: None,
                     output: None,
@@ -9359,6 +9440,7 @@ mod tests {
             },
             artifact_area: None,
             review_context: None,
+            evidence_review_context: None,
             input_artifacts: Vec::new(),
             depends_on: None,
             output: None,

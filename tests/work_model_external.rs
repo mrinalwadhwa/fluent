@@ -30,6 +30,7 @@ fn task(kind: TaskKind) -> Task {
             path: ".fluent/work/artifacts/write-code".to_string(),
         }),
         review_context: None,
+        evidence_review_context: None,
         input_artifacts: Vec::new(),
         depends_on: None,
         output: Some(TaskOutput {

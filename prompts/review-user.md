@@ -13,6 +13,17 @@ The Writer's workspace and commits:
 - Workspace: {{candidate_workspace_path}}
 - Commits: {{source_branch}}..{{candidate_commit}}
 
+{{#if evidence_review_context}}
+## Evidence-targeted review
+
+This unchanged candidate is under host-evidence recovery. Assess only whether
+the immutable host evidence at {{evidence_snapshot_path}} resolves the prior
+failed review at {{evidence_prior_review_path}} for commit
+{{evidence_candidate_commit}}. If you fail, include exactly one line:
+`Disposition: evidence-needed` when more proof could resolve it, or
+`Disposition: code-change` when source work is required.
+{{/if}}
+
 ## Phase 1 — Understand the Work Item
 
 1. Read Brief at {{brief_path}} — what should have changed and why.

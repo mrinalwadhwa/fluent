@@ -42,6 +42,7 @@ fn documented_work_item() -> WorkItem {
                     path: ".fluent/work/artifacts/write-review".to_string(),
                 }),
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: Some(TaskOutput {

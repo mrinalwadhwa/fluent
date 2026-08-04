@@ -2283,6 +2283,7 @@ mod tests {
                 },
                 artifact_area: None,
                 review_context: None,
+                evidence_review_context: None,
                 input_artifacts: Vec::new(),
                 depends_on: None,
                 output: None,

@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::review::{self, Verdict};
 use crate::work_model::{
     self, ArtifactRef, EvidenceAttachment, EvidenceRecovery, EvidenceRecoveryState,
+    EvidenceReviewContext,
     EvidenceReviewTarget, Task, TaskKind, TaskStatus, WorkModelError, WorkModelStore,
 };
 
@@ -46,6 +47,13 @@ pub fn attach(
     evidence_file: &Path,
     review_artifacts: &[String],
 ) -> Result<EvidenceRecovery> {
+    if fs::symlink_metadata(evidence_file)
+        .with_context(|| format!("inspect evidence file {}", evidence_file.display()))?
+        .file_type()
+        .is_symlink()
+    {
+        bail!("evidence file must not be a symlink");
+    }
     let bytes = fs::read(evidence_file)
         .with_context(|| format!("read evidence file {}", evidence_file.display()))?;
     let document = parse_document(&bytes)?;
@@ -106,7 +114,8 @@ pub fn attach(
                 let mut inputs = prior.input_artifacts.clone();
                 inputs.push(ArtifactRef { producer_id: "host-evidence".to_string(), path: snapshot_path.clone() });
                 inputs.push(ArtifactRef { producer_id: prior.id.clone(), path: review_artifact_path(&prior).unwrap() });
-                attempt.tasks.push(Task { id: task_id.clone(), kind: TaskKind::Review, status: TaskStatus::Planned, role: role.clone(), instructions: Some("This is an evidence-targeted review. Assess the attached host evidence against the prior failed review; do not request source changes unless evidence is insufficient.".to_string()), work_item_id: work_item_id.to_string(), attempt_id: Some(attempt_id.to_string()), workspace_access: prior.workspace_access, artifact_area: Some(work_model::TaskArtifactArea { path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id) }), review_context: prior.review_context, input_artifacts: inputs, depends_on: None, output: None, created_at: Some(work_model::now_iso8601()), started_at: None, completed_at: None });
+                let prior_review_artifact = review_artifact_path(&prior).unwrap();
+                attempt.tasks.push(Task { id: task_id.clone(), kind: TaskKind::Review, status: TaskStatus::Planned, role: role.clone(), instructions: None, work_item_id: work_item_id.to_string(), attempt_id: Some(attempt_id.to_string()), workspace_access: prior.workspace_access, artifact_area: Some(work_model::TaskArtifactArea { path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id) }), review_context: prior.review_context.clone(), evidence_review_context: Some(EvidenceReviewContext { recovery_id: recovery.id.clone(), candidate_commit: candidate_commit.to_string(), attachment: recovery.attachment.clone(), prior_review_artifact }), input_artifacts: inputs, depends_on: None, output: None, created_at: Some(work_model::now_iso8601()), started_at: None, completed_at: None });
             }
             if let Some(target) = attempt
                 .evidence_recoveries
@@ -162,6 +171,12 @@ fn read_verdict(project_root: &Path, task: &Task) -> Option<Verdict> {
 }
 
 fn publish_snapshot(project_root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("evidence snapshot path must stay under the managed artifact root");
+    }
     let path = project_root.join(relative);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -172,6 +187,9 @@ fn publish_snapshot(project_root: &Path, relative: &str, bytes: &[u8]) -> Result
             file.sync_all()?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                bail!("evidence snapshot path must not be a symlink");
+            }
             if fs::read(&path)? != bytes {
                 bail!("evidence snapshot digest collision at {}", path.display());
             }
