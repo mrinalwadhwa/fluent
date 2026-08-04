@@ -118,8 +118,10 @@ pub fn attach(
                     prior_review_artifact: review_artifacts
                         .iter()
                         .find(|path| {
-                            prior_reviews.iter().any(|task| task.role == *role
-                                && review_artifact_path(task).as_deref() == Some(path.as_str()))
+                            prior_reviews.iter().any(|task| {
+                                task.role == *role
+                                    && review_artifact_path(task).as_deref() == Some(path.as_str())
+                            })
                         })
                         .cloned()
                         .unwrap_or_default(),
@@ -198,43 +200,59 @@ fn validate_evidence_frontier(
     candidate_commit: &str,
     review_artifacts: &[String],
 ) -> Result<Vec<Task>, WorkModelError> {
-    let rejected = || WorkModelError::AttemptNotFound { id: attempt_id.to_string() };
-    let attempt = item.attempts.iter().find(|attempt| attempt.id == attempt_id).ok_or_else(rejected)?;
+    let rejected = || WorkModelError::AttemptNotFound {
+        id: attempt_id.to_string(),
+    };
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .ok_or_else(rejected)?;
     if review_artifacts.is_empty()
-        || review_artifacts.len() != review_artifacts.iter().collect::<std::collections::HashSet<_>>().len()
-        || attempt.tasks.iter().any(|task| task.status == TaskStatus::Executing)
-        || item.merge_candidates.iter().any(|candidate| candidate.attempt_id == attempt_id
-            && candidate.candidate_commit == candidate_commit)
+        || review_artifacts.len()
+            != review_artifacts
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        || attempt
+            .tasks
+            .iter()
+            .any(|task| task.status == TaskStatus::Executing)
+        || item.merge_candidates.iter().any(|candidate| {
+            candidate.attempt_id == attempt_id && candidate.candidate_commit == candidate_commit
+        })
     {
         return Err(rejected());
     }
-    let completed_writer = attempt.tasks.iter().enumerate().rev().find(|(_, task)| {
-        task.kind == TaskKind::Write && task.status == TaskStatus::Complete
-    }).and_then(|(index, task)| task.output.as_ref().map(|output| (index, output))).ok_or_else(rejected)?;
+    let completed_writer = attempt
+        .tasks
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, task)| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .and_then(|(index, task)| task.output.as_ref().map(|output| (index, output)))
+        .ok_or_else(rejected)?;
     if completed_writer.1.commit != candidate_commit
         || !candidate_workspace_is_clean_at(project_root, completed_writer.1, candidate_commit)
     {
         return Err(rejected());
     }
-    let last_writer = attempt.tasks.iter().enumerate().rev().find(|(_, task)| task.kind == TaskKind::Write);
-    let is_legacy = last_writer.is_some_and(|(index, task)| {
-        task.status == TaskStatus::Failed
-            && task.output.is_none()
-            && index > completed_writer.0
-            && index + 1 == attempt.tasks.len()
-            && task.input_artifacts.iter().map(|input| &input.path).collect::<std::collections::HashSet<_>>()
-                == review_artifacts.iter().collect()
-    });
+    let is_legacy = attempt.is_evidence_only_recoverable(candidate_commit, review_artifacts);
     let is_paused_evidence_recovery = attempt.status == work_model::AttemptStatus::NeedsUser
         && attempt.pause_kind == Some(work_model::PauseKind::Uncertain)
         && attempt.evidence_recoveries.last().is_some_and(|recovery| {
             recovery.state == EvidenceRecoveryState::NeedsEvidence
                 && recovery.candidate_commit == candidate_commit
                 && attempt.tasks.iter().any(|task| {
-                    task.evidence_review_context.as_ref().is_some_and(|context| {
-                        context.recovery_id == recovery.id
-                            && recovery.targets.iter().any(|target| target.role == task.role)
-                    })
+                    task.evidence_review_context
+                        .as_ref()
+                        .is_some_and(|context| {
+                            context.recovery_id == recovery.id
+                                && recovery
+                                    .targets
+                                    .iter()
+                                    .any(|target| target.role == task.role)
+                        })
                 })
         });
     if !(attempt.status == work_model::AttemptStatus::Reviewing
@@ -245,25 +263,37 @@ fn validate_evidence_frontier(
     }
     let mut selected = Vec::new();
     for path in review_artifacts {
-        let (index, task) = attempt.tasks.iter().enumerate().find(|(_, task)| {
-            review_artifact_path(task).as_deref() == Some(path.as_str())
-        }).ok_or_else(rejected)?;
+        let (index, task) = attempt
+            .tasks
+            .iter()
+            .enumerate()
+            .find(|(_, task)| review_artifact_path(task).as_deref() == Some(path.as_str()))
+            .ok_or_else(rejected)?;
         if task.kind != TaskKind::Review
             || task.status != TaskStatus::Complete
-            || task.review_context.as_ref().map(|context| context.candidate_commit.as_str()) != Some(candidate_commit)
+            || task
+                .review_context
+                .as_ref()
+                .map(|context| context.candidate_commit.as_str())
+                != Some(candidate_commit)
             || !matches!(read_verdict(project_root, task), Some(Verdict::Fail))
             || index <= completed_writer.0
             || attempt.tasks.iter().skip(index + 1).any(|later| {
-                later.kind == TaskKind::Review && later.role == task.role && later.status == TaskStatus::Complete
+                later.kind == TaskKind::Review
+                    && later.role == task.role
+                    && later.status == TaskStatus::Complete
             })
             || selected.iter().any(|prior: &Task| prior.role == task.role)
             || (is_paused_evidence_recovery
-                && !task.evidence_review_context.as_ref().is_some_and(|context| {
-                    attempt.evidence_recoveries.last().is_some_and(|recovery| {
-                        context.recovery_id == recovery.id
-                            && recovery.state == EvidenceRecoveryState::NeedsEvidence
-                    })
-                }))
+                && !task
+                    .evidence_review_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        attempt.evidence_recoveries.last().is_some_and(|recovery| {
+                            context.recovery_id == recovery.id
+                                && recovery.state == EvidenceRecoveryState::NeedsEvidence
+                        })
+                    }))
         {
             return Err(rejected());
         }
@@ -458,14 +488,16 @@ mod tests {
         });
 
         let before = item.clone();
-        assert!(validate_evidence_frontier(
-            root.path(),
-            &item,
-            "attempt-1",
-            "new-candidate",
-            &["review.md".to_string()],
-        )
-        .is_err());
+        assert!(
+            validate_evidence_frontier(
+                root.path(),
+                &item,
+                "attempt-1",
+                "new-candidate",
+                &["review.md".to_string()],
+            )
+            .is_err()
+        );
         assert_eq!(item, before);
     }
 

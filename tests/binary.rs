@@ -20565,13 +20565,21 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
         no_change: None,
         learner_canonicalization: None,
     });
-    item.add_review_tasks("attempt-1", &["architecture"]).unwrap();
+    item.add_review_tasks("attempt-1", &["architecture"])
+        .unwrap();
     item.attempts[0].status = AttemptStatus::Reviewing;
     let reviewer = item.attempts[0].tasks.last_mut().unwrap();
     reviewer.status = TaskStatus::Complete;
-    let review_path = format!("{}/review.md", reviewer.artifact_area.as_ref().unwrap().path);
+    let review_path = format!(
+        "{}/review.md",
+        reviewer.artifact_area.as_ref().unwrap().path
+    );
     fs::create_dir_all(project.join(&review_path).parent().unwrap()).unwrap();
-    fs::write(project.join(&review_path), "Verdict: fail\n\n## Findings\n- [ ] Need host proof\n").unwrap();
+    fs::write(
+        project.join(&review_path),
+        "Verdict: fail\n\n## Findings\n- [ ] Need host proof\n",
+    )
+    .unwrap();
     store.create_work_item(&item).unwrap();
 
     let evidence = tmp.path().join("host-evidence.json");
@@ -20580,8 +20588,17 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
     fluent_cmd()
         .current_dir(&project)
         .args([
-            "attempt", "evidence", "attach", "evidence-attach", "attempt-1", "--candidate",
-            &candidate, "--evidence-file", evidence.to_str().unwrap(), "--review-artifact", &review_path,
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-attach",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
+            &review_path,
         ])
         .assert()
         .success();
@@ -20592,8 +20609,17 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
     let snapshot = project.join(recovery["attachment"]["snapshot_path"].as_str().unwrap());
     assert_eq!(fs::read(snapshot).unwrap(), evidence_bytes);
     let tasks = shown["attempts"][0]["tasks"].as_array().unwrap();
-    assert_eq!(tasks.iter().filter(|task| task["kind"] == "write").count(), 1);
-    assert_eq!(tasks.iter().filter(|task| task["evidence_review_context"].is_object()).count(), 1);
+    assert_eq!(
+        tasks.iter().filter(|task| task["kind"] == "write").count(),
+        1
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .filter(|task| task["evidence_review_context"].is_object())
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -20617,23 +20643,36 @@ fn attempt_evidence_attach_rejects_stale_or_owned_frontier_without_mutation() {
         no_change: None,
         learner_canonicalization: None,
     });
-    item.add_review_tasks("attempt-1", &["architecture"]).unwrap();
+    item.add_review_tasks("attempt-1", &["architecture"])
+        .unwrap();
     item.attempts[0].status = AttemptStatus::Reviewing;
     let reviewer = item.attempts[0].tasks.last_mut().unwrap();
     reviewer.status = TaskStatus::Complete;
-    let review_path = format!("{}/review.md", reviewer.artifact_area.as_ref().unwrap().path);
+    let review_path = format!(
+        "{}/review.md",
+        reviewer.artifact_area.as_ref().unwrap().path
+    );
     fs::create_dir_all(project.join(&review_path).parent().unwrap()).unwrap();
     fs::write(project.join(&review_path), "Verdict: fail\n").unwrap();
     store.create_work_item(&item).unwrap();
-    let before = fs::read_to_string(project.join(".fluent/work/items/evidence-reject.json")).unwrap();
+    let before =
+        fs::read_to_string(project.join(".fluent/work/items/evidence-reject.json")).unwrap();
 
     let evidence = tmp.path().join("host-evidence.json");
     fs::write(&evidence, br#"{"schema_version":1,"producer":"trusted host","check":"fluent tester check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#).unwrap();
     fluent_cmd()
         .current_dir(&project)
         .args([
-            "attempt", "evidence", "attach", "evidence-reject", "attempt-1", "--candidate",
-            "stale-candidate", "--evidence-file", evidence.to_str().unwrap(), "--review-artifact",
+            "attempt",
+            "evidence",
+            "attach",
+            "evidence-reject",
+            "attempt-1",
+            "--candidate",
+            "stale-candidate",
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--review-artifact",
             &review_path,
         ])
         .assert()
@@ -20645,7 +20684,9 @@ fn attempt_evidence_attach_rejects_stale_or_owned_frontier_without_mutation() {
     );
     assert_eq!(git_head(&project), candidate);
     assert!(
-        !project.join(".fluent/work/artifacts/evidence-reject/attempt-1/host-evidence").exists(),
+        !project
+            .join(".fluent/work/artifacts/evidence-reject/attempt-1/host-evidence")
+            .exists(),
         "rejected attachment must not publish a snapshot"
     );
 }

@@ -2552,6 +2552,52 @@ impl Default for Attempt {
 }
 
 impl Attempt {
+    /// Return whether this is the narrowly recoverable legacy failure shape.
+    /// The caller separately verifies the completed Writer's workspace is clean
+    /// and still points at this candidate commit.
+    pub fn is_evidence_only_recoverable(
+        &self,
+        candidate_commit: &str,
+        review_artifacts: &[String],
+    ) -> bool {
+        if self.status != AttemptStatus::Failed || review_artifacts.is_empty() {
+            return false;
+        }
+        let Some((completed_index, completed_writer)) =
+            self.tasks.iter().enumerate().rev().find(|(_, task)| {
+                task.kind == TaskKind::Write && task.status == TaskStatus::Complete
+            })
+        else {
+            return false;
+        };
+        if completed_writer
+            .output
+            .as_ref()
+            .is_none_or(|output| output.commit != candidate_commit)
+        {
+            return false;
+        }
+        let Some((failed_index, failed_writer)) = self
+            .tasks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, task)| task.kind == TaskKind::Write)
+        else {
+            return false;
+        };
+        failed_writer.status == TaskStatus::Failed
+            && failed_writer.output.is_none()
+            && failed_index > completed_index
+            && failed_index + 1 == self.tasks.len()
+            && failed_writer
+                .input_artifacts
+                .iter()
+                .map(|input| &input.path)
+                .collect::<std::collections::HashSet<_>>()
+                == review_artifacts.iter().collect()
+    }
+
     /// Record one immutable host-evidence recovery, or return the existing
     /// recovery when the same candidate and attachment were already accepted.
     pub fn attach_evidence_recovery(
@@ -6296,6 +6342,40 @@ random banner prose that must be ignored
     }
 
     #[test]
+    fn failed_no_output_writer_with_evidence_only_inputs_is_recoverable() {
+        let mut attempt = Attempt {
+            id: "attempt-1".to_string(),
+            status: AttemptStatus::Failed,
+            ..Attempt::default()
+        };
+        let mut completed = task(TaskKind::Write, Vec::new());
+        completed.id = "attempt-1-write-1".to_string();
+        completed.status = TaskStatus::Complete;
+        completed.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "/workspace".to_string(),
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: "candidate-commit".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let mut failed = task(TaskKind::Write, Vec::new());
+        failed.id = "attempt-1-write-2".to_string();
+        failed.status = TaskStatus::Failed;
+        failed.input_artifacts = vec![ArtifactRef {
+            producer_id: "attempt-1-review-1".to_string(),
+            path: ".fluent/work/artifacts/work-1/attempt-1/review/review.md".to_string(),
+        }];
+        attempt.tasks = vec![completed, failed];
+
+        assert!(attempt.is_evidence_only_recoverable(
+            "candidate-commit",
+            &[".fluent/work/artifacts/work-1/attempt-1/review/review.md".to_string()],
+        ));
+    }
+
+    #[test]
     fn evidence_needed_recovery_accepts_new_host_evidence() {
         let mut attempt = Attempt {
             id: "attempt-1".to_string(),
@@ -6330,7 +6410,10 @@ random banner prose that must be ignored
             created_at: "2026-08-03T18:00:47Z".to_string(),
         };
 
-        assert_eq!(attempt.attach_evidence_recovery(next.clone()).unwrap(), next);
+        assert_eq!(
+            attempt.attach_evidence_recovery(next.clone()).unwrap(),
+            next
+        );
         assert_eq!(attempt.evidence_recoveries.len(), 2);
     }
 

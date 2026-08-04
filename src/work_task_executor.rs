@@ -10054,12 +10054,15 @@ mod tests {
             recovery_id: "host-evidence-1".to_string(),
             candidate_commit: "abc123".to_string(),
             attachment: crate::work_model::EvidenceAttachment {
-                snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/proof.json".to_string(),
+                snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/proof.json"
+                    .to_string(),
                 digest: "sha256:proof".to_string(),
             },
-            prior_review_artifact: ".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md".to_string(),
+            prior_review_artifact: ".fluent/work/artifacts/work-1/attempt-1/review-tests/review.md"
+                .to_string(),
         });
-        let artifact_dir = project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
             attempt_id: "attempt-1",
@@ -10070,10 +10073,15 @@ mod tests {
             readable_workspaces: std::slice::from_ref(&workspace),
             input_artifacts: &[],
             review_only: false,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(prompts.review_prompt.contains("Evidence-targeted review"));
         assert!(prompts.review_prompt.contains("host-evidence/proof.json"));
-        assert!(prompts.review_prompt.contains("Disposition: evidence-needed"));
+        assert!(
+            prompts
+                .review_prompt
+                .contains("Disposition: evidence-needed")
+        );
     }
 
     #[test]
