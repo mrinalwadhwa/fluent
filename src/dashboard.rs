@@ -1,4 +1,5 @@
 mod app;
+mod layout;
 mod render;
 mod snapshot;
 
@@ -222,6 +223,10 @@ mod tests {
         assert!(rendered.contains("Needs you (1)"));
         assert!(rendered.contains("Running (1)"));
         assert!(rendered.contains("Ready (1)"));
+        assert!(
+            rendered.find("Needs you (1)") < rendered.find("Running (1)")
+                && rendered.find("Running (1)") < rendered.find("Ready (1)")
+        );
     }
     #[test]
     fn empty_project_has_no_selection() {
@@ -382,10 +387,38 @@ mod tests {
         assert!(text(&app, 80, 15).contains("work-23"));
     }
     #[test]
+    fn list_navigation_moves_selection_when_scrolled() {
+        let mut app = app((0..24)
+            .map(|n| row(&format!("work-{n}"), "planned"))
+            .collect());
+        app.resize(80, 15);
+        for _ in 0..23 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        assert!(app.list_scroll > 0);
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.selected_id(), Some("work-22"));
+    }
+    #[test]
     fn all_work_adds_terminal_group() {
-        let mut app = app(vec![row("current", "planned"), row("done", "complete")]);
+        let mut app = app(vec![
+            row("current", "planned"),
+            row("complete", "complete"),
+            row("merged", "merged"),
+            row("abandoned", "abandoned"),
+        ]);
         app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(text(&app, 100, 24).contains("Terminal (1)"));
+        let rendered = text(&app, 100, 24);
+        assert!(rendered.contains("Terminal (3)"));
+        for (id, title) in [
+            ("complete", "complete title"),
+            ("merged", "merged title"),
+            ("abandoned", "abandoned title"),
+        ] {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+            assert_eq!(app.selected_id(), Some(id));
+            assert!(text(&app, 100, 24).contains(title), "missing {title}");
+        }
     }
     #[test]
     fn current_empty_state_points_to_all_work() {
@@ -427,6 +460,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let rendered = buffer_text(buffer);
         assert!(rendered.contains("…"));
+        assert!(rendered.contains("[planned]"));
         for y in 4..22 {
             assert!(buffer[(42, y)].symbol().contains('│'));
         }
@@ -477,11 +511,11 @@ mod tests {
         );
         app.resize(80, 15);
         for _ in 0..22 {
-            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+            app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
         }
         assert_eq!(
             app.list_scroll as usize,
-            render::scroll_bounds(&app).list_max_scroll as usize
+            app.scroll_bounds().list_max_scroll as usize
         );
         assert!(text(&app, 80, 15).contains("error 19"));
     }

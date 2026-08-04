@@ -1,4 +1,4 @@
-use super::render;
+use super::layout;
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -148,28 +148,23 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Up | KeyCode::Char('k') if self.pane == Pane::List => {
-                if self.list_scroll > 0 {
-                    self.list_scroll = self.list_scroll.saturating_sub(1);
-                    self.dirty = true;
-                } else {
-                    self.move_selection(-1);
-                }
+                self.move_selection(-1);
             }
             KeyCode::Down | KeyCode::Char('j') if self.pane == Pane::List => {
-                let last = self
-                    .snapshot
-                    .ordered_rows(self.all_work)
-                    .len()
-                    .saturating_sub(1);
-                if self.selected_index < last {
-                    self.move_selection(1);
-                } else {
-                    let max_scroll = render::scroll_bounds(self).list_max_scroll;
-                    if self.list_scroll < max_scroll {
-                        self.list_scroll += 1;
-                        self.dirty = true;
-                    }
-                }
+                self.move_selection(1);
+            }
+            KeyCode::PageUp if self.pane == Pane::List => {
+                self.list_scroll = self
+                    .list_scroll
+                    .saturating_sub(self.scroll_bounds().list_height.max(1));
+                self.dirty = true;
+            }
+            KeyCode::PageDown if self.pane == Pane::List => {
+                self.list_scroll = self
+                    .list_scroll
+                    .saturating_add(self.scroll_bounds().list_height.max(1))
+                    .min(self.scroll_bounds().list_max_scroll);
+                self.dirty = true;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(1);
@@ -179,7 +174,7 @@ impl App {
                 self.detail_scroll = self
                     .detail_scroll
                     .saturating_add(1)
-                    .min(render::scroll_bounds(self).detail_max_scroll);
+                    .min(self.scroll_bounds().detail_max_scroll);
                 self.dirty = true;
             }
             _ => {}
@@ -188,7 +183,7 @@ impl App {
     }
 
     fn keep_selection_visible(&mut self) {
-        let bounds = render::scroll_bounds(self);
+        let bounds = self.scroll_bounds();
         let Some(line) = self
             .selected
             .as_deref()
@@ -206,9 +201,13 @@ impl App {
     }
 
     fn clamp_scrolls(&mut self) {
-        let bounds = render::scroll_bounds(self);
+        let bounds = self.scroll_bounds();
         self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
         self.detail_scroll = self.detail_scroll.min(bounds.detail_max_scroll);
         self.keep_selection_visible();
+    }
+
+    pub fn scroll_bounds(&self) -> layout::ScrollBounds {
+        layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
     }
 }
