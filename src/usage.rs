@@ -205,51 +205,69 @@ pub fn extract_codex_usage(
         Err(_) => return Vec::new(),
     };
 
-    let mut rows = Vec::new();
+    let mut legacy_rows = Vec::new();
+    let mut completed_rows = Vec::new();
     for line in content.lines() {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        let is_token_count = val["type"].as_str() == Some("event_msg")
-            && val["payload"]["type"].as_str() == Some("token_count");
-        if !is_token_count {
+        let (usage, model, duration_ms, completed) = if val["type"].as_str() == Some("event_msg")
+            && val["payload"]["type"].as_str() == Some("token_count")
+        {
+            (
+                &val["payload"]["info"]["last_token_usage"],
+                val["payload"]["info"]["model"]
+                    .as_str()
+                    .or_else(|| val["payload"]["model"].as_str())
+                    .unwrap_or("unknown"),
+                val["payload"]["info"]["duration_ms"].as_u64(),
+                false,
+            )
+        } else if val["type"].as_str() == Some("turn.completed") {
+            (&val["usage"], "unknown", None, true)
+        } else {
             continue;
-        }
+        };
 
-        let last_usage = &val["payload"]["info"]["last_token_usage"];
-        let input_tokens = match last_usage["input_tokens"].as_u64() {
+        let input_tokens = match usage["input_tokens"].as_u64() {
             Some(n) => n,
             None => continue,
         };
-        let output_tokens = match last_usage["output_tokens"].as_u64() {
+        let output_tokens = match usage["output_tokens"].as_u64() {
             Some(n) => n,
             None => continue,
         };
 
-        let model = val["payload"]["info"]["model"]
-            .as_str()
-            .or_else(|| val["payload"]["model"].as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        rows.push(UsageRow {
+        let row = UsageRow {
             ts: chrono::Utc::now().to_rfc3339(),
             coder: "codex".to_string(),
             work_item_id: work_item_id.to_string(),
             attempt_id: attempt_id.to_string(),
             task_id: task_id.to_string(),
-            model,
+            model: model.to_string(),
             input_tokens,
             output_tokens,
-            cached_input_tokens: last_usage["cached_input_tokens"].as_u64().unwrap_or(0),
-            reasoning_output_tokens: last_usage["reasoning_output_tokens"].as_u64(),
-            duration_ms: val["payload"]["info"]["duration_ms"].as_u64(),
-        });
+            cached_input_tokens: usage["cached_input_tokens"].as_u64().unwrap_or(0),
+            reasoning_output_tokens: usage["reasoning_output_tokens"].as_u64(),
+            duration_ms,
+        };
+        if completed {
+            completed_rows.push(row);
+        } else {
+            legacy_rows.push(row);
+        }
     }
 
-    rows
+    // Some Codex versions may emit both the public turn completion and legacy
+    // internal token-count events. Prefer the public record so one turn never
+    // contributes two usage rows.
+    if completed_rows.is_empty() {
+        legacy_rows
+    } else {
+        completed_rows
+    }
 }
 
 /// Extract per-turn token usage from a Pi JSONL transcript.
@@ -345,7 +363,7 @@ pub fn log_usage_from_transcript(
     attempt_id: &str,
     task_id: &str,
 ) {
-    let rows = match coder {
+    let mut rows = match coder {
         "claude" => extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id),
         "codex" => extract_codex_usage(transcript_path, work_item_id, attempt_id, task_id),
         "pi" => extract_pi_usage(transcript_path, work_item_id, attempt_id, task_id),
@@ -354,6 +372,14 @@ pub fn log_usage_from_transcript(
 
     if rows.is_empty() {
         return;
+    }
+
+    if let Some(model) = task_model_from_artifact(transcript_path) {
+        for row in &mut rows {
+            if row.model == "unknown" {
+                row.model.clone_from(&model);
+            }
+        }
     }
 
     if let Err(error) = persist_task_usage(transcript_path, &rows) {
@@ -366,6 +392,16 @@ pub fn log_usage_from_transcript(
     if let Err(e) = recompute_summary() {
         eprintln!("warning: usage summary update failed: {e}");
     }
+}
+
+fn task_model_from_artifact(transcript_path: &Path) -> Option<String> {
+    let info_path = transcript_path.parent()?.join("coder-info.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(info_path).ok()?).ok()?;
+    value["model"]
+        .as_str()
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn persist_task_usage(transcript_path: &Path, rows: &[UsageRow]) -> Result<()> {
@@ -710,6 +746,63 @@ mod tests {
         let rows = extract_codex_usage(&path, "wi-1", "a1", "t1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].reasoning_output_tokens, Some(30));
+    }
+
+    /// Shape emitted by codex-cli 0.146.0, captured 2026-08-04.
+    #[test]
+    fn extract_codex_usage_reads_turn_completed_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"turn.completed","usage":{"input_tokens":892893,"cached_input_tokens":833024,"cache_write_input_tokens":0,"output_tokens":8767,"reasoning_output_tokens":2241}}"#,
+        )
+        .unwrap();
+
+        let rows = extract_codex_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 892893);
+        assert_eq!(rows[0].output_tokens, 8767);
+        assert_eq!(rows[0].cached_input_tokens, 833024);
+        assert_eq!(rows[0].reasoning_output_tokens, Some(2241));
+        assert_eq!(rows[0].model, "unknown");
+    }
+
+    #[test]
+    fn extract_codex_usage_prefers_turn_completed_when_both_schemas_are_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"output_tokens":2},"model":"o3"}}}"#,
+                "\n",
+                r#"{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":3}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let rows = extract_codex_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 20);
+    }
+
+    #[test]
+    fn task_model_comes_from_sibling_coder_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        fs::write(&transcript, "").unwrap();
+        fs::write(
+            dir.path().join("coder-info.json"),
+            r#"{"coder":"codex","model":"gpt-5.6-terra"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            task_model_from_artifact(&transcript).as_deref(),
+            Some("gpt-5.6-terra")
+        );
     }
 
     #[test]

@@ -153,8 +153,15 @@ checked count did not regress. Fluent records each host-derived Writer outcome,
 candidate commit, checked count, provider session identity, and whether the run
 was initial, pre-review continuation, or post-review corrective work. Codex
 Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
-Claude Writers resume with `--resume <session-id>`. A missing or provider-mismatched
-identity starts a fresh persistent session. Continuation prompts contain only
+because that subcommand does not accept `exec`'s `--cd` option, Fluent sets the
+subprocess current directory to the candidate workspace instead. Claude Writers
+resume with `--resume <session-id>`. A missing or provider-mismatched identity
+starts a fresh persistent session. Codex Writer Tasks copy only their generated
+`sessions/` rollout tree into the Task artifact after each launch and restore it
+into the next launch's temporary worker home. Authentication, configuration,
+hooks, and cache are not included. Older Attempts without that snapshot fall
+back to a fresh persistent session rather than attempting an unusable resume.
+Continuation prompts contain only
 unresolved progress plus a path to a generated `execution-context.json`. The
 versioned context records candidate/base commits, changed files, unresolved
 steps, current findings deduplicated by role and stable identity, passing Tester
@@ -1936,13 +1943,19 @@ Autonomous Codex launches cross a provider-specific boundary in
 selects one absolute `codex` launcher from `PATH`, derives its bounded package
 read closure, stages only supported authentication into a mode-private
 temporary home, and runs `codex login status` through that launcher before
-useful work starts. The launch keeps that prepared capability alive through
-sandbox construction and process completion, then removes the temporary home
-by RAII cleanup.
+useful work starts. The preflight runs from the system temp directory instead
+of inheriting an arbitrary project directory that the production profile may
+not grant. The launch keeps that prepared capability alive through sandbox
+construction and process completion, then removes the temporary home by RAII
+cleanup.
 
-The autonomous command disables hooks, ignores user configuration, and uses an
-ephemeral session. Its Seatbelt profile receives the staged home as its only
-writable Codex-state root plus read-only access to the resolved launcher's
+Every autonomous command disables hooks and ignores user configuration.
+Reviewer, Learner, and rebase commands use ephemeral sessions. Writer commands
+use persistent sessions inside the temporary worker home so an approved
+pre-review continuation can retain its rollout; Fluent copies only the
+`sessions/` tree into the Writer Task artifact and restores it into the next
+temporary worker home. The Seatbelt profile receives the staged home as its
+only writable Codex-state root plus read-only access to the resolved launcher's
 package closure; it does not receive the interactive home or the launcher's
 enclosing operator home. Writer, Reviewer, Learner, and rebase routes execute
 the retained absolute launcher instead of searching `PATH` again. Interactive
@@ -2355,6 +2368,12 @@ follow a fixed JSONL schema: `ts`, `coder`, `work_item_id`, `attempt_id`,
 `task_id`, `model`, `input_tokens`, `output_tokens`,
 `cached_input_tokens`, and `reasoning_output_tokens` (Codex only, omitted
 for Claude).
+
+Codex usage extraction accepts the legacy internal `event_msg/token_count`
+record and the public `turn.completed.usage` record emitted by current Codex
+CLI versions. If a transcript contains both shapes, Fluent uses the public
+completion record to avoid counting one turn twice. When that record omits the
+model, Fluent reads the model from the Task's sibling `coder-info.json`.
 
 After appending rows, the system recomputes
 `~/.config/fluent/usage/summary.json` with per-coder totals

@@ -860,7 +860,12 @@ impl CodexCode {
                 cmd.arg("--ephemeral");
             }
         }
-        cmd.args(["--cd", &working_dir.to_string_lossy()]);
+        // `--cd` belongs to `codex exec`, but `codex exec resume` does not
+        // accept it. Command::current_dir below supplies the same working root
+        // for resumed sessions without crossing the subcommand grammar.
+        if !matches!(session, CoderSession::Resume(_)) {
+            cmd.args(["--cd", &working_dir.to_string_lossy()]);
+        }
         cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
         if let Some(model) = self.effective_model() {
             cmd.args(["--model", &model]);
@@ -4891,6 +4896,11 @@ mod model_default_tests {
                 .iter()
                 .any(|arg| arg == "writer-thread-1")
         );
+        assert!(
+            !args.iter().any(|arg| arg == "--cd"),
+            "the resume subcommand does not accept exec's --cd option: {args:?}"
+        );
+        assert_eq!(cmd.get_current_dir(), Some(dir.path()));
         assert!(!args.iter().any(|arg| arg == "--ephemeral"));
     }
 

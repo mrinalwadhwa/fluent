@@ -424,6 +424,40 @@ impl CodexWorkerEnvironment {
         &self.launcher
     }
 
+    /// Persist only Codex rollout files needed to resume a Writer session.
+    pub fn snapshot_sessions_to(&self, destination: &Path) -> Result<()> {
+        let source = self.home.join("sessions");
+        if !source.is_dir() {
+            anyhow::bail!(
+                "Codex worker produced no resumable session directory at {}",
+                source.display()
+            );
+        }
+        copy_private_tree_atomic(&source, destination).with_context(|| {
+            format!(
+                "snapshot Codex Writer sessions from {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })
+    }
+
+    /// Restore a prior Writer's rollout files into this launch's private home.
+    pub fn restore_sessions_from(&self, source: &Path) -> Result<()> {
+        let destination = self.home.join("sessions");
+        copy_private_tree_atomic(source, &destination).with_context(|| {
+            format!(
+                "restore Codex Writer sessions from {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })
+    }
+
+    pub fn has_sessions(&self) -> bool {
+        self.home.join("sessions").is_dir()
+    }
+
     /// Ask Codex itself whether this worker home is authenticated.
     pub fn preflight(&self) -> std::result::Result<(), CodexAuthError> {
         #[cfg(test)]
@@ -458,6 +492,82 @@ impl CodexWorkerEnvironment {
             ))
         }
     }
+}
+
+fn copy_private_tree_atomic(source: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        anyhow::bail!(
+            "private tree destination {} already exists",
+            destination.display()
+        );
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("private tree destination has no parent"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create private tree parent {}", parent.display()))?;
+    let staging = tempfile::Builder::new()
+        .prefix(".fluent-codex-session-")
+        .tempdir_in(parent)
+        .with_context(|| format!("stage private tree beside {}", destination.display()))?;
+    let staged_tree = staging.path().join("sessions");
+    copy_private_tree(source, &staged_tree)?;
+    fs::rename(&staged_tree, destination).with_context(|| {
+        format!(
+            "publish private tree {} to {}",
+            staged_tree.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("inspect private tree {}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "private tree source {} is not a directory",
+            source.display()
+        );
+    }
+    fs::create_dir_all(destination)
+        .with_context(|| format!("create private directory {}", destination.display()))?;
+    set_private_mode(destination, 0o700)?;
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("read private directory {}", source.display()))?
+    {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "private tree {} contains unsupported symlink {}",
+                source.display(),
+                source_path.display()
+            );
+        }
+        if file_type.is_dir() {
+            copy_private_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "copy private file {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+            set_private_mode(&destination_path, 0o600)?;
+        } else {
+            anyhow::bail!(
+                "private tree {} contains unsupported entry {}",
+                source.display(),
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn test_or_resolved_launcher() -> std::result::Result<ResolvedCodexLauncher, CodexLauncherError> {
@@ -727,6 +837,87 @@ mod tests {
         let path = worker.home().to_path_buf();
         drop(worker);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn writer_session_snapshot_round_trips_without_auth_or_configuration() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("auth.json"), "auth").unwrap();
+        let first = CodexWorkerEnvironment::prepare_from(source.path()).unwrap();
+        let rollout = first
+            .home()
+            .join("sessions/2026/08/04/rollout-writer-thread.jsonl");
+        fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        fs::write(&rollout, "writer session").unwrap();
+        fs::write(first.home().join("config.toml"), "hooks = true").unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let snapshot = artifact.path().join("codex-session");
+
+        first.snapshot_sessions_to(&snapshot).unwrap();
+
+        assert!(
+            snapshot
+                .join("2026/08/04/rollout-writer-thread.jsonl")
+                .is_file()
+        );
+        assert!(!snapshot.join("auth.json").exists());
+        assert!(!snapshot.join("config.toml").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&snapshot).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(snapshot.join("2026/08/04/rollout-writer-thread.jsonl"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        let second = CodexWorkerEnvironment::prepare_from(source.path()).unwrap();
+        second.restore_sessions_from(&snapshot).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(
+                second
+                    .home()
+                    .join("sessions/2026/08/04/rollout-writer-thread.jsonl")
+            )
+            .unwrap(),
+            "writer session"
+        );
+        assert_eq!(
+            fs::read_to_string(second.home().join("auth.json")).unwrap(),
+            "auth"
+        );
+        assert!(!second.home().join("config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_session_snapshot_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("auth.json"), "auth").unwrap();
+        let worker = CodexWorkerEnvironment::prepare_from(source.path()).unwrap();
+        let sessions = worker.home().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), sessions.join("rollout.jsonl")).unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+
+        let snapshot = artifact.path().join("codex-session");
+        let error = worker.snapshot_sessions_to(&snapshot).unwrap_err();
+
+        assert!(error.to_string().contains("snapshot Codex Writer sessions"));
+        assert!(format!("{error:#}").contains("unsupported symlink"));
+        assert!(!snapshot.exists());
     }
 
     #[cfg(unix)]

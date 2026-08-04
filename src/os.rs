@@ -76,19 +76,15 @@ pub fn preflight_codex_launcher(
     }
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new(sandbox_exec_program())
-            .arg("-f")
-            .arg(&profile.path)
-            .arg(worker.launcher().executable())
-            .args(["login", "status"])
-            .env("CODEX_HOME", worker.home())
-            .output()
-            .map_err(|error| HostSandboxPreflightError {
-                message: format!(
-                    "could not execute prepared Codex launcher {}: {error}",
-                    worker.launcher().executable().display()
-                ),
-            })?;
+        let output =
+            codex_preflight_command(&profile.path, worker.launcher().executable(), worker.home())
+                .output()
+                .map_err(|error| HostSandboxPreflightError {
+                    message: format!(
+                        "could not execute prepared Codex launcher {}: {error}",
+                        worker.launcher().executable().display()
+                    ),
+                })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let detail = if stderr.is_empty() {
@@ -105,6 +101,21 @@ pub fn preflight_codex_launcher(
         let _ = (profile, worker);
         Ok(())
     }
+}
+
+fn codex_preflight_command(profile_path: &Path, launcher: &Path, worker_home: &Path) -> Command {
+    let mut command = Command::new(sandbox_exec_program());
+    command
+        .arg("-f")
+        .arg(profile_path)
+        .arg(launcher)
+        .args(["login", "status"])
+        // The production profile does not grant the caller's arbitrary current
+        // directory. Run this read-only authentication probe from the system
+        // temp tree, which every autonomous Codex profile already permits.
+        .current_dir(env::temp_dir())
+        .env("CODEX_HOME", worker_home);
+    command
 }
 
 /// Enable a deterministic probe outcome only for test-support binaries.
@@ -527,6 +538,17 @@ mod tests {
     #[test]
     fn host_sandbox_preflight_uses_the_system_launcher() {
         assert_eq!(sandbox_exec_program(), "/usr/bin/sandbox-exec");
+    }
+
+    #[test]
+    fn codex_launcher_preflight_uses_a_profile_readable_working_directory() {
+        let profile = PathBuf::from("/tmp/profile.sb");
+        let launcher = PathBuf::from("/opt/codex/bin/codex");
+        let worker_home = PathBuf::from("/tmp/fluent-codex-worker");
+
+        let command = codex_preflight_command(&profile, &launcher, &worker_home);
+
+        assert_eq!(command.get_current_dir(), Some(env::temp_dir().as_path()));
     }
 
     #[test]

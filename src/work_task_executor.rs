@@ -626,11 +626,8 @@ fn run_write_task_with_coder(
 
     // Verify the selected provider before reserving execution. A readiness failure
     // leaves this Task unstarted and pauses the existing Attempt for recovery.
-    let provider_readiness = match prepare_provider_readiness(plan_coder_kind(
-        &item,
-        config.attempt_id,
-        TaskKind::Write,
-    )?) {
+    let coder_kind = plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?;
+    let mut provider_readiness = match prepare_provider_readiness(coder_kind) {
         Ok(worker) => worker,
         Err(error) => {
             mark_task_failed_attempt_needs_user(
@@ -645,6 +642,44 @@ fn run_write_task_with_coder(
             return Err(error);
         }
     };
+    let prior_snapshot = match previous_writer_codex_session_snapshot(
+        &item,
+        config.attempt_id,
+        config.project_root,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!(
+                "warning: prior Codex Writer session cannot be resolved; starting a fresh session: {error:#}"
+            );
+            None
+        }
+    };
+    if let (Some(worker), Some(snapshot)) = (provider_readiness.codex_worker(), prior_snapshot)
+        && let Err(error) = worker.restore_sessions_from(&snapshot)
+    {
+        eprintln!(
+            "warning: prior Codex Writer session cannot be restored; starting a fresh session: {error:#}"
+        );
+        // Discard the possibly partial temporary home. Re-preparing preserves
+        // authentication isolation and guarantees session selection sees no
+        // stale rollout material.
+        provider_readiness = match prepare_provider_readiness(coder_kind) {
+            Ok(worker) => worker,
+            Err(error) => {
+                mark_task_failed_attempt_needs_user(
+                    config.store,
+                    config.project_root,
+                    config.work_item_id,
+                    config.attempt_id,
+                    config.task_id,
+                    &classify_task_failure(&error),
+                    &crate::notify::notify,
+                )?;
+                return Err(error);
+            }
+        };
+    }
 
     // Render and apply the exact Writer boundary while the Task is still Planned.
     // All roots below are deterministic from the start plan, including paths the
@@ -658,7 +693,7 @@ fn run_write_task_with_coder(
         &prior_reviews,
         config.resolver,
         config.no_sandbox,
-        plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?,
+        coder_kind,
         provider_readiness.codex_worker(),
     ) {
         Ok(profile) => profile,
@@ -687,7 +722,7 @@ fn run_write_task_with_coder(
         config.task_id,
         TaskKind::Write,
         AttemptStatus::Executing,
-        plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?,
+        coder_kind,
     )?;
 
     // Side-effectful setup after the reservation. Only non-deterministic failures
@@ -3107,7 +3142,17 @@ fn run_task_coder_with_coder(
     // take its terminal outcome: an unconfirmed group sweep lands in
     // coder-supervision.json rather than being dropped with the ManagedChild, and a
     // sidecar obstruction rides along as a typed non-retryable secondary.
-    let session = writer_coder_session(item, attempt_id, coder_kind);
+    let codex_snapshot_available = codex_worker
+        .map(crate::codex_worker::CodexWorkerEnvironment::has_sessions)
+        // Injected route tests have no production worker home; preserve their
+        // ability to exercise the selected session value directly.
+        .unwrap_or(true);
+    let session = writer_coder_session_with_codex_snapshot(
+        item,
+        attempt_id,
+        coder_kind,
+        codex_snapshot_available,
+    );
     let completion = coder.run_captured_reported_session(
         &prompt,
         &system_prompt,
@@ -3117,10 +3162,25 @@ fn run_task_coder_with_coder(
         capture.as_ref(),
         session,
     );
-    let exit_code = match transcript_path.as_deref().and_then(Path::parent) {
+    let completed = match transcript_path.as_deref().and_then(Path::parent) {
         Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
         None => completion.into_result()?,
     };
+    if let (Some(worker), Some(artifact_dir)) = (
+        codex_worker,
+        transcript_path.as_deref().and_then(Path::parent),
+    ) && worker.has_sessions()
+    {
+        if let Err(error) = worker.snapshot_sessions_to(&artifact_dir.join("codex-session")) {
+            // The coder has already completed. Session material improves the
+            // next continuation but is not execution evidence, so never rerun
+            // model work merely because this best-effort snapshot failed.
+            eprintln!(
+                "warning: Codex Writer session could not be saved; a continuation will start fresh: {error:#}"
+            );
+        }
+    }
+    let exit_code = completed;
     if let Some(tp) = &transcript_path {
         crate::usage::log_usage_from_transcript(
             tp,
@@ -3154,6 +3214,54 @@ fn writer_coder_session<'a>(
         .filter(|session_id| !session_id.trim().is_empty())
         .map(crate::coder::CoderSession::Resume)
         .unwrap_or(crate::coder::CoderSession::FreshPersistent)
+}
+
+fn writer_coder_session_with_codex_snapshot<'a>(
+    item: &'a WorkItem,
+    attempt_id: &str,
+    coder_kind: CoderKind,
+    codex_snapshot_available: bool,
+) -> crate::coder::CoderSession<'a> {
+    if coder_kind == CoderKind::Codex && !codex_snapshot_available {
+        crate::coder::CoderSession::FreshPersistent
+    } else {
+        writer_coder_session(item, attempt_id, coder_kind)
+    }
+}
+
+fn previous_writer_codex_session_snapshot(
+    item: &WorkItem,
+    attempt_id: &str,
+    project_root: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(attempt) = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+    else {
+        return Ok(None);
+    };
+    let Some(run) = attempt.writer_runs.last().filter(|run| {
+        run.outcome == crate::work_model::WriterOutcome::Continue
+            && run.provider == CoderKind::Codex.as_str()
+            && run
+                .session_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+    }) else {
+        return Ok(None);
+    };
+    let Some(area) = attempt
+        .tasks
+        .iter()
+        .find(|task| task.id == run.task_id)
+        .and_then(|task| task.artifact_area.as_ref())
+    else {
+        return Ok(None);
+    };
+    let snapshot =
+        resolve_managed_artifact_area_path(project_root, &area.path)?.join("codex-session");
+    Ok(snapshot.is_dir().then_some(snapshot))
 }
 
 /// Remove only the declaration a prior launch could have left behind. The next
@@ -7222,6 +7330,12 @@ mod tests {
         item.attempts[0].writer_runs[0].session_id = None;
         assert_eq!(
             writer_coder_session(&item, "attempt-1", CoderKind::Codex),
+            crate::coder::CoderSession::FreshPersistent
+        );
+
+        item.attempts[0].writer_runs[0].session_id = Some("codex-thread-1".to_string());
+        assert_eq!(
+            writer_coder_session_with_codex_snapshot(&item, "attempt-1", CoderKind::Codex, false,),
             crate::coder::CoderSession::FreshPersistent
         );
     }
