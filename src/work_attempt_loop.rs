@@ -464,6 +464,10 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
                                     == task.artifact_area.as_ref().map(|area| format!("{}/review.md", area.path)).unwrap_or_default()
                             })
                     })
+                    && !(task.kind == TaskKind::Write
+                        && attempt.evidence_recoveries.iter().any(|recovery| {
+                            recovery.state == EvidenceRecoveryState::CodeChange
+                        }))
             })
         {
             bail!(
