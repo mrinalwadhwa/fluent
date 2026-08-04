@@ -4332,14 +4332,24 @@ fn latest_review_artifacts(
         };
         last_write_index + 1
     };
-    let mut latest_by_role = std::collections::BTreeMap::new();
+    // Keep the established review-role order while replacing each role with its
+    // latest result. Evidence-targeted reviews append a replacement for one role;
+    // sorting roles here would change the ordinary Writer's corrective inputs.
+    let mut latest_by_role = Vec::new();
     for task in attempt.tasks[start..]
         .iter()
         .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
     {
-        latest_by_role.insert(task.role.clone(), task);
+        if let Some((_, latest)) = latest_by_role
+            .iter_mut()
+            .find(|(role, _)| role == &task.role)
+        {
+            *latest = task;
+        } else {
+            latest_by_role.push((task.role.clone(), task));
+        }
     }
-    latest_by_role.into_values()
+    latest_by_role.into_iter().map(|(_, task)| task)
         .filter_map(|task| task.artifact_area.as_ref().map(|area| (task, area)))
         .map(|(task, area)| {
             let artifact_dir =
