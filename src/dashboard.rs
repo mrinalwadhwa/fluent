@@ -285,4 +285,44 @@ mod tests {
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(app.detail_scroll, 1);
     }
+    #[test]
+    fn refresh_key_requests_immediate_poll() {
+        let mut app = app(vec![row("work", "planned")]);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE),
+            Effect::Refresh
+        );
+    }
+    #[test]
+    fn failed_poll_keeps_snapshot_and_marks_it_stale() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.refresh_failed("cannot read Work model".into());
+        let rendered = text(&app, 100, 24);
+        assert!(rendered.contains("STALE: cannot read Work model"));
+        assert!(rendered.contains("work title"));
+        app.refresh(snapshot::DashboardSnapshot::from_status(
+            crate::work_status::WorkStatus {
+                rows: vec![row("fresh", "planned")],
+                errors: vec![],
+            },
+        ));
+        assert!(!text(&app, 100, 24).contains("STALE:"));
+    }
+    #[test]
+    fn help_lists_contextual_controls_and_closes() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(text(&app, 100, 24).contains("j/k or arrows select"));
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.help);
+    }
+    #[test]
+    fn dashboard_controls_leave_work_state_unchanged() {
+        let mut app = app(vec![row("work", "planned")]);
+        let before = app.snapshot.rows[0].status.clone();
+        for key in ['j', 'a', '?', 'r', 'c'] {
+            app.handle_key(KeyCode::Char(key), KeyModifiers::NONE);
+        }
+        assert_eq!(app.snapshot.rows[0].status, before);
+    }
 }
