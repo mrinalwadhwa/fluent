@@ -27,6 +27,8 @@ pub struct WorkItemStatus {
     pub merge_candidate: String,
     pub merge: String,
     pub action: String,
+    /// An exact operator command for exceptional recovery states.
+    pub next_action: Option<String>,
 }
 
 pub fn load_work_status(project_root: &Path) -> Result<WorkStatus, anyhow::Error> {
@@ -76,6 +78,7 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
             .unwrap_or_else(|| "-".to_string()),
         action: action_label_with_liveness(item, attempt, merge_candidate, project_root)
             .to_string(),
+        next_action: evidence_recovery_next_action(attempt),
     }
 }
 
@@ -227,6 +230,13 @@ fn action_label_with_liveness(
 
     if let Some(attempt) = attempt {
         if attempt.status == AttemptStatus::NeedsUser
+            && attempt.evidence_recoveries.last().is_some_and(|recovery| {
+                recovery.state == crate::work_model::EvidenceRecoveryState::NeedsEvidence
+            })
+        {
+            return "evidence-needed";
+        }
+        if attempt.status == AttemptStatus::NeedsUser
             || attempt
                 .tasks
                 .iter()
@@ -297,6 +307,25 @@ fn action_label_with_liveness(
         Some(AttemptStatus::NeedsUser) => "needs-user",
         None => "not-started",
     }
+}
+
+fn evidence_recovery_next_action(attempt: Option<&Attempt>) -> Option<String> {
+    let attempt = attempt?;
+    let recovery = attempt.evidence_recoveries.last()?;
+    if attempt.status != AttemptStatus::NeedsUser
+        || recovery.state != crate::work_model::EvidenceRecoveryState::NeedsEvidence
+    {
+        return None;
+    }
+    let artifacts = recovery
+        .targets
+        .iter()
+        .map(|target| format!(" --review-artifact {}", target.prior_review_artifact))
+        .collect::<String>();
+    Some(format!(
+        "fluent attempt evidence attach {} {} --candidate {} --evidence-file <path>{artifacts}",
+        attempt.work_item_id, attempt.id, recovery.candidate_commit
+    ))
 }
 
 fn attempt_status_label(status: &AttemptStatus) -> &'static str {
@@ -531,6 +560,7 @@ mod tests {
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
+                next_action: None,
             }],
             errors: vec!["invalid work model in bad.json".to_string()],
         };
@@ -556,6 +586,7 @@ mod tests {
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
+                next_action: None,
             }],
             errors: Vec::new(),
         };
@@ -620,5 +651,39 @@ mod tests {
 
         assert_eq!(row.action, "merged");
         assert_eq!(row.merge, "merged review:pending");
+    }
+
+    #[test]
+    fn evidence_needed_status_names_exact_attachment_command() {
+        let attempt = Attempt {
+            id: "attempt-1".to_string(),
+            work_item_id: "work-1".to_string(),
+            status: AttemptStatus::NeedsUser,
+            evidence_recoveries: vec![crate::work_model::EvidenceRecovery {
+                id: "host-evidence-1".to_string(),
+                candidate_commit: "abc123".to_string(),
+                attachment: crate::work_model::EvidenceAttachment {
+                    snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/a.json"
+                        .to_string(),
+                    digest: "sha256:abc".to_string(),
+                },
+                targets: vec![crate::work_model::EvidenceReviewTarget {
+                    role: "architecture".to_string(),
+                    prior_review_artifact:
+                        ".fluent/work/artifacts/work-1/attempt-1/review/review.md".to_string(),
+                    review_task_id: None,
+                }],
+                state: crate::work_model::EvidenceRecoveryState::NeedsEvidence,
+                created_at: "2026-08-03T00:00:00Z".to_string(),
+            }],
+            ..Attempt::default()
+        };
+
+        assert_eq!(
+            evidence_recovery_next_action(Some(&attempt)).as_deref(),
+            Some(
+                "fluent attempt evidence attach work-1 attempt-1 --candidate abc123 --evidence-file <path> --review-artifact .fluent/work/artifacts/work-1/attempt-1/review/review.md"
+            )
+        );
     }
 }

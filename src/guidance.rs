@@ -202,13 +202,21 @@ pub fn next_action_for_action(action: &str, id: &str, merge_candidate_id: &str) 
     }
 }
 
+pub fn next_action_for_status_row(row: &crate::work_status::WorkItemStatus) -> Option<String> {
+    row.next_action
+        .as_ref()
+        .map(|action| format!("\n→ Next: {action}"))
+        .or_else(|| next_action_for_action(&row.action, &row.id, &row.merge_candidate))
+}
+
 /// Name the next command for the most-actionable Work Item on a populated board.
 /// Priority follows `work_status`: needs-user > merge-ready > learner-not-ready >
 /// task-ready. A `learner-blocked` row remains visible but is not repeatedly
 /// actionable: the originating Attempt already emitted its one-time inspection
 /// hint. Returns `None` when nothing on the board is actionable.
 pub fn status_next_action(status: &WorkStatus) -> Option<String> {
-    const PRIORITY: [&str; 4] = [
+    const PRIORITY: [&str; 5] = [
+        "evidence-needed",
         "needs-user",
         "merge-ready",
         "learner-not-ready",
@@ -216,7 +224,7 @@ pub fn status_next_action(status: &WorkStatus) -> Option<String> {
     ];
     for action in PRIORITY {
         if let Some(row) = status.rows.iter().find(|row| row.action == action) {
-            return next_action_for_action(&row.action, &row.id, &row.merge_candidate);
+            return next_action_for_status_row(row);
         }
     }
     None
@@ -455,6 +463,7 @@ mod tests {
             merge_candidate: "-".to_string(),
             merge: "-".to_string(),
             action: action.to_string(),
+            next_action: None,
         }
     }
 

@@ -11,8 +11,8 @@ use std::path::{Component, Path};
 use crate::review::{self, Verdict};
 use crate::work_model::{
     self, ArtifactRef, EvidenceAttachment, EvidenceRecovery, EvidenceRecoveryState,
-    EvidenceReviewContext,
-    EvidenceReviewTarget, Task, TaskKind, TaskStatus, WorkModelError, WorkModelStore,
+    EvidenceReviewContext, EvidenceReviewTarget, Task, TaskKind, TaskStatus, WorkModelError,
+    WorkModelStore,
 };
 
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
@@ -66,25 +66,77 @@ pub fn attach(
     publish_snapshot(project_root, &snapshot_path, &bytes)?;
 
     let recovery = store.mutate_work_item(work_item_id, |item| {
-        let attempt = item.attempts.iter_mut().find(|a| a.id == attempt_id)
-            .ok_or_else(|| WorkModelError::AttemptNotFound { id: attempt_id.to_string() })?;
-        let recorded_candidate = attempt.tasks.iter().rev()
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let completed_writer = attempt
+            .tasks
+            .iter()
+            .rev()
             .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-            .and_then(|task| task.output.as_ref())
-            .map(|output| output.commit.as_str());
-        if recorded_candidate != Some(candidate_commit) || attempt.tasks.iter().any(|t| t.status == TaskStatus::Executing) {
-            return Err(WorkModelError::AttemptNotFound { id: attempt_id.to_string() });
+            .and_then(|task| task.output.as_ref());
+        if completed_writer.map(|output| output.commit.as_str()) != Some(candidate_commit)
+            || attempt
+                .tasks
+                .iter()
+                .any(|t| t.status == TaskStatus::Executing)
+            || !candidate_workspace_is_clean_at(
+                project_root,
+                completed_writer.unwrap(),
+                candidate_commit,
+            )
+        {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        }
+        let failed_writer = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Failed);
+        if let Some(failed_writer) = failed_writer {
+            if failed_writer.output.is_some()
+                || failed_writer
+                    .input_artifacts
+                    .iter()
+                    .any(|input| !review_artifacts.contains(&input.path))
+            {
+                return Err(WorkModelError::AttemptNotFound {
+                    id: attempt_id.to_string(),
+                });
+            }
         }
         let mut roles = Vec::new();
         for path in review_artifacts {
-            let task = attempt.tasks.iter().find(|task| review_artifact_path(task).as_deref() == Some(path.as_str()))
-                .ok_or_else(|| WorkModelError::AttemptNotFound { id: attempt_id.to_string() })?;
-            if task.kind != TaskKind::Review || task.status != TaskStatus::Complete || !matches!(read_verdict(project_root, task), Some(Verdict::Fail)) {
-                return Err(WorkModelError::AttemptNotFound { id: attempt_id.to_string() });
+            let task = attempt
+                .tasks
+                .iter()
+                .find(|task| review_artifact_path(task).as_deref() == Some(path.as_str()))
+                .ok_or_else(|| WorkModelError::AttemptNotFound {
+                    id: attempt_id.to_string(),
+                })?;
+            if task.kind != TaskKind::Review
+                || task.status != TaskStatus::Complete
+                || !matches!(read_verdict(project_root, task), Some(Verdict::Fail))
+            {
+                return Err(WorkModelError::AttemptNotFound {
+                    id: attempt_id.to_string(),
+                });
             }
-            if !roles.contains(&task.role) { roles.push(task.role.clone()); }
+            if !roles.contains(&task.role) {
+                roles.push(task.role.clone());
+            }
         }
-        if roles.is_empty() { return Err(WorkModelError::AttemptNotFound { id: attempt_id.to_string() }); }
+        if roles.is_empty() {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        }
         let recovery = attempt.attach_evidence_recovery(EvidenceRecovery {
             id: format!("host-evidence-{}", &digest[7..19]),
             candidate_commit: candidate_commit.to_string(),
@@ -98,7 +150,12 @@ pub fn attach(
                     role: role.clone(),
                     prior_review_artifact: review_artifacts
                         .iter()
-                        .find(|path| attempt.tasks.iter().any(|task| task.role == *role && review_artifact_path(task).as_deref() == Some(path.as_str())))
+                        .find(|path| {
+                            attempt.tasks.iter().any(|task| {
+                                task.role == *role
+                                    && review_artifact_path(task).as_deref() == Some(path.as_str())
+                            })
+                        })
                         .cloned()
                         .unwrap_or_default(),
                     review_task_id: None,
@@ -108,14 +165,55 @@ pub fn attach(
             created_at: work_model::now_iso8601(),
         })?;
         for role in roles {
-            let prior = attempt.tasks.iter().find(|task| task.role == role && review_artifact_path(task).as_deref().is_some_and(|path| review_artifacts.iter().any(|artifact| artifact == path))).unwrap().clone();
+            let prior = attempt
+                .tasks
+                .iter()
+                .find(|task| {
+                    task.role == role
+                        && review_artifact_path(task).as_deref().is_some_and(|path| {
+                            review_artifacts.iter().any(|artifact| artifact == path)
+                        })
+                })
+                .unwrap()
+                .clone();
             let task_id = format!("{attempt_id}-evidence-{}-{role}", &digest[7..19]);
             if !attempt.tasks.iter().any(|task| task.id == task_id) {
                 let mut inputs = prior.input_artifacts.clone();
-                inputs.push(ArtifactRef { producer_id: "host-evidence".to_string(), path: snapshot_path.clone() });
-                inputs.push(ArtifactRef { producer_id: prior.id.clone(), path: review_artifact_path(&prior).unwrap() });
+                inputs.push(ArtifactRef {
+                    producer_id: "host-evidence".to_string(),
+                    path: snapshot_path.clone(),
+                });
+                inputs.push(ArtifactRef {
+                    producer_id: prior.id.clone(),
+                    path: review_artifact_path(&prior).unwrap(),
+                });
                 let prior_review_artifact = review_artifact_path(&prior).unwrap();
-                attempt.tasks.push(Task { id: task_id.clone(), kind: TaskKind::Review, status: TaskStatus::Planned, role: role.clone(), instructions: None, work_item_id: work_item_id.to_string(), attempt_id: Some(attempt_id.to_string()), workspace_access: prior.workspace_access, artifact_area: Some(work_model::TaskArtifactArea { path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id) }), review_context: prior.review_context.clone(), evidence_review_context: Some(EvidenceReviewContext { recovery_id: recovery.id.clone(), candidate_commit: candidate_commit.to_string(), attachment: recovery.attachment.clone(), prior_review_artifact }), input_artifacts: inputs, depends_on: None, output: None, created_at: Some(work_model::now_iso8601()), started_at: None, completed_at: None });
+                attempt.tasks.push(Task {
+                    id: task_id.clone(),
+                    kind: TaskKind::Review,
+                    status: TaskStatus::Planned,
+                    role: role.clone(),
+                    instructions: None,
+                    work_item_id: work_item_id.to_string(),
+                    attempt_id: Some(attempt_id.to_string()),
+                    workspace_access: prior.workspace_access,
+                    artifact_area: Some(work_model::TaskArtifactArea {
+                        path: work_model::work_artifact_path(work_item_id, attempt_id, &task_id),
+                    }),
+                    review_context: prior.review_context.clone(),
+                    evidence_review_context: Some(EvidenceReviewContext {
+                        recovery_id: recovery.id.clone(),
+                        candidate_commit: candidate_commit.to_string(),
+                        attachment: recovery.attachment.clone(),
+                        prior_review_artifact,
+                    }),
+                    input_artifacts: inputs,
+                    depends_on: None,
+                    output: None,
+                    created_at: Some(work_model::now_iso8601()),
+                    started_at: None,
+                    completed_at: None,
+                });
             }
             if let Some(target) = attempt
                 .evidence_recoveries
@@ -132,6 +230,31 @@ pub fn attach(
     })?;
     let _ = document; // validation intentionally happens before publication.
     Ok(recovery)
+}
+
+fn candidate_workspace_is_clean_at(
+    project_root: &Path,
+    output: &crate::work_model::TaskOutput,
+    candidate: &str,
+) -> bool {
+    let workspace = Path::new(&output.workspace_path);
+    let workspace = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        project_root.join(workspace)
+    };
+    crate::git::run_stdout(
+        &workspace,
+        &["rev-parse", "HEAD"],
+        "inspect evidence candidate",
+    )
+    .is_ok_and(|head| head == candidate)
+        && crate::git::run_stdout(
+            &workspace,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "inspect evidence candidate cleanliness",
+        )
+        .is_ok_and(|status| status.is_empty())
 }
 
 fn parse_document(bytes: &[u8]) -> Result<EvidenceDocument> {
@@ -172,15 +295,36 @@ fn read_verdict(project_root: &Path, task: &Task) -> Option<Verdict> {
 
 fn publish_snapshot(project_root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
     let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path.components().any(|component| matches!(component, Component::ParentDir))
-    {
+    let managed_root = Path::new(".fluent/work/artifacts");
+    if relative_path.is_absolute() || !relative_path.starts_with(managed_root) {
         bail!("evidence snapshot path must stay under the managed artifact root");
     }
-    let path = project_root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let mut current = project_root.to_path_buf();
+    for component in relative_path.components() {
+        let Component::Normal(part) = component else {
+            bail!("evidence snapshot path must use normal managed components");
+        };
+        current.push(part);
+        if current == project_root.join(relative_path) {
+            break;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!("evidence snapshot path must not traverse a symlink")
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                bail!("evidence snapshot parent must be a directory")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).with_context(|| {
+                    format!("create managed evidence directory {}", current.display())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
+    let path = project_root.join(relative_path);
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             file.write_all(bytes)?;
@@ -247,5 +391,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn evidence_snapshot_rejects_symlinked_managed_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join(".fluent/work")).unwrap();
+        symlink(outside.path(), root.path().join(".fluent/work/artifacts")).unwrap();
+
+        assert!(
+            publish_snapshot(
+                root.path(),
+                ".fluent/work/artifacts/work/a/host-evidence/digest.json",
+                b"exact host output\n",
+            )
+            .is_err()
+        );
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 }

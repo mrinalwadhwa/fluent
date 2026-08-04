@@ -330,6 +330,7 @@ mod tests {
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
+                next_action: None,
             }],
             errors: Vec::new(),
         });
@@ -365,6 +366,7 @@ mod tests {
                 merge_candidate: "-".to_string(),
                 merge: "-".to_string(),
                 action: "task-ready".to_string(),
+                next_action: None,
             }],
             errors: vec!["invalid Work Item file .fluent/work/items/broken-work.json".to_string()],
         });
@@ -390,6 +392,7 @@ mod tests {
                 merge_candidate: "attempt-1-merge-candidate".to_string(),
                 merge: "pending review:pending".to_string(),
                 action: "learner-not-ready".to_string(),
+                next_action: None,
             }],
             errors: Vec::new(),
         });
@@ -412,6 +415,7 @@ mod tests {
                 merge_candidate: "attempt-1-merge-candidate".to_string(),
                 merge: "pending review:pending".to_string(),
                 action: "learner-blocked".to_string(),
+                next_action: None,
             }],
             errors: Vec::new(),
         });
