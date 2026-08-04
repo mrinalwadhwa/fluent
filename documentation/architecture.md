@@ -1498,10 +1498,13 @@ verifies the checksum, and atomically replaces the binary via POSIX
 rename. After replacement, the updater shells out to the new binary's
 `skills` command so skills are always in sync with the binary.
 
-`scripts/release.sh` publishes both the binary and checksum only from a clean
-`origin/main` commit with a new tag, after formatting, compilation, and the exact
-configured Tester commands pass. `tools/install.sh` applies the same checksum
-gate before replacing an existing installation.
+`scripts/release.sh` publishes the binary, checksum, and committed
+`documentation/releases/<tag>.md` notes only from a clean `origin/main` commit
+with a new tag, after formatting, compilation, and the exact configured Tester
+commands pass. It refuses publication when the version-specific notes are
+missing and passes the committed file to GitHub with `--notes-file`.
+`tools/install.sh` applies the same checksum gate before replacing an existing
+installation.
 
 On every command except `fluent update`, Fluent runs a cached update
 check: it queries the release source at most once per 24 hours, caches

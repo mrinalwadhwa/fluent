@@ -11,9 +11,10 @@ setup_fixture() {
   local tmp="$1"
   local root="$tmp/project"
   local bin="$tmp/bin"
-  mkdir -p "$root/scripts" "$bin"
+  mkdir -p "$root/scripts" "$root/documentation/releases" "$bin"
   cp "$PROJECT_DIR/scripts/release.sh" "$root/scripts/release.sh"
   printf '[package]\nname = "fixture"\nversion = "9.8.7"\n' > "$root/Cargo.toml"
+  printf '# Fixture release notes\n' > "$root/documentation/releases/v9.8.7.md"
 
   cat > "$bin/rustc" <<'EOF'
 #!/bin/sh
@@ -92,6 +93,8 @@ test_publishes_checksum_at_exact_commit_after_gates() {
 
   grep -Fq -- '--no-sandbox tester check' "$tmp/release.log"
   grep -Fq -- 'release create v9.8.7 --target aaaaaaaa' "$tmp/gh.log"
+  grep -Fq -- '--notes-file' "$tmp/gh.log"
+  grep -Fq -- 'documentation/releases/v9.8.7.md' "$tmp/gh.log"
   grep -Fq -- 'fluent-aarch64-apple-darwin.sha256' "$tmp/gh.log"
   local checksum asset
   checksum="$tmp/uploads/fluent-aarch64-apple-darwin.sha256"
@@ -139,6 +142,22 @@ test_rejects_reused_tag_or_failed_release_gate() {
   [ ! -e "$tmp/gh.log" ]
 }
 
+test_rejects_missing_release_notes() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  setup_fixture "$tmp"
+  mv "$tmp/project/documentation/releases/v9.8.7.md" \
+    "$tmp/missing-release-notes.md"
+
+  if run_release "$tmp" > "$tmp/missing-notes" 2>&1; then
+    printf '    FAIL: release without version-specific notes was accepted\n'
+    return 1
+  fi
+  grep -Fq 'release notes not found' "$tmp/missing-notes"
+  [ ! -e "$tmp/gh.log" ]
+}
+
 printf 'test-release-script\n\n'
 
 run_test "publishes checksum at exact commit after gates" \
@@ -147,5 +166,7 @@ run_test "rejects dirty or unsynchronized source" \
   test_rejects_dirty_or_unsynchronized_source
 run_test "rejects reused tag or failed release gate" \
   test_rejects_reused_tag_or_failed_release_gate
+run_test "rejects missing release notes" \
+  test_rejects_missing_release_notes
 
 summarize_and_exit

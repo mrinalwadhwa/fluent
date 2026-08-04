@@ -5171,9 +5171,11 @@ Test: tests/behaviors/operations/test-release-script.sh (publishes checksum at e
 ### B9
 
 IF the release source is dirty or unsynchronized, the version tag already
-exists, or a release gate fails, THEN THE SYSTEM SHALL publish no release.
+exists, a release gate fails, or version-specific release notes are missing,
+THEN THE SYSTEM SHALL publish no release.
 Test: tests/behaviors/operations/test-release-script.sh (rejects dirty or unsynchronized source)
 Test: tests/behaviors/operations/test-release-script.sh (rejects reused tag or failed release gate)
+Test: tests/behaviors/operations/test-release-script.sh (rejects missing release notes)
 
 ## Project initialization
 

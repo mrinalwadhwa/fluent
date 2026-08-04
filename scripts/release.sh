@@ -23,6 +23,12 @@ TARGET_TRIPLE="$(rustc -vV | grep '^host:' | awk '{print $2}')"
 readonly TARGET_TRIPLE
 readonly ASSET_NAME="fluent-${TARGET_TRIPLE}"
 readonly CHECKSUM_NAME="${ASSET_NAME}.sha256"
+readonly RELEASE_NOTES="$REPO_ROOT/documentation/releases/$TAG.md"
+
+if [[ ! -f "$RELEASE_NOTES" ]]; then
+  printf 'error: release notes not found at %s\n' "$RELEASE_NOTES" >&2
+  exit 1
+fi
 
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]]; then
   printf 'error: release source tree is not clean\n' >&2
@@ -85,7 +91,7 @@ printf 'Creating GitHub release %s ...\n' "$TAG"
 gh release create "$TAG" \
   --target "$HEAD_COMMIT" \
   --title "$TAG" \
-  --notes "Release ${version}" \
+  --notes-file "$RELEASE_NOTES" \
   "$STAGING/$ASSET_NAME" \
   "$STAGING/$CHECKSUM_NAME"
 

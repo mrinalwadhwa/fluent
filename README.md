@@ -22,6 +22,17 @@ Use the command above to install the Fluent skill. Start your coding agent in th
 
 The first invocation sets up Fluent for that project and starts shaping the work with you. You can also invoke the skill explicitly: `$fluent` in Codex, `/fluent` in Claude Code, or `/skill:fluent` in Pi.
 
+### Upgrade
+
+Run `fluent update` to install the latest binary. Starting with v0.1.5, Fluent
+downloads the release checksum and verifies the binary before replacing the
+installed executable. After upgrading from an earlier release, rebuild stored
+artifact metrics once with `fluent work-item rebuild-metrics` if you want
+historical Work Items to report their complete storage totals immediately.
+
+See the [v0.1.5 release notes](documentation/releases/v0.1.5.md) for behavior
+changes and recovery commands.
+
 ## How Fluent works
 
 Fluent separates work that needs human attention from work agents can do on their own. You can think of it as two conceptual queues. The first queue waits for people with the right context, judgment, expertise, or authority. The second waits on both agent and compute capacity: room to run an agent within subscription, rate, and budget limits, and a suitable environment with the models, tools, and hardware the work needs.
