@@ -93,9 +93,9 @@ fn list(frame: &mut Frame, area: Rect, app: &App) {
             };
             lines.push(Line::from(format!(
                 "{marker}{} — {} [{}]",
-                compact(&row.status.id, 18),
-                compact(&row.status.title, 30),
-                row.status.action
+                compact(&row.status.id, 14),
+                compact(&row.status.title, 20),
+                compact(&row.status.action, 12)
             )));
         }
     }
@@ -108,7 +108,10 @@ fn list(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(message));
     }
     if !app.snapshot.errors.is_empty() {
-        lines.push(Line::from("Work Item read errors:"));
+        lines.push(Line::from(format!(
+            "Work Item read errors ({}):",
+            app.snapshot.errors.len()
+        )));
         lines.extend(app.snapshot.errors.iter().map(|e| Line::from(e.clone())));
     }
     frame.render_widget(

@@ -2929,55 +2929,62 @@ Test: tests/binary.rs (cleanup_work_items_reports_and_removes_orphan_artifact_ro
 ### B1
 
 WHEN `fluent dashboard` is invoked,
-THE SYSTEM SHALL open the Work Items view by default.
-Test: dashboard::tests::test_work_view_renders_work_items,
-tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work Items)
+THE SYSTEM SHALL open a read-only Current Work console. It groups non-terminal
+Work as Needs you, Running, and Ready, in that order, and shows a count for each
+non-empty group. Unknown current actions remain visible in Needs you.
+Test: dashboard::tests::dashboard_opens_on_current_work,
+dashboard::tests::current_work_is_grouped_with_counts,
+dashboard::tests::unknown_current_action_remains_visible
 
 ### B2
 
-WHEN `fluent dashboard` is invoked and stored Work Items exist,
-THE SYSTEM SHALL provide a Work Items view that shows Work Items,
-latest Attempts, selected Tasks, review state, Merge Candidates, merge
-state, and actionable labels.
-Test: dashboard::tests::test_work_view_renders_work_items,
-tests/behaviors/operations/test-work-status-dashboard.sh (dashboard lists Work Items)
+WHEN the operator presses `a`,
+THE SYSTEM SHALL toggle All Work, which retains Current Work groups and adds a
+Terminal group for complete, merged, and abandoned Work. Empty Current Work
+names the All Work key; an empty project has no selection.
+Test: dashboard::tests::all_key_toggles_current_and_all_work,
+dashboard::tests::all_work_adds_terminal_group,
+dashboard::tests::current_empty_state_points_to_all_work,
+dashboard::tests::empty_project_has_no_selection
 
 ### B3
 
-WHEN the dashboard polls Work model state,
-THE SYSTEM SHALL refresh the Work Items view from stored Work Item files
-without requiring a dashboard restart.
-Test: dashboard::tests::test_app_poll_refreshes_work_items, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard refreshes Work Items on poll)
+WHEN a non-empty view opens, the console SHALL select the first Work Item. The
+operator can use Up/`k` and Down/`j` to reach every row and list diagnostic;
+selection survives a refresh, filtering, reordering, and terminal resize by ID,
+or falls back to the nearest remaining row.
+Test: dashboard::tests::initial_selection_uses_first_non_empty_section,
+dashboard::tests::overflow_rows_remain_navigable,
+dashboard::tests::selection_survives_refresh_reorder_and_filter,
+dashboard::tests::removed_selection_uses_nearest_remaining_row
 
 ### B4
 
-WHEN Work Items need user input, have pending Merge Candidates, are blocked on
-non-relaunchable Learner evidence, or have read errors,
-THE SYSTEM SHALL show top-level Work view counts for Work Items, actionable
-rows, and errors, while keeping `learner-blocked` rows visible but excluding
-them from the actionable count.
-Test: dashboard::tests::test_work_view_counts_errors,
-dashboard::tests::test_work_view_counts_learner_not_ready_as_actionable,
-dashboard::tests::test_work_view_shows_learner_blocked_without_counting_it_as_actionable,
-tests/behaviors/operations/test-work-status-dashboard.sh (dashboard
-surfaces actionable Work, dashboard reports Work read errors)
+WHILE the console runs, it SHALL poll stored Work state about every two seconds
+and on `r`. A successful changed refresh replaces the snapshot; a failed refresh
+retains the last snapshot and shows a stale error. The list shows the count of
+Work Item read errors and lets the operator scroll to every error. An unchanged
+successful poll does not request a redraw.
+Test: dashboard::tests::refresh_key_requests_immediate_poll,
+dashboard::tests::successful_poll_replaces_dashboard_snapshot,
+dashboard::tests::successful_poll_clears_stale_state,
+dashboard::tests::failed_poll_keeps_snapshot_and_marks_it_stale,
+dashboard::tests::work_read_errors_remain_available_with_overflow,
+dashboard::tests::idle_dashboard_does_not_request_repaint
 
 ### B5
 
-WHEN the Work Items view is selected and no Work Items exist,
-THE SYSTEM SHALL show a Work empty state.
-Test: dashboard::tests::test_work_view_renders_empty_state, tests/behaviors/operations/test-work-status-dashboard.sh (dashboard shows empty Work view)
-
-## Dashboard layout
-
-### B1
-
-WHEN the dashboard Work Items view is displayed,
-THE SYSTEM SHALL render four vertical regions: Work Items counts header,
-view tabs, Work Items list, and help bar.
-Test: dashboard::tests::test_work_view_counts_errors,
-dashboard::tests::test_work_view_renders_work_items,
-dashboard::tests::test_work_view_renders_empty_state
+WHEN the terminal is at least 100 columns wide and 15 rows high, the console
+SHALL show its grouped list and selected Work Item detail side by side. From 60
+through 99 columns it SHALL show list and detail panes separately with Enter and
+Esc. Below 60 columns or 15 rows it SHALL show the required minimum size and
+quit control. Compact rows truncate by display width; detail wraps and scrolls.
+Test: dashboard::tests::wide_layout_shows_list_and_detail,
+dashboard::tests::narrow_layout_switches_between_list_and_detail,
+dashboard::tests::long_and_wide_character_content_stays_within_regions,
+dashboard::tests::overflow_detail_remains_navigable,
+dashboard::tests::resize_preserves_selection_and_changes_layout,
+dashboard::tests::undersized_terminal_shows_resize_message
 
 ## Dashboard keyboard
 
@@ -2987,24 +2994,15 @@ WHEN the user presses `q` or Ctrl+C,
 THE SYSTEM SHALL exit the dashboard and restore the terminal.
 Untestable: Requires live terminal restore after process exit
 
-## Dashboard copy mode
+### B2
 
-### B1
-
-WHEN the user presses `c`,
-THE SYSTEM SHALL toggle copy mode: disable mouse capture so the terminal
-allows text selection, and show a [COPY MODE] indicator in the help bar.
-Pressing `c` again re-enables mouse capture.
-Test: dashboard::tests::test_toggle_copy_mode, dashboard::tests::test_help_bar_shows_copy_key, dashboard::tests::test_help_bar_shows_copy_mode_indicator
-
-## Dashboard render and poll cadence
-
-### B1
-
-WHILE the dashboard is running,
-THE SYSTEM SHALL render frames at ~75ms intervals for smooth animation
-and poll for new data at ~2s intervals to avoid unnecessary I/O.
-Untestable: Requires timing measurement of render and poll intervals in live TUI
+WHEN the operator presses `?`, THE SYSTEM SHALL show controls for the current
+layout and close help with Esc or `?`. The help bar SHALL show the applicable
+selection or scrolling controls. Dashboard controls do not modify stored Work
+or execution state.
+Test: dashboard::tests::help_lists_contextual_controls_and_closes,
+dashboard::tests::help_bar_tracks_current_view,
+dashboard::tests::dashboard_controls_leave_work_state_unchanged
 
 ## Per-project Fargate images
 

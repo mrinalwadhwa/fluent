@@ -21,13 +21,13 @@ impl Group {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DashboardRow {
     pub status: WorkItemStatus,
     pub group: Group,
     pub next_action: Option<String>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DashboardSnapshot {
     pub rows: Vec<DashboardRow>,
     pub errors: Vec<String>,
@@ -82,6 +82,31 @@ impl DashboardSnapshot {
             (!rows.is_empty()).then_some((group, rows))
         })
         .collect()
+    }
+    pub fn list_line_count(&self, all: bool) -> usize {
+        let group_lines = self
+            .groups(all)
+            .into_iter()
+            .map(|(_, rows)| rows.len() + 1)
+            .sum::<usize>();
+        let empty_lines = usize::from(group_lines == 0);
+        let error_lines = if self.errors.is_empty() {
+            0
+        } else {
+            self.errors.len() + 1
+        };
+        group_lines + empty_lines + error_lines
+    }
+    pub fn selected_line(&self, all: bool, id: &str) -> Option<usize> {
+        let mut line = 0;
+        for (_, rows) in self.groups(all) {
+            line += 1;
+            if let Some(index) = rows.iter().position(|row| row.status.id == id) {
+                return Some(line + index);
+            }
+            line += rows.len();
+        }
+        None
     }
 }
 

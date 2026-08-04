@@ -78,8 +78,10 @@ impl Drop for TerminalSession {
 /// Launch the read-only Work operator console.
 pub fn run_dashboard(search_root: &Path) -> Result<()> {
     let status = work_status::load_work_status(search_root)?;
-    let mut app = App::new(snapshot::DashboardSnapshot::from_status(status));
     let mut session = TerminalSession::open()?;
+    let mut app = App::new(snapshot::DashboardSnapshot::from_status(status));
+    let size = session.terminal.size()?;
+    app.resize(size.width, size.height);
     let mut next_poll = Instant::now() + DATA_POLL_INTERVAL;
 
     loop {
@@ -150,6 +152,11 @@ mod tests {
                 rows,
                 errors: vec![],
             },
+        ))
+    }
+    fn app_with_errors(rows: Vec<WorkItemStatus>, errors: Vec<String>) -> App {
+        App::new(snapshot::DashboardSnapshot::from_status(
+            crate::work_status::WorkStatus { rows, errors },
         ))
     }
     fn text(app: &App, width: u16, height: u16) -> String {
@@ -228,7 +235,7 @@ mod tests {
         let mut app = app(vec![row("need", "failed"), row("run", "executing")]);
         app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(app.selected_id(), Some("run"));
-        assert_eq!(app.list_scroll, 1);
+        assert_eq!(app.list_scroll, 3);
     }
     #[test]
     fn selection_survives_refresh_reorder_and_filter() {
@@ -324,5 +331,116 @@ mod tests {
             app.handle_key(KeyCode::Char(key), KeyModifiers::NONE);
         }
         assert_eq!(app.snapshot.rows[0].status, before);
+    }
+    #[test]
+    fn overflow_rows_remain_navigable() {
+        let mut app = app((0..24)
+            .map(|n| row(&format!("work-{n}"), "planned"))
+            .collect());
+        for _ in 0..23 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        assert_eq!(app.selected_id(), Some("work-23"));
+        assert!(app.list_scroll > 0);
+    }
+    #[test]
+    fn all_work_adds_terminal_group() {
+        let mut app = app(vec![row("current", "planned"), row("done", "complete")]);
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(text(&app, 100, 24).contains("Terminal (1)"));
+    }
+    #[test]
+    fn current_empty_state_points_to_all_work() {
+        assert!(
+            text(&app(vec![row("done", "complete")]), 100, 24)
+                .contains("No Current Work. Press a for All Work.")
+        );
+    }
+    #[test]
+    fn detail_shows_selected_work_state() {
+        let mut status = row("work", "planned");
+        status.compatibility_warnings = vec!["legacy state".into()];
+        status.metrics.input_tokens = 42;
+        status.release = Some(Default::default());
+        let rendered = text(&app(vec![status]), 100, 24);
+        for value in ["ID: work", "Metrics:", "Warning: legacy state", "Release:"] {
+            assert!(rendered.contains(value), "missing {value}");
+        }
+    }
+    #[test]
+    fn long_and_wide_character_content_stays_within_regions() {
+        let mut status = row("識別子", "planned");
+        status.title = "e\u{301}識別子 with a very long title that must truncate".into();
+        let rendered = text(&app(vec![status]), 60, 15);
+        assert!(rendered.contains("…"));
+        assert_eq!(rendered.lines().count(), 15);
+    }
+    #[test]
+    fn resize_preserves_selection_and_changes_layout() {
+        let mut app = app(vec![row("first", "planned"), row("selected", "planned")]);
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        app.resize(80, 24);
+        assert!(text(&app, 80, 24).contains("Work Items"));
+        app.resize(100, 24);
+        assert_eq!(app.selected_id(), Some("selected"));
+        assert!(text(&app, 100, 24).contains("Work Item detail"));
+    }
+    #[test]
+    fn all_key_toggles_current_and_all_work() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(app.all_work());
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(!app.all_work());
+    }
+    #[test]
+    fn successful_poll_replaces_dashboard_snapshot() {
+        let mut app = app(vec![row("old", "planned")]);
+        app.take_dirty();
+        app.refresh(snapshot::DashboardSnapshot::from_status(
+            crate::work_status::WorkStatus {
+                rows: vec![row("fresh", "planned")],
+                errors: vec![],
+            },
+        ));
+        assert!(app.take_dirty());
+        assert_eq!(app.selected_id(), Some("fresh"));
+    }
+    #[test]
+    fn successful_poll_clears_stale_state() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.refresh_failed("read failed".into());
+        app.refresh(app.snapshot.clone());
+        assert!(app.stale_error.is_none());
+    }
+    #[test]
+    fn work_read_errors_remain_available_with_overflow() {
+        let mut app = app_with_errors(
+            vec![row("work", "planned")],
+            (0..20).map(|n| format!("error {n}")).collect(),
+        );
+        for _ in 0..22 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        assert_eq!(
+            app.list_scroll as usize,
+            app.snapshot.list_line_count(false) - 1
+        );
+        assert!(text(&app, 80, 15).contains("error 19"));
+    }
+    #[test]
+    fn idle_dashboard_does_not_request_repaint() {
+        let mut app = app(vec![row("work", "planned")]);
+        app.take_dirty();
+        app.refresh(app.snapshot.clone());
+        assert!(!app.take_dirty());
+    }
+    #[test]
+    fn help_bar_tracks_current_view() {
+        let mut app = app(vec![row("work", "planned")]);
+        assert!(text(&app, 100, 24).contains("j/k select"));
+        app.resize(80, 24);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(text(&app, 80, 24).contains("Esc list  j/k scroll"));
     }
 }

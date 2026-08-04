@@ -64,6 +64,10 @@ impl App {
         self.dirty = true;
     }
     pub fn refresh(&mut self, snapshot: DashboardSnapshot) {
+        let was_stale = self.stale_error.is_some();
+        if self.snapshot == snapshot && !was_stale {
+            return;
+        }
         let prior = self.selected.clone();
         self.snapshot = snapshot;
         self.stale_error = None;
@@ -98,7 +102,10 @@ impl App {
         self.selected_index =
             (self.selected_index as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
         self.selected = Some(rows[self.selected_index].status.id.clone());
-        self.list_scroll = self.selected_index as u16;
+        self.list_scroll = self
+            .snapshot
+            .selected_line(self.all_work, &rows[self.selected_index].status.id)
+            .unwrap_or_default() as u16;
         self.detail_scroll = 0;
         self.dirty = true;
     }
@@ -138,8 +145,38 @@ impl App {
                 self.pane = Pane::List;
                 self.dirty = true;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.pane == Pane::List => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') if self.pane == Pane::List => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') if self.pane == Pane::List => {
+                let selected_line = self
+                    .selected
+                    .as_deref()
+                    .and_then(|id| self.snapshot.selected_line(self.all_work, id))
+                    .unwrap_or_default() as u16;
+                if self.list_scroll > selected_line {
+                    self.list_scroll = self.list_scroll.saturating_sub(1);
+                    self.dirty = true;
+                } else {
+                    self.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.pane == Pane::List => {
+                let last = self
+                    .snapshot
+                    .ordered_rows(self.all_work)
+                    .len()
+                    .saturating_sub(1);
+                if self.selected_index < last {
+                    self.move_selection(1);
+                } else {
+                    let max_scroll = self
+                        .snapshot
+                        .list_line_count(self.all_work)
+                        .saturating_sub(1) as u16;
+                    if self.list_scroll < max_scroll {
+                        self.list_scroll += 1;
+                        self.dirty = true;
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(1);
                 self.dirty = true;
