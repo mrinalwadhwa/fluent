@@ -247,6 +247,33 @@ pub fn extract_verdict(content: &str) -> Verdict {
     Verdict::Uncertain
 }
 
+/// The next action requested by a failed evidence-targeted review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceDisposition {
+    EvidenceNeeded,
+    CodeChange,
+}
+
+/// Read the fail-only disposition from an evidence-targeted review. A pass must
+/// not carry a disposition, and malformed or missing values stay uncertain.
+pub fn extract_evidence_disposition(content: &str) -> Option<EvidenceDisposition> {
+    if extract_verdict(content) != Verdict::Fail {
+        return None;
+    }
+    content.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if !label.trim().eq_ignore_ascii_case("disposition") {
+            return None;
+        }
+        match value.trim().to_ascii_lowercase().as_str() {
+            "evidence-needed" => Some(EvidenceDisposition::EvidenceNeeded),
+            "code-change" => Some(EvidenceDisposition::CodeChange),
+            _ => None,
+        }
+    })
+}
+
 /// Reviewer's self-reported judgment about whether the writer made
 /// progress on prior-round concerns. Emitted as a `Progress:` line in
 /// review.md. Round 1 has no prior review to compare against, so
@@ -331,6 +358,26 @@ mod tests {
         assert_eq!(
             extract_verdict("No verdict here.\nJust some text."),
             Verdict::Uncertain
+        );
+    }
+
+    #[test]
+    fn evidence_targeted_disposition_is_fail_only_and_typed() {
+        assert_eq!(
+            extract_evidence_disposition("Verdict: fail\nDisposition: evidence-needed\n"),
+            Some(EvidenceDisposition::EvidenceNeeded)
+        );
+        assert_eq!(
+            extract_evidence_disposition("Verdict: fail\nDisposition: code-change\n"),
+            Some(EvidenceDisposition::CodeChange)
+        );
+        assert_eq!(
+            extract_evidence_disposition("Verdict: pass\nDisposition: code-change\n"),
+            None
+        );
+        assert_eq!(
+            extract_evidence_disposition("Verdict: fail\nDisposition: later\n"),
+            None
         );
     }
 
