@@ -19,8 +19,9 @@ setup_project() {
   EXTERNAL_BIN="${OPERATOR_HOME}/.local/bin"
   PACKAGE_ROOT="${OPERATOR_HOME}/.local/lib/node_modules/@openai/codex"
   CODEX_HOME_FIXTURE="${TEST_DIR}/codex-home"
-  LAUNCH_LOG="${TEST_DIR}/launcher.log"
-  ACCESS_LOG="${TEST_DIR}/access.log"
+  TASK_ARTIFACT_DIR="${PROJECT}/.fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"
+  LAUNCH_LOG="${TASK_ARTIFACT_DIR}/launcher.log"
+  ACCESS_LOG="${TASK_ARTIFACT_DIR}/access.log"
   PROFILE_LOG="${TEST_DIR}/profile.sb"
 
   mkdir -p "$PROJECT" "$ISOLATED_HOME" "$EXTERNAL_BIN" \
@@ -41,6 +42,7 @@ setup_project() {
   git commit -m "init" > /dev/null 2>&1
   "$FLUENT_BIN" work-item create work-1 --title "Codex boundary" > /dev/null
   "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
+  mkdir -p "$TASK_ARTIFACT_DIR"
 }
 
 write_external_codex_package() {
@@ -59,10 +61,15 @@ LAUNCHER
   cat > "${PACKAGE_ROOT}/runtime/codex-runtime" <<'RUNTIME'
 #!/usr/bin/env bash
 set -euo pipefail
+case " $* " in
+  *" exec "*) invocation="exec" ;;
+  *" --version "*) invocation="version" ;;
+  *) invocation="other" ;;
+esac
 if cat "${CODEX_BOUNDARY_OPERATOR_HOME}/secret.txt" > /dev/null 2>&1; then
-  printf 'operator-home-readable\n' >> "$CODEX_BOUNDARY_ACCESS_LOG"
+  printf '%s\toperator-home-readable\n' "$invocation" >> "$CODEX_BOUNDARY_ACCESS_LOG"
 else
-  printf 'operator-home-denied\n' >> "$CODEX_BOUNDARY_ACCESS_LOG"
+  printf '%s\toperator-home-denied\n' "$invocation" >> "$CODEX_BOUNDARY_ACCESS_LOG"
 fi
 printf 'task output\n' > task-output.txt
 git add task-output.txt
@@ -127,13 +134,19 @@ test_external_package_launcher_runs_with_isolated_home() {
   local resolved_launcher
   resolved_launcher="$(cd "$EXTERNAL_BIN" && pwd -P)/codex"
   [[ -s "$LAUNCH_LOG" ]] || result=1
-  if [[ -s "$LAUNCH_LOG" ]] &&
-    ! awk -v expected="$resolved_launcher" '$0 != expected { exit 1 }' "$LAUNCH_LOG"; then
-    printf '    FAIL: readiness and launch did not use %s\n' "$resolved_launcher"
-    result=1
+  if [[ -s "$LAUNCH_LOG" ]]; then
+    while IFS= read -r launched; do
+      if [[ "$launched" != "$resolved_launcher" ]]; then
+        printf '    FAIL: readiness and launch did not use %s\n' "$resolved_launcher"
+        result=1
+        break
+      fi
+    done < "$LAUNCH_LOG"
   fi
   if ((SANDBOX_SUPPORTED)); then
-    [[ "$(cat "$ACCESS_LOG" 2>/dev/null)" == "operator-home-denied" ]] || result=1
+    local exec_access
+    exec_access="$(grep $'^exec\t' "$ACCESS_LOG" 2>/dev/null || true)"
+    [[ "$exec_access" == $'exec\toperator-home-denied' ]] || result=1
   else
     local package_rule operator_rule
     package_rule="(allow file-read*  (subpath \"${PACKAGE_ROOT}\"))"
