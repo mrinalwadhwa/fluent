@@ -20546,7 +20546,7 @@ fn attempt_show_prints_attempt_json() {
 
 #[test]
 fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
-    use fluent::work_model::{TaskOutput, TaskStatus, WorkItem, WorkModelStore};
+    use fluent::work_model::{AttemptStatus, TaskOutput, TaskStatus, WorkItem, WorkModelStore};
 
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);
@@ -20566,6 +20566,7 @@ fn attempt_evidence_attach_preserves_exact_evidence_and_identity() {
         learner_canonicalization: None,
     });
     item.add_review_tasks("attempt-1", &["architecture"]).unwrap();
+    item.attempts[0].status = AttemptStatus::Reviewing;
     let reviewer = item.attempts[0].tasks.last_mut().unwrap();
     reviewer.status = TaskStatus::Complete;
     let review_path = format!("{}/review.md", reviewer.artifact_area.as_ref().unwrap().path);

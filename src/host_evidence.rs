@@ -60,83 +60,44 @@ pub fn attach(
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     let snapshot_path = snapshot_path(work_item_id, attempt_id, &digest)?;
 
-    // Publish immutable bytes before the model reference. Content addressing makes
-    // this safe to retry; an unused snapshot is harmless and cannot affect a
-    // candidate or Work Item transition.
-    publish_snapshot(project_root, &snapshot_path, &bytes)?;
-
     let recovery = store.mutate_work_item(work_item_id, |item| {
-        let attempt = item
+        let existing = item
             .attempts
-            .iter_mut()
+            .iter()
             .find(|a| a.id == attempt_id)
             .ok_or_else(|| WorkModelError::AttemptNotFound {
                 id: attempt_id.to_string(),
             })?;
-        let completed_writer = attempt
-            .tasks
-            .iter()
-            .rev()
-            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-            .and_then(|task| task.output.as_ref());
-        if completed_writer.map(|output| output.commit.as_str()) != Some(candidate_commit)
-            || attempt
-                .tasks
-                .iter()
-                .any(|t| t.status == TaskStatus::Executing)
-            || !candidate_workspace_is_clean_at(
-                project_root,
-                completed_writer.unwrap(),
-                candidate_commit,
-            )
-        {
-            return Err(WorkModelError::AttemptNotFound {
+        if let Some(existing) = existing.evidence_recoveries.iter().find(|existing| {
+            existing.candidate_commit == candidate_commit
+                && existing.attachment.digest == digest
+                && existing.attachment.snapshot_path == snapshot_path
+        }) {
+            return Ok(existing.clone());
+        }
+        let prior_reviews = validate_evidence_frontier(
+            project_root,
+            item,
+            attempt_id,
+            candidate_commit,
+            review_artifacts,
+        )?;
+        // Publish only after the lock-held frontier check. A rejected request
+        // therefore cannot leave a host-owned artifact behind.
+        publish_snapshot(project_root, &snapshot_path, &bytes).map_err(|_| {
+            WorkModelError::AttemptNotFound {
                 id: attempt_id.to_string(),
-            });
-        }
-        let failed_writer = attempt
-            .tasks
+            }
+        })?;
+        let attempt = item
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .expect("validated Attempt must remain present");
+        let roles = prior_reviews
             .iter()
-            .rev()
-            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Failed);
-        if let Some(failed_writer) = failed_writer {
-            if failed_writer.output.is_some()
-                || failed_writer
-                    .input_artifacts
-                    .iter()
-                    .any(|input| !review_artifacts.contains(&input.path))
-            {
-                return Err(WorkModelError::AttemptNotFound {
-                    id: attempt_id.to_string(),
-                });
-            }
-        }
-        let mut roles = Vec::new();
-        for path in review_artifacts {
-            let task = attempt
-                .tasks
-                .iter()
-                .find(|task| review_artifact_path(task).as_deref() == Some(path.as_str()))
-                .ok_or_else(|| WorkModelError::AttemptNotFound {
-                    id: attempt_id.to_string(),
-                })?;
-            if task.kind != TaskKind::Review
-                || task.status != TaskStatus::Complete
-                || !matches!(read_verdict(project_root, task), Some(Verdict::Fail))
-            {
-                return Err(WorkModelError::AttemptNotFound {
-                    id: attempt_id.to_string(),
-                });
-            }
-            if !roles.contains(&task.role) {
-                roles.push(task.role.clone());
-            }
-        }
-        if roles.is_empty() {
-            return Err(WorkModelError::AttemptNotFound {
-                id: attempt_id.to_string(),
-            });
-        }
+            .map(|task| task.role.clone())
+            .collect::<Vec<_>>();
         let recovery = attempt.attach_evidence_recovery(EvidenceRecovery {
             id: format!("host-evidence-{}", &digest[7..19]),
             candidate_commit: candidate_commit.to_string(),
@@ -151,10 +112,8 @@ pub fn attach(
                     prior_review_artifact: review_artifacts
                         .iter()
                         .find(|path| {
-                            attempt.tasks.iter().any(|task| {
-                                task.role == *role
-                                    && review_artifact_path(task).as_deref() == Some(path.as_str())
-                            })
+                            prior_reviews.iter().any(|task| task.role == *role
+                                && review_artifact_path(task).as_deref() == Some(path.as_str()))
                         })
                         .cloned()
                         .unwrap_or_default(),
@@ -165,17 +124,11 @@ pub fn attach(
             created_at: work_model::now_iso8601(),
         })?;
         for role in roles {
-            let prior = attempt
-                .tasks
+            let prior = prior_reviews
                 .iter()
-                .find(|task| {
-                    task.role == role
-                        && review_artifact_path(task).as_deref().is_some_and(|path| {
-                            review_artifacts.iter().any(|artifact| artifact == path)
-                        })
-                })
-                .unwrap()
-                .clone();
+                .find(|task| task.role == role)
+                .cloned()
+                .unwrap();
             let task_id = format!("{attempt_id}-evidence-{}-{role}", &digest[7..19]);
             if !attempt.tasks.iter().any(|task| task.id == task_id) {
                 let mut inputs = prior.input_artifacts.clone();
@@ -230,6 +183,65 @@ pub fn attach(
     })?;
     let _ = document; // validation intentionally happens before publication.
     Ok(recovery)
+}
+
+fn validate_evidence_frontier(
+    project_root: &Path,
+    item: &work_model::WorkItem,
+    attempt_id: &str,
+    candidate_commit: &str,
+    review_artifacts: &[String],
+) -> Result<Vec<Task>, WorkModelError> {
+    let rejected = || WorkModelError::AttemptNotFound { id: attempt_id.to_string() };
+    let attempt = item.attempts.iter().find(|attempt| attempt.id == attempt_id).ok_or_else(rejected)?;
+    if review_artifacts.is_empty()
+        || review_artifacts.len() != review_artifacts.iter().collect::<std::collections::HashSet<_>>().len()
+        || attempt.tasks.iter().any(|task| task.status == TaskStatus::Executing)
+        || item.merge_candidates.iter().any(|candidate| candidate.attempt_id == attempt_id
+            && candidate.candidate_commit == candidate_commit)
+    {
+        return Err(rejected());
+    }
+    let completed_writer = attempt.tasks.iter().enumerate().rev().find(|(_, task)| {
+        task.kind == TaskKind::Write && task.status == TaskStatus::Complete
+    }).and_then(|(index, task)| task.output.as_ref().map(|output| (index, output))).ok_or_else(rejected)?;
+    if completed_writer.1.commit != candidate_commit
+        || !candidate_workspace_is_clean_at(project_root, completed_writer.1, candidate_commit)
+    {
+        return Err(rejected());
+    }
+    let last_writer = attempt.tasks.iter().enumerate().rev().find(|(_, task)| task.kind == TaskKind::Write);
+    let is_legacy = last_writer.is_some_and(|(index, task)| {
+        task.status == TaskStatus::Failed
+            && task.output.is_none()
+            && index > completed_writer.0
+            && index + 1 == attempt.tasks.len()
+            && task.input_artifacts.iter().map(|input| &input.path).collect::<std::collections::HashSet<_>>()
+                == review_artifacts.iter().collect()
+    });
+    if !(attempt.status == work_model::AttemptStatus::Reviewing || is_legacy) {
+        return Err(rejected());
+    }
+    let mut selected = Vec::new();
+    for path in review_artifacts {
+        let (index, task) = attempt.tasks.iter().enumerate().find(|(_, task)| {
+            review_artifact_path(task).as_deref() == Some(path.as_str())
+        }).ok_or_else(rejected)?;
+        if task.kind != TaskKind::Review
+            || task.status != TaskStatus::Complete
+            || task.review_context.as_ref().map(|context| context.candidate_commit.as_str()) != Some(candidate_commit)
+            || !matches!(read_verdict(project_root, task), Some(Verdict::Fail))
+            || index <= completed_writer.0
+            || attempt.tasks.iter().skip(index + 1).any(|later| {
+                later.kind == TaskKind::Review && later.role == task.role && later.status == TaskStatus::Complete
+            })
+            || selected.iter().any(|prior: &Task| prior.role == task.role)
+        {
+            return Err(rejected());
+        }
+        selected.push(task.clone());
+    }
+    Ok(selected)
 }
 
 fn candidate_workspace_is_clean_at(
