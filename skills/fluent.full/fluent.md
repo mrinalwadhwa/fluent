@@ -96,11 +96,38 @@ The round outcome determines what happens next:
 - Learner fails after its coder ran but host evidence remains pending — the
   candidate is `learner-blocked`; inspect the Work Item and recover the evidence
   with human intervention. Do not rerun the Learner or land the candidate.
-- Any fail — follow-up write next round, scoped to failed reviewers.
+- Any fail — follow-up write next round, scoped to failed reviewers, except
+  when a failed reviewer needs trusted host evidence for an unchanged candidate.
 - Any uncertain, or a round cap reached — Attempt records `needs-user`, pausing the loop.
 - A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
 
 The user provides input; `fluent attempt run` resumes the loop where it left off. When the pause is `provider-unavailable`, wait for provider capacity, then run `fluent attempt run <work-item-id> [attempt-id]` without new input. Fluent retries the same unfinished Task and keeps completed peer Tasks and transcripts.
+
+### Recover a host-evidence finding
+
+Use this only when the candidate does not need a source change and the failed
+review explicitly asks for proof that a trusted host can run. Create one JSON
+file on that host, for example:
+
+```json
+{"schema_version":1,"producer":"release-host","check":"fluent tester check","working_directory":"/repo","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"...captured output..."}
+```
+
+Inspect `fluent work-item show <work-item-id>` for the current Attempt,
+candidate SHA, and failed `review.md` artifact paths. Then attach the exact
+proof and each finding it addresses:
+
+```sh
+fluent attempt evidence attach <work-item-id> <attempt-id> \
+  --candidate <candidate-sha> --evidence-file host-evidence.json \
+  --review-artifact .fluent/work/artifacts/.../review.md
+```
+
+Fluent snapshots the exact document, binds it to that candidate, and reruns
+only the named reviewers. Do not edit the candidate or invent a commit. Inspect
+the Work Item again for the next action: `evidence-needed` means attach new
+host proof; `code-change` means run the ordinary Writer path. A passing targeted
+review still requires all exact-commit evidence and Learning before landing.
 
 ### Codex authentication pauses
 

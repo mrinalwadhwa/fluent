@@ -316,6 +316,28 @@ state `passed` and does not create a Merge Candidate. Any fail marks the
 Attempt failed with review state `failed` and does not create a follow-up
 write Task. Uncertain verdicts without failures mark the Attempt
 `needs-user` and write the same Work handoff artifact.
+
+### Host evidence recovery
+
+An operator can attach trusted host-run proof to an unchanged candidate with
+`fluent attempt evidence attach <work-item> <attempt> --candidate <sha>
+--evidence-file <path> --review-artifact <path>...`. The evidence file is a
+schema-version-1 JSON document containing `producer`, `check`,
+`working_directory`, `result` (`pass` or `fail`), RFC3339 `run_at`, and captured
+`output`. Fluent validates and snapshots its exact bytes under the Attempt's
+managed artifacts, binds its digest to the named candidate commit, and plans
+only the named failed reviewer roles. Attachment never changes the candidate or
+approved planning inputs, and it cannot make a candidate landable.
+
+Evidence-targeted reviewers receive the immutable snapshot and their prior
+failed review. A passing result replaces only that role's result for the same
+candidate; `Verdict: fail` must include `Disposition: evidence-needed` or
+`Disposition: code-change`. The former waits for another attachment without a
+Writer round. The latter closes evidence recovery and follows the normal
+Writer, Tester, and reviewer path. Once every targeted role passes and the
+unchanged candidate's remaining exact-commit evidence passes, the Attempt
+continues to Learning without rerunning the Writer or Tester.
+
 `fluent work-item list` and `fluent work-item show <id>` expose the same durable
 Work Item model for inspection. These commands use `.fluent/work/items/`
 through the Rust storage model and validate stored objects.

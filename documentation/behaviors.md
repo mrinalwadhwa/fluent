@@ -3,6 +3,27 @@
 Observable behaviors of the fluent system. Each statement describes what
 the system does, not how. EARS format.
 
+## Host evidence recovery
+
+### B1
+
+WHEN an operator attaches a valid schema-version-1 host evidence document to an
+eligible Attempt and exact candidate commit, THE SYSTEM SHALL retain immutable
+bytes and its digest, plan only the explicitly named failed reviewer roles, and
+leave the candidate and approved planning inputs unchanged.
+
+### B2
+
+IF a host evidence attachment names a stale Work Item, Attempt, candidate,
+review artifact, or a frontier owned by a live Task or landing operation, THEN
+THE SYSTEM SHALL reject it without changing Work or candidate state.
+
+### B3
+
+WHEN an evidence-targeted reviewer fails, THE SYSTEM SHALL require a
+`Disposition: evidence-needed` or `Disposition: code-change`: the first pauses
+for further host evidence and the second resumes the ordinary Writer path.
+
 ## Test harnesses
 
 | Harness | Runs | Usage |
