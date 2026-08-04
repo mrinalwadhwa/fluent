@@ -80,10 +80,12 @@ For a codebase, module, or area review (not building something new), capture eno
 Delegated execution runs as a loop until it produces a ready Merge Candidate,
 stops at a Learner failure, or pauses at `needs-user`. Each round:
 
-1. The writer produces a candidate commit.
-2. The Tester Task runs the project's tests.
-3. Domain reviewers evaluate in parallel.
-4. After the reviewers pass, the Learner runs in the Work Item's Learner mode:
+1. The Writer produces a candidate commit and updates required progress.
+2. Fluent reconciles required progress. If approved work remains incomplete, it
+   starts another Writer continuation without running the Tester or reviewers.
+3. Once required progress is complete, the Tester Task runs the project's tests.
+4. Domain reviewers evaluate in parallel.
+5. After the reviewers pass, the Learner runs in the Work Item's Learner mode:
    in the default `capture` mode it captures durable project expertise, while in
    `no-expertise` mode it audits the change without writing expertise. Either
    way it records possible follow-ups for materialization after land.
@@ -246,7 +248,10 @@ The writer produces tests alongside code. When committing a candidate:
 - Each EARS statement has either a `Test:` reference pointing at a real test or an `Untestable:` marker with a one-line reason.
 - Run the project's tests before committing (best practice, not enforced).
 
-The Tester Task runs after the write completes and produces `tester-results.json` for reviewers.
+The Tester Task runs only after a completed Writer has satisfied the Work Item's
+required-progress contract. Incomplete work continues on the Writer path and
+does not spend a Tester or review cycle. The Tester then produces
+`tester-results.json` for reviewers.
 
 After creating or repairing a project Tester, run `fluent tester check` before spending review work. It validates the Tester and runs it through the production Tester boundary. If this standalone check reports a harness error, repair the configuration, extractor, or sandbox problem and rerun `fluent tester check`; it creates no Attempt to resume. If a production Tester Task pauses an existing Attempt for a harness error, repair the problem and resume with `fluent attempt run <work-item-id> [<attempt-id>]`; the same Tester retries without rerunning an already completed Writer. For SwiftPM nested-sandbox failures, disable SwiftPM's inner sandbox and use writable project-local cache paths. Fluent leaves project test configuration and scripts unchanged.
 

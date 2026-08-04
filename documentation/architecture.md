@@ -144,9 +144,15 @@ state that proves Fluent accepted the canonical result: `HandoffPending`,
 `Succeeded`, or `Failed` with the typed `HandoffPublication` failure stage.
 Ordinary coder, transcript-pump, and evidence-persistence failures do not account
 for divergence. Existing TaskOutput and AttemptLearning JSON records without the
-optional fields keep their legacy shape. The Attempt loop plans Tester and
-reviewer Tasks against the Writer output that exists before Learning; after
-Learning, landing consumes the current `TaskOutput.commit`.
+optional fields keep their legacy shape. After each completed Writer, the
+Attempt loop reconciles the current `## Required completion` section with the
+Attempt's immutable progress contract before it creates any Tester or reviewer
+Task. An unchecked or evidence-less entry creates one Writer continuation. A
+malformed, unknown, duplicate, or rewritten entry pauses for user repair. An
+Attempt without a progress contract keeps the legacy transition. Only a
+reconciled candidate reaches Tester and reviewer planning. Those Tasks use the
+Writer output that exists before Learning; after Learning, landing consumes the
+current `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only
 worktree preflight checks the source checkout for staged, unstaged, and
 untracked changes outside `.fluent/`. If it finds any, it reports Git's
@@ -200,7 +206,7 @@ a background post-merge review is in flight. If the source HEAD moves
 during the review (e.g. another merge lands), the guard fails the
 review Tasks with a clear error and does not attempt restoration.
 
-When a review round includes a candidate workspace, Fluent creates a
+When a reconciled review round includes a candidate workspace, Fluent creates a
 `TaskKind::Tester` Task alongside the reviewer Tasks. The Tester is a
 deterministic subcommand (`fluent tester run`) that reads
 `.fluent/tester.yaml` from the candidate workspace, runs each declared

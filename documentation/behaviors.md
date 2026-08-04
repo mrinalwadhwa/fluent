@@ -4706,6 +4706,49 @@ unique across all commands and harnesses, prefixing with the binary,
 file, or section when a test name recurs.
 Test: src/work_task_executor.rs (extract_tester_results_bootstrap_requires_unique_ids)
 
+## Pre-review completion gate
+
+### B1
+
+WHEN a completed Writer leaves an approved required-progress entry unchecked or
+without evidence, THE SYSTEM SHALL plan one Writer continuation before planning
+a Tester or reviewer.
+Test: src/work_attempt_loop.rs (unchecked_required_progress_plans_writer_before_tester_or_review)
+
+### B2
+
+WHEN a completed Writer satisfies every approved required-progress entry, THE
+SYSTEM SHALL plan one Tester and one review Task for each configured reviewer.
+Test: src/work_attempt_loop.rs (checked_required_progress_plans_one_tester_and_review_round)
+
+### B3
+
+IF required progress is malformed or rewrites the approved manifest, THEN THE
+SYSTEM SHALL pause the Attempt with an actionable diagnosis before planning a
+Tester or reviewer.
+Test: src/work_attempt_loop.rs (malformed_required_progress_pauses_before_tester_or_review)
+Test: src/work_attempt_loop.rs (rewritten_required_progress_pauses_before_tester_or_review)
+
+### B4
+
+WHEN an Attempt has no required-progress contract, THE SYSTEM SHALL preserve the
+legacy transition from a completed Writer to Tester and review planning.
+Test: src/work_attempt_loop.rs (legacy_completed_writer_plans_reviews_without_progress_contract)
+
+### B5
+
+WHEN Fluent retries the completed-Writer planning boundary after its transition
+is durable, THE SYSTEM SHALL reuse the existing Writer continuation without
+creating a duplicate.
+Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_continuation)
+
+### B6
+
+WHEN Fluent retries the completed-Writer planning boundary after Tester and
+review Tasks are durable, THE SYSTEM SHALL reuse those Tasks without creating
+duplicates.
+Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_tester_or_review_tasks)
+
 ## Suite-health gate
 
 ### B1

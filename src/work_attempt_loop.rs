@@ -483,13 +483,17 @@ pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunRes
             && has_completed_write(attempt.tasks.as_slice())
             && !has_review_after_latest_write(attempt.tasks.as_slice())
         {
-            let review_roles = next_review_roles(attempt);
-            let mut item = item;
-            let task_ids = item.add_next_review_tasks(config.attempt_id, &review_roles)?;
-            config.store.write_work_item(&item)?;
-            outcomes.push(WorkAttemptRunOutcome::PlannedReviews {
-                task_ids: task_ids.clone(),
-            });
+            let outcome = plan_after_completed_writer(
+                config.project_root,
+                config.store,
+                item,
+                config.attempt_id,
+            )?;
+            let needs_user = matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. });
+            outcomes.push(outcome);
+            if needs_user {
+                return Ok(WorkAttemptRunResult { outcomes });
+            }
             continue;
         }
 
@@ -4002,6 +4006,171 @@ fn required_progress_finding(project_root: &Path, attempt: &Attempt) -> Option<A
             })
         }
     }
+}
+
+fn required_progress_artifact(attempt: &Attempt) -> ArtifactRef {
+    ArtifactRef {
+        producer_id: "required-progress".to_string(),
+        path: format!(
+            "{}/{}/{}/progress.md",
+            crate::work_model::WORK_PROGRESS_DIR,
+            attempt.work_item_id,
+            attempt.id
+        ),
+    }
+}
+
+fn required_progress_requires_user(reason: &str) -> bool {
+    ["malformed", "duplicate", "unknown", "rewritten"]
+        .iter()
+        .any(|marker| reason.contains(marker))
+}
+
+fn plan_after_completed_writer(
+    project_root: &Path,
+    store: &WorkModelStore,
+    mut item: WorkItem,
+    attempt_id: &str,
+) -> Result<WorkAttemptRunOutcome> {
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    let latest_write_index = attempt
+        .tasks
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} has no Writer Task", attempt_id))?;
+    let latest_write = &attempt.tasks[latest_write_index];
+    if latest_write.status == TaskStatus::Planned {
+        return Ok(WorkAttemptRunOutcome::PlannedWriteRound {
+            task_id: latest_write.id.clone(),
+        });
+    }
+    let existing_review_ids = attempt.tasks[latest_write_index + 1..]
+        .iter()
+        .filter(|task| is_review_phase_task(task))
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    if !existing_review_ids.is_empty() {
+        return Ok(WorkAttemptRunOutcome::PlannedReviews {
+            task_ids: existing_review_ids,
+        });
+    }
+    if let Some(outcome) =
+        gate_required_progress_before_reviews(project_root, store, &mut item, attempt_id)?
+    {
+        return Ok(outcome);
+    }
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    let review_roles = next_review_roles(attempt);
+    let task_ids = item.add_next_review_tasks(attempt_id, &review_roles)?;
+    store.write_work_item(&item)?;
+    Ok(WorkAttemptRunOutcome::PlannedReviews { task_ids })
+}
+
+/// Reconcile a completed Writer before any Tester or reviewer is planned.
+/// Ordinary incomplete progress creates one Writer continuation. Structural
+/// corruption pauses with a durable diagnosis instead of asking a Writer to
+/// guess how the immutable contract should be repaired. Legacy Attempts have no
+/// contract and pass through unchanged.
+fn gate_required_progress_before_reviews(
+    project_root: &Path,
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_id: &str,
+) -> Result<Option<WorkAttemptRunOutcome>> {
+    let attempt_index = item
+        .attempts
+        .iter()
+        .position(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    let attempt = &item.attempts[attempt_index];
+    if attempt.progress_contract.is_none() {
+        return Ok(None);
+    }
+    let artifact = required_progress_artifact(attempt);
+    let path = project_root.join(&artifact.path);
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "read required progress before review planning: {}",
+                    path.display()
+                )
+            });
+        }
+    };
+    let Err(reason) = attempt.reconcile_required_progress(&source) else {
+        return Ok(None);
+    };
+
+    if !required_progress_requires_user(&reason) {
+        item.attempts[attempt_index].status = AttemptStatus::Planned;
+        item.attempts[attempt_index].pause_kind = None;
+        let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
+        store.write_work_item(item)?;
+        return Ok(Some(WorkAttemptRunOutcome::PlannedWriteRound { task_id }));
+    }
+
+    item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+    item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
+    item.attempts[attempt_index].review_state = Some(AttemptReviewState::NotReviewed);
+    store.write_work_item(item)?;
+    let handoff_path = write_required_progress_handoff(
+        project_root,
+        &item.id,
+        attempt_id,
+        &reason,
+        &artifact.path,
+    )?;
+    store.mutate_work_item(&item.id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let handoff = ArtifactRef {
+            producer_id: "required-progress".to_string(),
+            path: handoff_path.clone(),
+        };
+        if !attempt.artifacts.contains(&handoff) {
+            attempt.artifacts.push(handoff);
+        }
+        Ok(())
+    })?;
+    Ok(Some(WorkAttemptRunOutcome::NeedsUser { handoff_path }))
+}
+
+fn write_required_progress_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    reason: &str,
+    progress_path: &str,
+) -> Result<String> {
+    let relative_path =
+        work_artifact_path(work_item_id, attempt_id, "required-progress-needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path,
+        format!(
+            "# Required progress needs user input\n\nFluent stopped before Tester and review planning because the required-progress contract cannot be repaired safely.\n\nReason: {reason}\n\nInspect `{progress_path}` and restore its entries to the approved Plan.\n"
+        ),
+    )?;
+    Ok(relative_path)
 }
 
 /// Settle a RoundCap or Uncertain review pause through a fresh, precedence-aware
@@ -7608,6 +7777,323 @@ mod tests {
         let progress_path = project_root.join(".fluent/work/progress/work-1/attempt-1/progress.md");
         fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
         fs::write(&progress_path, section).unwrap();
+    }
+
+    #[test]
+    fn unchecked_required_progress_plans_writer_before_tester_or_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Finish required work");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        item.attempts[0].progress_contract = Some(crate::work_model::ProgressContract {
+            version: crate::work_model::PROGRESS_CONTRACT_VERSION,
+            required: vec![crate::work_model::RequiredProgressEntry {
+                id: "step-1".to_string(),
+                requirement: "Do the thing".to_string(),
+            }],
+        });
+        store.create_work_item(&item).unwrap();
+        let progress_path = tmp
+            .path()
+            .join(".fluent/work/progress/work-1/attempt-1/progress.md");
+        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
+        fs::write(
+            progress_path,
+            "## Required completion\n\n- [ ] step-1 — Do the thing\n",
+        )
+        .unwrap();
+
+        let mut item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            gate_required_progress_before_reviews(tmp.path(), &store, &mut item, "attempt-1")
+                .unwrap()
+                .expect("unchecked progress must be handled before review planning");
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedWriteRound { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            2
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+    }
+
+    fn make_completed_writer_gate_fixture(
+        project_root: &Path,
+        progress: Option<&str>,
+        marked: bool,
+    ) -> WorkModelStore {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem::planned("work-1", "Finish required work");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: ".fluent/work/workspaces/work-1/attempt-1/candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        if marked {
+            item.attempts[0].progress_contract = Some(crate::work_model::ProgressContract {
+                version: crate::work_model::PROGRESS_CONTRACT_VERSION,
+                required: vec![crate::work_model::RequiredProgressEntry {
+                    id: "step-1".to_string(),
+                    requirement: "Do the thing".to_string(),
+                }],
+            });
+        }
+        store.create_work_item(&item).unwrap();
+        if let Some(progress) = progress {
+            let path = project_root.join(".fluent/work/progress/work-1/attempt-1/progress.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, progress).unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn checked_required_progress_plans_one_tester_and_review_round() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- [x] step-1 — Do the thing; Evidence: src/x.rs\n"),
+            true,
+        );
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedReviews { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Tester)
+                .count(),
+            1
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Review)
+                .count(),
+            review::REVIEWERS.len()
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_completed_writer_plans_reviews_without_progress_contract() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(tmp.path(), None, false);
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedReviews { .. }
+        ));
+    }
+
+    #[test]
+    fn malformed_required_progress_pauses_before_tester_or_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- step-1 — Do the thing\n"),
+            true,
+        );
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        let WorkAttemptRunOutcome::NeedsUser { handoff_path } = outcome else {
+            panic!("malformed progress must pause before reviews")
+        };
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        assert_eq!(stored.attempts[0].pause_kind, Some(PauseKind::Uncertain));
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+        let handoff = fs::read_to_string(tmp.path().join(handoff_path)).unwrap();
+        assert!(handoff.contains("malformed required-progress line"));
+        assert!(handoff.contains("before Tester and review planning"));
+    }
+
+    #[test]
+    fn rewritten_required_progress_pauses_before_tester_or_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- [x] step-1 — Different work; Evidence: src/x.rs\n"),
+            true,
+        );
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        let WorkAttemptRunOutcome::NeedsUser { handoff_path } = outcome else {
+            panic!("rewritten progress must pause before reviews")
+        };
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+        let handoff = fs::read_to_string(tmp.path().join(handoff_path)).unwrap();
+        assert!(handoff.contains("requirement was rewritten"));
+    }
+
+    #[test]
+    fn post_write_gate_retry_does_not_duplicate_continuation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- [ ] step-1 — Do the thing\n"),
+            true,
+        );
+
+        let first = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+        let second = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            2
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+    }
+
+    #[test]
+    fn post_write_gate_retry_does_not_duplicate_tester_or_review_tasks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_gate_fixture(
+            tmp.path(),
+            Some("## Required completion\n\n- [x] step-1 — Do the thing; Evidence: src/x.rs\n"),
+            true,
+        );
+
+        let first = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+        let second = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Tester)
+                .count(),
+            1
+        );
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Review)
+                .count(),
+            review::REVIEWERS.len()
+        );
     }
 
     #[test]
