@@ -33,6 +33,7 @@ pub mod provider_evidence;
 pub mod provider_readiness;
 pub mod review;
 pub mod review_diff_command;
+pub(crate) mod review_invalidation;
 pub mod review_only_worktree;
 pub mod transcript;
 // Crate-private: the byte pump, its typed `TranscriptPumpError`, and the pump

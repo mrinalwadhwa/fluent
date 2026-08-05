@@ -110,13 +110,20 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
    summaries or relevant failure excerpts in the model conversation.
 4. Once required progress, every matrix row, and deterministic gate are complete,
    domain reviewers evaluate the candidate in parallel using the matrix, gate
-   artifact, and Writer's focused verification as advisory evidence.
+   artifact, and Writer's focused verification as advisory evidence. After a
+   reviewed correction, Fluent reruns failed reviewers plus reviewers whose
+   project-owned path domains changed since the immediately preceding reviewed
+   Writer commit. Unknown or unverifiable deltas rerun every reviewer, and every
+   required review must name the exact new candidate commit before advancement.
 5. After the reviewers pass, one final Tester Task runs the project's complete
    declared test commands against the exact reviewed commit.
 6. After the final Tester passes, the Learner runs in the Work Item's Learner mode:
    in the default `capture` mode it captures durable project expertise, while in
    `no-expertise` mode it audits the change without writing expertise. Either
-   way it records possible follow-ups for materialization after land.
+   way it records possible follow-ups for materialization after land. Capture
+   changes are restricted to Fluent's expertise subtree and cross the final
+   deterministic candidate gate before the handoff is published; they do not
+   invalidate the pre-Learner domain reviews.
 
 The round outcome determines what happens next:
 
@@ -126,8 +133,10 @@ The round outcome determines what happens next:
 - Learner fails after its coder ran but host evidence remains pending — the
   candidate is `learner-blocked`; inspect the Work Item and recover the evidence
   with human intervention. Do not rerun the Learner or land the candidate.
-- Any fail — follow-up write next round, scoped to failed reviewers, except
-  when a failed reviewer needs trusted host evidence for an unchanged candidate.
+- Any fail — follow-up write next round, then rerun the failed reviewers and any
+  additional review domains the correction changed. Passing untouched domains
+  remain valid. A reviewer that needs trusted host evidence for an unchanged
+  candidate follows the separate host-evidence recovery path.
 - Any uncertain verdict — Attempt records `needs-user`, pausing the loop.
 - A Writer-round cap reached — inspect the candidate and failed reviews. If the
   frontier is legitimate, approve one to three more rounds with `fluent attempt

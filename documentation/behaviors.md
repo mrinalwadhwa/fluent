@@ -5242,6 +5242,66 @@ THE SYSTEM SHALL retain the gate evidence, roll back to the reviewed Writer
 commit, and keep the Merge Candidate non-ready.
 Test: src/work_attempt_loop.rs (learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit)
 
+## Correction-aware review invalidation
+
+### B1
+
+WHEN a reviewed corrective Writer changes the candidate commit, THE SYSTEM SHALL
+compare the immediately preceding reviewed Writer commit with the new candidate
+and include additions, changes, deletions, and both sides of copies or renames in
+the changed-path set.
+Test: src/review_invalidation.rs (changed_paths_include_both_sides_of_a_rename)
+Test: src/review_invalidation.rs (changed_paths_include_deletions)
+
+### B2
+
+WHEN every changed path belongs to a known project domain, THE SYSTEM SHALL map
+the delta to its documentation, behavior, architecture, skill, and test review
+roles and preserve passing roles whose domains remain untouched.
+Test: src/review_invalidation.rs (known_paths_invalidate_only_their_review_domains)
+Test: src/review_invalidation.rs (rename_paths_are_classified_together)
+
+### B3
+
+WHEN Fluent plans review after a corrective Writer, THE SYSTEM SHALL schedule the
+ordered union of reviewers that failed the preceding round and reviewers whose
+domains the correction changed.
+Test: src/work_attempt_loop.rs (corrective_review_roles_include_changed_domains_in_default_order)
+Test: src/work_attempt_loop.rs (corrective_writer_invalidates_domains_changed_since_the_reviewed_commit)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (attempt loop plans follow-up with mixed missing review)
+
+### B4
+
+IF a changed path is unknown or unsafe, the prior review context is missing or
+mismatched, or Git cannot establish the correction delta, THEN THE SYSTEM SHALL
+invalidate every built-in reviewer.
+Test: src/review_invalidation.rs (unknown_or_unsafe_paths_invalidate_every_reviewer)
+Test: src/review_invalidation.rs (changed_paths_fail_closed_when_git_cannot_compare_commits)
+Test: src/work_attempt_loop.rs (corrective_writer_invalidates_domains_changed_since_the_reviewed_commit)
+
+### B5
+
+BEFORE Fluent interprets the current review round or advances to final Tester or
+Learner, THE SYSTEM SHALL require every affected reviewer to have a completed
+Review Task whose context names the exact latest Writer commit and SHALL reopen
+only missing roles or roles whose latest completed review is mismatched, except
+that an unknown role invalidates all built-in reviewers.
+Test: src/work_attempt_loop.rs (exact_candidate_review_check_reopens_only_missing_invalidated_roles)
+Test: src/work_attempt_loop.rs (exact_candidate_review_check_reopens_a_mismatched_current_role)
+Test: src/work_attempt_loop.rs (exact_candidate_review_check_accepts_the_latest_replacement_for_a_role)
+Test: src/work_attempt_loop.rs (pre_land_no_expertise_rejects_mismatched_final_review_context)
+
+### B6
+
+WHEN a capture Learner changes only `.fluent/expertise/`, THE SYSTEM SHALL keep
+pre-Learner review passes valid while enforcing the Learner mutation boundary and
+running the deterministic candidate gate against the canonicalized candidate
+before Learning succeeds.
+Test: src/review_invalidation.rs (learner_owned_expertise_does_not_stale_pre_learner_reviews)
+Test: src/work_attempt_loop.rs (learner_path_expertise_subtree_is_in_bounds)
+Test: src/work_attempt_loop.rs (learner_path_outside_expertise_is_out_of_bounds)
+Test: src/work_attempt_loop.rs (learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit)
+
 ## Reviewed corrective Writer context
 
 ### B1
@@ -6572,6 +6632,9 @@ THE SYSTEM SHALL require candidate `HEAD`, the Merge Candidate `candidate_commit
 the latest Write-output commit, and every Tester and built-in reviewer context in
 the final passing round to equal the reviewed Writer SHA with no staged,
 unstaged, or untracked candidate change, reading only the final passing round.
+Review admission SHALL first reopen any mismatched current reviewer context; this
+preflight remains the fresh race-closing check before the Learner coder launches
+or Learning advances.
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_requires_clean_common_sha_before_launch)
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_rejects_mismatched_final_review_context)
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_preserves_every_candidate_pointer)

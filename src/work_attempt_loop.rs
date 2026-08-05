@@ -1411,6 +1411,187 @@ fn next_review_roles(attempt: &Attempt) -> Vec<&'static str> {
     }
 }
 
+fn merge_review_roles(requested: &[&str], invalidated: &[&str]) -> Vec<&'static str> {
+    let selected = requested
+        .iter()
+        .chain(invalidated.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    let merged = review::REVIEWERS
+        .iter()
+        .copied()
+        .filter(|role| selected.contains(role))
+        .collect::<Vec<_>>();
+    if merged.is_empty() {
+        review::REVIEWERS.to_vec()
+    } else {
+        merged
+    }
+}
+
+fn review_roles_invalidated_after_latest_write(
+    project_root: &Path,
+    attempt: &Attempt,
+) -> Vec<&'static str> {
+    let Some(write_index) = attempt
+        .tasks
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return review::REVIEWERS.to_vec();
+    };
+    let Some(previous_write_index) = attempt.tasks[..write_index]
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return Vec::new();
+    };
+    let Some(output) = attempt.tasks[write_index].output.as_ref() else {
+        return review::REVIEWERS.to_vec();
+    };
+    let Some(reviewed_commit) = attempt.tasks[previous_write_index]
+        .output
+        .as_ref()
+        .map(|previous| previous.commit.as_str())
+    else {
+        return review::REVIEWERS.to_vec();
+    };
+    if reviewed_commit == output.commit {
+        return Vec::new();
+    }
+    let prior_review_tasks = &attempt.tasks[previous_write_index + 1..write_index];
+    if !prior_review_tasks
+        .iter()
+        .any(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
+        || !mismatched_current_review_roles(reviewed_commit, prior_review_tasks).is_empty()
+    {
+        return review::REVIEWERS.to_vec();
+    }
+    let workspace = match resolve_managed_sibling_workspace_path(
+        project_root,
+        &output.workspace_path,
+        "review invalidation workspace",
+    ) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            eprintln!(
+                "warning: cannot resolve the correction workspace for review invalidation; rerunning every reviewer: {error:#}"
+            );
+            return review::REVIEWERS.to_vec();
+        }
+    };
+    match crate::review_invalidation::changed_paths_between(
+        &workspace,
+        reviewed_commit,
+        &output.commit,
+    ) {
+        Ok(paths) => crate::review_invalidation::affected_review_roles(&paths),
+        Err(error) => {
+            eprintln!(
+                "warning: cannot classify the correction delta for review invalidation; rerunning every reviewer: {error:#}"
+            );
+            review::REVIEWERS.to_vec()
+        }
+    }
+}
+
+fn missing_invalidated_review_roles(
+    invalidated: &[&str],
+    candidate_commit: &str,
+    review_tasks: &[Task],
+) -> Vec<&'static str> {
+    review::REVIEWERS
+        .iter()
+        .copied()
+        .filter(|role| invalidated.contains(role))
+        .filter(|role| {
+            !review_tasks.iter().any(|task| {
+                task.kind == TaskKind::Review
+                    && task.status == TaskStatus::Complete
+                    && task.role == *role
+                    && task
+                        .review_context
+                        .as_ref()
+                        .is_some_and(|context| context.candidate_commit == candidate_commit)
+            })
+        })
+        .collect()
+}
+
+fn mismatched_current_review_roles(
+    candidate_commit: &str,
+    review_tasks: &[Task],
+) -> Vec<&'static str> {
+    let mut mismatched = HashSet::new();
+    let mut seen = HashSet::new();
+    for task in review_tasks
+        .iter()
+        .rev()
+        .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Complete)
+    {
+        let Some(role) = review::REVIEWERS
+            .iter()
+            .copied()
+            .find(|role| *role == task.role)
+        else {
+            return review::REVIEWERS.to_vec();
+        };
+        if !seen.insert(role) {
+            continue;
+        }
+        if task
+            .review_context
+            .as_ref()
+            .is_none_or(|context| context.candidate_commit != candidate_commit)
+        {
+            mismatched.insert(role);
+        }
+    }
+    review::REVIEWERS
+        .iter()
+        .copied()
+        .filter(|role| mismatched.contains(role))
+        .collect()
+}
+
+fn stale_review_roles_after_latest_write(
+    project_root: &Path,
+    attempt: &Attempt,
+) -> Vec<&'static str> {
+    let Some(write_index) = attempt
+        .tasks
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return review::REVIEWERS.to_vec();
+    };
+    let Some(candidate_commit) = attempt.tasks[write_index]
+        .output
+        .as_ref()
+        .map(|output| output.commit.as_str())
+    else {
+        return review::REVIEWERS.to_vec();
+    };
+    let invalidated = review_roles_invalidated_after_latest_write(project_root, attempt);
+    let missing = missing_invalidated_review_roles(
+        &invalidated,
+        candidate_commit,
+        &attempt.tasks[write_index + 1..],
+    );
+    let mismatched =
+        mismatched_current_review_roles(candidate_commit, &attempt.tasks[write_index + 1..]);
+    let stale = missing
+        .iter()
+        .chain(mismatched.iter())
+        .copied()
+        .collect::<HashSet<_>>();
+    review::REVIEWERS
+        .iter()
+        .copied()
+        .filter(|role| stale.contains(role))
+        .collect()
+}
+
 /// Everything the Learner coder needs, assembled by the loop from the Attempt's
 /// completed change and every review round's artifacts.
 pub(crate) struct LearnerCoderRequest<'a> {
@@ -4600,7 +4781,9 @@ fn plan_after_completed_writer(
         .iter()
         .find(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
-    let review_roles = next_review_roles(attempt);
+    let requested_roles = next_review_roles(attempt);
+    let invalidated_roles = review_roles_invalidated_after_latest_write(project_root, attempt);
+    let review_roles = merge_review_roles(&requested_roles, &invalidated_roles);
     let task_ids = item.add_next_review_tasks(attempt_id, &review_roles)?;
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::PlannedReviews { task_ids })
@@ -5476,6 +5659,15 @@ fn interpret_reviews(
                 .find(|entry| entry.id == recovery.id)
                 .unwrap()
                 .state = EvidenceRecoveryState::Complete;
+        }
+    }
+    if !item.attempts[attempt_index].kind.is_review_only_like() {
+        let stale_roles =
+            stale_review_roles_after_latest_write(project_root, &item.attempts[attempt_index]);
+        if !stale_roles.is_empty() {
+            let task_ids = item.add_next_review_tasks(attempt_id, &stale_roles)?;
+            store.write_work_item(&item)?;
+            return Ok(WorkAttemptRunOutcome::PlannedReviews { task_ids });
         }
     }
     let review_artifacts = latest_review_artifacts(project_root, &item.attempts[attempt_index])?;
@@ -6758,6 +6950,213 @@ mod tests {
         ]);
 
         assert_eq!(next_review_roles(&attempt), vec!["documentation", "tests"]);
+    }
+
+    #[test]
+    fn corrective_review_roles_include_changed_domains_in_default_order() {
+        assert_eq!(
+            merge_review_roles(&["tests"], &["documentation", "architecture", "tests"],),
+            vec!["documentation", "architecture", "tests"]
+        );
+        assert_eq!(
+            merge_review_roles(&["documentation"], crate::review::REVIEWERS),
+            crate::review::REVIEWERS
+        );
+    }
+
+    #[test]
+    fn corrective_writer_invalidates_domains_changed_since_the_reviewed_commit() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let workspace = root.path().join("work-6-work-1-attempt-1");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(workspace.join("documentation")).unwrap();
+        crate::git::run(
+            &workspace,
+            &["init", "-q"],
+            "initialize invalidation fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            &workspace,
+            &["config", "user.name", "Fluent Test"],
+            "configure invalidation fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            &workspace,
+            &["config", "user.email", "fluent@example.test"],
+            "configure invalidation fixture",
+        )
+        .unwrap();
+        fs::write(workspace.join("documentation/guide.md"), "first\n").unwrap();
+        crate::git::run(&workspace, &["add", "."], "stage invalidation base").unwrap();
+        crate::git::run(
+            &workspace,
+            &["commit", "-q", "-m", "Add guide"],
+            "commit invalidation base",
+        )
+        .unwrap();
+        let reviewed =
+            crate::git::run_stdout(&workspace, &["rev-parse", "HEAD"], "read reviewed commit")
+                .unwrap();
+        fs::write(workspace.join("documentation/guide.md"), "second\n").unwrap();
+        crate::git::run(&workspace, &["add", "."], "stage invalidation correction").unwrap();
+        crate::git::run(
+            &workspace,
+            &["commit", "-q", "-m", "Update guide"],
+            "commit invalidation correction",
+        )
+        .unwrap();
+        let candidate =
+            crate::git::run_stdout(&workspace, &["rev-parse", "HEAD"], "read corrected commit")
+                .unwrap();
+
+        let mut first_write = write_task("attempt-1-write-1", Vec::new());
+        first_write.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: Some(reviewed.clone()),
+            commit: reviewed.clone(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let mut documentation_review =
+            review_task("attempt-1-review-documentation", "documentation");
+        documentation_review.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            candidate_commit: reviewed.clone(),
+            base_commit: None,
+        });
+        let mut tests_review = review_task("attempt-1-review-tests", "tests");
+        tests_review.review_context = documentation_review.review_context.clone();
+        let mut correction = write_task(
+            "attempt-1-write-2",
+            vec![ArtifactRef {
+                producer_id: "attempt-1-review-tests".to_string(),
+                path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md"
+                    .to_string(),
+            }],
+        );
+        correction.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: Some(reviewed),
+            commit: candidate,
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let attempt = attempt_with_tasks(vec![
+            first_write,
+            documentation_review,
+            tests_review,
+            correction,
+        ]);
+
+        assert_eq!(
+            review_roles_invalidated_after_latest_write(&project, &attempt),
+            vec!["documentation"]
+        );
+        assert_eq!(
+            merge_review_roles(
+                &next_review_roles(&attempt),
+                &review_roles_invalidated_after_latest_write(&project, &attempt),
+            ),
+            vec!["documentation", "tests"]
+        );
+
+        let mut unverifiable = attempt;
+        unverifiable.tasks[0].output.as_mut().unwrap().commit = "missing-reviewed-sha".to_string();
+        for task in &mut unverifiable.tasks[1..3] {
+            task.review_context.as_mut().unwrap().candidate_commit =
+                "missing-reviewed-sha".to_string();
+        }
+        assert_eq!(
+            review_roles_invalidated_after_latest_write(&project, &unverifiable),
+            crate::review::REVIEWERS
+        );
+    }
+
+    #[test]
+    fn exact_candidate_review_check_reopens_only_missing_invalidated_roles() {
+        let mut tests = review_task("attempt-1-review-2-tests", "tests");
+        tests.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            candidate_commit: "candidate-2".to_string(),
+            base_commit: None,
+        });
+        let mut stale_documentation =
+            review_task("attempt-1-review-documentation", "documentation");
+        stale_documentation.review_context = Some(crate::work_model::ReviewContext {
+            candidate_commit: "candidate-1".to_string(),
+            ..tests.review_context.clone().unwrap()
+        });
+
+        assert_eq!(
+            missing_invalidated_review_roles(
+                &["documentation", "tests"],
+                "candidate-2",
+                &[stale_documentation.clone(), tests.clone()],
+            ),
+            vec!["documentation"]
+        );
+
+        let mut current_documentation = stale_documentation;
+        current_documentation
+            .review_context
+            .as_mut()
+            .unwrap()
+            .candidate_commit = "candidate-2".to_string();
+        assert!(
+            missing_invalidated_review_roles(
+                &["documentation", "tests"],
+                "candidate-2",
+                &[current_documentation, tests],
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_candidate_review_check_reopens_a_mismatched_current_role() {
+        let mut documentation = review_task("attempt-1-review-2-documentation", "documentation");
+        documentation.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            candidate_commit: "candidate-1".to_string(),
+            base_commit: None,
+        });
+
+        assert_eq!(
+            mismatched_current_review_roles("candidate-2", &[documentation]),
+            vec!["documentation"]
+        );
+    }
+
+    #[test]
+    fn exact_candidate_review_check_accepts_the_latest_replacement_for_a_role() {
+        let mut stale = review_task("attempt-1-review-2-documentation", "documentation");
+        stale.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".to_string(),
+            candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            candidate_commit: "candidate-1".to_string(),
+            base_commit: None,
+        });
+        let mut replacement = review_task("attempt-1-review-3-documentation", "documentation");
+        replacement.review_context = Some(crate::work_model::ReviewContext {
+            candidate_commit: "candidate-2".to_string(),
+            ..stale.review_context.clone().unwrap()
+        });
+
+        assert!(mismatched_current_review_roles("candidate-2", &[stale, replacement]).is_empty());
     }
 
     #[test]
@@ -10965,9 +11364,8 @@ mod tests {
 
     #[test]
     fn pre_land_no_expertise_rejects_mismatched_final_review_context() {
-        // B4: if any final-round Tester or built-in reviewer context names a SHA
-        // other than the reviewed Writer SHA, the preflight fails closed before the
-        // coder launches.
+        // B4: if a final-round reviewer context names a SHA other than the reviewed
+        // Writer SHA, exact-candidate validation reopens that role before the Learner.
         let tmp = tempfile::TempDir::new().unwrap();
         let (store, project_root, _workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
         mark_no_expertise(&store);
@@ -10987,7 +11385,7 @@ mod tests {
         };
         let outcome = run_pre_land_learner_outcome(&project_root, &store, &run_coder);
         assert!(
-            matches!(outcome, WorkAttemptRunOutcome::LearnerNotReady { .. }),
+            matches!(outcome, WorkAttemptRunOutcome::PlannedReviews { .. }),
             "a mismatched final review context blocks readiness; got {outcome:?}"
         );
         assert!(
@@ -10995,8 +11393,16 @@ mod tests {
             "no coder launches when a final review context disagrees"
         );
         let stored = store.read_work_item("work-1").unwrap();
-        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
-        assert!(stored.attempts[0].learning.as_ref().unwrap().is_failed());
+        assert!(stored.merge_candidates.is_empty());
+        assert!(stored.attempts[0].learning.is_none());
+        assert!(stored.attempts[0].tasks.iter().any(|task| {
+            task.kind == TaskKind::Review
+                && task.role == "tests"
+                && task
+                    .review_context
+                    .as_ref()
+                    .is_some_and(|context| context.candidate_commit == base)
+        }));
     }
 
     #[test]
@@ -15530,6 +15936,11 @@ git update-ref HEAD "$replacement" "$host"
             .and_then(|task| task.output.as_mut())
             .expect("completed Write output")
             .commit = baseline.clone();
+        for task in &mut item.attempts[0].tasks {
+            if let Some(context) = task.review_context.as_mut() {
+                context.candidate_commit = baseline.clone();
+            }
+        }
         store.write_work_item(&item).unwrap();
 
         let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {

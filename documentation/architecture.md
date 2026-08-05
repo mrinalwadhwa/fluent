@@ -169,6 +169,27 @@ outcome, candidate commit, progress and matrix completion counts, provider sessi
 identity, and whether the run was initial, pre-review continuation, or post-review
 corrective work.
 
+After a reviewed corrective Writer completes, the host compares its candidate
+with the immediately preceding completed Writer commit. The Git name-status
+delta includes both sides of copies and renames, so deleted or relocated material
+cannot escape classification. Project-owned path domains map the delta to the
+documentation, behavior, architecture, skill, and test reviewers. The next
+parallel review round is the ordered union of failed reviewers and reviewers
+whose domains changed; passing reviewers outside that union remain valid. An
+unknown or unsafe path, missing prior review context, unreadable commit, invalid
+workspace, or unclassifiable delta invalidates every reviewer.
+
+Review completion is candidate-specific. Before Fluent interprets a review round
+or advances to final Tester or Learner, it reopens each affected review that is
+missing and every role whose latest completed review does not name the latest
+Writer commit. A completed replacement supersedes that role's stale historical
+task. This check also repairs partially persisted or legacy rounds instead of
+allowing stale evidence to authorize a later candidate. Capture Learner changes
+under `.fluent/expertise/` are excluded from pre-Learner domain invalidation: the
+Learner mutation boundary restricts those changes, and the deterministic
+candidate gate validates the resulting expertise commit before handoff
+publication.
+
 Writers with a persisted base commit also cross a deterministic admission gate
 before matrix reconciliation or review. The host verifies the exact candidate
 and clean workspace, runs `git diff --check`, rejects merge commits, invalid

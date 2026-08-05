@@ -99,12 +99,17 @@ case "\$PWD" in
     count="\$(cat "${write_count_file}")"
     count="\$((count + 1))"
     printf '%s\n' "\$count" > "${write_count_file}"
-    if [ "${write_mode}" = "bad-whitespace" ]; then
-      printf 'loop output %s    \n' "\$count" > "loop-output-\$count.txt"
-    else
-      printf 'loop output %s\n' "\$count" > "loop-output-\$count.txt"
+    output_path="loop-output-\$count.txt"
+    if [ "${verdict}" = "mixed-missing" ]; then
+      mkdir -p documentation
+      output_path="documentation/loop-output-\$count.txt"
     fi
-    git add "loop-output-\$count.txt"
+    if [ "${write_mode}" = "bad-whitespace" ]; then
+      printf 'loop output %s    \n' "\$count" > "\$output_path"
+    else
+      printf 'loop output %s\n' "\$count" > "\$output_path"
+    fi
+    git add "\$output_path"
     git commit -m "Add loop output \$count" > /dev/null 2>&1
     matrix_path="\$(printf '%s' "\$*" | grep -oE '/[^[:space:]]*writer-completion\.json' | head -1 || true)"
     if [ -n "\$matrix_path" ] && [ -f "\$matrix_path" ] && [ "${matrix_mode}" = "complete" ]; then
