@@ -46,6 +46,7 @@ pub mod work_model;
 pub mod work_status;
 pub mod work_task_executor;
 pub mod worktree;
+pub(crate) mod writer_cache;
 
 pub mod observations;
 pub mod queue;

@@ -265,6 +265,27 @@ fn copy_dir_with_fallback(src: &Path, dst: &Path) -> Result<()> {
     )
 }
 
+/// Copy a writable private cache without ever hard-linking it to the source.
+/// Clone/reflink copies are safe because writes use copy-on-write; the final
+/// fallback is an ordinary recursive copy.
+pub(crate) fn copy_private_cache_dir(src: &Path, dst: &Path) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        if try_cp(src, dst, &["-cR"]) {
+            return Ok(());
+        }
+    } else if try_cp(src, dst, &["-R", "--reflink=auto"]) {
+        return Ok(());
+    }
+    if try_cp(src, dst, &["-R"]) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "All private copy strategies failed for {} -> {}",
+        src.display(),
+        dst.display()
+    )
+}
+
 fn try_cp(src: &Path, dst: &Path, flags: &[&str]) -> bool {
     if dst.exists() {
         let _ = std::fs::remove_dir_all(dst);

@@ -208,6 +208,22 @@ starts a fresh persistent session. Codex Writer Tasks copy only their generated
 into the next launch's temporary worker home. Authentication, configuration,
 hooks, and cache are not included. Older Attempts without that snapshot fall
 back to a fresh persistent session rather than attempting an unusable resume.
+
+Every autonomous Writer also receives one Fluent-owned Cargo dependency cache
+under `.fluent/work/cache/writers/<work-item-id>/<attempt-id>/`. Its private
+`cargo-home/` is shared by initial, continuation, and corrective Writer Tasks
+in that exact Attempt, but never by another Attempt. Cargo build output remains
+in the candidate workspace so later Writer rounds, the final Tester, and the
+candidate-keyed reviewer cache retain the existing warm-output path.
+Before the first launch, the host admits only `registry/` and `git/` from its
+canonical Cargo home, using copy-on-write or a deep copy so private writes can
+never mutate the source. Fluent does not copy Cargo credentials, configuration,
+or binaries, and the Writer sandbox grants the private cache without granting
+the operator's Cargo home. The cache is rebuildable execution state rather than
+a durable artifact. Existing managed-path components and copied dependency
+symlinks are checked for escapes, and cache reclamation preserves only
+Work Item/Attempt pairs still referenced by nonterminal Work.
+
 Continuation prompts contain only
 unresolved progress plus a path to a generated `execution-context.json`. The
 versioned context records candidate/base commits, changed files, unresolved

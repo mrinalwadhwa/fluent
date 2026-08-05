@@ -7061,6 +7061,71 @@ Test: src/work_task_executor.rs (prepare_pre_review_reclaims_only_canonical_cach
 Test: src/work_task_executor.rs (failed_prepare_pre_review_removes_managed_cache)
 Test: src/work_task_executor.rs (review_artifact_usage_records_bytes_and_warns_on_private_cache)
 
+## Writer dependency-cache confinement
+
+### B1
+
+WHEN Fluent launches initial, continuation, or corrective Writers for one exact
+Attempt, THE SYSTEM SHALL give every round the same Fluent-owned `CARGO_HOME`.
+Test: src/writer_cache.rs (writer_rounds_reuse_exact_attempt_cache_without_cross_attempt_sharing)
+Test: src/work_task_executor.rs (writer_launch_uses_private_dependency_cache)
+
+### B2
+
+WHEN Fluent launches a Writer for another Attempt, THE SYSTEM SHALL assign
+another `CARGO_HOME` path.
+Test: src/writer_cache.rs (writer_rounds_reuse_exact_attempt_cache_without_cross_attempt_sharing)
+
+### B3
+
+WHEN Fluent prepares a Writer dependency cache, THE SYSTEM SHALL keep it under
+`.fluent/work/cache/writers/<work-item-id>/<attempt-id>/` rather than a durable
+artifact or the operator's Cargo home.
+Test: src/writer_cache.rs (writer_dependency_cache_stays_outside_durable_artifacts)
+Test: src/work_task_executor.rs (writer_sandbox_confines_dependency_writes_to_the_exact_attempt_cache)
+
+### B4
+
+WHEN the host has a canonical Cargo dependency cache, THE SYSTEM SHALL admit
+only its `registry/` and `git/` trees and SHALL exclude Cargo credentials,
+configuration, and binaries.
+Test: src/writer_cache.rs (preparation_admits_only_dependency_trees_from_the_canonical_cargo_home)
+
+### B5
+
+WHEN a Writer changes its private dependency cache, THE SYSTEM SHALL leave the
+admitted host cache unchanged.
+Test: src/writer_cache.rs (private_dependency_writes_do_not_mutate_the_admitted_source)
+
+### B6
+
+WHEN admitted dependencies were previously fetched, THE SYSTEM SHALL permit a
+Writer's focused Cargo verification to pass offline after the original
+dependency source becomes unavailable.
+Test: src/writer_cache.rs (an_admitted_git_dependency_builds_offline_from_the_private_cache)
+
+### B7
+
+IF an existing managed cache component is a symlink, or a copied dependency
+symlink resolves outside the private cache, THEN THE SYSTEM SHALL reject cache
+preparation before launching the Writer.
+Test: src/writer_cache.rs (preflight_rejects_a_symlinked_managed_cache_ancestor)
+Test: src/writer_cache.rs (preparation_rejects_a_dependency_symlink_that_escapes_the_private_cache)
+Test: src/writer_cache.rs (preparation_rejects_a_cache_leaf_symlink_before_writing_through_it)
+Test: src/work_task_executor.rs (writer_cache_symlink_rejection_leaves_the_task_unstarted)
+
+### B8
+
+WHEN Fluent reclaims Writer dependency caches, THE SYSTEM SHALL preserve an
+exact Work Item/Attempt cache referenced by nonterminal Work.
+Test: src/writer_cache.rs (reclamation_preserves_a_cache_referenced_by_nonterminal_work)
+
+### B9
+
+WHEN Fluent reclaims Writer dependency caches after Work becomes terminal, THE
+SYSTEM SHALL retire that Work Item/Attempt cache.
+Test: src/writer_cache.rs (reclamation_retires_a_cache_after_work_becomes_terminal)
+
 ## Generated commit wording
 
 ### B1

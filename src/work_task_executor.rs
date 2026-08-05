@@ -640,6 +640,11 @@ fn run_write_task_with_coder(
         &plan.task.input_artifacts,
     )?);
     preflight_write_worktree(config.project_root, &workspace_path, &branch_name)?;
+    let writer_cache = crate::writer_cache::preflight_writer_dependency_cache(
+        config.project_root,
+        config.work_item_id,
+        config.attempt_id,
+    )?;
 
     // Verify the selected provider before reserving execution. A readiness failure
     // leaves this Task unstarted and pauses the existing Attempt for recovery.
@@ -721,6 +726,7 @@ fn run_write_task_with_coder(
         coder_kind,
         provider_readiness.codex_worker(),
         claude_home.as_deref(),
+        &writer_cache,
     ) {
         Ok(profile) => profile,
         Err(error) => {
@@ -761,6 +767,11 @@ fn run_write_task_with_coder(
         config.task_id,
         &reservation.receipt,
         || {
+            crate::writer_cache::prepare_writer_dependency_cache_for_launch(
+                &writer_cache,
+                config.store,
+                crate::writer_cache::canonical_cargo_home_from_env().as_deref(),
+            )?;
             prepare_task_worktree(
                 config.project_root,
                 &workspace_path,
@@ -814,6 +825,7 @@ fn run_write_task_with_coder(
             &pump_config,
             provider_readiness.codex_worker(),
             claude_home.as_deref(),
+            &writer_cache,
             sandbox_profile.as_ref(),
             coder_override,
         ),
@@ -845,6 +857,7 @@ fn run_write_task_with_coder(
                 &pump_config,
                 provider_readiness.codex_worker(),
                 claude_home.as_deref(),
+                &writer_cache,
                 sandbox_profile.as_ref(),
                 coder_override,
             ),
@@ -2899,6 +2912,7 @@ fn preflight_write_sandbox_profile(
     coder_kind: CoderKind,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     claude_home: Option<&Path>,
+    writer_cache: &crate::writer_cache::WriterDependencyCache,
 ) -> Result<Option<os::SandboxProfile>> {
     // Test-support may exercise a nested Codex route without applying a
     // Seatbelt profile. Keep that exception explicit and feature-gated: the
@@ -2929,6 +2943,7 @@ fn preflight_write_sandbox_profile(
         writable_roots.push(project_root.join(&artifact_area.path));
     }
     writable_roots.extend(claude_home.map(Path::to_path_buf));
+    writable_roots.push(writer_cache.root().to_path_buf());
 
     let profile = if coder_kind == CoderKind::Claude {
         os::render_profile_for_access_for_autonomous_claude(
@@ -2973,6 +2988,7 @@ fn run_task_coder_with_optional_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     claude_home: Option<&Path>,
+    writer_cache: &crate::writer_cache::WriterDependencyCache,
     sandbox_profile: Option<&os::SandboxProfile>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
@@ -2992,6 +3008,7 @@ fn run_task_coder_with_optional_coder(
         pump_config,
         codex_worker,
         claude_home,
+        writer_cache,
         sandbox_profile,
         move |sandbox, _executable| match coder_override {
             Some(make) => make(sandbox),
@@ -3022,6 +3039,7 @@ fn run_task_coder_with_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     claude_home: Option<&Path>,
+    writer_cache: &crate::writer_cache::WriterDependencyCache,
     sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
@@ -3044,6 +3062,7 @@ fn run_task_coder_with_coder(
             .with_context(|| format!("creating confined Claude home {}", home.display()))?;
         launch_env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
     }
+    launch_env.extend(writer_cache.launch_env());
 
     let task = item
         .attempts
@@ -3139,6 +3158,7 @@ fn run_task_coder_with_coder(
             readable_roots.extend(worker.launcher().readable_roots().iter().cloned());
         }
         let mut additional_writable = vec![common_git_dir, progress_dir.clone()];
+        additional_writable.push(writer_cache.root().to_path_buf());
         if let Some(ref tp) = transcript_path {
             if let Some(artifact_dir) = tp.parent() {
                 additional_writable.push(artifact_dir.to_path_buf());
@@ -6824,6 +6844,17 @@ mod tests {
     use std::process::Command;
     use std::sync::{Arc, Mutex};
 
+    fn test_writer_cache(project_root: &Path) -> crate::writer_cache::WriterDependencyCache {
+        let cache = crate::writer_cache::preflight_writer_dependency_cache(
+            project_root,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        crate::writer_cache::prepare_writer_dependency_cache(&cache, None).unwrap();
+        cache
+    }
+
     #[test]
     fn tester_guarded_preflight_does_not_create_before_reservation() {
         let workspace = tempfile::tempdir().unwrap();
@@ -7360,6 +7391,7 @@ mod tests {
         let pump_config = crate::transcript_pump::resolve_config(project_root);
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let recorded_for_coder = Arc::clone(&recorded);
+        let writer_cache = test_writer_cache(project_root);
 
         run_task_coder_with_coder(
             &item,
@@ -7377,6 +7409,7 @@ mod tests {
             &pump_config,
             None,
             Some(&managed_home),
+            &writer_cache,
             None,
             move |_sandbox, _executable| {
                 Box::new(RecordingEnvironmentCoder {
@@ -7387,13 +7420,130 @@ mod tests {
         .unwrap();
 
         assert!(managed_home.is_dir());
+        let recorded = recorded.lock().unwrap();
         assert!(
             recorded
-                .lock()
-                .unwrap()
                 .iter()
                 .any(|(key, value)| { key == "HOME" && Path::new(value) == managed_home })
         );
+    }
+
+    #[test]
+    fn writer_launch_uses_private_dependency_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Use private dependencies".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_for_coder = Arc::clone(&recorded);
+        let writer_cache = test_writer_cache(project_root);
+
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Claude,
+            true,
+            None,
+            None,
+            &pump_config,
+            None,
+            None,
+            &writer_cache,
+            None,
+            move |_sandbox, _executable| {
+                Box::new(RecordingEnvironmentCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .unwrap();
+
+        let recorded = recorded.lock().unwrap();
+        assert!(recorded.iter().any(|(key, value)| {
+            key == "CARGO_HOME" && Path::new(value) == writer_cache.cargo_home()
+        }));
+        assert!(!recorded.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"));
+        let user_cargo_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".cargo"));
+        assert!(!recorded.iter().any(|(key, value)| {
+            key == "CARGO_HOME"
+                && user_cargo_home
+                    .as_ref()
+                    .is_some_and(|home| Path::new(value) == home)
+        }));
+    }
+
+    #[test]
+    fn writer_sandbox_confines_dependency_writes_to_the_exact_attempt_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(project_root)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Confine Writer cache".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &item.attempts[0].tasks[0];
+        let writer_cache = crate::writer_cache::preflight_writer_dependency_cache(
+            project_root,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+
+        let profile = preflight_write_sandbox_profile(
+            task,
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            false,
+            CoderKind::Claude,
+            None,
+            None,
+            &writer_cache,
+        )
+        .unwrap()
+        .expect("sandboxed Writer has a profile");
+        let profile = fs::read_to_string(profile.path).unwrap();
+        let cache_write = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            writer_cache.root().display()
+        );
+        assert!(profile.contains(&cache_write));
+        if let Some(home) = std::env::var_os("HOME") {
+            let user_cargo_write = format!(
+                "(allow file-write* (subpath \"{}\"))",
+                PathBuf::from(home).join(".cargo").display()
+            );
+            assert!(!profile.contains(&user_cargo_write));
+        }
     }
 
     #[test]
@@ -7509,6 +7659,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            &test_writer_cache(project_root),
             None,
             move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
@@ -7595,6 +7746,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            &test_writer_cache(project_root),
             None,
             move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
@@ -7737,6 +7889,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            &test_writer_cache(project_root),
             None,
             move |_sandbox, _executable| {
                 Box::new(SessionRecordingCoder {
@@ -7874,6 +8027,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            &test_writer_cache(project_root),
             None,
             move |_sandbox, _executable| {
                 Box::new(SupervisionReportingCoder {
@@ -7998,6 +8152,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            &test_writer_cache(project_root),
             None,
             move |_sandbox, _executable| {
                 Box::new(CountingSupervisionCoder {
@@ -9790,6 +9945,86 @@ mod tests {
             );
         }
         assert_eq!(fs::read_to_string(input_path).unwrap(), "authoritative\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_cache_symlink_rejection_leaves_the_task_unstarted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        crate::git::run(&project_root, &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(
+            &project_root,
+            &["config", "user.email", "test@test"],
+            "configure fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            &project_root,
+            &["config", "user.name", "test"],
+            "configure fixture",
+        )
+        .unwrap();
+        fs::write(project_root.join("tracked.txt"), "baseline\n").unwrap();
+        crate::git::run(&project_root, &["add", "."], "add fixture").unwrap();
+        crate::git::run(
+            &project_root,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Reject escaped Writer cache".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task_id = item.attempts[0].tasks[0].id.clone();
+        let workspace_path = resolve_managed_workspace_path(
+            &project_root,
+            &item.attempts[0].tasks[0].workspace_access.writes[0].path,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        let store = WorkModelStore::new(&project_root);
+        store.create_work_item(&item).unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(project_root.join(".fluent/work/cache/writers")).unwrap();
+        std::os::unix::fs::symlink(
+            &external,
+            project_root.join(".fluent/work/cache/writers/work-1"),
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(&project_root));
+        let make_coder = |_sandbox| -> Box<dyn crate::coder::Coder> {
+            panic!("cache preflight must reject before constructing a coder")
+        };
+
+        let error = run_write_task_with_coder(
+            WorkTaskRunConfig {
+                project_root: &project_root,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("must not be a symlink"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Planned);
+        assert!(!workspace_path.exists());
     }
 
     #[test]

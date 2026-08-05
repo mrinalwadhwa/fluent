@@ -185,6 +185,8 @@ Then move to the next `- [ ]` item.
 
 Run the smallest harness-native test selections that give useful feedback for the files and behaviors you changed. Do not run the complete configured suite merely to duplicate Fluent's final Tester gate; Fluent runs that canonical suite once after reviewers pass. Expand your focused selection when failures or the change's risk justify it.
 
+Fluent has assigned this Attempt a private dependency cache through `CARGO_HOME`. Reuse it for focused Cargo commands. Do not override that variable or read from or write to the operator's global Cargo home. When confirming that admitted dependencies are sufficient, prefer Cargo's `--offline` option.
+
 ### Task is done when
 
 {{#if is_followup_writer}}

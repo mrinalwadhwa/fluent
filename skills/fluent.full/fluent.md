@@ -87,7 +87,10 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
 
 1. The Writer produces a candidate commit, updates required progress, and fills
    the host-generated `writer-completion.json` coverage matrix with implementation
-   evidence and focused harness-native verification.
+   evidence and focused harness-native verification. Fluent gives every Writer
+   round in the exact Attempt the same confined Cargo dependency cache, seeded
+   only with the host's admitted `registry/` and `git/` stores; Writers do not
+   use or modify the operator's global Cargo home.
 2. Fluent reconciles required progress and the completion matrix. If approved
    work remains incomplete, it
    resumes the same Writer provider session without running the Tester or
