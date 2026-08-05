@@ -115,6 +115,9 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "prompts/write-continuation-user.md" => {
             Some(include_str!("../prompts/write-continuation-user.md").to_string())
         }
+        "prompts/write-correction-user.md" => {
+            Some(include_str!("../prompts/write-correction-user.md").to_string())
+        }
         "prompts/review-system.md" => Some(include_str!("../prompts/review-system.md").to_string()),
         "prompts/review-user.md" => Some(include_str!("../prompts/review-user.md").to_string()),
         "prompts/review-only-system.md" => {
@@ -694,6 +697,7 @@ Check item {{ITEM_ID}}.
         assert!(bundled_content("prompts/write-system.md").is_some());
         assert!(bundled_content("prompts/write-user.md").is_some());
         assert!(bundled_content("prompts/write-continuation-user.md").is_some());
+        assert!(bundled_content("prompts/write-correction-user.md").is_some());
         assert!(bundled_content("prompts/review-system.md").is_some());
         assert!(bundled_content("prompts/review-user.md").is_some());
         assert!(bundled_content("prompts/rebase-system.md").is_some());

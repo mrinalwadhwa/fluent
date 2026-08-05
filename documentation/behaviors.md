@@ -5031,19 +5031,21 @@ Test: src/work_attempt_loop.rs (second_stagnant_pre_review_continuation_pauses)
 
 ### B9
 
-WHEN a pre-review Writer continuation uses the same provider as the preceding
-Writer and that Writer recorded a session identity with its required
-provider-owned material, THE SYSTEM SHALL resume that exact provider session
-from the candidate workspace using only options accepted by the provider's
-resume command.
+WHEN a subsequent pre-review or reviewed-correction Writer uses the same
+provider as the preceding Writer and that Writer recorded a session identity
+with its required provider-owned material, THE SYSTEM SHALL resume that exact
+provider session from the candidate workspace using only options accepted by
+the provider's resume command.
 Test: src/work_task_executor.rs (writer_route_resumes_the_matching_recorded_provider_session)
+Test: src/work_task_executor.rs (reviewed_correction_resumes_the_latest_compatible_writer_session)
+Test: src/work_task_executor.rs (completed_codex_writer_snapshot_is_selected_for_reviewed_correction)
 Test: src/coder.rs (resumed_writer_codex_command_uses_the_recorded_session)
 Test: src/coder.rs (resumed_writer_claude_command_uses_the_recorded_session)
 Test: src/codex_worker.rs (writer_session_snapshot_round_trips_without_auth_or_configuration)
 
 ### B10
 
-IF a pre-review continuation has no usable session identity or lacks the
+IF a subsequent Writer has no usable session identity or lacks the
 provider-owned session material required to resume it, THEN THE SYSTEM SHALL
 start a fresh persistent Writer session.
 Test: src/work_task_executor.rs (writer_session_falls_back_to_fresh_when_identity_is_unusable)
@@ -5239,6 +5241,56 @@ IF a capture Learner produces a candidate that fails deterministic checks, THEN
 THE SYSTEM SHALL retain the gate evidence, roll back to the reviewed Writer
 commit, and keep the Merge Candidate non-ready.
 Test: src/work_attempt_loop.rs (learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit)
+
+## Reviewed corrective Writer context
+
+### B1
+
+WHEN Fluent prompts a reviewed corrective Writer, THE SYSTEM SHALL write one
+current `execution-context.json` and render a prompt no larger than 32 KiB that
+references current progress, the completion matrix, planning authority, and
+full correction artifacts by managed path rather than embedding their bodies;
+derived Work uses a task-owned snapshot of its immutable corrective authority.
+Test: src/work_task_executor.rs (reviewed_correction_prompt_is_bounded_and_references_full_artifacts_by_path)
+Test: src/work_task_executor.rs (reviewed_correction_references_derived_authority_without_reinjecting_it)
+
+### B2
+
+WHEN Fluent generates corrective context, THE SYSTEM SHALL preserve every
+current finding, unresolved progress entry, and correction-input artifact path
+within the bounded authoritative core.
+Test: src/work_task_executor.rs (execution_context_never_silently_omits_current_findings)
+Test: src/work_task_executor.rs (execution_context_is_bounded_and_preserves_authoritative_core)
+
+### B3
+
+IF the findings, unresolved progress, and correction-input paths cannot fit
+within the execution-context size limit, THEN THE SYSTEM SHALL reject the
+context before launch rather than silently omit authoritative work.
+Test: src/work_task_executor.rs (execution_context_rejects_authoritative_findings_that_cannot_fit)
+Test: src/work_task_executor.rs (execution_context_rejects_artifact_paths_that_cannot_fit)
+
+### B4
+
+WHEN Fluent prepares a reviewed corrective Writer, THE SYSTEM SHALL create a
+task-owned `commands/` directory for complete command output while the prompt
+directs the Writer to inspect only concise summaries or relevant failure
+excerpts in the model conversation.
+Test: src/writer_context.rs (final_metrics_separate_cached_replay_from_uncached_input)
+Test: src/work_task_executor.rs (reviewed_correction_prompt_is_bounded_and_references_full_artifacts_by_path)
+
+### B5
+
+WHEN a Writer completes, THE SYSTEM SHALL persist prompt kind and bytes,
+execution-context and transcript bytes, cached and uncached input tokens, output
+tokens, and applicable budget warnings beside the full transcript.
+Test: src/writer_context.rs (final_metrics_separate_cached_replay_from_uncached_input)
+
+### B6
+
+IF a reviewed corrective prompt exceeds its host-owned size budget, THEN THE
+SYSTEM SHALL reject it before Writer launch.
+Test: src/writer_context.rs (reviewed_correction_prompt_budget_is_enforced_before_launch)
 
 ## Suite-health gate
 

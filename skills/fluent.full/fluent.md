@@ -103,7 +103,11 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
    the exact Writer delta: Git whitespace and commit integrity, approved
    behavior-to-test references, and the project's read-only `check-pre-merge`
    hook. A first deterministic defect returns its structured evidence to one
-   corrective Writer; a repeated defect or unverifiable host state pauses.
+   corrective Writer; a repeated defect or unverifiable host state pauses. A
+   reviewed correction resumes the compatible Writer session, reads one bounded
+   current-context artifact, and references full historical evidence by path.
+   It saves complete command output under its Task artifact and keeps only
+   summaries or relevant failure excerpts in the model conversation.
 4. Once required progress, every matrix row, and deterministic gate are complete,
    domain reviewers evaluate the candidate in parallel using the matrix, gate
    artifact, and Writer's focused verification as advisory evidence.
@@ -337,6 +341,10 @@ spot a Work Item whose context or review loop is growing before starting another
 expensive round. These commands read one persisted sidecar instead of walking
 artifact trees. After upgrading an existing project or manually repairing
 artifacts, run `fluent work-item rebuild-metrics [work-item-id]` once.
+Each Writer also stores `writer-context-usage.json` beside its transcript.
+Inspect that sidecar when a correction is slow: it separates host prompt size,
+transcript growth, cached replay, and uncached input so the next correction
+targets the measured source of context growth.
 
 After creating or repairing a project Tester, run `fluent tester check` before spending review work. It validates the Tester and runs it through the production Tester boundary. If this standalone check reports a harness error, repair the configuration, extractor, or sandbox problem and rerun `fluent tester check`; it creates no Attempt to resume. If a production Tester Task pauses an existing Attempt for a harness error, repair the problem and resume with `fluent attempt run <work-item-id> [<attempt-id>]`; the same Tester retries without rerunning an already completed Writer. For SwiftPM nested-sandbox failures, disable SwiftPM's inner sandbox and use writable project-local cache paths. Fluent leaves project test configuration and scripts unchanged.
 

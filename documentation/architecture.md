@@ -196,7 +196,8 @@ commit and leaves Learning failed and retryable. A no-expertise Learner checks t
 unchanged reviewed candidate before it publishes its handoff.
 
 Codex
-Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
+Writers omit `--ephemeral` and subsequent pre-review or reviewed-correction
+rounds resume with `codex exec resume <thread-id>`;
 because that subcommand does not accept `exec`'s `--cd` option, Fluent sets the
 subprocess current directory to the candidate workspace instead. Claude Writers
 run with an Attempt-scoped managed `HOME`; their sandbox denies the operator's
@@ -224,18 +225,32 @@ a durable artifact. Existing managed-path components and copied dependency
 symlinks are checked for escapes, and cache reclamation preserves only
 Work Item/Attempt pairs still referenced by nonterminal Work.
 
-Continuation prompts contain only
-unresolved progress plus a path to a generated `execution-context.json`. The
+Pre-review continuation and reviewed-correction prompts contain only the paths
+needed for current work, including a generated `execution-context.json`. The
 versioned context records candidate/base commits, changed files, unresolved
 steps, current findings deduplicated by role and stable identity, passing Tester
 evidence, executed commands, and historical artifact paths. Its collections and
-serialized size are bounded; omission counts make truncation visible. Full
-historical artifacts remain unchanged for audit and are opened by path only when
-needed. Review prompts use the same generated context instead of reinjecting
-prior review bodies. Two consecutive pre-review continuations that create commits
-without increasing either completion count pause for user inspection. A no-change
-incomplete Writer also pauses. A malformed, unknown, duplicate, rewritten, or
-regressed contract pauses for user repair. Only a reconciled candidate reaches
+serialized size are bounded. Fluent may omit advisory commands, evidence
+summaries, or changed-file rows and records those counts, but it never silently
+omits an unresolved step, current finding, or input-artifact path; an
+authoritative core that cannot fit fails before Writer launch.
+Reviewed-correction prompts are capped at 32 KiB. Full historical artifacts
+remain unchanged for audit and are opened by path only when needed. Review
+prompts use the same generated context instead of reinjecting prior review
+bodies. Corrective Writers save complete command output under their task
+artifact's `commands/` directory and inspect concise summaries or relevant
+failure excerpts in the model conversation.
+
+Every Writer persists `writer-context-usage.json` beside its transcript. The
+sidecar records prompt kind and bytes, execution-context and transcript bytes,
+input, cached-input, uncached-input, and output tokens, plus warnings when cached
+replay, uncached input, or transcript size crosses the host-owned budget. It
+does not truncate the audit transcript or fail completed model work.
+
+Two consecutive pre-review continuations that create commits without increasing
+either completion count pause for user inspection. A no-change incomplete Writer
+also pauses. A malformed, unknown, duplicate, rewritten, or regressed contract
+pauses for user repair. Only a reconciled candidate reaches
 reviewer planning.
 Those Tasks use the Writer output that exists before Learning; after Learning,
 landing consumes the current `TaskOutput.commit`.

@@ -43,11 +43,8 @@ pub(crate) const WRITER_COMPLETION_MATRIX_FILE: &str = "writer-completion.json";
 const REVIEW_ARTIFACT_WARN_BYTES: u64 = 16 * 1024 * 1024;
 const EXECUTION_CONTEXT_MAX_BYTES: usize = 128 * 1024;
 const EXECUTION_CONTEXT_MAX_CHANGED_FILES: usize = 100;
-const EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS: usize = 25;
-const EXECUTION_CONTEXT_MAX_FINDINGS: usize = 25;
 const EXECUTION_CONTEXT_MAX_EVIDENCE: usize = 25;
 const EXECUTION_CONTEXT_MAX_COMMANDS: usize = 25;
-const EXECUTION_CONTEXT_MAX_ARTIFACTS: usize = 50;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -3104,29 +3101,48 @@ fn run_task_coder_with_coder(
         materialize_required_progress_before_writer(project_root, item, attempt_id)?;
         materialize_writer_completion_before_writer(project_root, item, attempt_id, task_id)?;
     }
-    let prompt = if item
+    let previous_writer_continues = item
         .attempts
         .iter()
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.writer_runs.last())
-        .is_some_and(|run| run.outcome == crate::work_model::WriterOutcome::Continue)
-    {
-        build_writer_continuation_prompt(
-            item,
-            attempt_id,
-            task_id,
-            prior_reviews,
-            workspace_path,
-            project_root,
-        )?
+        .is_some_and(|run| run.outcome == crate::work_model::WriterOutcome::Continue);
+    let has_correction_artifacts = !correction_artifacts_only(prior_reviews).is_empty();
+    let (prompt, prompt_kind) = if previous_writer_continues {
+        (
+            build_writer_continuation_prompt(
+                item,
+                attempt_id,
+                task_id,
+                prior_reviews,
+                workspace_path,
+                project_root,
+            )?,
+            crate::writer_context::WriterPromptKind::PreReviewContinuation,
+        )
+    } else if has_correction_artifacts {
+        (
+            build_reviewed_correction_prompt(
+                item,
+                attempt_id,
+                task_id,
+                prior_reviews,
+                workspace_path,
+                project_root,
+            )?,
+            crate::writer_context::WriterPromptKind::ReviewedCorrection,
+        )
     } else {
-        build_write_task_prompt_with_workspace(
-            item,
-            attempt_id,
-            task_id,
-            prior_reviews,
-            Some(workspace_path),
-            Some(project_root),
+        (
+            build_write_task_prompt_with_workspace(
+                item,
+                attempt_id,
+                task_id,
+                prior_reviews,
+                Some(workspace_path),
+                Some(project_root),
+            ),
+            crate::writer_context::WriterPromptKind::Initial,
         )
     };
 
@@ -3136,6 +3152,15 @@ fn run_task_coder_with_coder(
         .map(|a| project_root.join(&a.path).join("transcript.jsonl"));
     if let Some(parent) = transcript_path.as_ref().and_then(|p| p.parent()) {
         fs::create_dir_all(parent).context("Failed to create writer transcript artifact dir")?;
+        let execution_context = parent.join("execution-context.json");
+        crate::writer_context::record_writer_context_launch(
+            parent,
+            prompt_kind,
+            &prompt,
+            execution_context
+                .is_file()
+                .then_some(execution_context.as_path()),
+        )?;
     }
 
     let workspace_resolver = ContentResolver::new(Some(workspace_path));
@@ -3257,6 +3282,11 @@ fn run_task_coder_with_coder(
             attempt_id,
             task_id,
         );
+        if let Some(artifact_dir) = tp.parent()
+            && let Err(error) = crate::writer_context::finalize_writer_context_usage(artifact_dir)
+        {
+            eprintln!("warning: Writer context usage persistence failed: {error:#}");
+        }
     }
     if exit_code == 0 {
         Ok(())
@@ -3275,8 +3305,11 @@ fn writer_coder_session<'a>(
         .find(|attempt| attempt.id == attempt_id)
         .and_then(|attempt| attempt.writer_runs.last())
         .filter(|run| {
-            run.outcome == crate::work_model::WriterOutcome::Continue
-                && run.provider == coder_kind.as_str()
+            matches!(
+                run.outcome,
+                crate::work_model::WriterOutcome::Complete
+                    | crate::work_model::WriterOutcome::Continue
+            ) && run.provider == coder_kind.as_str()
         })
         .and_then(|run| run.session_id.as_deref())
         .filter(|session_id| !session_id.trim().is_empty())
@@ -3310,8 +3343,10 @@ fn previous_writer_codex_session_snapshot(
         return Ok(None);
     };
     let Some(run) = attempt.writer_runs.last().filter(|run| {
-        run.outcome == crate::work_model::WriterOutcome::Continue
-            && run.provider == CoderKind::Codex.as_str()
+        matches!(
+            run.outcome,
+            crate::work_model::WriterOutcome::Complete | crate::work_model::WriterOutcome::Continue
+        ) && run.provider == CoderKind::Codex.as_str()
             && run
                 .session_id
                 .as_deref()
@@ -3668,6 +3703,149 @@ fn build_writer_continuation_prompt(
     .context("write-continuation-user.md template must render with the documented context")
 }
 
+fn build_reviewed_correction_prompt(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+    correction_artifacts: &[PathBuf],
+    workspace_path: &Path,
+    project_root: &Path,
+) -> Result<String> {
+    let progress_path = progress_md_path_for(project_root, &item.id, attempt_id);
+    let unresolved_steps = fs::read_to_string(&progress_path)
+        .ok()
+        .map(|source| unresolved_progress_steps(&source))
+        .unwrap_or_default();
+    let task = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+        .ok_or_else(|| anyhow::anyhow!("corrective Writer Task {task_id:?} not found"))?;
+    let artifact_area = task.artifact_area.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("corrective Writer Task {task_id:?} must declare an artifact area")
+    })?;
+    let artifact_dir = resolve_managed_artifact_area_path(project_root, &artifact_area.path)?;
+    let candidate_commit = git_stdout(workspace_path, &["rev-parse", "HEAD"]);
+    let base_commit = writer_context_base_commit(item, attempt_id, workspace_path);
+    let context_path = write_execution_context(
+        &artifact_dir,
+        workspace_path,
+        &candidate_commit,
+        base_commit.as_deref(),
+        &unresolved_steps,
+        correction_artifacts,
+    )?;
+    let corrective_authority_path = if let Some(authority) = corrective_execution_context(item) {
+        let path = artifact_dir.join("corrective-authority.md");
+        crate::atomic_write::atomic_write(&path, authority.as_bytes())
+            .with_context(|| format!("write corrective authority snapshot {}", path.display()))?;
+        path.display().to_string()
+    } else {
+        String::new()
+    };
+    let has_writer_completion_matrix = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .is_some_and(|attempt| attempt.writer_completion_contract.is_some());
+    let writer_completion_matrix_path = has_writer_completion_matrix
+        .then(|| writer_completion_matrix_path(project_root, task))
+        .flatten()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let planning = compute_planning_paths(item, project_root);
+    let template = ContentResolver::new(Some(workspace_path))
+        .resolve_content("prompts/write-correction-user.md")
+        .expect("bundled write-correction-user.md must resolve");
+    let prompt = crate::content::render_template(
+        &template,
+        &[
+            ("work_item_id", &item.id),
+            ("work_item_title", &item.title),
+            ("attempt_id", attempt_id),
+            ("task_id", task_id),
+            ("brief_path", &planning.brief()),
+            ("behaviors_path", &planning.behaviors()),
+            ("approach_path", &planning.approach()),
+            ("plan_path", &planning.plan()),
+            ("progress_md_path", &progress_path.display().to_string()),
+            (
+                "writer_completion_matrix_path",
+                &writer_completion_matrix_path,
+            ),
+            (
+                "has_writer_completion_matrix",
+                if has_writer_completion_matrix {
+                    "yes"
+                } else {
+                    ""
+                },
+            ),
+            (
+                "execution_context_path",
+                &context_path.display().to_string(),
+            ),
+            ("artifact_dir", &artifact_dir.display().to_string()),
+            (
+                "no_change_declaration_path",
+                &artifact_dir
+                    .join(NO_CHANGE_DECLARATION_FILE)
+                    .display()
+                    .to_string(),
+            ),
+            ("corrective_authority_path", &corrective_authority_path),
+            (
+                "has_corrective_authority",
+                if corrective_authority_path.is_empty() {
+                    ""
+                } else {
+                    "yes"
+                },
+            ),
+        ],
+    )
+    .context("write-correction-user.md template must render with the documented context")?;
+    if prompt.len() > crate::writer_context::REVIEWED_CORRECTION_PROMPT_MAX_BYTES {
+        bail!(
+            "reviewed correction prompt is {} bytes; limit is {} bytes",
+            prompt.len(),
+            crate::writer_context::REVIEWED_CORRECTION_PROMPT_MAX_BYTES
+        );
+    }
+    Ok(prompt)
+}
+
+fn writer_context_base_commit(
+    item: &WorkItem,
+    attempt_id: &str,
+    workspace_path: &Path,
+) -> Option<String> {
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)?;
+    if let Some(base) = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write)
+        .filter_map(|task| task.output.as_ref())
+        .find_map(|output| output.base_commit.as_deref())
+        .filter(|base| !base.is_empty())
+    {
+        return Some(base.to_string());
+    }
+    let source_branch = attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write)
+        .filter_map(|task| task.output.as_ref())
+        .next()
+        .map(|output| output.source_branch.as_str())?;
+    let base = git_stdout(workspace_path, &["merge-base", source_branch, "HEAD"]);
+    (!base.is_empty()).then_some(base)
+}
+
 fn unresolved_progress_steps(source: &str) -> Vec<String> {
     let mut include_nested = false;
     let mut unresolved = Vec::new();
@@ -3735,16 +3913,10 @@ fn write_execution_context(
         .collect::<Vec<_>>();
     let (changed_files, omitted_changed_files) =
         bounded_vec(changed_files, EXECUTION_CONTEXT_MAX_CHANGED_FILES);
-    let (unresolved_steps, omitted_unresolved_steps) =
-        bounded_vec(unresolved_steps, EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS);
-    let (current_findings, omitted_current_findings) =
-        bounded_vec(current_findings, EXECUTION_CONTEXT_MAX_FINDINGS);
     let (passing_evidence, omitted_passing_evidence) =
         bounded_vec(passing_evidence, EXECUTION_CONTEXT_MAX_EVIDENCE);
     let (executed_commands, omitted_executed_commands) =
         bounded_vec(executed_commands, EXECUTION_CONTEXT_MAX_COMMANDS);
-    let (historical_artifacts, omitted_historical_artifacts) =
-        bounded_vec(historical_artifacts, EXECUTION_CONTEXT_MAX_ARTIFACTS);
     let mut context = ExecutionContextV1 {
         schema_version: 1,
         candidate_commit: truncate_utf8(candidate_commit, 128),
@@ -3759,11 +3931,11 @@ fn write_execution_context(
         historical_artifacts,
         omitted: ExecutionContextOmitted {
             changed_files: omitted_changed_files,
-            unresolved_steps: omitted_unresolved_steps,
-            current_findings: omitted_current_findings,
+            unresolved_steps: 0,
+            current_findings: 0,
             passing_evidence: omitted_passing_evidence,
             executed_commands: omitted_executed_commands,
-            historical_artifacts: omitted_historical_artifacts,
+            historical_artifacts: 0,
         },
     };
     let serialized = bounded_execution_context_json(&mut context)?;
@@ -3796,16 +3968,10 @@ fn bounded_execution_context_json(context: &mut ExecutionContextV1) -> Result<St
         if serialized.len() <= EXECUTION_CONTEXT_MAX_BYTES {
             return Ok(serialized);
         }
-        if context.historical_artifacts.pop().is_some() {
-            context.omitted.historical_artifacts += 1;
-        } else if context.current_findings.pop().is_some() {
-            context.omitted.current_findings += 1;
-        } else if context.executed_commands.pop().is_some() {
+        if context.executed_commands.pop().is_some() {
             context.omitted.executed_commands += 1;
         } else if context.changed_files.pop().is_some() {
             context.omitted.changed_files += 1;
-        } else if context.unresolved_steps.pop().is_some() {
-            context.omitted.unresolved_steps += 1;
         } else if context.passing_evidence.pop().is_some() {
             context.omitted.passing_evidence += 1;
         } else {
@@ -7944,6 +8110,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reviewed_correction_resumes_the_latest_compatible_writer_session() {
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0]
+            .writer_runs
+            .push(crate::work_model::WriterRun {
+                task_id: "attempt-1-write-1".to_string(),
+                outcome: crate::work_model::WriterOutcome::Complete,
+                kind: crate::work_model::WriterRunKind::Initial,
+                provider: "codex".to_string(),
+                session_id: Some("writer-thread-1".to_string()),
+                continuation: 0,
+                checked_required: 1,
+                completed_matrix: 1,
+                candidate_commit: "commit-1".to_string(),
+            });
+
+        assert_eq!(
+            writer_coder_session(&item, "attempt-1", CoderKind::Codex),
+            crate::coder::CoderSession::Resume("writer-thread-1")
+        );
+    }
+
+    #[test]
+    fn completed_codex_writer_snapshot_is_selected_for_reviewed_correction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut item = review_item();
+        let writer_id = item.attempts[0].tasks[0].id.clone();
+        let artifact_path = item.attempts[0].tasks[0]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .clone();
+        let artifact_dir = tmp.path().join(artifact_path);
+        fs::create_dir_all(artifact_dir.join("codex-session")).unwrap();
+        item.attempts[0]
+            .writer_runs
+            .push(crate::work_model::WriterRun {
+                task_id: writer_id,
+                outcome: crate::work_model::WriterOutcome::Complete,
+                kind: crate::work_model::WriterRunKind::Initial,
+                provider: "codex".to_string(),
+                session_id: Some("writer-thread-1".to_string()),
+                continuation: 0,
+                checked_required: 1,
+                completed_matrix: 1,
+                candidate_commit: "commit-1".to_string(),
+            });
+
+        let snapshot = previous_writer_codex_session_snapshot(&item, "attempt-1", tmp.path())
+            .unwrap()
+            .expect("completed Writer snapshot remains resumable");
+
+        assert_eq!(snapshot, artifact_dir.join("codex-session"));
+    }
+
     impl crate::coder::Coder for SupervisionReportingCoder {
         fn run(
             &self,
@@ -11676,6 +11903,55 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_correction_references_derived_authority_without_reinjecting_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = tmp.path().join("candidate");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut item = corrective_review_item("tests");
+        let authority = item.write_task_instructions().unwrap();
+        let review_path = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
+        fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+        fs::write(
+            &review_path,
+            "Verdict: fail\n\n## Findings\n\n- [ ] Restore the guard assertion\n",
+        )
+        .unwrap();
+        let task_id = item
+            .add_next_write_round(
+                "attempt-1",
+                vec![crate::work_model::ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path: review_path
+                        .strip_prefix(project_root)
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                }],
+            )
+            .unwrap();
+
+        let prompt = build_reviewed_correction_prompt(
+            &item,
+            "attempt-1",
+            &task_id,
+            std::slice::from_ref(&review_path),
+            &workspace,
+            project_root,
+        )
+        .unwrap();
+        let authority_path = project_root
+            .join(work_artifact_path("work-1", "attempt-1", &task_id))
+            .join("corrective-authority.md");
+
+        assert!(prompt.contains(&authority_path.display().to_string()));
+        assert!(!prompt.contains("Retries stop after the configured cap"));
+        assert_eq!(fs::read_to_string(authority_path).unwrap(), authority);
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
     fn evidence_targeted_review_prompt_names_immutable_inputs() {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
@@ -12255,7 +12531,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_context_is_bounded_and_reports_omissions() {
+    fn execution_context_is_bounded_and_preserves_authoritative_core() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         let artifact = tmp.path().join("artifact");
@@ -12273,7 +12549,7 @@ mod tests {
             .join("\n");
         fs::write(&review, format!("Verdict: fail\n\n{findings}\n")).unwrap();
         let mut inputs = vec![review];
-        inputs.extend((0..200).map(|index| tmp.path().join(format!("history-{index}.json"))));
+        inputs.extend((0..75).map(|index| tmp.path().join(format!("history-{index}.json"))));
         let unresolved = (0..100)
             .map(|index| format!("step {index}: {}", "large unresolved detail ".repeat(100)))
             .collect::<Vec<_>>();
@@ -12291,12 +12567,12 @@ mod tests {
         let context: ExecutionContextV1 = serde_json::from_str(&source).unwrap();
 
         assert!(source.len() <= EXECUTION_CONTEXT_MAX_BYTES);
-        assert!(context.unresolved_steps.len() <= EXECUTION_CONTEXT_MAX_UNRESOLVED_STEPS);
-        assert!(context.current_findings.len() <= EXECUTION_CONTEXT_MAX_FINDINGS);
-        assert!(context.historical_artifacts.len() <= EXECUTION_CONTEXT_MAX_ARTIFACTS);
-        assert!(context.omitted.unresolved_steps > 0);
-        assert!(context.omitted.current_findings > 0);
-        assert!(context.omitted.historical_artifacts > 0);
+        assert_eq!(context.unresolved_steps.len(), 100);
+        assert_eq!(context.current_findings.len(), 100);
+        assert_eq!(context.historical_artifacts.len(), inputs.len());
+        assert_eq!(context.omitted.unresolved_steps, 0);
+        assert_eq!(context.omitted.current_findings, 0);
+        assert_eq!(context.omitted.historical_artifacts, 0);
         assert!(
             inputs[0].is_file(),
             "historical review evidence remains intact"
@@ -12992,6 +13268,220 @@ mod tests {
             context["historical-artifacts"],
             serde_json::json!([finding.display().to_string()])
         );
+    }
+
+    #[test]
+    fn reviewed_correction_prompt_is_bounded_and_references_full_artifacts_by_path() {
+        let mut item = review_item();
+        let project = tempfile::TempDir::new().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initialize correction fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["config", "user.name", "Fluent Test"],
+            "configure correction fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["config", "user.email", "fluent@example.test"],
+            "configure correction fixture",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("candidate.txt"), "base\n").unwrap();
+        crate::git::run(workspace.path(), &["add", "."], "stage correction base").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["commit", "-q", "-m", "Add base"],
+            "commit correction base",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("candidate.txt"), "corrected\n").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["add", "."],
+            "stage correction candidate",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["commit", "-q", "-m", "Change candidate"],
+            "commit correction candidate",
+        )
+        .unwrap();
+
+        let review_path = project
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests/review.md");
+        fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+        let large_output_marker = "FULL-REVIEW-BODY-MUST-STAY-OUT-OF-PROMPT";
+        fs::write(
+            &review_path,
+            format!(
+                "Verdict: fail\n\n## Findings\n\n- [ ] Preserve overflow selection\n\n{}\n",
+                large_output_marker.repeat(4_000)
+            ),
+        )
+        .unwrap();
+        let task_id = item
+            .add_next_write_round(
+                "attempt-1",
+                vec![crate::work_model::ArtifactRef {
+                    producer_id: "attempt-1-review-tests".to_string(),
+                    path: review_path
+                        .strip_prefix(project.path())
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                }],
+            )
+            .unwrap();
+        let progress = progress_md_path_for(project.path(), "work-1", "attempt-1");
+        fs::create_dir_all(progress.parent().unwrap()).unwrap();
+        fs::write(
+            &progress,
+            "## Review follow-ups\n\n- [ ] Preserve overflow selection\n",
+        )
+        .unwrap();
+
+        let prompt = build_reviewed_correction_prompt(
+            &item,
+            "attempt-1",
+            &task_id,
+            std::slice::from_ref(&review_path),
+            workspace.path(),
+            project.path(),
+        )
+        .unwrap();
+
+        let artifact_dir = project
+            .path()
+            .join(work_artifact_path("work-1", "attempt-1", &task_id));
+        let context_path = artifact_dir.join("execution-context.json");
+        assert!(prompt.len() <= crate::writer_context::REVIEWED_CORRECTION_PROMPT_MAX_BYTES);
+        assert!(prompt.contains(&context_path.display().to_string()));
+        assert!(prompt.contains(&artifact_dir.display().to_string()));
+        assert!(prompt.contains(&progress.display().to_string()));
+        assert!(!prompt.contains(large_output_marker));
+        assert!(!prompt.contains("{{"));
+
+        let context: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+        assert_eq!(
+            context["current-findings"][0]["title"],
+            "Preserve overflow selection"
+        );
+        assert_eq!(
+            context["historical-artifacts"],
+            serde_json::json!([review_path.display().to_string()])
+        );
+    }
+
+    #[test]
+    fn execution_context_never_silently_omits_current_findings() {
+        let project = tempfile::TempDir::new().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initialize findings fixture",
+        )
+        .unwrap();
+        let review_path = project.path().join("review-tests.md");
+        let findings = (0..40)
+            .map(|index| format!("- [ ] Finding {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&review_path, findings).unwrap();
+
+        let context_path = write_execution_context(
+            project.path(),
+            workspace.path(),
+            "candidate",
+            None,
+            &[],
+            std::slice::from_ref(&review_path),
+        )
+        .unwrap();
+        let context: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+
+        assert_eq!(context["current-findings"].as_array().unwrap().len(), 40);
+        assert_eq!(context["omitted"]["current-findings"], 0);
+    }
+
+    #[test]
+    fn execution_context_rejects_authoritative_findings_that_cannot_fit() {
+        let project = tempfile::TempDir::new().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initialize oversized fixture",
+        )
+        .unwrap();
+        let review_path = project.path().join("review-tests.md");
+        let findings = (0..500)
+            .map(|index| {
+                format!(
+                    "- [ ] Finding {index}: {}",
+                    "authoritative detail ".repeat(30)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&review_path, findings).unwrap();
+
+        let error = write_execution_context(
+            project.path(),
+            workspace.path(),
+            "candidate",
+            None,
+            &[],
+            std::slice::from_ref(&review_path),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("execution context core exceeds"));
+        assert!(!project.path().join("execution-context.json").exists());
+    }
+
+    #[test]
+    fn execution_context_rejects_artifact_paths_that_cannot_fit() {
+        let project = tempfile::TempDir::new().unwrap();
+        let workspace = tempfile::TempDir::new().unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initialize oversized artifact fixture",
+        )
+        .unwrap();
+        let artifacts = (0..600)
+            .map(|index| {
+                project.path().join(format!(
+                    "inputs/{index:04}-{}-review.md",
+                    "immutable-correction-input".repeat(8)
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let error = write_execution_context(
+            project.path(),
+            workspace.path(),
+            "candidate",
+            None,
+            &[],
+            &artifacts,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("execution context core exceeds"));
+        assert!(!project.path().join("execution-context.json").exists());
     }
 
     #[test]
