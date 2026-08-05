@@ -982,6 +982,14 @@ impl WorkItem {
                     task_input_artifacts.push(artifact);
                 }
             }
+            for artifact in attempt.artifacts.iter().filter(|artifact| {
+                artifact.producer_id == latest_write.id
+                    && artifact.path.ends_with("/candidate-gate.json")
+            }) {
+                if !task_input_artifacts.contains(artifact) {
+                    task_input_artifacts.push(artifact.clone());
+                }
+            }
             let writer_artifact_path = latest_write
                 .artifact_area
                 .as_ref()

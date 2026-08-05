@@ -635,8 +635,10 @@ fn run_write_task_with_coder(
         config.work_item_id,
         config.attempt_id,
     )?;
-    let prior_reviews =
-        resolve_input_artifact_paths(config.project_root, &plan.task.input_artifacts)?;
+    let prior_reviews = readable_input_artifacts_only(&resolve_input_artifact_paths(
+        config.project_root,
+        &plan.task.input_artifacts,
+    )?);
     preflight_write_worktree(config.project_root, &workspace_path, &branch_name)?;
 
     // Verify the selected provider before reserving execution. A readiness failure
@@ -3390,7 +3392,7 @@ fn build_write_task_prompt_with_workspace(
     let work_item_inputs = project_root
         .map(|root| work_item_inputs_only(item, root))
         .unwrap_or_default();
-    let prior_reviews = prior_reviews_only(prior_reviews);
+    let prior_reviews = correction_artifacts_only(prior_reviews);
     let prior_reviews_list = prior_reviews_block(&prior_reviews, "   ");
     let work_item_inputs_list = prior_reviews_block(&work_item_inputs, "   ");
     let progress_md_pathbuf = project_root.and_then(|root| {
@@ -5189,6 +5191,36 @@ fn prior_reviews_only(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+fn correction_artifacts_only(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
+    input_artifacts
+        .iter()
+        .filter(|path| is_correction_artifact(path))
+        .cloned()
+        .collect()
+}
+
+fn is_correction_artifact(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        name == "review.md"
+            || name == "tester-results.json"
+            || name == crate::candidate_gate::CANDIDATE_GATE_FILE
+    })
+}
+
+fn readable_input_artifacts_only(input_artifacts: &[PathBuf]) -> Vec<PathBuf> {
+    input_artifacts
+        .iter()
+        .filter(|path| {
+            is_correction_artifact(path)
+                || path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "inputs")
+        })
+        .cloned()
+        .collect()
+}
+
 fn work_item_inputs_only(item: &WorkItem, project_root: &Path) -> Vec<PathBuf> {
     item.input_artifacts
         .iter()
@@ -5329,7 +5361,9 @@ fn run_review_coder_with_coder(
         (CoderSandbox::None, None)
     } else {
         let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
-        readable_roots.extend(input_artifact_readable_roots(input_artifacts));
+        readable_roots.extend(input_artifact_readable_roots(
+            &readable_input_artifacts_only(input_artifacts),
+        ));
         readable_roots.push(planning_files_dir(project_root, &item.id));
         readable_roots.push(general_expertise_dir(project_root));
         readable_roots.push(review_skills_dir(project_root));
@@ -6221,7 +6255,9 @@ fn preflight_review_sandbox_profile(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut readable_roots = review_readable_sandbox_roots(&readable_workspaces)?;
-    readable_roots.extend(input_artifact_readable_roots(input_artifacts));
+    readable_roots.extend(input_artifact_readable_roots(
+        &readable_input_artifacts_only(input_artifacts),
+    ));
     readable_roots.push(planning_files_dir(project_root, work_item_id));
     readable_roots.push(general_expertise_dir(project_root));
     readable_roots.push(review_skills_dir(project_root));
@@ -12991,7 +13027,7 @@ mod tests {
 
         assert!(prompt.contains("preserved Work Item input"));
         assert!(prompt.contains("0000-transcript.jsonl"));
-        assert!(!prompt.contains("Read each prior review file"));
+        assert!(!prompt.contains("Read each prior correction artifact"));
     }
 
     #[test]
@@ -13015,8 +13051,38 @@ mod tests {
             Some(tmp.path()),
         );
 
-        assert!(prompt.contains("- Read each prior review file"));
+        assert!(prompt.contains("- Read each prior correction artifact"));
         assert!(prompt.contains("- Read each preserved Work Item input"));
+    }
+
+    #[test]
+    fn correction_artifacts_expose_gate_but_not_writer_private_files() {
+        let artifacts = vec![
+            PathBuf::from("writer/transcript.jsonl"),
+            PathBuf::from("writer/writer-completion.json"),
+            PathBuf::from("candidate-gates/write-2/candidate-gate.json"),
+            PathBuf::from("review/review.md"),
+            PathBuf::from("tester/tester-results.json"),
+            PathBuf::from("work-1/inputs/0000-user-evidence.jsonl"),
+        ];
+
+        assert_eq!(
+            correction_artifacts_only(&artifacts),
+            vec![
+                artifacts[2].clone(),
+                artifacts[3].clone(),
+                artifacts[4].clone()
+            ]
+        );
+        assert_eq!(
+            readable_input_artifacts_only(&artifacts),
+            vec![
+                artifacts[2].clone(),
+                artifacts[3].clone(),
+                artifacts[4].clone(),
+                artifacts[5].clone(),
+            ]
+        );
     }
 
     #[test]
@@ -13031,8 +13097,8 @@ mod tests {
             std::slice::from_ref(&review_path),
         );
         assert!(
-            prompt.contains("Read each prior review file"),
-            "follow-up-round prompt should include the prior-reviews instruction; got prompt:\n{prompt}"
+            prompt.contains("Read each prior correction artifact"),
+            "follow-up-round prompt should include the prior-correction instruction; got prompt:\n{prompt}"
         );
         assert!(
             prompt.contains(&format!("   - {}", review_path.display())),
@@ -13042,6 +13108,23 @@ mod tests {
             prompt.contains("Address review finding:"),
             "follow-up-round prompt should include the prior-finding-record instruction; got prompt:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn write_task_prompt_lists_candidate_gate_for_correction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let gate_path = tmp.path().join("candidate-gate.json");
+        fs::write(&gate_path, "{\"disposition\":\"rejected\"}\n").unwrap();
+
+        let prompt = build_write_task_prompt(
+            &review_item(),
+            "attempt-1",
+            "attempt-1-write-1",
+            std::slice::from_ref(&gate_path),
+        );
+
+        assert!(prompt.contains("Read each prior correction artifact"));
+        assert!(prompt.contains(&gate_path.display().to_string()));
     }
 
     #[test]

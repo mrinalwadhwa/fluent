@@ -96,12 +96,17 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
    deduplicated findings, passing evidence, executed commands, and paths to full
    historical artifacts. If the session identity is unavailable, Fluent starts a
    fresh persistent Writer session.
-3. Once required progress and every matrix row are complete, domain reviewers
-   evaluate the candidate in parallel using the matrix and Writer's focused
-   verification as advisory evidence.
-4. After the reviewers pass, one final Tester Task runs the project's complete
+3. Before admission to review, Fluent runs cheap deterministic checks against
+   the exact Writer delta: Git whitespace and commit integrity, approved
+   behavior-to-test references, and the project's read-only `check-pre-merge`
+   hook. A first deterministic defect returns its structured evidence to one
+   corrective Writer; a repeated defect or unverifiable host state pauses.
+4. Once required progress, every matrix row, and deterministic gate are complete,
+   domain reviewers evaluate the candidate in parallel using the matrix, gate
+   artifact, and Writer's focused verification as advisory evidence.
+5. After the reviewers pass, one final Tester Task runs the project's complete
    declared test commands against the exact reviewed commit.
-5. After the final Tester passes, the Learner runs in the Work Item's Learner mode:
+6. After the final Tester passes, the Learner runs in the Work Item's Learner mode:
    in the default `capture` mode it captures durable project expertise, while in
    `no-expertise` mode it audits the change without writing expertise. Either
    way it records possible follow-ups for materialization after land.
@@ -124,6 +129,10 @@ The round outcome determines what happens next:
 - An incomplete Writer without a new candidate commit, regressed progress or
   matrix completion, or two consecutive pre-review continuations with no newly
   completed requirement — Attempt records `needs-user` before Tester and review.
+- A repeated deterministic candidate rejection, unreadable gate evidence, or a
+  project check that changes HEAD or the worktree — Attempt records `needs-user`
+  before Tester and review. Inspect `candidate-gate.json` and repair the named
+  candidate or project check before resuming.
 - A missing, malformed, contradictory, or structurally edited completion matrix —
   Attempt records `needs-user`; restore the host-owned rows before resuming.
 - A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
@@ -287,6 +296,9 @@ The writer produces tests alongside code. When committing a candidate:
 - Run focused harness-native selections before committing and report the exact
   commands, results, and covered risks. Leave the complete configured suite to
   Fluent's final Tester.
+- Before declaring completion, reconcile every host-generated matrix row with a
+  concrete changed-file reference and focused passing evidence. Do not defer a
+  known boundary, cleanup path, or navigation requirement to reviewers.
 
 Reviewer Tasks run only after a completed Writer has satisfied the Work Item's
 required-progress contract and task-specific `writer-completion.json`. Fluent
@@ -302,6 +314,12 @@ Writer path and does not spend a review or Tester cycle. Domain reviewers inspec
 the candidate and use the matrix and reported focused checks as advisory evidence
 instead of rerunning the full suite. Only the tests reviewer may run one named
 missing check, using the candidate-keyed shared cache.
+
+The host then writes `candidate-gate.json` for the exact Writer commit. It uses
+the existing harness-native `Test:` references, not aliases, and runs the
+project-owned `check-pre-merge` hook read-only. Writers receive this artifact for
+one focused correction when the gate rejects their candidate; reviewers receive
+it only after it passes.
 
 After every reviewer passes, one final Tester produces `tester-results.json`,
 which the host binds to the exact reviewed commit. This is the authoritative

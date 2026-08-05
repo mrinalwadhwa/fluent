@@ -13620,7 +13620,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     let second_round_inputs = second_round_reviews[0]["input_artifacts"]
         .as_array()
         .unwrap();
-    assert_eq!(second_round_inputs.len(), 3);
+    assert_eq!(second_round_inputs.len(), 4);
     assert_eq!(
         second_round_inputs[0]["path"],
         ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md"
@@ -13631,14 +13631,19 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     );
     assert_eq!(
         second_round_inputs[1]["path"],
-        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/transcript.jsonl"
+        ".fluent/work/artifacts/work-1/attempt-1/candidate-gates/attempt-1-write-2/candidate-gate.json"
     );
     assert_eq!(second_round_inputs[1]["producer_id"], "attempt-1-write-2");
     assert_eq!(
         second_round_inputs[2]["path"],
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/transcript.jsonl"
+    );
+    assert_eq!(second_round_inputs[2]["producer_id"], "attempt-1-write-2");
+    assert_eq!(
+        second_round_inputs[3]["path"],
         ".fluent/work/progress/work-1/attempt-1/progress.md"
     );
-    assert_eq!(second_round_inputs[2]["producer_id"], "writer");
+    assert_eq!(second_round_inputs[3]["producer_id"], "writer");
 }
 
 #[test]
@@ -26050,7 +26055,11 @@ fn attempt_extend_binds_candidate_and_failed_review_bytes() {
     assert_eq!(extension.new_cap, 2);
     assert_eq!(extension.failed_reviews.len(), 1);
     assert!(extension.failed_reviews[0].digest.starts_with("sha256:"));
-    assert_eq!(stored.attempts[0].tasks.len(), 3);
+    assert_eq!(
+        stored.attempts[0].tasks.len(),
+        2,
+        "extending the cap records approval but does not plan work before attempt run"
+    );
 
     fs::write(
         review_path.unwrap(),

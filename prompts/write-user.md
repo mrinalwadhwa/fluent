@@ -66,7 +66,7 @@ First, understand what this Work Item asks for:
      this is fluent's own accumulated understanding of the project — prefer it over re-deriving.
 {{/if}}
 {{#if has_prior_reviews}}
-- Read each prior review file. The list below is the complete set from the most recent prior round: {{prior_reviews_list}}
+- Read each prior correction artifact, including review reports, Tester evidence, or `candidate-gate.json`. The list below is the complete set for this continuation: {{prior_reviews_list}}
 {{/if}}
 {{#if has_work_item_inputs}}
 - Read each preserved Work Item input. These immutable files are authoritative execution inputs: {{work_item_inputs_list}}

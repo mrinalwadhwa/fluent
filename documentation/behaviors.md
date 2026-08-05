@@ -5153,6 +5153,93 @@ WHEN an older Attempt has no Writer completion contract, THE SYSTEM SHALL retain
 its existing required-progress and review-planning behavior.
 Test: src/work_attempt_loop.rs (legacy_completed_writer_plans_reviews_without_progress_contract)
 
+### B23
+
+WHEN a completed Writer records both a base commit and candidate commit, THE
+SYSTEM SHALL run deterministic candidate checks before completion-matrix
+admission or model review and persist `candidate-gate.json` under the Attempt's
+gate artifacts.
+Test: src/work_attempt_loop.rs (passing_candidate_gate_is_attached_to_every_reviewer)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (candidate gate blocks review and final Tester)
+
+### B24
+
+WHEN a Writer candidate passes deterministic checks, THE SYSTEM SHALL attach
+the exact candidate's gate evidence to every planned reviewer.
+Test: src/work_attempt_loop.rs (passing_candidate_gate_is_attached_to_every_reviewer)
+
+### B25
+
+WHEN deterministic candidate checks run, THE SYSTEM SHALL reject a candidate
+whose whitespace, linear commit metadata, or prohibited trailers do not satisfy
+the admission rules.
+Test: src/candidate_gate.rs (rejects_whitespace_errors_and_prohibited_commit_metadata)
+
+### B25a
+
+WHEN deterministic candidate checks run, THE SYSTEM SHALL require the workspace
+to have the exact candidate at HEAD, contain the base in its history, and be
+clean before review.
+Test: src/candidate_gate.rs (mismatched_candidate_head_blocks_with_persisted_identity_evidence)
+Test: src/candidate_gate.rs (dirty_candidate_workspace_blocks_before_review)
+
+### B26
+
+WHEN deterministic candidate checks run, THE SYSTEM SHALL resolve every
+approved `Test:` path and native test identifier without introducing aliases.
+Test: src/candidate_gate.rs (rejects_missing_test_paths_and_selectors_without_aliases)
+
+### B27
+
+WHEN final structured Tester evidence is available, THE SYSTEM SHALL require a
+matching passing Rust test identity or shell-script identity for every approved
+`Test:` reference.
+Test: src/candidate_gate.rs (validates_test_references_against_passing_structured_tester_evidence)
+Test: src/candidate_gate.rs (shell_evidence_uses_the_harness_native_script_identity)
+
+### B28
+
+WHEN a project provides an executable `check-pre-merge` hook, THE SYSTEM SHALL
+run that project-owned check at the candidate gate so formatting and forbidden
+dependency checks fail before review and preserve its log.
+Test: src/candidate_gate.rs (project_check_failure_rejects_candidate_and_keeps_its_log)
+Test: tests/behaviors/operations/test-dashboard-module-boundaries.sh (dashboard module boundary behavior tests passed)
+
+### B29
+
+IF `check-pre-merge` moves HEAD or changes worktree state, THEN THE SYSTEM SHALL
+block the gate as invalid host configuration.
+Test: src/candidate_gate.rs (a_project_check_that_mutates_the_candidate_blocks_as_invalid_configuration)
+
+### B30
+
+IF a Writer candidate fails deterministic checks, THEN THE SYSTEM SHALL return
+the structured gate evidence to one corrective Writer without planning a
+reviewer or final Tester.
+Test: src/work_attempt_loop.rs (deterministic_candidate_failure_returns_to_writer_before_review)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (candidate gate blocks review and final Tester)
+
+### B31
+
+IF a corrective Writer still fails deterministic checks, or the gate cannot
+establish trustworthy Git, Tester, or hook state, THEN THE SYSTEM SHALL pause
+with an actionable handoff instead of continuing indefinitely.
+Test: src/work_attempt_loop.rs (invalid_project_check_pauses_without_reviewer_or_tester)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (candidate gate blocks review and final Tester)
+
+### B32
+
+WHEN a pre-land Learner finishes, THE SYSTEM SHALL run the applicable candidate
+checks before Learning succeeds.
+Test: src/work_attempt_loop.rs (learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit)
+
+### B33
+
+IF a capture Learner produces a candidate that fails deterministic checks, THEN
+THE SYSTEM SHALL retain the gate evidence, roll back to the reviewed Writer
+commit, and keep the Merge Candidate non-ready.
+Test: src/work_attempt_loop.rs (learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit)
+
 ## Suite-health gate
 
 ### B1

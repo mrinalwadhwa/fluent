@@ -25,6 +25,14 @@ setup_test_project() {
   seed_tester_config "."
   git add . && git commit -m "init" > /dev/null 2>&1
   if [ "$planning_mode" = "matrix" ]; then
+    mkdir -p tests/behaviors/operations
+    printf '# completion matrix blocks review and final Tester\n' \
+      > tests/behaviors/operations/test-work-attempt-loop.sh
+    cat > .fluent/extract-tester-results <<'EXTRACTOR'
+#!/bin/sh
+printf '%s\n' '[{"id":"tests/behaviors/operations/test-work-attempt-loop.sh","test_harness":"shell-harness","status":"pass","duration_ms":1,"failure_excerpt":null}]'
+EXTRACTOR
+    chmod +x .fluent/extract-tester-results
     cat > behaviors.md <<'BEHAVIORS'
 ## Attempt loop
 
@@ -33,7 +41,9 @@ setup_test_project() {
 WHEN the Writer completes, THE SYSTEM SHALL retain its output.
 Test: tests/behaviors/operations/test-work-attempt-loop.sh (completion matrix blocks review and final Tester)
 BEHAVIORS
-    git add behaviors.md && git commit -m "Add attempt behavior" > /dev/null 2>&1
+    git add behaviors.md tests/behaviors/operations/test-work-attempt-loop.sh \
+      .fluent/extract-tester-results
+    git commit -m "Add attempt behavior" > /dev/null 2>&1
     "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" \
       --behaviors-file behaviors.md > /dev/null
   else
@@ -89,7 +99,11 @@ case "\$PWD" in
     count="\$(cat "${write_count_file}")"
     count="\$((count + 1))"
     printf '%s\n' "\$count" > "${write_count_file}"
-    printf 'loop output %s\n' "\$count" > "loop-output-\$count.txt"
+    if [ "${write_mode}" = "bad-whitespace" ]; then
+      printf 'loop output %s    \n' "\$count" > "loop-output-\$count.txt"
+    else
+      printf 'loop output %s\n' "\$count" > "loop-output-\$count.txt"
+    fi
     git add "loop-output-\$count.txt"
     git commit -m "Add loop output \$count" > /dev/null 2>&1
     matrix_path="\$(printf '%s' "\$*" | grep -oE '/[^[:space:]]*writer-completion\.json' | head -1 || true)"
@@ -313,10 +327,11 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
   [ "$(json_value '.attempts[0].review_state')" = "passed" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts | length')" = "1" ] || RESULT=1
-  [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts[0].path')" = ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-write-2") | .input_artifacts[] | select(.path == ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-documentation/review.md")] | length')" = "1" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].artifacts[] | select(.producer_id == "attempt-1-write-2" and (.path | endswith("/candidate-gate.json")))] | length')" = "1" ] || RESULT=1
   [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and (.id | startswith("attempt-1-review-2-")))] | length')" = "1" ] || RESULT=1
   [ "$(json_value '.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .role')" = "documentation" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.id == "attempt-1-review-2-documentation") | .input_artifacts[] | select(.producer_id == "attempt-1-write-2" and (.path | endswith("/candidate-gate.json")))] | length')" = "1" ] || RESULT=1
   return $RESULT
 }
 
@@ -404,6 +419,22 @@ test_completion_matrix_blocks_review_and_final_tester() {
   return $RESULT
 }
 
+test_candidate_gate_blocks_review_and_final_tester() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_mock_claude pass bad-whitespace
+
+  RESULT=0
+  run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "needs user input" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "tester")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" = "2" ] || RESULT=1
+  [ "$(json_value '.attempts[0].writer_runs[-1].outcome')" = "blocked" ] || RESULT=1
+  [ -f .fluent/work/artifacts/work-1/attempt-1/candidate-gates/attempt-1-write-2/candidate-gate.json ] || RESULT=1
+  return $RESULT
+}
+
 test_completion_matrix_admits_review_and_final_tester() {
   setup_test_project matrix
   trap cleanup_test_project RETURN
@@ -459,6 +490,7 @@ run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_mar
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure
 run_test "completion matrix blocks review and final Tester" test_completion_matrix_blocks_review_and_final_tester
+run_test "candidate gate blocks review and final Tester" test_candidate_gate_blocks_review_and_final_tester
 run_test "completion matrix admits review and final Tester" test_completion_matrix_admits_review_and_final_tester
 run_test "attempt loop preserves invalid state and completes Learning" test_attempt_loop_invalid_request_preserves_state_and_completes_learning
 

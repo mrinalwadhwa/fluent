@@ -167,7 +167,35 @@ authoritative complete-suite gate. Attempts created before this contract retain
 their legacy progress and review path. Fluent records each host-derived Writer
 outcome, candidate commit, progress and matrix completion counts, provider session
 identity, and whether the run was initial, pre-review continuation, or post-review
-corrective work. Codex
+corrective work.
+
+Writers with a persisted base commit also cross a deterministic admission gate
+before matrix reconciliation or review. The host verifies the exact candidate
+and clean workspace, runs `git diff --check`, rejects merge commits, invalid
+identities, literal `\\n` message text, and `Co-Authored-By` trailers, and resolves
+approved behavior references against committed test files and native test
+identifiers. It stores the results under the Attempt's `candidate-gates/`
+artifacts, separate from the Writer's private artifact directory. A first
+candidate defect becomes the sole input to one
+corrective Writer; a repeated rejection pauses. Unreadable Git or Tester evidence
+and a mutating check hook pause immediately.
+
+The same gate invokes the project's existing `check-pre-merge` hook from the
+candidate workspace. This keeps formatting and architecture rules project-owned;
+for example, this repository's hook rejects the dashboard `app` importing
+`render`, which would recreate the forbidden `app -> render -> app` dependency.
+The gate snapshots HEAD and worktree status around the hook, so a check may report
+but never repair. The later landing check remains an independent final safeguard.
+
+After the final Tester, the gate matches each `Test:` reference to its passing
+structured result. Rust selectors match the harness test ID; shell selectors use
+the script path because that is the shell harness's native test identity. A
+capture Learner runs the gate after canonicalizing expertise but before publishing
+its handoff. Rejection rolls the Learner transaction back to the reviewed Writer
+commit and leaves Learning failed and retryable. A no-expertise Learner checks the
+unchanged reviewed candidate before it publishes its handoff.
+
+Codex
 Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
 because that subcommand does not accept `exec`'s `--cd` option, Fluent sets the
 subprocess current directory to the candidate workspace instead. Claude Writers

@@ -1927,6 +1927,29 @@ fn settle_no_expertise_learner(
         }
     };
 
+    let write_output = item.attempts[attempt_index]
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .and_then(|task| task.output.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!("no completed Writer output before Learner candidate gate")
+        })?;
+    if let Err(gate) = run_learner_candidate_gate(
+        project_root,
+        item,
+        attempt_index,
+        prepared_run.launch_workspace_path.as_path(),
+        &write_output.commit,
+        &write_output.commit,
+        &prepared_run.run_dir,
+    ) {
+        settle_no_expertise_failure(store, &work_item_id, &attempt_id, runs, gate)?;
+        *item = store.read_work_item(&work_item_id)?;
+        return Ok(());
+    }
+
     // Prepare: one fresh, lock-held mutation re-finds the Attempt, requires it still
     // owns this runner's exact `InProgress { runs }` reservation and stays
     // landing-eligible, evaluates the postflight against the current aggregate and
@@ -2876,6 +2899,20 @@ fn run_pre_land_learner(
     transaction.inventory(workspace_path)?;
     let normalized = transaction.normalize(workspace_path)?;
 
+    let candidate_commit = normalized
+        .canonical_commit
+        .as_deref()
+        .unwrap_or(write_output.commit.as_str());
+    run_learner_candidate_gate(
+        project_root,
+        item,
+        attempt_index,
+        workspace_path,
+        &write_output.commit,
+        candidate_commit,
+        &current_run_dir,
+    )?;
+
     // Stamp the final handoff — a last validation of the accepted draft — with the
     // canonical expertise references. Only after BOTH the canonical result verified
     // clean and the handoff stamped do the Work-model pointers move, so no rejection
@@ -2916,6 +2953,51 @@ fn run_pre_land_learner(
         }
     }
     Ok(handoff)
+}
+
+fn run_learner_candidate_gate(
+    project_root: &Path,
+    item: &WorkItem,
+    attempt_index: usize,
+    workspace: &Path,
+    base_commit: &str,
+    candidate_commit: &str,
+    run_dir: &Path,
+) -> Result<()> {
+    let attempt = &item.attempts[attempt_index];
+    let task_id = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .map(|task| task.id.as_str());
+    let artifact_path = run_dir.join(crate::candidate_gate::CANDIDATE_GATE_FILE);
+    let tester_results = latest_tester_results_path(project_root, attempt);
+    let evidence =
+        crate::candidate_gate::run_candidate_gate(crate::candidate_gate::CandidateGateRequest {
+            project_root,
+            workspace,
+            work_item_id: &item.id,
+            attempt_id: &attempt.id,
+            task_id,
+            phase: crate::candidate_gate::CandidateGatePhase::Learner,
+            base_commit,
+            candidate_commit,
+            completion_contract: attempt.writer_completion_contract.as_ref(),
+            tester_results_path: tester_results.as_deref(),
+            artifact_path: &artifact_path,
+        })?;
+    match evidence.disposition {
+        crate::candidate_gate::CandidateGateDisposition::Passed => Ok(()),
+        crate::candidate_gate::CandidateGateDisposition::Rejected => bail!(
+            "Learner candidate gate rejected {candidate_commit}; evidence: {}",
+            artifact_path.display()
+        ),
+        crate::candidate_gate::CandidateGateDisposition::Blocked => bail!(
+            "Learner candidate gate could not verify {candidate_commit}; evidence: {}",
+            artifact_path.display()
+        ),
+    }
 }
 
 /// The review round a Tester or built-in reviewer Task belongs to. Round 1 uses
@@ -3945,7 +4027,13 @@ impl LearnerGitTransaction {
         }
         git::run(
             workspace,
-            &["commit", "--message", "Update expertise"],
+            &[
+                "commit",
+                "--message",
+                "Update expertise",
+                "--message",
+                "- Record durable project guidance from the accepted candidate.",
+            ],
             "author canonical expertise commit",
         )?;
         let head = git::run_stdout(workspace, &["rev-parse", "HEAD"], "resolve canonical HEAD")?;
@@ -4493,6 +4581,15 @@ fn plan_after_completed_writer(
             task_ids: existing_review_ids,
         });
     }
+    if let Some(outcome) = gate_candidate_after_writer(
+        project_root,
+        store,
+        &mut item,
+        attempt_id,
+        latest_write_index,
+    )? {
+        return Ok(outcome);
+    }
     if let Some(outcome) =
         gate_writer_completion_before_reviews(project_root, store, &mut item, attempt_id)?
     {
@@ -4507,6 +4604,206 @@ fn plan_after_completed_writer(
     let task_ids = item.add_next_review_tasks(attempt_id, &review_roles)?;
     store.write_work_item(&item)?;
     Ok(WorkAttemptRunOutcome::PlannedReviews { task_ids })
+}
+
+/// Run cheap host checks against the exact Writer delta before the completion
+/// matrix or any model reviewer. Legacy outputs without a persisted base commit
+/// retain their prior route. Candidate defects become one focused Writer input;
+/// unverifiable Git or hook state pauses instead of asking a Writer to repair the
+/// host boundary.
+fn gate_candidate_after_writer(
+    project_root: &Path,
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_id: &str,
+    write_index: usize,
+) -> Result<Option<WorkAttemptRunOutcome>> {
+    let attempt_index = item
+        .attempts
+        .iter()
+        .position(|attempt| attempt.id == attempt_id)
+        .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
+    let task = &item.attempts[attempt_index].tasks[write_index];
+    let output = task
+        .output
+        .as_ref()
+        .expect("completed Writer has output before candidate admission");
+    let Some(base_commit) = output.base_commit.as_deref() else {
+        return Ok(None);
+    };
+    let workspace = resolve_managed_sibling_workspace_path(
+        project_root,
+        &output.workspace_path,
+        "candidate gate workspace",
+    )?;
+    let artifact = ArtifactRef {
+        producer_id: task.id.clone(),
+        path: format!(
+            "{}/{}/{}",
+            work_artifact_path(&item.id, attempt_id, "candidate-gates"),
+            task.id,
+            crate::candidate_gate::CANDIDATE_GATE_FILE
+        ),
+    };
+    let evidence =
+        crate::candidate_gate::run_candidate_gate(crate::candidate_gate::CandidateGateRequest {
+            project_root,
+            workspace: &workspace,
+            work_item_id: &item.id,
+            attempt_id,
+            task_id: Some(&task.id),
+            phase: crate::candidate_gate::CandidateGatePhase::Writer,
+            base_commit,
+            candidate_commit: &output.commit,
+            completion_contract: item.attempts[attempt_index]
+                .writer_completion_contract
+                .as_ref(),
+            tester_results_path: None,
+            artifact_path: &project_root.join(&artifact.path),
+        })?;
+    match evidence.disposition {
+        crate::candidate_gate::CandidateGateDisposition::Passed => {
+            if !item.attempts[attempt_index].artifacts.contains(&artifact) {
+                item.attempts[attempt_index].artifacts.push(artifact);
+            }
+            Ok(None)
+        }
+        crate::candidate_gate::CandidateGateDisposition::Rejected => {
+            let repeated_rejection = item.attempts[attempt_index].tasks[write_index]
+                .input_artifacts
+                .iter()
+                .any(|input| {
+                    input
+                        .path
+                        .ends_with(crate::candidate_gate::CANDIDATE_GATE_FILE)
+                });
+            if repeated_rejection {
+                return pause_candidate_gate_before_reviews(
+                    project_root,
+                    store,
+                    item,
+                    attempt_index,
+                    attempt_id,
+                    &artifact,
+                    &evidence,
+                )
+                .map(Some);
+            }
+            record_writer_run(
+                project_root,
+                item,
+                attempt_index,
+                WriterOutcome::Continue,
+                0,
+                0,
+            );
+            item.attempts[attempt_index].status = AttemptStatus::Planned;
+            item.attempts[attempt_index].pause_kind = None;
+            let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
+            store.write_work_item(item)?;
+            Ok(Some(WorkAttemptRunOutcome::PlannedWriteRound { task_id }))
+        }
+        crate::candidate_gate::CandidateGateDisposition::Blocked => {
+            pause_candidate_gate_before_reviews(
+                project_root,
+                store,
+                item,
+                attempt_index,
+                attempt_id,
+                &artifact,
+                &evidence,
+            )
+            .map(Some)
+        }
+    }
+}
+
+fn pause_candidate_gate_before_reviews(
+    project_root: &Path,
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    attempt_id: &str,
+    artifact: &ArtifactRef,
+    evidence: &crate::candidate_gate::CandidateGateEvidence,
+) -> Result<WorkAttemptRunOutcome> {
+    record_writer_run(
+        project_root,
+        item,
+        attempt_index,
+        WriterOutcome::Blocked,
+        0,
+        0,
+    );
+    item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
+    item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
+    item.attempts[attempt_index].review_state = Some(AttemptReviewState::NotReviewed);
+    if !item.attempts[attempt_index].artifacts.contains(artifact) {
+        item.attempts[attempt_index]
+            .artifacts
+            .push(artifact.clone());
+    }
+    store.write_work_item(item)?;
+    let handoff_path =
+        write_candidate_gate_handoff(project_root, &item.id, attempt_id, &artifact.path, evidence)?;
+    store.mutate_work_item(&item.id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+            .ok_or_else(|| crate::work_model::WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            })?;
+        let handoff = ArtifactRef {
+            producer_id: "candidate-gate".to_string(),
+            path: handoff_path.clone(),
+        };
+        if !attempt.artifacts.contains(&handoff) {
+            attempt.artifacts.push(handoff);
+        }
+        Ok(())
+    })?;
+    Ok(WorkAttemptRunOutcome::NeedsUser { handoff_path })
+}
+
+fn write_candidate_gate_handoff(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    artifact_path: &str,
+    evidence: &crate::candidate_gate::CandidateGateEvidence,
+) -> Result<String> {
+    let relative_path =
+        work_artifact_path(work_item_id, attempt_id, "candidate-gate-needs-user.md");
+    let path = project_root.join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let diagnostics = evidence
+        .checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check.status,
+                crate::candidate_gate::CandidateCheckStatus::Error
+                    | crate::candidate_gate::CandidateCheckStatus::Failed
+            )
+        })
+        .flat_map(|check| {
+            check
+                .diagnostics
+                .iter()
+                .map(move |line| format!("- {}: {line}", check.name))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        &path,
+        format!(
+            "# Candidate gate needs user input\n\nFluent stopped before review because host-owned candidate checks could not establish trustworthy state.\n\nEvidence: `{artifact_path}`\n\n{diagnostics}\n"
+        ),
+    )?;
+    Ok(relative_path)
 }
 
 /// Reconcile a completed Writer's required progress and structured completion
@@ -8980,7 +9277,7 @@ mod tests {
                     workspace_id: "candidate".to_string(),
                     workspace_path: "candidate".to_string(),
                     source_branch: "work/attempt-1".to_string(),
-                    base_commit: (round > 0).then(|| format!("commit-{round}")),
+                    base_commit: None,
                     commit: format!("commit-{}", round + 1),
                     no_change: None,
                     learner_canonicalization: None,
@@ -9016,13 +9313,11 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = plan_after_completed_writer(
-            tmp.path(),
-            &store,
-            store.read_work_item("work-1").unwrap(),
-            "attempt-1",
-        )
-        .unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            gate_writer_completion_before_reviews(tmp.path(), &store, &mut item, "attempt-1")
+                .unwrap()
+                .expect("an incomplete no-change Writer pauses");
 
         assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
         let stored = store.read_work_item("work-1").unwrap();
@@ -9055,13 +9350,11 @@ mod tests {
             })
             .unwrap();
 
-        let outcome = plan_after_completed_writer(
-            tmp.path(),
-            &store,
-            store.read_work_item("work-1").unwrap(),
-            "attempt-1",
-        )
-        .unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        let outcome =
+            gate_writer_completion_before_reviews(tmp.path(), &store, &mut item, "attempt-1")
+                .unwrap()
+                .expect("an incomplete no-change Writer pauses");
 
         assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
         let stored = store.read_work_item("work-1").unwrap();
@@ -9136,7 +9429,7 @@ mod tests {
             workspace_id: "candidate".to_string(),
             workspace_path: "candidate".to_string(),
             source_branch: "work/attempt-1".to_string(),
-            base_commit: Some("commit-1".to_string()),
+            base_commit: None,
             commit: "commit-2".to_string(),
             no_change: None,
             learner_canonicalization: None,
@@ -9401,6 +9694,186 @@ mod tests {
                     .input_artifacts
                     .iter()
                     .any(|artifact| artifact.path.ends_with("/writer-completion.json"))
+            );
+        }
+    }
+
+    fn make_candidate_gate_fixture(
+        project_root: &Path,
+        candidate_source: &str,
+        hook: Option<&str>,
+    ) -> (WorkModelStore, tempfile::TempDir) {
+        let parent = project_root.parent().unwrap();
+        let workspace = tempfile::Builder::new()
+            .prefix("work-candidate-gate-")
+            .tempdir_in(parent)
+            .unwrap();
+        crate::git::run(workspace.path(), &["init", "-q"], "initialize candidate").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["config", "user.name", "Test Author"],
+            "configure author",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+            "configure email",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("README.md"), "base\n").unwrap();
+        crate::git::run(workspace.path(), &["add", "README.md"], "stage base").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["commit", "-q", "-m", "Create base"],
+            "commit base",
+        )
+        .unwrap();
+        let base =
+            crate::git::run_stdout(workspace.path(), &["rev-parse", "HEAD"], "read base").unwrap();
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/lib.rs"), candidate_source).unwrap();
+        crate::git::run(workspace.path(), &["add", "src/lib.rs"], "stage candidate").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["commit", "-q", "-m", "Add candidate"],
+            "commit candidate",
+        )
+        .unwrap();
+        let candidate =
+            crate::git::run_stdout(workspace.path(), &["rev-parse", "HEAD"], "read candidate")
+                .unwrap();
+        if let Some(hook) = hook {
+            use std::os::unix::fs::PermissionsExt;
+            let hook_dir = project_root.join(".fluent/hooks");
+            fs::create_dir_all(&hook_dir).unwrap();
+            let path = hook_dir.join("check-pre-merge");
+            fs::write(&path, hook).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem::planned("work-1", "Gate the candidate");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let relative_workspace = format!(
+            "../{}",
+            workspace.path().file_name().unwrap().to_string_lossy()
+        );
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: relative_workspace,
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: Some(base),
+            commit: candidate,
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        store.create_work_item(&item).unwrap();
+        (store, workspace)
+    }
+
+    #[test]
+    fn deterministic_candidate_failure_returns_to_writer_before_review() {
+        let project = tempfile::TempDir::new().unwrap();
+        let (store, _workspace) =
+            make_candidate_gate_fixture(project.path(), "pub fn value() {    \n}\n", None);
+
+        let outcome = plan_after_completed_writer(
+            project.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedWriteRound { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            2
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| task.kind != TaskKind::Review && task.kind != TaskKind::Tester)
+        );
+        let gate = &stored.attempts[0].tasks.last().unwrap().input_artifacts[0];
+        assert!(gate.path.ends_with("/candidate-gate.json"));
+        let evidence: crate::candidate_gate::CandidateGateEvidence =
+            serde_json::from_slice(&fs::read(project.path().join(&gate.path)).unwrap()).unwrap();
+        assert_eq!(
+            evidence.disposition,
+            crate::candidate_gate::CandidateGateDisposition::Rejected
+        );
+    }
+
+    #[test]
+    fn invalid_project_check_pauses_without_reviewer_or_tester() {
+        let project = tempfile::TempDir::new().unwrap();
+        let (store, _workspace) = make_candidate_gate_fixture(
+            project.path(),
+            "pub fn value() {}\n",
+            Some("#!/bin/sh\nprintf dirty > hook-output.txt\n"),
+        );
+
+        let outcome = plan_after_completed_writer(
+            project.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| task.kind != TaskKind::Review && task.kind != TaskKind::Tester)
+        );
+    }
+
+    #[test]
+    fn passing_candidate_gate_is_attached_to_every_reviewer() {
+        let project = tempfile::TempDir::new().unwrap();
+        let (store, _workspace) =
+            make_candidate_gate_fixture(project.path(), "pub fn value() {}\n", None);
+
+        let outcome = plan_after_completed_writer(
+            project.path(),
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedReviews { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        for reviewer in stored.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Review)
+        {
+            assert!(
+                reviewer
+                    .input_artifacts
+                    .iter()
+                    .any(|artifact| artifact.path.ends_with("/candidate-gate.json"))
             );
         }
     }
@@ -12103,6 +12576,78 @@ mod tests {
     }
 
     #[test]
+    fn learner_candidate_gate_rejects_and_rolls_back_bad_expertise_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, reviewed) =
+            make_learner_passing_fixture(tmp.path(), 1);
+        let run_coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let expertise = request.workspace_path.join(".fluent/expertise");
+            fs::create_dir_all(&expertise).unwrap();
+            fs::write(expertise.join("learning.md"), "# Learning    \n").unwrap();
+            git::run(
+                request.workspace_path,
+                &["add", ".fluent/expertise/learning.md"],
+                "add invalid expertise",
+            )
+            .unwrap();
+            git::run(
+                request.workspace_path,
+                &["commit", "-m", "Update expertise"],
+                "commit invalid expertise",
+            )
+            .unwrap();
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                r#"{"learning_summary":"x","follow_ups":[]}"#,
+            )
+            .unwrap();
+            Ok(())
+        };
+
+        let outcome = interpret_reviews(
+            &project_root,
+            &store,
+            store.read_work_item("work-1").unwrap(),
+            "attempt-1",
+            true,
+            Some(LearnerConfig {
+                run_coder: &run_coder,
+                codex_worker: None,
+                no_sandbox: false,
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::LearnerNotReady { .. }
+        ));
+        assert_eq!(
+            git::run_stdout(&workspace, &["rev-parse", "HEAD"], "read restored HEAD").unwrap(),
+            reviewed
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert!(learning.is_failed());
+        assert!(
+            learning
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("candidate gate rejected")
+        );
+        let gates = project_root.join(".fluent/work/artifacts/work-1/attempt-1/learner/runs");
+        assert!(fs::read_dir(gates).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .join(crate::candidate_gate::CANDIDATE_GATE_FILE)
+                .is_file()
+        }));
+    }
+
+    #[test]
     fn learner_expertise_commit_preserves_no_change_writer_identity() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (store, project_root, workspace, verified_commit) =
@@ -14783,6 +15328,11 @@ mod tests {
         let subject =
             git::run_stdout(&workspace, &["log", "-1", "--format=%s"], "subject").unwrap();
         assert_eq!(subject, "Update expertise");
+        let body = git::run_stdout(&workspace, &["log", "-1", "--format=%b"], "body").unwrap();
+        assert_eq!(
+            body,
+            "- Record durable project guidance from the accepted candidate."
+        );
         let tree =
             git::run_stdout(&workspace, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap();
         assert!(tree.contains(".fluent/expertise/note.md"));

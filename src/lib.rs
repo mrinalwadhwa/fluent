@@ -1,5 +1,6 @@
 pub mod atomic_write;
 pub mod auto_merge;
+pub mod candidate_gate;
 pub mod claude_auth;
 pub mod cleanup;
 pub mod cli;
