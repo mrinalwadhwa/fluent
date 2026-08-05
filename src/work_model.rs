@@ -582,6 +582,10 @@ impl WorkItem {
             .as_ref()
             .and_then(|context| context.plan.as_deref())
             .and_then(ProgressContract::from_plan);
+        let writer_completion_contract = self
+            .planning_context
+            .as_ref()
+            .and_then(WriterCompletionContract::from_planning_context);
         let input_artifacts = self.preserved_input_refs();
         self.attempts.push(Attempt {
             id: attempt_id.clone(),
@@ -622,6 +626,7 @@ impl WorkItem {
             created_at: Some(now_iso8601()),
             completed_at: None,
             progress_contract,
+            writer_completion_contract,
             ..Default::default()
         });
 
@@ -986,6 +991,12 @@ impl WorkItem {
                 producer_id: latest_write.id.clone(),
                 path: format!("{writer_artifact_path}/transcript.jsonl"),
             });
+            if attempt.writer_completion_contract.is_some() {
+                task_input_artifacts.push(ArtifactRef {
+                    producer_id: latest_write.id.clone(),
+                    path: format!("{writer_artifact_path}/writer-completion.json"),
+                });
+            }
             let progress_md_path =
                 format!("{WORK_PROGRESS_DIR}/{}/{}/progress.md", self.id, attempt_id,);
             task_input_artifacts.push(ArtifactRef {
@@ -2205,6 +2216,590 @@ pub struct ProgressContract {
     pub required: Vec<RequiredProgressEntry>,
 }
 
+/// Schema version for the immutable planning manifest that backs every
+/// host-generated Writer completion matrix.
+pub const WRITER_COMPLETION_CONTRACT_VERSION: u32 = 1;
+
+/// Maximum serialized size accepted for one Writer completion matrix. The
+/// matrix is prompt context and durable evidence, so fail before launching a
+/// Writer instead of silently truncating an approved requirement.
+pub const WRITER_COMPLETION_MATRIX_MAX_BYTES: usize = 128 * 1024;
+
+/// Source class for one immutable completion-matrix requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriterCompletionRequirementKind {
+    Behavior,
+    Approach,
+    Plan,
+    Finding,
+}
+
+/// One immutable requirement in the planning portion of a Writer completion
+/// matrix. `verification_refs` preserves the approved `Test:` marker or Plan
+/// verification cell; it does not create a new test-selector vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterCompletionRequirement {
+    pub id: String,
+    pub kind: WriterCompletionRequirementKind,
+    pub source: String,
+    pub requirement: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_refs: Vec<String>,
+}
+
+/// Immutable planning requirements stamped on a new code-producing Attempt.
+/// Legacy Attempts deserialize without this contract and retain their prior
+/// admission behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterCompletionContract {
+    pub version: u32,
+    pub requirements: Vec<WriterCompletionRequirement>,
+}
+
+impl WriterCompletionContract {
+    pub fn from_planning_context(context: &PlanningContext) -> Option<Self> {
+        let mut requirements = Vec::new();
+        if let Some(combined) = context
+            .combined
+            .as_deref()
+            .filter(|combined| !combined.trim().is_empty())
+        {
+            requirements.extend(parse_behavior_completion_requirements(combined));
+            requirements.extend(parse_approach_completion_requirements(combined));
+            requirements.extend(parse_plan_completion_requirements(combined));
+        } else {
+            if let Some(behaviors) = context.behaviors.as_deref() {
+                requirements.extend(parse_behavior_completion_requirements(behaviors));
+            }
+            if let Some(approach) = context.approach.as_deref() {
+                requirements.extend(parse_approach_completion_requirements(approach));
+            }
+            if let Some(plan) = context.plan.as_deref() {
+                requirements.extend(parse_plan_completion_requirements(plan));
+            }
+        }
+        if requirements.is_empty() {
+            None
+        } else {
+            let mut identities = std::collections::HashMap::new();
+            for requirement in &mut requirements {
+                let count = identities.entry(requirement.id.clone()).or_insert(0usize);
+                *count += 1;
+                if *count > 1 {
+                    requirement.id = format!("{}:{}", requirement.id, count);
+                }
+            }
+            Some(Self {
+                version: WRITER_COMPLETION_CONTRACT_VERSION,
+                requirements,
+            })
+        }
+    }
+}
+
+fn completion_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch);
+            pending_dash = false;
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn parse_behavior_completion_requirements(source: &str) -> Vec<WriterCompletionRequirement> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut requirements = Vec::new();
+    let mut area = "unscoped".to_string();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            area = completion_slug(heading);
+            index += 1;
+            continue;
+        }
+        let Some(behavior_id) = trimmed.strip_prefix("### ").filter(|id| {
+            id.strip_prefix('B').is_some_and(|number| {
+                !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+            })
+        }) else {
+            index += 1;
+            continue;
+        };
+        let behavior_id = behavior_id.to_ascii_lowercase();
+        let source_ref = format!("behaviors.md#{}:{}", area, behavior_id);
+        index += 1;
+        let mut statement = Vec::new();
+        let mut verification_refs = Vec::new();
+        while index < lines.len() && !lines[index].trim_start().starts_with("##") {
+            let line = lines[index].trim();
+            if let Some(reference) = line.strip_prefix("Test:") {
+                let reference = reference.trim();
+                if !reference.is_empty() {
+                    verification_refs.push(reference.to_string());
+                }
+            } else if let Some(reason) = line.strip_prefix("Untestable:") {
+                let reason = reason.trim();
+                verification_refs.push(format!("Untestable: {reason}"));
+            } else if !line.is_empty() {
+                statement.push(line.to_string());
+            }
+            index += 1;
+        }
+        requirements.push(WriterCompletionRequirement {
+            id: format!("behavior:{area}:{behavior_id}"),
+            kind: WriterCompletionRequirementKind::Behavior,
+            source: source_ref,
+            requirement: statement.join(" "),
+            verification_refs,
+        });
+    }
+    requirements
+}
+
+fn parse_approach_completion_requirements(source: &str) -> Vec<WriterCompletionRequirement> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Section {
+        Other,
+        Decisions,
+        Guidance,
+    }
+
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut section = Section::Other;
+    let mut decision = None::<String>;
+    let mut requirements = Vec::new();
+    let mut guidance_index = 0usize;
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if let Some(heading) = line.strip_prefix("## ") {
+            if heading == "Structure" {
+                let mut structure = Vec::new();
+                index += 1;
+                while index < lines.len() && !lines[index].trim_start().starts_with("## ") {
+                    let line = lines[index].trim();
+                    if !line.is_empty() {
+                        structure.push(line.to_string());
+                    }
+                    index += 1;
+                }
+                if !structure.is_empty() {
+                    requirements.push(WriterCompletionRequirement {
+                        id: "approach:structure".to_string(),
+                        kind: WriterCompletionRequirementKind::Approach,
+                        source: "approach.md#structure".to_string(),
+                        requirement: structure.join(" "),
+                        verification_refs: Vec::new(),
+                    });
+                }
+                section = Section::Other;
+                decision = None;
+                continue;
+            }
+            section = match heading {
+                "Key decisions" => Section::Decisions,
+                "Execution guidance" => Section::Guidance,
+                _ => Section::Other,
+            };
+            decision = None;
+            index += 1;
+            continue;
+        }
+        if section == Section::Decisions {
+            if let Some(heading) = line.strip_prefix("### ") {
+                decision = Some(heading.trim().to_string());
+            } else if let Some(choice) = line.strip_prefix("Choice:") {
+                if let Some(heading) = decision.as_deref() {
+                    let mut choice_lines = vec![choice.trim().to_string()];
+                    let mut cursor = index + 1;
+                    while cursor < lines.len() {
+                        let continuation = lines[cursor].trim();
+                        if continuation.starts_with("Why:")
+                            || continuation.starts_with("Alternatives:")
+                            || continuation.starts_with("Trade-offs:")
+                            || continuation.starts_with('#')
+                        {
+                            break;
+                        }
+                        if !continuation.is_empty() {
+                            choice_lines.push(continuation.to_string());
+                        }
+                        cursor += 1;
+                    }
+                    requirements.push(WriterCompletionRequirement {
+                        id: format!("approach:decision:{}", completion_slug(heading)),
+                        kind: WriterCompletionRequirementKind::Approach,
+                        source: format!("approach.md#{}", completion_slug(heading)),
+                        requirement: choice_lines.join(" "),
+                        verification_refs: Vec::new(),
+                    });
+                }
+            }
+        } else if section == Section::Guidance {
+            if let Some(guidance) = line.strip_prefix("- ") {
+                guidance_index += 1;
+                requirements.push(WriterCompletionRequirement {
+                    id: format!("approach:guidance:{guidance_index}"),
+                    kind: WriterCompletionRequirementKind::Approach,
+                    source: format!("approach.md#execution-guidance-{guidance_index}"),
+                    requirement: guidance.trim().to_string(),
+                    verification_refs: Vec::new(),
+                });
+            }
+        }
+        index += 1;
+    }
+    requirements
+}
+
+fn parse_plan_completion_requirements(source: &str) -> Vec<WriterCompletionRequirement> {
+    let mut requirements = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        let cells = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if cells.len() < 3
+            || cells[0].is_empty()
+            || !cells[0].chars().all(|c| c.is_ascii_digit())
+            || !cells
+                .last()
+                .is_some_and(|req| req.eq_ignore_ascii_case("yes"))
+        {
+            continue;
+        }
+        let verification_refs = cells
+            .get(3)
+            .filter(|verification| !verification.is_empty())
+            .map(|verification| vec![(*verification).to_string()])
+            .unwrap_or_default();
+        requirements.push(WriterCompletionRequirement {
+            id: format!("plan:step-{}", cells[0]),
+            kind: WriterCompletionRequirementKind::Plan,
+            source: format!("plan.md#step-{}", cells[0]),
+            requirement: cells[1].to_string(),
+            verification_refs,
+        });
+    }
+    requirements
+}
+
+/// One open review finding added to a corrective Writer's task-specific matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterCompletionFinding {
+    pub id: String,
+    pub role: String,
+    pub source: String,
+    pub requirement: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriterCompletionState {
+    #[default]
+    Pending,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WriterVerificationResult {
+    Pass,
+}
+
+/// One focused verification claim supplied by the Writer. It is advisory input
+/// to review; the host validates its shape, while the final Tester remains the
+/// authoritative full-suite result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriterVerificationClaim {
+    pub command: String,
+    pub result: WriterVerificationResult,
+}
+
+/// One row in a task-specific Writer completion matrix. The first five fields
+/// are host-owned and immutable. Writers fill only the remaining claim fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct WriterCompletionRow {
+    pub id: String,
+    pub kind: WriterCompletionRequirementKind,
+    pub source: String,
+    pub requirement: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_refs: Vec<String>,
+    #[serde(default)]
+    pub state: WriterCompletionState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implementation_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<WriterVerificationClaim>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applicable_constraints: Vec<String>,
+}
+
+impl From<&WriterCompletionRequirement> for WriterCompletionRow {
+    fn from(requirement: &WriterCompletionRequirement) -> Self {
+        Self {
+            id: requirement.id.clone(),
+            kind: requirement.kind,
+            source: requirement.source.clone(),
+            requirement: requirement.requirement.clone(),
+            verification_refs: requirement.verification_refs.clone(),
+            state: WriterCompletionState::Pending,
+            implementation_evidence: Vec::new(),
+            verification: Vec::new(),
+            applicable_constraints: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct WriterCompletionMatrix {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub rows: Vec<WriterCompletionRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriterCompletionMatrixStatus {
+    pub complete: usize,
+    pub required: usize,
+    pub incomplete_reason: Option<String>,
+}
+
+impl WriterCompletionMatrixStatus {
+    pub fn is_complete(&self) -> bool {
+        self.complete == self.required && self.incomplete_reason.is_none()
+    }
+}
+
+impl WriterCompletionMatrix {
+    pub fn skeleton(
+        contract: &WriterCompletionContract,
+        task_id: &str,
+        findings: &[WriterCompletionFinding],
+        prior: Option<&Self>,
+    ) -> Result<Self, String> {
+        if contract.version != WRITER_COMPLETION_CONTRACT_VERSION {
+            return Err(format!(
+                "Writer completion contract schema version {} does not match {}",
+                contract.version, WRITER_COMPLETION_CONTRACT_VERSION
+            ));
+        }
+        let mut rows = contract
+            .requirements
+            .iter()
+            .map(WriterCompletionRow::from)
+            .collect::<Vec<_>>();
+        if let Some(prior) = prior {
+            for row in &mut rows {
+                let Some(previous) = prior.rows.iter().find(|previous| {
+                    previous.id == row.id
+                        && previous.kind == row.kind
+                        && previous.source == row.source
+                        && previous.requirement == row.requirement
+                        && previous.verification_refs == row.verification_refs
+                        && previous.state == WriterCompletionState::Complete
+                }) else {
+                    continue;
+                };
+                row.state = previous.state;
+                row.implementation_evidence = previous.implementation_evidence.clone();
+                row.verification = previous.verification.clone();
+                row.applicable_constraints = previous.applicable_constraints.clone();
+            }
+        }
+        rows.extend(findings.iter().map(|finding| WriterCompletionRow {
+            id: finding.id.clone(),
+            kind: WriterCompletionRequirementKind::Finding,
+            source: finding.source.clone(),
+            requirement: format!(
+                "Address {} review finding: {}",
+                finding.role, finding.requirement
+            ),
+            verification_refs: Vec::new(),
+            state: WriterCompletionState::Pending,
+            implementation_evidence: Vec::new(),
+            verification: Vec::new(),
+            applicable_constraints: Vec::new(),
+        }));
+        let matrix = Self {
+            schema_version: WRITER_COMPLETION_CONTRACT_VERSION,
+            task_id: task_id.to_string(),
+            rows,
+        };
+        let bytes = serde_json::to_vec_pretty(&matrix)
+            .map_err(|error| format!("serialize Writer completion matrix: {error}"))?;
+        if bytes.len() > WRITER_COMPLETION_MATRIX_MAX_BYTES {
+            return Err(format!(
+                "Writer completion matrix is {} bytes; maximum is {} bytes",
+                bytes.len(),
+                WRITER_COMPLETION_MATRIX_MAX_BYTES
+            ));
+        }
+        Ok(matrix)
+    }
+
+    pub fn status_against(
+        &self,
+        contract: &WriterCompletionContract,
+        task_id: &str,
+        findings: &[WriterCompletionFinding],
+    ) -> Result<WriterCompletionMatrixStatus, String> {
+        let actual_bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| format!("serialize Writer completion matrix: {error}"))?;
+        if actual_bytes.len() > WRITER_COMPLETION_MATRIX_MAX_BYTES {
+            return Err(format!(
+                "Writer completion matrix is {} bytes; maximum is {} bytes",
+                actual_bytes.len(),
+                WRITER_COMPLETION_MATRIX_MAX_BYTES
+            ));
+        }
+        if self.schema_version != WRITER_COMPLETION_CONTRACT_VERSION {
+            return Err(format!(
+                "Writer completion matrix schema version {} does not match {}",
+                self.schema_version, WRITER_COMPLETION_CONTRACT_VERSION
+            ));
+        }
+        if self.task_id != task_id {
+            return Err(format!(
+                "Writer completion matrix belongs to Task {:?}, expected {:?}",
+                self.task_id, task_id
+            ));
+        }
+        let expected = Self::skeleton(contract, task_id, findings, None)?;
+        if self.rows.len() != expected.rows.len() {
+            return Err(format!(
+                "Writer completion matrix has {} rows; expected {}",
+                self.rows.len(),
+                expected.rows.len()
+            ));
+        }
+        let allowed_constraints = contract
+            .requirements
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    WriterCompletionRequirementKind::Behavior
+                        | WriterCompletionRequirementKind::Approach
+                )
+            })
+            .map(|entry| entry.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut complete = 0usize;
+        let mut incomplete_reason = None;
+        for (row, expected) in self.rows.iter().zip(&expected.rows) {
+            if row.id != expected.id
+                || row.kind != expected.kind
+                || row.source != expected.source
+                || row.requirement != expected.requirement
+                || row.verification_refs != expected.verification_refs
+            {
+                return Err(format!(
+                    "Writer completion matrix immutable row {:?} was omitted, reordered, or rewritten",
+                    expected.id
+                ));
+            }
+            if row.state == WriterCompletionState::Pending
+                && (!row.implementation_evidence.is_empty()
+                    || !row.verification.is_empty()
+                    || !row.applicable_constraints.is_empty())
+            {
+                return Err(format!(
+                    "Writer completion row {:?} is pending but carries completion claims",
+                    row.id
+                ));
+            }
+            if row.state == WriterCompletionState::Pending {
+                incomplete_reason.get_or_insert_with(|| {
+                    format!("Writer completion row {:?} is still pending", row.id)
+                });
+                continue;
+            }
+            if row.kind != WriterCompletionRequirementKind::Finding
+                && !row.applicable_constraints.is_empty()
+            {
+                return Err(format!(
+                    "Writer completion row {:?} is not a review finding but carries constraint mappings",
+                    row.id
+                ));
+            }
+            if row
+                .implementation_evidence
+                .iter()
+                .all(|value| value.trim().is_empty())
+            {
+                incomplete_reason.get_or_insert_with(|| {
+                    format!(
+                        "Writer completion row {:?} lacks implementation evidence",
+                        row.id
+                    )
+                });
+                continue;
+            }
+            if row.verification.is_empty()
+                || row
+                    .verification
+                    .iter()
+                    .any(|claim| claim.command.trim().is_empty())
+            {
+                incomplete_reason.get_or_insert_with(|| {
+                    format!(
+                        "Writer completion row {:?} lacks focused verification",
+                        row.id
+                    )
+                });
+                continue;
+            }
+            if row.kind == WriterCompletionRequirementKind::Finding {
+                if row.applicable_constraints.is_empty() {
+                    incomplete_reason.get_or_insert_with(|| {
+                        format!(
+                            "Writer completion finding {:?} lacks an applicable behavior or approach constraint",
+                            row.id
+                        )
+                    });
+                    continue;
+                }
+                for reference in &row.applicable_constraints {
+                    let declared_none = reference
+                        .strip_prefix("none: ")
+                        .is_some_and(|reason| !reason.trim().is_empty());
+                    if !allowed_constraints.contains(reference.as_str()) && !declared_none {
+                        return Err(format!(
+                            "Writer completion finding {:?} references unknown constraint {:?}",
+                            row.id, reference
+                        ));
+                    }
+                }
+            }
+            complete += 1;
+        }
+        Ok(WriterCompletionMatrixStatus {
+            complete,
+            required: self.rows.len(),
+            incomplete_reason,
+        })
+    }
+}
+
 /// Validated completion state of the authoritative required-progress manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredProgressStatus {
@@ -2896,6 +3491,10 @@ pub struct Attempt {
     /// deserializes without it and stays compatible with the advancement gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_contract: Option<ProgressContract>,
+    /// Immutable approved planning requirements used to generate and reconcile
+    /// one task-specific Writer completion matrix per write round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_completion_contract: Option<WriterCompletionContract>,
     /// Explicit approvals for legitimate write-round-cap pauses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub round_cap_extensions: Vec<RoundCapExtension>,
@@ -2919,6 +3518,7 @@ impl Default for Attempt {
             completed_at: None,
             learning: None,
             progress_contract: None,
+            writer_completion_contract: None,
             round_cap_extensions: Vec::new(),
         }
     }
@@ -3885,6 +4485,8 @@ pub struct WriterRun {
     pub continuation: u32,
     #[serde(default)]
     pub checked_required: usize,
+    #[serde(default)]
+    pub completed_matrix: usize,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub candidate_commit: String,
 }
@@ -5032,6 +5634,8 @@ struct AttemptRecord {
     learning: Option<AttemptLearning>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     progress_contract: Option<ProgressContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_completion_contract: Option<WriterCompletionContract>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     round_cap_extensions: Vec<RoundCapExtension>,
 }
@@ -5114,6 +5718,7 @@ impl AttemptRecord {
             completed_at: attempt.completed_at.clone(),
             learning: attempt.learning.clone(),
             progress_contract: attempt.progress_contract.clone(),
+            writer_completion_contract: attempt.writer_completion_contract.clone(),
             round_cap_extensions: attempt.round_cap_extensions.clone(),
         }
     }
@@ -5137,6 +5742,7 @@ impl From<AttemptRecord> for Attempt {
             completed_at: record.completed_at,
             learning: record.learning,
             progress_contract: record.progress_contract,
+            writer_completion_contract: record.writer_completion_contract,
             round_cap_extensions: record.round_cap_extensions,
         }
     }
@@ -6724,6 +7330,7 @@ mod tests {
             session_id: Some("thread-1".to_string()),
             continuation: 2,
             checked_required: 3,
+            completed_matrix: 0,
             candidate_commit: "abc123".to_string(),
         };
         let encoded = serde_json::to_value(&run).unwrap();
@@ -6837,6 +7444,304 @@ mod tests {
 ";
         assert!(ProgressContract::from_plan(plan_no_required).is_none());
         assert!(ProgressContract::from_plan("no table here").is_none());
+    }
+
+    #[test]
+    fn writer_completion_contract_maps_approved_planning_inputs() {
+        let context = PlanningContext {
+            behaviors: Some(
+                "# Behaviors (diff)\n\n\
+                 ## Dashboard navigation\n\n\
+                 ### B1\n\n\
+                 WHEN the user presses Down,\n\
+                 THE SYSTEM SHALL move the selection by one row.\n\
+                 Test: tests/dashboard.rs (down_moves_selection)\n"
+                    .to_string(),
+            ),
+            approach: Some(
+                "# Approach\n\n\
+                 ## Key decisions\n\n\
+                 ### Keep selection in app state\n\n\
+                 Choice: The app owns selection and rendering receives it by value.\n\n\
+                 Why: Navigation semantics stay outside terminal drawing.\n\n\
+                 ## Structure\n\n\
+                 The app owns selection; render depends only on render data.\n\n\
+                 ## Execution guidance\n\n\
+                 - Keep render independent from app state.\n"
+                    .to_string(),
+            ),
+            plan: Some(
+                "| # | State reached | Behaviors | Verification | Req? |\n\
+                 |---|---------------|-----------|--------------|------|\n\
+                 | 1 | Down moves selection | Dashboard navigation:B1 | `cargo test down_moves_selection` | Yes |\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let contract = WriterCompletionContract::from_planning_context(&context)
+            .expect("approved planning inputs derive a completion contract");
+        assert_eq!(contract.version, WRITER_COMPLETION_CONTRACT_VERSION);
+        assert_eq!(
+            contract
+                .requirements
+                .iter()
+                .map(|entry| (entry.kind, entry.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    WriterCompletionRequirementKind::Behavior,
+                    "behavior:dashboard-navigation:b1"
+                ),
+                (
+                    WriterCompletionRequirementKind::Approach,
+                    "approach:decision:keep-selection-in-app-state"
+                ),
+                (
+                    WriterCompletionRequirementKind::Approach,
+                    "approach:structure"
+                ),
+                (
+                    WriterCompletionRequirementKind::Approach,
+                    "approach:guidance:1"
+                ),
+                (WriterCompletionRequirementKind::Plan, "plan:step-1"),
+            ]
+        );
+        assert_eq!(
+            contract.requirements[0].verification_refs,
+            vec!["tests/dashboard.rs (down_moves_selection)"]
+        );
+        assert_eq!(
+            contract.requirements[4].verification_refs,
+            vec!["`cargo test down_moves_selection`"]
+        );
+
+        let mut item = WorkItem::planned("matrix-work", "Matrix work");
+        item.planning_context = Some(context);
+        item.add_initial_attempt("attempt-1").unwrap();
+        assert_eq!(
+            item.attempts[0].writer_completion_contract.as_ref(),
+            Some(&contract),
+            "the approved manifest is stamped before the Attempt is persisted"
+        );
+    }
+
+    #[test]
+    fn writer_completion_matrix_reconciles_claims_and_corrective_findings() {
+        let contract = WriterCompletionContract {
+            version: WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![WriterCompletionRequirement {
+                id: "behavior:dashboard:b1".to_string(),
+                kind: WriterCompletionRequirementKind::Behavior,
+                source: "behaviors.md#dashboard:b1".to_string(),
+                requirement: "WHEN refreshed, THE SYSTEM SHALL preserve selection.".to_string(),
+                verification_refs: vec!["tests/dashboard.rs (preserves_selection)".to_string()],
+            }],
+        };
+        let findings = vec![WriterCompletionFinding {
+            id: "finding:tests:stable-id".to_string(),
+            role: "tests".to_string(),
+            source: ".fluent/work/artifacts/review-tests/review.md".to_string(),
+            requirement: "Assert overflow navigation directly".to_string(),
+        }];
+        let mut matrix =
+            WriterCompletionMatrix::skeleton(&contract, "attempt-1-write-2", &findings, None)
+                .unwrap();
+        assert_eq!(matrix.rows.len(), 2);
+        assert!(
+            !matrix
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap()
+                .is_complete()
+        );
+
+        for row in &mut matrix.rows {
+            row.state = WriterCompletionState::Complete;
+            row.implementation_evidence = vec!["src/dashboard.rs".to_string()];
+            row.verification = vec![WriterVerificationClaim {
+                command: "cargo test preserves_selection".to_string(),
+                result: WriterVerificationResult::Pass,
+            }];
+        }
+        assert!(
+            matrix
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap()
+                .incomplete_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("applicable behavior or approach"))
+        );
+        matrix.rows[1].applicable_constraints = vec!["behavior:dashboard:b1".to_string()];
+        assert!(
+            matrix
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap()
+                .is_complete()
+        );
+
+        let mut rewritten = matrix.clone();
+        rewritten.rows[0].requirement.push_str(" rewritten");
+        assert!(
+            rewritten
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap_err()
+                .contains("rewritten")
+        );
+
+        let mut missing = matrix.clone();
+        missing.rows.pop();
+        assert!(
+            missing
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap_err()
+                .contains("expected 2")
+        );
+
+        let mut unknown_constraint = matrix.clone();
+        unknown_constraint.rows[1].applicable_constraints = vec!["behavior:unknown:b9".to_string()];
+        assert!(
+            unknown_constraint
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap_err()
+                .contains("unknown constraint")
+        );
+
+        let mut contradictory = matrix.clone();
+        contradictory.rows[0].state = WriterCompletionState::Pending;
+        assert!(
+            contradictory
+                .status_against(&contract, "attempt-1-write-2", &findings)
+                .unwrap_err()
+                .contains("pending but carries completion claims")
+        );
+    }
+
+    #[test]
+    fn writer_completion_contract_uses_combined_context_as_authority() {
+        let context = PlanningContext {
+            behaviors: Some("## Ignored\n\n### B9\n\nSHALL be ignored".to_string()),
+            combined: Some(
+                "## Combined behavior\n\n\
+                 ### B1\n\n\
+                 WHEN combined, THE SYSTEM SHALL use this statement.\n\
+                 Test: tests/combined.rs (uses_combined)\n\n\
+                 ## Steps\n\n\
+                 | # | State reached | Behaviors | Verification | Req? |\n\
+                 |---|---------------|-----------|--------------|------|\n\
+                 | 1 | Combined state | Combined behavior:B1 | combined check | Yes |\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let contract = WriterCompletionContract::from_planning_context(&context).unwrap();
+        assert!(
+            contract
+                .requirements
+                .iter()
+                .any(|row| row.id == "behavior:combined-behavior:b1")
+        );
+        assert!(
+            contract
+                .requirements
+                .iter()
+                .any(|row| row.id == "plan:step-1")
+        );
+        assert!(
+            contract
+                .requirements
+                .iter()
+                .all(|row| row.id != "behavior:ignored:b9")
+        );
+    }
+
+    #[test]
+    fn next_writer_matrix_carries_planning_claims_but_reopens_findings() {
+        let contract = WriterCompletionContract {
+            version: WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![WriterCompletionRequirement {
+                id: "plan:step-1".to_string(),
+                kind: WriterCompletionRequirementKind::Plan,
+                source: "plan.md#step-1".to_string(),
+                requirement: "Dashboard is navigable".to_string(),
+                verification_refs: vec!["dashboard journey".to_string()],
+            }],
+        };
+        let finding = WriterCompletionFinding {
+            id: "finding:tests:stable-id".to_string(),
+            role: "tests".to_string(),
+            source: "review-tests/review.md".to_string(),
+            requirement: "Add direct assertion".to_string(),
+        };
+        let mut prior = WriterCompletionMatrix::skeleton(
+            &contract,
+            "attempt-1-write-1",
+            std::slice::from_ref(&finding),
+            None,
+        )
+        .unwrap();
+        for row in &mut prior.rows {
+            row.state = WriterCompletionState::Complete;
+            row.implementation_evidence = vec!["commit abc".to_string()];
+            row.verification = vec![WriterVerificationClaim {
+                command: "cargo test dashboard".to_string(),
+                result: WriterVerificationResult::Pass,
+            }];
+        }
+
+        let next = WriterCompletionMatrix::skeleton(
+            &contract,
+            "attempt-1-write-2",
+            std::slice::from_ref(&finding),
+            Some(&prior),
+        )
+        .unwrap();
+        assert_eq!(next.rows[0].state, WriterCompletionState::Complete);
+        assert_eq!(next.rows[1].state, WriterCompletionState::Pending);
+        assert!(next.rows[1].implementation_evidence.is_empty());
+    }
+
+    #[test]
+    fn writer_completion_matrix_refuses_unbounded_context() {
+        let oversized_contract = WriterCompletionContract {
+            version: WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![WriterCompletionRequirement {
+                id: "behavior:large:b1".to_string(),
+                kind: WriterCompletionRequirementKind::Behavior,
+                source: "behaviors.md#large:b1".to_string(),
+                requirement: "x".repeat(WRITER_COMPLETION_MATRIX_MAX_BYTES),
+                verification_refs: Vec::new(),
+            }],
+        };
+        let error = WriterCompletionMatrix::skeleton(&oversized_contract, "write-1", &[], None)
+            .unwrap_err();
+        assert!(error.contains("maximum"));
+
+        let contract = WriterCompletionContract {
+            version: WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![WriterCompletionRequirement {
+                id: "behavior:bounded:b1".to_string(),
+                kind: WriterCompletionRequirementKind::Behavior,
+                source: "behaviors.md#bounded:b1".to_string(),
+                requirement: "Keep evidence bounded".to_string(),
+                verification_refs: Vec::new(),
+            }],
+        };
+        let mut matrix = WriterCompletionMatrix::skeleton(&contract, "write-1", &[], None).unwrap();
+        matrix.rows[0].state = WriterCompletionState::Complete;
+        matrix.rows[0].implementation_evidence =
+            vec!["x".repeat(WRITER_COMPLETION_MATRIX_MAX_BYTES)];
+        matrix.rows[0].verification = vec![WriterVerificationClaim {
+            command: "cargo test bounded".to_string(),
+            result: WriterVerificationResult::Pass,
+        }];
+        assert!(
+            matrix
+                .status_against(&contract, "write-1", &[])
+                .unwrap_err()
+                .contains("maximum")
+        );
     }
 
     #[test]

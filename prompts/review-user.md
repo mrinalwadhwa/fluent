@@ -80,6 +80,9 @@ failed review at {{evidence_prior_review_path}} for commit
 {{#if is_review_behaviors_before_final_tester}}
    - For each `Test:` reference, verify that the named test exists and directly exercises the behavior. Use the Writer's focused verification only as advisory evidence; the final Tester has not run yet.
 {{/if}}
+{{#if has_writer_completion_matrix}}
+   - Read the Writer completion matrix at {{writer_completion_matrix_path}}. Treat its implementation and focused-verification claims as an advisory coverage map, not authoritative test evidence. Check the candidate and cited sources directly; the final Tester has not run yet.
+{{/if}}
 {{#if is_review_architecture}}
    - Flag structural choices that diverge from what `approach.md` specifies. Do not re-litigate `approach.md` itself — that judgment lives with `define-approach`. If the approach is itself the problem, mark Verdict `uncertain` and record the concern as a finding.
    - Flag any structural decision the Writer made that isn't already in `decisions.md` and that a future contributor would want to know about.

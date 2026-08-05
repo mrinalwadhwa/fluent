@@ -12,6 +12,7 @@ source "${PROJECT_DIR}/tests/lib/work_test_fixtures.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 setup_test_project() {
+  local planning_mode="${1:-legacy}"
   TEST_DIR="$(mktemp -d -t fluent-work-attempt-loop-XXXXXX)"
   mkdir -p "$TEST_DIR/project" "$TEST_DIR/bin"
   cd "$TEST_DIR/project"
@@ -23,7 +24,21 @@ setup_test_project() {
   seed_review_skill_stubs "."
   seed_tester_config "."
   git add . && git commit -m "init" > /dev/null 2>&1
-  "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
+  if [ "$planning_mode" = "matrix" ]; then
+    cat > behaviors.md <<'BEHAVIORS'
+## Attempt loop
+
+### B1
+
+WHEN the Writer completes, THE SYSTEM SHALL retain its output.
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (completion matrix blocks review and final Tester)
+BEHAVIORS
+    git add behaviors.md && git commit -m "Add attempt behavior" > /dev/null 2>&1
+    "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" \
+      --behaviors-file behaviors.md > /dev/null
+  else
+    "$FLUENT_BIN" work-item create work-1 --title "Attempt loop" > /dev/null
+  fi
   "$FLUENT_BIN" attempt create work-1 attempt-1 > /dev/null
 }
 
@@ -42,6 +57,7 @@ cleanup_test_project() {
 write_mock_claude() {
   local verdict="$1"
   local write_mode="${2:-commit}"
+  local matrix_mode="${3:-complete}"
   local write_count_file="${TEST_DIR}/write-count"
   printf '0\n' > "$write_count_file"
   cat > "${TEST_DIR}/bin/claude" <<MOCK_SCRIPT
@@ -76,6 +92,14 @@ case "\$PWD" in
     printf 'loop output %s\n' "\$count" > "loop-output-\$count.txt"
     git add "loop-output-\$count.txt"
     git commit -m "Add loop output \$count" > /dev/null 2>&1
+    matrix_path="\$(printf '%s' "\$*" | grep -oE '/[^[:space:]]*writer-completion\.json' | head -1 || true)"
+    if [ -n "\$matrix_path" ] && [ -f "\$matrix_path" ] && [ "${matrix_mode}" = "complete" ]; then
+      jq '(.rows[] | .state) = "complete"
+          | (.rows[] | .["implementation-evidence"]) = ["loop-output"]
+          | (.rows[] | .verification) = [{"command":"test -f loop-output-1.txt","result":"pass"}]' \
+        "\$matrix_path" > "\$matrix_path.tmp"
+      mv "\$matrix_path.tmp" "\$matrix_path"
+    fi
     ;;
   *)
     if [ "${verdict}" = "mixed-missing" ]; then
@@ -365,6 +389,35 @@ test_attempt_loop_stops_after_task_executor_failure() {
   return $RESULT
 }
 
+test_completion_matrix_blocks_review_and_final_tester() {
+  setup_test_project matrix
+  trap cleanup_test_project RETURN
+  write_mock_claude pass commit pending
+
+  RESULT=0
+  run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "needs user input" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "tester")] | length')" = "0" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "write")] | length')" -ge "2" ] || RESULT=1
+  [ "$(json_value '.attempts[0].writer_runs[0].completed_matrix')" = "0" ] || RESULT=1
+  return $RESULT
+}
+
+test_completion_matrix_admits_review_and_final_tester() {
+  setup_test_project matrix
+  trap cleanup_test_project RETURN
+  write_mock_claude pass
+
+  RESULT=0
+  run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "review" and .status == "complete")] | length')" = "5" ] || RESULT=1
+  [ "$(json_value '[.attempts[0].tasks[] | select(.kind == "tester" and .status == "complete")] | length')" = "1" ] || RESULT=1
+  [ "$(json_value '.attempts[0].writer_runs[0].completed_matrix')" = "1" ] || RESULT=1
+  return $RESULT
+}
+
 test_attempt_loop_invalid_request_preserves_state_and_completes_learning() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -405,6 +458,8 @@ run_test "attempt loop counts preplanned follow-up against budget" test_attempt_
 run_test "attempt loop marks uncertain reviews needs-user" test_attempt_loop_marks_uncertain_reviews_needs_user
 run_test "attempt loop marks missing verdict needs-user" test_attempt_loop_marks_missing_verdict_needs_user
 run_test "attempt loop stops after Task executor failure" test_attempt_loop_stops_after_task_executor_failure
+run_test "completion matrix blocks review and final Tester" test_completion_matrix_blocks_review_and_final_tester
+run_test "completion matrix admits review and final Tester" test_completion_matrix_admits_review_and_final_tester
 run_test "attempt loop preserves invalid state and completes Learning" test_attempt_loop_invalid_request_preserves_state_and_completes_learning
 
 summarize_and_exit

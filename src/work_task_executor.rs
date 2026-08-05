@@ -39,6 +39,7 @@ pub struct WorkTaskRunResult {
 }
 
 const NO_CHANGE_DECLARATION_FILE: &str = "no-change.json";
+pub(crate) const WRITER_COMPLETION_MATRIX_FILE: &str = "writer-completion.json";
 const REVIEW_ARTIFACT_WARN_BYTES: u64 = 16 * 1024 * 1024;
 const EXECUTION_CONTEXT_MAX_BYTES: usize = 128 * 1024;
 const EXECUTION_CONTEXT_MAX_CHANGED_FILES: usize = 100;
@@ -3080,6 +3081,7 @@ fn run_task_coder_with_coder(
     // Idempotent and crash-safe: an existing section is left untouched.
     if task.kind == TaskKind::Write {
         materialize_required_progress_before_writer(project_root, item, attempt_id)?;
+        materialize_writer_completion_before_writer(project_root, item, attempt_id, task_id)?;
     }
     let prompt = if item
         .attempts
@@ -3412,6 +3414,22 @@ fn build_write_task_prompt_with_workspace(
         .and_then(|a| a.progress_contract.as_ref())
         .is_some();
     let has_required_progress_value = if has_required_progress { "yes" } else { "" };
+    let writer_completion_matrix_pathbuf = project_root.and_then(|root| {
+        item.attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .filter(|attempt| attempt.writer_completion_contract.is_some())
+            .and_then(|_| writer_completion_matrix_path(root, task))
+    });
+    let writer_completion_matrix_path = writer_completion_matrix_pathbuf
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let has_writer_completion_matrix_value = if writer_completion_matrix_pathbuf.is_some() {
+        "yes"
+    } else {
+        ""
+    };
     let has_prior_reviews = !prior_reviews.is_empty();
     let has_work_item_inputs = !work_item_inputs.is_empty();
     let planning = project_root
@@ -3514,6 +3532,14 @@ fn build_write_task_prompt_with_workspace(
             ("has_no_prior_reviews", has_no_prior_reviews_value),
             ("has_progress_md", has_progress_md_value),
             ("has_required_progress", has_required_progress_value),
+            (
+                "writer_completion_matrix_path",
+                &writer_completion_matrix_path,
+            ),
+            (
+                "has_writer_completion_matrix",
+                has_writer_completion_matrix_value,
+            ),
             ("general_expertise_index", &general_expertise_index),
             ("project_expertise_index", &project_expertise_index),
             (
@@ -3567,6 +3593,21 @@ fn build_writer_continuation_prompt(
         &unresolved_steps,
         prior_reviews,
     )?;
+    let has_writer_completion_matrix = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .is_some_and(|attempt| attempt.writer_completion_contract.is_some());
+    let writer_completion_matrix_path = has_writer_completion_matrix
+        .then(|| writer_completion_matrix_path(project_root, task))
+        .flatten()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let has_writer_completion_matrix_value = if has_writer_completion_matrix {
+        "yes"
+    } else {
+        ""
+    };
     let planning = compute_planning_paths(item, project_root);
     let brief_path = planning.brief();
     let behaviors_path = planning.behaviors();
@@ -3583,6 +3624,14 @@ fn build_writer_continuation_prompt(
             ("attempt_id", attempt_id),
             ("task_id", task_id),
             ("progress_md_path", &progress_path.display().to_string()),
+            (
+                "writer_completion_matrix_path",
+                &writer_completion_matrix_path,
+            ),
+            (
+                "has_writer_completion_matrix",
+                has_writer_completion_matrix_value,
+            ),
             ("brief_path", &brief_path),
             ("behaviors_path", &behaviors_path),
             ("approach_path", &approach_path),
@@ -4877,6 +4926,168 @@ pub(crate) fn materialize_required_progress_before_writer(
     Ok(())
 }
 
+fn writer_completion_matrix_path(
+    project_root: &Path,
+    task: &crate::work_model::Task,
+) -> Option<PathBuf> {
+    task.artifact_area.as_ref().map(|area| {
+        project_root
+            .join(&area.path)
+            .join(WRITER_COMPLETION_MATRIX_FILE)
+    })
+}
+
+fn managed_writer_completion_matrix_path(
+    project_root: &Path,
+    task: &crate::work_model::Task,
+) -> Result<Option<PathBuf>> {
+    task.artifact_area
+        .as_ref()
+        .map(|area| {
+            resolve_managed_artifact_area_path(project_root, &area.path)
+                .map(|dir| dir.join(WRITER_COMPLETION_MATRIX_FILE))
+        })
+        .transpose()
+}
+
+pub(crate) fn writer_completion_findings(
+    project_root: &Path,
+    task: &crate::work_model::Task,
+) -> Result<Vec<crate::work_model::WriterCompletionFinding>> {
+    let mut findings = BTreeMap::new();
+    for artifact in &task.input_artifacts {
+        let relative = Path::new(&artifact.path);
+        let is_review = relative.file_name().is_some_and(|name| {
+            name == "review.md" || name.to_string_lossy().starts_with("review-")
+        });
+        if !is_review {
+            continue;
+        }
+        let path = resolve_input_artifact_path(project_root, &artifact.path)?;
+        let source = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read review findings for Writer completion matrix: {}",
+                path.display()
+            )
+        })?;
+        let role = crate::review::REVIEWERS
+            .iter()
+            .find(|role| {
+                artifact.producer_id.contains(**role)
+                    || artifact.path.contains(&format!("review-{role}"))
+            })
+            .copied()
+            .unwrap_or("unknown");
+        for title in crate::review::open_finding_titles(&source) {
+            let identity = crate::review::finding_identity(role, &title);
+            findings
+                .entry((role.to_string(), identity.clone()))
+                .or_insert(crate::work_model::WriterCompletionFinding {
+                    id: format!("finding:{role}:{identity}"),
+                    role: role.to_string(),
+                    source: artifact.path.clone(),
+                    requirement: title,
+                });
+        }
+    }
+    Ok(findings.into_values().collect())
+}
+
+/// Materialize one task-specific structured completion matrix before launching a
+/// Writer. Existing task evidence is never overwritten on retry. Planning claims
+/// carry forward from the latest prior Writer, while findings in the current
+/// review frontier always start pending.
+pub(crate) fn materialize_writer_completion_before_writer(
+    project_root: &Path,
+    item: &WorkItem,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(attempt) = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+    else {
+        return Ok(None);
+    };
+    let Some(contract) = attempt.writer_completion_contract.as_ref() else {
+        return Ok(None);
+    };
+    let Some(task_index) = attempt.tasks.iter().position(|task| task.id == task_id) else {
+        return Ok(None);
+    };
+    let task = &attempt.tasks[task_index];
+    let Some(path) = managed_writer_completion_matrix_path(project_root, task)? else {
+        anyhow::bail!("Writer Task {task_id:?} has no artifact area for its completion matrix");
+    };
+    match fs::metadata(&path) {
+        Ok(metadata)
+            if metadata.len() > crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES as u64 =>
+        {
+            anyhow::bail!(
+                "existing Writer completion matrix is {} bytes; maximum is {} bytes: {}",
+                metadata.len(),
+                crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES,
+                path.display()
+            );
+        }
+        Ok(_) => return Ok(Some(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect existing Writer completion matrix: {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    let prior = attempt.tasks[..task_index]
+        .iter()
+        .rev()
+        .find(|candidate| candidate.kind == TaskKind::Write)
+        .map(|candidate| managed_writer_completion_matrix_path(project_root, candidate))
+        .transpose()?
+        .flatten()
+        .map(|prior_path| {
+            let source = fs::read_to_string(&prior_path).with_context(|| {
+                format!(
+                    "read prior Writer completion matrix: {}",
+                    prior_path.display()
+                )
+            })?;
+            serde_json::from_str::<crate::work_model::WriterCompletionMatrix>(&source).with_context(
+                || {
+                    format!(
+                        "parse prior Writer completion matrix: {}",
+                        prior_path.display()
+                    )
+                },
+            )
+        })
+        .transpose()?;
+    let findings = writer_completion_findings(project_root, task)?;
+    let matrix = crate::work_model::WriterCompletionMatrix::skeleton(
+        contract,
+        task_id,
+        &findings,
+        prior.as_ref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let bytes = serde_json::to_vec_pretty(&matrix).context("serialize Writer completion matrix")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create Writer completion matrix directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    crate::atomic_write::atomic_write(&path, &bytes)
+        .with_context(|| format!("install Writer completion matrix: {}", path.display()))?;
+    Ok(Some(path))
+}
+
 /// Compute the absolute paths the writer/reviewer prompts reference for each
 /// planning section. Returns `None` for sections with empty content.
 fn compute_planning_paths(item: &WorkItem, project_root: &Path) -> PlanningFilePaths {
@@ -5355,6 +5566,20 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         })
         .map(|path| path.display().to_string())
         .unwrap_or_default();
+    let writer_completion_matrix_path = input
+        .input_artifacts
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == WRITER_COMPLETION_MATRIX_FILE)
+        })
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let has_writer_completion_matrix = if writer_completion_matrix_path.is_empty() {
+        ""
+    } else {
+        "yes"
+    };
     let reviewer_progress_md_path =
         progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
             .display()
@@ -5454,6 +5679,11 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("tester_results_path", &tester_results_path),
             ("has_final_tester_evidence", has_final_tester_evidence),
             ("writer_transcript_path", &writer_transcript_path),
+            (
+                "writer_completion_matrix_path",
+                &writer_completion_matrix_path,
+            ),
+            ("has_writer_completion_matrix", has_writer_completion_matrix),
             ("progress_md_path", &reviewer_progress_md_path),
             ("review_path", &review_path_display),
             ("artifact_dir", &artifact_dir_display),
@@ -7447,6 +7677,7 @@ mod tests {
                 session_id: Some("writer-thread-1".to_string()),
                 continuation: 0,
                 checked_required: 0,
+                completed_matrix: 0,
                 candidate_commit: "commit-1".to_string(),
             });
 
@@ -7502,6 +7733,7 @@ mod tests {
                 session_id: Some("claude-session-1".to_string()),
                 continuation: 0,
                 checked_required: 0,
+                completed_matrix: 0,
                 candidate_commit: "commit-1".to_string(),
             });
 
@@ -11817,6 +12049,11 @@ mod tests {
             r#"{"type":"agent_message","message":"Verification: cargo test focused — pass"}"#,
         )
         .unwrap();
+        let writer_matrix = writer_transcript
+            .parent()
+            .unwrap()
+            .join(WRITER_COMPLETION_MATRIX_FILE);
+        fs::write(&writer_matrix, "{\"schema-version\":1}").unwrap();
 
         let item = review_item_with_role("behaviors");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
@@ -11827,7 +12064,7 @@ mod tests {
             artifact_dir: &artifact_dir,
             review_path: &review_path,
             readable_workspaces: std::slice::from_ref(&workspace),
-            input_artifacts: std::slice::from_ref(&writer_transcript),
+            input_artifacts: &[writer_transcript.clone(), writer_matrix.clone()],
             review_only: false,
         })
         .unwrap();
@@ -11850,6 +12087,12 @@ mod tests {
             prompts.review_prompt.contains("advisory evidence"),
             "pre-Tester reviewers should receive the Writer verification boundary"
         );
+        assert!(
+            prompts
+                .review_prompt
+                .contains(&writer_matrix.display().to_string())
+        );
+        assert!(prompts.review_prompt.contains("advisory coverage map"));
         assert!(
             !prompts.review_prompt.contains("host-owned outcomes"),
             "pre-Tester reviewers must not be told canonical evidence already exists"
@@ -12372,6 +12615,7 @@ mod tests {
                 session_id: Some("writer-thread-1".to_string()),
                 continuation: 0,
                 checked_required: 1,
+                completed_matrix: 0,
                 candidate_commit: "commit-1".to_string(),
             });
         let project = tempfile::TempDir::new().unwrap();
@@ -12438,7 +12682,27 @@ mod tests {
         assert!(prompt.contains(&context_path.display().to_string()));
         assert!(!prompt.contains("new candidate content"));
         assert!(!prompt.contains("Fix the boundary"));
+        assert!(!prompt.contains("Writer completion matrix:"));
         assert!(!prompt.contains("{{"));
+
+        item.attempts[0].writer_completion_contract =
+            Some(crate::work_model::WriterCompletionContract {
+                version: crate::work_model::WRITER_COMPLETION_CONTRACT_VERSION,
+                requirements: Vec::new(),
+            });
+        let matrix_prompt = build_writer_continuation_prompt(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            std::slice::from_ref(&finding),
+            workspace.path(),
+            project.path(),
+        )
+        .unwrap();
+        assert!(matrix_prompt.contains("Writer completion matrix:"));
+        assert!(matrix_prompt.contains("Preserve every host-owned row field"));
+        assert!(matrix_prompt.contains("writer-completion.json"));
+        assert!(!matrix_prompt.contains("{{"));
 
         let context: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
@@ -12536,6 +12800,10 @@ mod tests {
             prompt.contains("without re-creating or rewording"),
             "the prompt preserves the required manifest while migrating legacy rows; got:\n{prompt}"
         );
+        assert!(prompt.contains("writer-completion.json"));
+        assert!(prompt.contains("Writer completion matrix"));
+        assert!(prompt.contains("harness-native"));
+        assert!(prompt.contains("does not replace the project's test selectors"));
 
         // An unmarked (legacy) follow-up still separates review findings, then
         // resumes its ordinary plan checklist without required-progress terms.
@@ -12569,6 +12837,120 @@ mod tests {
                 && !plain_prompt.contains("first `- [ ]` required item"),
             "an unmarked follow-up omits required-progress terminology; got:\n{plain_prompt}"
         );
+    }
+
+    #[test]
+    fn corrective_writer_matrix_carries_planning_rows_and_adds_open_findings() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mut item = WorkItem::planned("work-1", "Dashboard correction");
+        item.planning_context = Some(crate::work_model::PlanningContext {
+            behaviors: Some(
+                "## Dashboard\n\n### B1\n\nWHEN refreshed, THE SYSTEM SHALL preserve selection.\nTest: tests/dashboard.rs (preserves_selection)\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+        item.add_initial_attempt("attempt-1").unwrap();
+        materialize_writer_completion_before_writer(
+            project.path(),
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+        )
+        .unwrap();
+        let first_path = project.path().join(
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/writer-completion.json",
+        );
+        let mut first: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_str(&fs::read_to_string(&first_path).unwrap()).unwrap();
+        first.rows[0].state = crate::work_model::WriterCompletionState::Complete;
+        first.rows[0].implementation_evidence = vec!["src/dashboard.rs".to_string()];
+        first.rows[0].verification = vec![crate::work_model::WriterVerificationClaim {
+            command: "cargo test preserves_selection".to_string(),
+            result: crate::work_model::WriterVerificationResult::Pass,
+        }];
+        fs::write(&first_path, serde_json::to_vec_pretty(&first).unwrap()).unwrap();
+        let first_task = &mut item.attempts[0].tasks[0];
+        first_task.status = TaskStatus::Complete;
+        first_task.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
+            commit: "commit-1".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let review_rel =
+            ".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-1-tests/review.md";
+        let review_path = project.path().join(review_rel);
+        fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+        fs::write(
+            &review_path,
+            "Verdict: fail\n\n## Findings\n\n- [ ] Assert overflow navigation directly (blocking)\n",
+        )
+        .unwrap();
+        let task_id = item
+            .add_next_write_round(
+                "attempt-1",
+                vec![crate::work_model::ArtifactRef {
+                    producer_id: "attempt-1-review-1-tests".to_string(),
+                    path: review_rel.to_string(),
+                }],
+            )
+            .unwrap();
+
+        let path = materialize_writer_completion_before_writer(
+            project.path(),
+            &item,
+            "attempt-1",
+            &task_id,
+        )
+        .unwrap()
+        .unwrap();
+        let matrix: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(matrix.rows.len(), 2);
+        assert_eq!(
+            matrix.rows[0].state,
+            crate::work_model::WriterCompletionState::Complete
+        );
+        assert_eq!(
+            matrix.rows[1].kind,
+            crate::work_model::WriterCompletionRequirementKind::Finding
+        );
+        assert_eq!(
+            matrix.rows[1].state,
+            crate::work_model::WriterCompletionState::Pending
+        );
+        assert!(
+            matrix.rows[1]
+                .requirement
+                .contains("Assert overflow navigation directly")
+        );
+
+        let before = fs::read(&path).unwrap();
+        materialize_writer_completion_before_writer(project.path(), &item, "attempt-1", &task_id)
+            .unwrap();
+        assert_eq!(
+            fs::read(path).unwrap(),
+            before,
+            "retry must not overwrite claims"
+        );
+    }
+
+    #[test]
+    fn writer_completion_findings_reject_artifact_path_escape() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mut item = review_item();
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.input_artifacts = vec![crate::work_model::ArtifactRef {
+            producer_id: "attempt-1-review-tests".to_string(),
+            path: "../../review-tests/review.md".to_string(),
+        }];
+
+        let error = writer_completion_findings(project.path(), writer).unwrap_err();
+        assert!(error.to_string().contains("must stay under"));
     }
 
     #[test]

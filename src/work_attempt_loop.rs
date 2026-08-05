@@ -4450,6 +4450,17 @@ fn required_progress_artifact(attempt: &Attempt) -> ArtifactRef {
     }
 }
 
+fn writer_completion_artifact(task: &Task) -> Option<ArtifactRef> {
+    task.artifact_area.as_ref().map(|area| ArtifactRef {
+        producer_id: task.id.clone(),
+        path: format!(
+            "{}/{}",
+            area.path,
+            crate::work_task_executor::WRITER_COMPLETION_MATRIX_FILE
+        ),
+    })
+}
+
 fn plan_after_completed_writer(
     project_root: &Path,
     store: &WorkModelStore,
@@ -4483,7 +4494,7 @@ fn plan_after_completed_writer(
         });
     }
     if let Some(outcome) =
-        gate_required_progress_before_reviews(project_root, store, &mut item, attempt_id)?
+        gate_writer_completion_before_reviews(project_root, store, &mut item, attempt_id)?
     {
         return Ok(outcome);
     }
@@ -4498,12 +4509,12 @@ fn plan_after_completed_writer(
     Ok(WorkAttemptRunOutcome::PlannedReviews { task_ids })
 }
 
-/// Reconcile a completed Writer before any Tester or reviewer is planned.
-/// Ordinary incomplete progress creates one Writer continuation. Structural
-/// corruption pauses with a durable diagnosis instead of asking a Writer to
-/// guess how the immutable contract should be repaired. Legacy Attempts have no
-/// contract and pass through unchanged.
-fn gate_required_progress_before_reviews(
+/// Reconcile a completed Writer's required progress and structured completion
+/// matrix before any Tester or reviewer is planned. Ordinary incomplete claims
+/// create one Writer continuation. Structural corruption pauses with a durable
+/// diagnosis instead of asking a Writer to guess how a host-owned contract should
+/// be repaired. Legacy Attempts have neither contract and pass through unchanged.
+fn gate_writer_completion_before_reviews(
     project_root: &Path,
     store: &WorkModelStore,
     item: &mut WorkItem,
@@ -4514,60 +4525,192 @@ fn gate_required_progress_before_reviews(
         .iter()
         .position(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Attempt {:?} not found", attempt_id))?;
-    if item.attempts[attempt_index].progress_contract.is_none() {
+    if item.attempts[attempt_index].progress_contract.is_none()
+        && item.attempts[attempt_index]
+            .writer_completion_contract
+            .is_none()
+    {
         record_writer_run(
             project_root,
             item,
             attempt_index,
             WriterOutcome::Complete,
             0,
+            0,
         );
         return Ok(None);
     }
-    let artifact = required_progress_artifact(&item.attempts[attempt_index]);
-    let path = project_root.join(&artifact.path);
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "read required progress before review planning: {}",
-                    path.display()
+    let progress_artifact = required_progress_artifact(&item.attempts[attempt_index]);
+    let progress = if item.attempts[attempt_index].progress_contract.is_some() {
+        let path = project_root.join(&progress_artifact.path);
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "read required progress before review planning: {}",
+                        path.display()
+                    )
+                });
+            }
+        };
+        match item.attempts[attempt_index].required_progress_status(&source) {
+            Ok(progress) => progress,
+            Err(reason) => {
+                return pause_writer_completion_before_reviews(
+                    project_root,
+                    store,
+                    item,
+                    attempt_index,
+                    attempt_id,
+                    &progress_artifact,
+                    &reason,
+                    0,
+                    0,
                 )
-            });
+                .map(Some);
+            }
+        }
+    } else {
+        crate::work_model::RequiredProgressStatus {
+            checked: 0,
+            required: 0,
+            incomplete_reason: None,
         }
     };
-    let progress = match item.attempts[attempt_index].required_progress_status(&source) {
-        Ok(progress) => progress,
-        Err(reason) => {
-            return pause_required_progress_before_reviews(
-                project_root,
-                store,
-                item,
-                attempt_index,
-                attempt_id,
-                &artifact,
-                &reason,
-                0,
-            )
-            .map(Some);
+    let latest_writer = item.attempts[attempt_index]
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .expect("the completed Writer gate has a completed Writer");
+    let matrix_artifact = writer_completion_artifact(latest_writer);
+    let matrix_status = if let Some(contract) = item.attempts[attempt_index]
+        .writer_completion_contract
+        .as_ref()
+    {
+        let artifact = matrix_artifact
+            .as_ref()
+            .expect("a Writer Task has an artifact area");
+        let path = project_root.join(&artifact.path);
+        match fs::metadata(&path) {
+            Ok(metadata)
+                if metadata.len()
+                    > crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES as u64 =>
+            {
+                return pause_writer_completion_before_reviews(
+                    project_root,
+                    store,
+                    item,
+                    attempt_index,
+                    attempt_id,
+                    artifact,
+                    &format!(
+                        "Writer completion matrix is {} bytes; maximum is {} bytes",
+                        metadata.len(),
+                        crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES
+                    ),
+                    progress.checked,
+                    0,
+                )
+                .map(Some);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return pause_writer_completion_before_reviews(
+                    project_root,
+                    store,
+                    item,
+                    attempt_index,
+                    attempt_id,
+                    artifact,
+                    "Writer completion matrix is missing after host materialization",
+                    progress.checked,
+                    0,
+                )
+                .map(Some);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect Writer completion matrix before review planning: {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "read Writer completion matrix before review planning: {}",
+                        path.display()
+                    )
+                });
+            }
+        };
+        let matrix =
+            match serde_json::from_str::<crate::work_model::WriterCompletionMatrix>(&source) {
+                Ok(matrix) => matrix,
+                Err(error) => {
+                    return pause_writer_completion_before_reviews(
+                        project_root,
+                        store,
+                        item,
+                        attempt_index,
+                        attempt_id,
+                        artifact,
+                        &format!("Writer completion matrix is malformed: {error}"),
+                        progress.checked,
+                        0,
+                    )
+                    .map(Some);
+                }
+            };
+        let findings =
+            crate::work_task_executor::writer_completion_findings(project_root, latest_writer)?;
+        match matrix.status_against(contract, &latest_writer.id, &findings) {
+            Ok(status) => status,
+            Err(reason) => {
+                return pause_writer_completion_before_reviews(
+                    project_root,
+                    store,
+                    item,
+                    attempt_index,
+                    attempt_id,
+                    artifact,
+                    &reason,
+                    progress.checked,
+                    0,
+                )
+                .map(Some);
+            }
+        }
+    } else {
+        crate::work_model::WriterCompletionMatrixStatus {
+            complete: 0,
+            required: 0,
+            incomplete_reason: None,
         }
     };
-    if progress.is_complete() {
+    if progress.is_complete() && matrix_status.is_complete() {
         record_writer_run(
             project_root,
             item,
             attempt_index,
             WriterOutcome::Complete,
             progress.checked,
+            matrix_status.complete,
         );
         return Ok(None);
     }
     let reason = progress
         .incomplete_reason
         .as_deref()
-        .unwrap_or("required progress is incomplete");
+        .or(matrix_status.incomplete_reason.as_deref())
+        .unwrap_or("Writer completion evidence is incomplete");
     let attempt = &item.attempts[attempt_index];
     let task = attempt
         .tasks
@@ -4579,11 +4722,16 @@ fn gate_required_progress_before_reviews(
         .output
         .as_ref()
         .is_some_and(|output| output.base_commit.as_deref() != Some(output.commit.as_str()));
-    let previous_checked = attempt.writer_runs.last().map(|run| run.checked_required);
-    let regressed = previous_checked.is_some_and(|checked| progress.checked < checked);
+    let previous_completion = attempt
+        .writer_runs
+        .last()
+        .map(|run| (run.checked_required, run.completed_matrix));
+    let regressed = previous_completion.is_some_and(|(checked, completed)| {
+        progress.checked < checked || matrix_status.complete < completed
+    });
     let current_kind = writer_run_kind(attempt, task);
     let stagnant_continuations = if current_kind == WriterRunKind::PreReviewContinuation
-        && previous_checked == Some(progress.checked)
+        && previous_completion == Some((progress.checked, matrix_status.complete))
     {
         1 + attempt
             .writer_runs
@@ -4592,6 +4740,7 @@ fn gate_required_progress_before_reviews(
             .take_while(|run| {
                 run.kind == WriterRunKind::PreReviewContinuation
                     && run.checked_required == progress.checked
+                    && run.completed_matrix == matrix_status.complete
             })
             .count()
     } else {
@@ -4603,27 +4752,34 @@ fn gate_required_progress_before_reviews(
         ))
     } else if regressed {
         Some(format!(
-            "required progress regressed from {} checked entries to {}",
-            previous_checked.unwrap_or_default(),
-            progress.checked
+            "Writer completion regressed from {:?} to ({}, {})",
+            previous_completion.unwrap_or_default(),
+            progress.checked,
+            matrix_status.complete
         ))
     } else if stagnant_continuations >= 2 {
         Some(format!(
-            "two pre-review Writer continuations made no checked progress; {reason}"
+            "two pre-review Writer continuations made no completion progress; {reason}"
         ))
     } else {
         None
     };
     if let Some(blocked_reason) = blocked_reason {
-        return pause_required_progress_before_reviews(
+        let blocking_artifact = if !progress.is_complete() {
+            &progress_artifact
+        } else {
+            matrix_artifact.as_ref().unwrap_or(&progress_artifact)
+        };
+        return pause_writer_completion_before_reviews(
             project_root,
             store,
             item,
             attempt_index,
             attempt_id,
-            &artifact,
+            blocking_artifact,
             &blocked_reason,
             progress.checked,
+            matrix_status.complete,
         )
         .map(Some);
     }
@@ -4634,16 +4790,24 @@ fn gate_required_progress_before_reviews(
         attempt_index,
         WriterOutcome::Continue,
         progress.checked,
+        matrix_status.complete,
     );
     item.attempts[attempt_index].status = AttemptStatus::Planned;
     item.attempts[attempt_index].pause_kind = None;
-    let task_id = item.add_next_write_round(attempt_id, vec![artifact])?;
+    let mut continuation_artifacts = Vec::new();
+    if item.attempts[attempt_index].progress_contract.is_some() {
+        continuation_artifacts.push(progress_artifact);
+    }
+    if let Some(artifact) = matrix_artifact {
+        continuation_artifacts.push(artifact);
+    }
+    let task_id = item.add_next_write_round(attempt_id, continuation_artifacts)?;
     store.write_work_item(item)?;
     Ok(Some(WorkAttemptRunOutcome::PlannedWriteRound { task_id }))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pause_required_progress_before_reviews(
+fn pause_writer_completion_before_reviews(
     project_root: &Path,
     store: &WorkModelStore,
     item: &mut WorkItem,
@@ -4652,6 +4816,7 @@ fn pause_required_progress_before_reviews(
     artifact: &ArtifactRef,
     reason: &str,
     checked_required: usize,
+    completed_matrix: usize,
 ) -> Result<WorkAttemptRunOutcome> {
     record_writer_run(
         project_root,
@@ -4659,12 +4824,13 @@ fn pause_required_progress_before_reviews(
         attempt_index,
         WriterOutcome::Blocked,
         checked_required,
+        completed_matrix,
     );
     item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
     item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::NotReviewed);
     store.write_work_item(item)?;
-    let handoff_path = write_required_progress_handoff(
+    let handoff_path = write_writer_completion_handoff(
         project_root,
         &item.id,
         attempt_id,
@@ -4697,6 +4863,7 @@ fn record_writer_run(
     attempt_index: usize,
     outcome: WriterOutcome,
     checked_required: usize,
+    completed_matrix: usize,
 ) {
     let attempt = &mut item.attempts[attempt_index];
     let Some(task) = attempt
@@ -4746,6 +4913,7 @@ fn record_writer_run(
         session_id,
         continuation,
         checked_required,
+        completed_matrix,
         candidate_commit,
     });
 }
@@ -4781,23 +4949,41 @@ fn writer_session_id(path: &Path) -> Option<String> {
         })
 }
 
-fn write_required_progress_handoff(
+fn write_writer_completion_handoff(
     project_root: &Path,
     work_item_id: &str,
     attempt_id: &str,
     reason: &str,
     progress_path: &str,
 ) -> Result<String> {
-    let relative_path =
-        work_artifact_path(work_item_id, attempt_id, "required-progress-needs-user.md");
+    let matrix = progress_path.ends_with(crate::work_task_executor::WRITER_COMPLETION_MATRIX_FILE);
+    let file_name = if matrix {
+        "writer-completion-needs-user.md"
+    } else {
+        "required-progress-needs-user.md"
+    };
+    let relative_path = work_artifact_path(work_item_id, attempt_id, file_name);
     let path = project_root.join(&relative_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let (title, contract, repair) = if matrix {
+        (
+            "Writer completion needs user input",
+            "Writer completion matrix",
+            "restore its immutable rows from the host-generated planning manifest",
+        )
+    } else {
+        (
+            "Required progress needs user input",
+            "required-progress contract",
+            "restore its entries to the approved Plan",
+        )
+    };
     fs::write(
         &path,
         format!(
-            "# Required progress needs user input\n\nFluent stopped before Tester and review planning because the required-progress contract cannot be repaired safely.\n\nReason: {reason}\n\nInspect `{progress_path}` and restore its entries to the approved Plan.\n"
+            "# {title}\n\nFluent stopped before Tester and review planning because the {contract} cannot be repaired safely.\n\nReason: {reason}\n\nInspect `{progress_path}` and {repair}.\n"
         ),
     )?;
     Ok(relative_path)
@@ -8732,7 +8918,7 @@ mod tests {
 
         let mut item = store.read_work_item("work-1").unwrap();
         let outcome =
-            gate_required_progress_before_reviews(tmp.path(), &store, &mut item, "attempt-1")
+            gate_writer_completion_before_reviews(tmp.path(), &store, &mut item, "attempt-1")
                 .unwrap()
                 .expect("unchecked progress must be handled before review planning");
 
@@ -8814,6 +9000,7 @@ mod tests {
                     session_id: Some("writer-thread-1".to_string()),
                     continuation: round,
                     checked_required: 0,
+                    completed_matrix: 0,
                     candidate_commit: format!("commit-{}", round + 1),
                 });
             }
@@ -8937,6 +9124,7 @@ mod tests {
             session_id: Some("thread-1".to_string()),
             continuation: 0,
             checked_required: 1,
+            completed_matrix: 0,
             candidate_commit: "commit-1".to_string(),
         });
         let artifact = required_progress_artifact(&item.attempts[0]);
@@ -9095,6 +9283,240 @@ mod tests {
                 .filter(|task| task.kind == TaskKind::Write)
                 .count(),
             1
+        );
+    }
+
+    fn make_completed_writer_matrix_fixture(project_root: &Path, complete: bool) -> WorkModelStore {
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem::planned("matrix-work", "Complete the approved behaviors");
+        item.planning_context = Some(crate::work_model::PlanningContext {
+            behaviors: Some(
+                "# Behaviors (diff)\n\n\
+                 ## Dashboard\n\n\
+                 ### B1\n\n\
+                 WHEN refreshed, THE SYSTEM SHALL preserve selection.\n\
+                 Test: tests/dashboard.rs (preserves_selection)\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+        item.add_initial_attempt("attempt-1").unwrap();
+        crate::work_task_executor::materialize_writer_completion_before_writer(
+            project_root,
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+        )
+        .unwrap();
+        let matrix_path = project_root.join(
+            ".fluent/work/artifacts/matrix-work/attempt-1/attempt-1-write-1/writer-completion.json",
+        );
+        let mut matrix: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_str(&fs::read_to_string(&matrix_path).unwrap()).unwrap();
+        if complete {
+            matrix.rows[0].state = crate::work_model::WriterCompletionState::Complete;
+            matrix.rows[0].implementation_evidence = vec!["src/dashboard.rs".to_string()];
+            matrix.rows[0].verification = vec![crate::work_model::WriterVerificationClaim {
+                command: "cargo test preserves_selection".to_string(),
+                result: crate::work_model::WriterVerificationResult::Pass,
+            }];
+            fs::write(&matrix_path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+        }
+        let writer = &mut item.attempts[0].tasks[0];
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: "candidate".to_string(),
+            source_branch: "work/attempt-1".to_string(),
+            base_commit: None,
+            commit: "abc123".to_string(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        store.create_work_item(&item).unwrap();
+        store
+    }
+
+    #[test]
+    fn incomplete_writer_completion_matrix_returns_to_writer_before_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), false);
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedWriteRound { .. }
+        ));
+        let stored = store.read_work_item("matrix-work").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            2
+        );
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+        assert_eq!(stored.attempts[0].writer_runs[0].completed_matrix, 0);
+    }
+
+    #[test]
+    fn complete_writer_completion_matrix_reaches_review_and_is_attached() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedReviews { .. }
+        ));
+        let stored = store.read_work_item("matrix-work").unwrap();
+        assert_eq!(stored.attempts[0].writer_runs[0].completed_matrix, 1);
+        for review in stored.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Review)
+        {
+            assert!(
+                review
+                    .input_artifacts
+                    .iter()
+                    .any(|artifact| artifact.path.ends_with("/writer-completion.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn rewritten_writer_completion_matrix_pauses_before_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+        let path = tmp.path().join(
+            ".fluent/work/artifacts/matrix-work/attempt-1/attempt-1-write-1/writer-completion.json",
+        );
+        let mut matrix: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        matrix.rows[0].requirement = "A rewritten requirement".to_string();
+        fs::write(&path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, WorkAttemptRunOutcome::NeedsUser { .. }));
+        let stored = store.read_work_item("matrix-work").unwrap();
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| !is_review_phase_task(task))
+        );
+    }
+
+    #[test]
+    fn missing_writer_completion_matrix_pauses_before_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+        fs::remove_file(tmp.path().join(
+            ".fluent/work/artifacts/matrix-work/attempt-1/attempt-1-write-1/writer-completion.json",
+        ))
+        .unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        let WorkAttemptRunOutcome::NeedsUser { handoff_path } = outcome else {
+            panic!("a deleted host-owned matrix must pause")
+        };
+        let handoff = fs::read_to_string(tmp.path().join(handoff_path)).unwrap();
+        assert!(handoff.contains("completion matrix is missing"));
+    }
+
+    #[test]
+    fn oversized_writer_completion_matrix_pauses_without_reading_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+        let path = tmp.path().join(
+            ".fluent/work/artifacts/matrix-work/attempt-1/attempt-1-write-1/writer-completion.json",
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES + 1) as u64)
+            .unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        let WorkAttemptRunOutcome::NeedsUser { handoff_path } = outcome else {
+            panic!("an oversized matrix must pause before it is read")
+        };
+        let handoff = fs::read_to_string(tmp.path().join(handoff_path)).unwrap();
+        assert!(handoff.contains("maximum"));
+    }
+
+    #[test]
+    fn incomplete_writer_completion_retry_does_not_duplicate_continuation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), false);
+
+        let first = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+        let second = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        let stored = store.read_work_item("matrix-work").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Write)
+                .count(),
+            2
         );
     }
 

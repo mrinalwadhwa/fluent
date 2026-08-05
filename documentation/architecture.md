@@ -145,13 +145,29 @@ state that proves Fluent accepted the canonical result: `HandoffPending`,
 Ordinary coder, transcript-pump, and evidence-persistence failures do not account
 for divergence. Existing TaskOutput and AttemptLearning JSON records without the
 optional fields keep their legacy shape. After each completed Writer, the
-Attempt loop reconciles the current `## Required completion` section with the
-Attempt's immutable progress contract before it creates any Tester or reviewer
-Task. An unchecked or evidence-less entry creates a pre-review Writer
-continuation only when the completed Writer created a candidate commit and the
-checked count did not regress. Fluent records each host-derived Writer outcome,
-candidate commit, checked count, provider session identity, and whether the run
-was initial, pre-review continuation, or post-review corrective work. Codex
+Attempt loop reconciles both the current `## Required completion` section and the
+latest Task's `writer-completion.json` before it creates any Tester or reviewer
+Task. New code-producing Attempts stamp an immutable completion contract from
+approved behavior statements and their existing verification markers, Approach
+choices and execution guidance, and required Plan rows and Verification cells.
+Before each Writer launch the host materializes a bounded task-owned matrix from
+that contract. Planning claims from the prior Writer carry forward; open findings
+from the current review artifacts become pending rows identified by stable
+role-scoped finding identities. The Writer may fill only completion state,
+implementation evidence, passing focused commands, and finding-to-constraint
+mappings. It does not choose a second set of test-selector names.
+
+An unchecked progress entry or incomplete matrix row creates a pre-review Writer
+continuation only when the completed Writer created a candidate commit and neither
+completion count regressed. Missing or malformed matrices, immutable-field edits,
+unknown constraint references, and pending rows that carry completion claims pause
+for repair. A valid matrix is attached to every reviewer as an advisory coverage
+map; reviewers still inspect the candidate, and the final Tester remains the
+authoritative complete-suite gate. Attempts created before this contract retain
+their legacy progress and review path. Fluent records each host-derived Writer
+outcome, candidate commit, progress and matrix completion counts, provider session
+identity, and whether the run was initial, pre-review continuation, or post-review
+corrective work. Codex
 Writers omit `--ephemeral` and resume with `codex exec resume <thread-id>`;
 because that subcommand does not accept `exec`'s `--cd` option, Fluent sets the
 subprocess current directory to the candidate workspace instead. Claude Writers
@@ -172,12 +188,11 @@ evidence, executed commands, and historical artifact paths. Its collections and
 serialized size are bounded; omission counts make truncation visible. Full
 historical artifacts remain unchanged for audit and are opened by path only when
 needed. Review prompts use the same generated context instead of reinjecting
-prior review bodies. Two consecutive pre-review continuations that create
-commits without checking more
-required work pause for user inspection. A no-change incomplete Writer also
-pauses. A malformed, unknown, duplicate, rewritten, or regressed manifest pauses
-for user repair. An Attempt without a progress contract keeps the legacy
-transition. Only a reconciled candidate reaches Tester and reviewer planning.
+prior review bodies. Two consecutive pre-review continuations that create commits
+without increasing either completion count pause for user inspection. A no-change
+incomplete Writer also pauses. A malformed, unknown, duplicate, rewritten, or
+regressed contract pauses for user repair. Only a reconciled candidate reaches
+reviewer planning.
 Those Tasks use the Writer output that exists before Learning; after Learning,
 landing consumes the current `TaskOutput.commit`.
 Before Fluent binds a missing initial Writer workspace, its read-only

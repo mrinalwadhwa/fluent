@@ -5091,6 +5091,68 @@ Test: src/work_status.rs (metrics_are_derived_from_local_work_evidence)
 Test: src/usage.rs (task_usage_is_persisted_beside_the_transcript)
 Test: tests/binary.rs (work_show_outputs_pretty_json_for_one_work_item)
 
+### B16
+
+WHEN Fluent creates a new code-producing Attempt from approved Behaviors,
+Approach, and Plan inputs, THE SYSTEM SHALL stamp an immutable Writer completion
+contract containing every EARS statement and its existing verification marker,
+every applicable Approach decision, structural boundary, and execution-guidance
+constraint, and every required Plan row and its existing Verification cell.
+Test: src/work_model.rs (writer_completion_contract_maps_approved_planning_inputs)
+
+### B17
+
+WHEN Fluent launches an initial or corrective Writer, THE SYSTEM SHALL
+materialize a bounded task-owned `writer-completion.json` matrix before launch,
+carry forward completed planning claims from the preceding Writer, and add every
+currently open review finding as a pending row without inventing test-selector
+names.
+Test: src/work_task_executor.rs (corrective_writer_matrix_carries_planning_rows_and_adds_open_findings)
+Test: src/work_model.rs (writer_completion_matrix_refuses_unbounded_context)
+
+### B18
+
+WHEN a completed Writer leaves any matrix row pending, without implementation
+evidence, without a passing focused verification claim, or, for a finding,
+without an applicable behavior or approach reference or a specific
+not-applicable reason, THE SYSTEM SHALL plan one Writer continuation before any
+reviewer or final Tester.
+Test: src/work_attempt_loop.rs (incomplete_writer_completion_matrix_returns_to_writer_before_review)
+Test: src/work_model.rs (writer_completion_matrix_reconciles_claims_and_corrective_findings)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (completion matrix blocks review and final Tester)
+
+### B19
+
+IF a Writer completion matrix is missing, malformed, contradictory, or changes
+an immutable row field, THEN THE SYSTEM SHALL pause with an actionable diagnosis
+before any reviewer or final Tester.
+Test: src/work_attempt_loop.rs (missing_writer_completion_matrix_pauses_before_review)
+Test: src/work_attempt_loop.rs (rewritten_writer_completion_matrix_pauses_before_review)
+Test: src/work_model.rs (writer_completion_matrix_reconciles_claims_and_corrective_findings)
+
+### B20
+
+WHEN every required-progress entry and Writer completion row is satisfied, THE
+SYSTEM SHALL attach the matrix to every reviewer as an advisory coverage map and
+plan reviewers without planning the final Tester yet.
+Test: src/work_attempt_loop.rs (complete_writer_completion_matrix_reaches_review_and_is_attached)
+Test: src/work_task_executor.rs (work_review_prompt_renders_role_conditional_blocks)
+Test: tests/behaviors/operations/test-work-attempt-loop.sh (completion matrix admits review and final Tester)
+
+### B21
+
+WHEN Fluent retries matrix materialization or the completed-Writer admission
+boundary, THE SYSTEM SHALL preserve existing Writer claims and SHALL NOT create
+a duplicate Writer continuation.
+Test: src/work_task_executor.rs (corrective_writer_matrix_carries_planning_rows_and_adds_open_findings)
+Test: src/work_attempt_loop.rs (incomplete_writer_completion_retry_does_not_duplicate_continuation)
+
+### B22
+
+WHEN an older Attempt has no Writer completion contract, THE SYSTEM SHALL retain
+its existing required-progress and review-planning behavior.
+Test: src/work_attempt_loop.rs (legacy_completed_writer_plans_reviews_without_progress_contract)
+
 ## Suite-health gate
 
 ### B1

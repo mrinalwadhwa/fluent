@@ -85,16 +85,20 @@ For a codebase, module, or area review (not building something new), capture eno
 Delegated execution runs as a loop until it produces a ready Merge Candidate,
 stops at a Learner failure, or pauses at `needs-user`. Each round:
 
-1. The Writer produces a candidate commit and updates required progress.
-2. Fluent reconciles required progress. If approved work remains incomplete, it
+1. The Writer produces a candidate commit, updates required progress, and fills
+   the host-generated `writer-completion.json` coverage matrix with implementation
+   evidence and focused harness-native verification.
+2. Fluent reconciles required progress and the completion matrix. If approved
+   work remains incomplete, it
    resumes the same Writer provider session without running the Tester or
    reviewers. The continuation reads a bounded generated context containing the
    exact candidate/base commits, unresolved progress, changed files, current
    deduplicated findings, passing evidence, executed commands, and paths to full
    historical artifacts. If the session identity is unavailable, Fluent starts a
    fresh persistent Writer session.
-3. Once required progress is complete, domain reviewers evaluate the candidate
-   in parallel using the Writer's focused verification as advisory evidence.
+3. Once required progress and every matrix row are complete, domain reviewers
+   evaluate the candidate in parallel using the matrix and Writer's focused
+   verification as advisory evidence.
 4. After the reviewers pass, one final Tester Task runs the project's complete
    declared test commands against the exact reviewed commit.
 5. After the final Tester passes, the Learner runs in the Work Item's Learner mode:
@@ -117,9 +121,11 @@ The round outcome determines what happens next:
   frontier is legitimate, approve one to three more rounds with `fluent attempt
   extend <work-item-id> <attempt-id> --additional-write-rounds N`, then resume.
   Fluent binds the approval to the candidate and exact review bytes.
-- An incomplete Writer without a new candidate commit, regressed required progress,
-  or two consecutive pre-review continuations with no newly checked required work —
-  Attempt records `needs-user` before Tester and review.
+- An incomplete Writer without a new candidate commit, regressed progress or
+  matrix completion, or two consecutive pre-review continuations with no newly
+  completed requirement — Attempt records `needs-user` before Tester and review.
+- A missing, malformed, contradictory, or structurally edited completion matrix —
+  Attempt records `needs-user`; restore the host-owned rows before resuming.
 - A provider exhausts its retries before the model produces tokens or uses tools — Attempt records `needs-user` as `provider-unavailable`.
 
 The user provides input; `fluent attempt run` resumes the loop where it left off.
@@ -283,11 +289,19 @@ The writer produces tests alongside code. When committing a candidate:
   Fluent's final Tester.
 
 Reviewer Tasks run only after a completed Writer has satisfied the Work Item's
-required-progress contract. Incomplete work continues on the Writer path and
-does not spend a review or Tester cycle. Domain reviewers inspect the candidate
-and use the Writer's reported focused checks as advisory evidence instead of
-rerunning the full suite. Only the tests reviewer may run one named missing
-check, using the candidate-keyed shared cache.
+required-progress contract and task-specific `writer-completion.json`. Fluent
+generates immutable rows from the approved behaviors and their existing
+`Test:`/`Untestable:` markers, applicable Approach decisions, structural
+boundaries, and execution guidance, required Plan rows and Verification cells,
+and the current round's open review findings. This references harness-native
+commands; it does not introduce
+another selector vocabulary. The Writer fills concrete implementation evidence,
+passing focused commands, and each finding's applicable behavior or approach
+constraint (or a specific reason none applies). Incomplete work continues on the
+Writer path and does not spend a review or Tester cycle. Domain reviewers inspect
+the candidate and use the matrix and reported focused checks as advisory evidence
+instead of rerunning the full suite. Only the tests reviewer may run one named
+missing check, using the candidate-keyed shared cache.
 
 After every reviewer passes, one final Tester produces `tester-results.json`,
 which the host binds to the exact reviewed commit. This is the authoritative

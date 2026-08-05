@@ -81,6 +81,16 @@ Your changes should read as though the project's regular maintainers wrote them.
 
 The Brief, Behaviors, Approach, and Plan files are read-only.
 
+{{#if has_writer_completion_matrix}}
+## Writer completion matrix
+
+Read {{writer_completion_matrix_path}}. Fluent generated its rows from the approved behaviors and their existing `Test:` or `Untestable:` references, required Plan rows and their existing Verification cells, applicable Approach decisions, structural boundaries, execution guidance, and this round's open review findings.
+
+The row identity, kind, source, requirement, and verification references are immutable. Do not add, remove, reorder, or rewrite rows. For every row you genuinely satisfy, set `state` to `complete`, list concrete files, symbols, commits, or a verified no-change reason in `implementation-evidence`, and add at least one focused harness-native command with `result: pass` under `verification`. For each review-finding row, also list the applicable behavior or approach row IDs under `applicable-constraints`; when none applies, use `none: <specific reason>`.
+
+Fluent validates this matrix before starting reviewers. Pending or evidence-less rows return to Writer work without spending a review or final-Tester cycle. Structural edits or contradictory claims pause for repair. The matrix is advisory evidence for reviewers; it does not replace the project's test selectors or Fluent's final Tester.
+{{/if}}
+
 ## Phase 2 — Set up progress
 
 progress.md is a `- [ ]` to-do list that persists across rounds. Each item can have nested bullets (two-space indent) for commit hashes, divergences, and notes for the next round. Example:

@@ -920,6 +920,7 @@ mod tests {
             session_id: Some("thread-1".to_string()),
             continuation: 1,
             checked_required: 1,
+            completed_matrix: 0,
             candidate_commit: "abc123".to_string(),
         });
 
@@ -1033,6 +1034,7 @@ mod tests {
                 session_id: Some("thread-1".to_string()),
                 continuation,
                 checked_required: 1,
+                completed_matrix: 0,
                 candidate_commit: "abc123".to_string(),
             });
         }
