@@ -322,7 +322,9 @@ fn reserve_task_start(
         };
         let effort = mapping.effort.clone();
         let attempt_kind = attempt.kind.clone();
-        let is_first_write = !attempt.tasks.iter().any(|t| t.kind == TaskKind::Tester);
+        let is_first_write = !attempt.tasks[..task_index]
+            .iter()
+            .any(|task| task.kind == TaskKind::Write);
 
         // Capture the exact state the reservation is about to overwrite.
         let prior_task = attempt.tasks[task_index].clone();
@@ -5322,6 +5324,37 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
                 .to_string()
         })
         .unwrap_or_default();
+    let has_final_tester_evidence = if tester_results_path.is_empty() {
+        ""
+    } else {
+        "yes"
+    };
+    let is_review_behaviors_with_final_tester_value =
+        if task.role == "behaviors" && !tester_results_path.is_empty() {
+            "yes"
+        } else {
+            ""
+        };
+    let is_review_behaviors_before_final_tester_value =
+        if task.role == "behaviors" && tester_results_path.is_empty() {
+            "yes"
+        } else {
+            ""
+        };
+    let writer_transcript_path = input
+        .input_artifacts
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "transcript.jsonl")
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("-write-"))
+        })
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     let reviewer_progress_md_path =
         progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
             .display()
@@ -5396,6 +5429,14 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("has_work_item_inputs", reviewer_has_work_item_inputs),
             ("is_review_tests", is_review_tests_value),
             ("is_review_behaviors", is_review_behaviors_value),
+            (
+                "is_review_behaviors_with_final_tester",
+                is_review_behaviors_with_final_tester_value,
+            ),
+            (
+                "is_review_behaviors_before_final_tester",
+                is_review_behaviors_before_final_tester_value,
+            ),
             ("is_review_architecture", is_review_architecture_value),
             ("is_review_documentation", is_review_documentation_value),
             ("work_item_inputs_list", &work_item_inputs_list),
@@ -5411,6 +5452,8 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
             ("evidence_candidate_commit", evidence_candidate_commit),
             ("review_diff_command", &review_diff_command),
             ("tester_results_path", &tester_results_path),
+            ("has_final_tester_evidence", has_final_tester_evidence),
+            ("writer_transcript_path", &writer_transcript_path),
             ("progress_md_path", &reviewer_progress_md_path),
             ("review_path", &review_path_display),
             ("artifact_dir", &artifact_dir_display),
@@ -7731,8 +7774,7 @@ mod tests {
         .unwrap();
 
         let item = review_item_with_role("architecture");
-        // `add_review_tasks` pushes a Tester task before the review tasks, so select
-        // the review task by role rather than a positional index.
+        // Select the review task by role rather than relying on task ordering.
         let review_task_id = item.attempts[0]
             .tasks
             .iter()
@@ -10000,6 +10042,12 @@ mod tests {
         review_item_with_role("tests")
     }
 
+    fn review_item_with_final_tester() -> WorkItem {
+        let mut item = review_item();
+        item.add_final_tester_task("attempt-1").unwrap();
+        item
+    }
+
     fn review_item_with_role(role: &str) -> WorkItem {
         let mut item = WorkItem {
             id: "work-1".to_string(),
@@ -10634,7 +10682,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let store = WorkModelStore::new(project_root);
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let tester = item.attempts[0]
             .tasks
             .iter()
@@ -10707,7 +10755,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let store = WorkModelStore::new(project_root);
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let tester = item.attempts[0]
             .tasks
             .iter()
@@ -10769,7 +10817,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let store = WorkModelStore::new(project_root);
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let tester = item.attempts[0]
             .tasks
             .iter()
@@ -10832,7 +10880,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let project_root = tmp.path();
         let store = WorkModelStore::new(project_root);
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let tester = item.attempts[0]
             .tasks
             .iter()
@@ -10970,6 +11018,32 @@ mod tests {
         });
     }
 
+    #[test]
+    fn corrective_writer_does_not_recapture_attempt_baseline_without_tester() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = review_item();
+        item.attempts[0].status = AttemptStatus::Planned;
+        let task_id = item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+        store.create_work_item(&item).unwrap();
+
+        let reservation = reserve_task_start(
+            &store,
+            "work-1",
+            "attempt-1",
+            &task_id,
+            TaskKind::Write,
+            AttemptStatus::Executing,
+            CoderKind::Claude,
+        )
+        .unwrap();
+
+        assert!(
+            !reservation.is_first_write,
+            "a corrective Writer must reuse the Attempt baseline even when no final Tester exists"
+        );
+    }
+
     fn corrective_review_item(role: &str) -> WorkItem {
         let context = CorrectiveContext {
             objective: "Restore the retry guard".to_string(),
@@ -11032,7 +11106,8 @@ mod tests {
         let workspace = tmp.path().join("work-6-work-1-attempt-1");
         fs::create_dir_all(&workspace).unwrap();
 
-        let item = corrective_review_item("tests");
+        let mut item = corrective_review_item("tests");
+        item.add_final_tester_task("attempt-1").unwrap();
         let context = item.write_task_instructions().unwrap();
 
         // The Writer receives the corrective execution context verbatim.
@@ -11421,6 +11496,7 @@ mod tests {
                 ],
             )
             .unwrap();
+        seeded.add_final_tester_task("attempt-1").unwrap();
         store.write_work_item(&seeded).unwrap();
         crate::follow_up::authorize_derived_work_item(&project_root, &store, &seeded.id).unwrap();
         crate::follow_up::process_landed_batch(&project_root, &batch, None).unwrap();
@@ -11552,7 +11628,7 @@ mod tests {
             project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-tests");
         let review_path = artifact_dir.join("review.md");
 
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
             attempt_id: "attempt-1",
@@ -11733,6 +11809,14 @@ mod tests {
         let artifact_dir =
             project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors");
         let review_path = artifact_dir.join("review.md");
+        let writer_transcript = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+        fs::create_dir_all(writer_transcript.parent().unwrap()).unwrap();
+        fs::write(
+            &writer_transcript,
+            r#"{"type":"agent_message","message":"Verification: cargo test focused — pass"}"#,
+        )
+        .unwrap();
 
         let item = review_item_with_role("behaviors");
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
@@ -11743,7 +11827,7 @@ mod tests {
             artifact_dir: &artifact_dir,
             review_path: &review_path,
             readable_workspaces: std::slice::from_ref(&workspace),
-            input_artifacts: &[],
+            input_artifacts: std::slice::from_ref(&writer_transcript),
             review_only: false,
         })
         .unwrap();
@@ -11758,8 +11842,17 @@ mod tests {
             "behaviors reviewer should see the Test: reference verification"
         );
         assert!(
-            prompts.review_prompt.contains("tester-results.json"),
-            "behaviors reviewer should see tester-results.json instructions"
+            prompts
+                .review_prompt
+                .contains(&writer_transcript.display().to_string())
+        );
+        assert!(
+            prompts.review_prompt.contains("advisory evidence"),
+            "pre-Tester reviewers should receive the Writer verification boundary"
+        );
+        assert!(
+            !prompts.review_prompt.contains("host-owned outcomes"),
+            "pre-Tester reviewers must not be told canonical evidence already exists"
         );
         assert!(!prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(!prompts.review_prompt.contains("cargo test"));
@@ -12027,7 +12120,7 @@ mod tests {
 
     #[test]
     fn tester_task_artifact_path_resolved_from_artifact_area() {
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let attempt = &item.attempts[0];
         let tester_task = attempt
             .tasks
@@ -12056,7 +12149,7 @@ mod tests {
 
     #[test]
     fn tester_task_does_not_spawn_coder_process() {
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let attempt = &item.attempts[0];
         let tester_task = attempt
             .tasks
@@ -12069,7 +12162,7 @@ mod tests {
 
     #[test]
     fn tester_task_does_not_write_transcript() {
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let attempt = &item.attempts[0];
         let tester_task = attempt
             .tasks
@@ -12093,7 +12186,7 @@ mod tests {
 
     #[test]
     fn tester_task_invokes_subcommand_not_coder() {
-        let item = review_item();
+        let item = review_item_with_final_tester();
         let attempt = &item.attempts[0];
         let tester_task = attempt
             .tasks
@@ -12632,6 +12725,39 @@ mod tests {
             prompt.contains("`.fluent/tester.yaml` is missing"),
             "prompt should include tester.yaml bootstrap when missing"
         );
+    }
+
+    #[test]
+    fn writer_prompt_assigns_focused_checks_and_reports_them_for_review() {
+        let item = review_item();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let workspace = tmp.path();
+        let fluent_dir = workspace.join(".fluent");
+        std::fs::create_dir_all(&fluent_dir).unwrap();
+        std::fs::write(fluent_dir.join("tester.yaml"), "commands: []").unwrap();
+        let extractor = fluent_dir.join("extract-tester-results");
+        std::fs::write(&extractor, "#!/bin/sh\necho '[]'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&extractor).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&extractor, permissions).unwrap();
+        }
+
+        let prompt = build_write_task_prompt_with_workspace(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            &[],
+            Some(workspace),
+            None,
+        );
+
+        assert!(prompt.contains("smallest harness-native test selections"));
+        assert!(prompt.contains("concise `Verification` section"));
+        assert!(prompt.contains("final Tester artifact is the authoritative"));
+        assert!(!prompt.contains("Run all the test commands in `.fluent/tester.yaml`"));
     }
 
     #[test]

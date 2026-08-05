@@ -922,7 +922,6 @@ impl WorkItem {
         round: Option<usize>,
     ) -> Result<Vec<String>, WorkModelError> {
         self.ensure_not_abandoned()?;
-        let tester_instructions = self.write_task_instructions();
         let preserved_inputs = self.preserved_input_refs();
         let Some(attempt) = self
             .attempts
@@ -956,49 +955,7 @@ impl WorkItem {
             id: write_output.workspace_id.clone(),
             path: write_output.workspace_path.clone(),
         };
-        // Persist corrective input on the Tester Task for inspection. The
-        // Tester runner executes tester.yaml and does not consume a prompt.
         let mut task_ids = Vec::new();
-
-        let tester_task_id = {
-            let tester_id = match round {
-                Some(round) => format!("{attempt_id}-tester-{round}"),
-                None => format!("{attempt_id}-tester"),
-            };
-            validate_id("task", &tester_id)?;
-            if attempt.tasks.iter().any(|task| task.id == tester_id) {
-                return Err(WorkModelError::TaskAlreadyExists { id: tester_id });
-            }
-            attempt.tasks.push(Task {
-                id: tester_id.clone(),
-                kind: TaskKind::Tester,
-                status: TaskStatus::Planned,
-                role: "tester".to_string(),
-                instructions: tester_instructions.clone(),
-                work_item_id: self.id.clone(),
-                attempt_id: Some(attempt_id.to_string()),
-                workspace_access: WorkspaceAccess::read_only(vec![candidate.clone()]),
-                artifact_area: Some(TaskArtifactArea {
-                    path: work_artifact_path(&self.id, attempt_id, &tester_id),
-                }),
-                review_context: Some(ReviewContext {
-                    candidate_workspace_id: write_output.workspace_id.clone(),
-                    candidate_workspace_path: write_output.workspace_path.clone(),
-                    source_branch: write_output.source_branch.clone(),
-                    candidate_commit: write_output.commit.clone(),
-                    base_commit: None,
-                }),
-                evidence_review_context: None,
-                input_artifacts: Vec::new(),
-                depends_on: None,
-                output: None,
-                created_at: Some(now_iso8601()),
-                started_at: None,
-                completed_at: None,
-            });
-            task_ids.push(tester_id.clone());
-            tester_id
-        };
 
         for role in roles {
             validate_id("review role", role)?;
@@ -1020,12 +977,14 @@ impl WorkItem {
                     task_input_artifacts.push(artifact);
                 }
             }
+            let writer_artifact_path = latest_write
+                .artifact_area
+                .as_ref()
+                .map(|area| area.path.clone())
+                .unwrap_or_else(|| work_artifact_path(&self.id, attempt_id, &latest_write.id));
             task_input_artifacts.push(ArtifactRef {
-                producer_id: tester_task_id.clone(),
-                path: format!(
-                    "{}/tester-results.json",
-                    work_artifact_path(&self.id, attempt_id, &tester_task_id)
-                ),
+                producer_id: latest_write.id.clone(),
+                path: format!("{writer_artifact_path}/transcript.jsonl"),
             });
             let progress_md_path =
                 format!("{WORK_PROGRESS_DIR}/{}/{}/progress.md", self.id, attempt_id,);
@@ -1054,7 +1013,7 @@ impl WorkItem {
                 }),
                 evidence_review_context: None,
                 input_artifacts: task_input_artifacts,
-                depends_on: Some(tester_task_id.clone()),
+                depends_on: None,
                 output: None,
                 created_at: Some(now_iso8601()),
                 started_at: None,
@@ -1067,6 +1026,91 @@ impl WorkItem {
 
         self.validate()?;
         Ok(task_ids)
+    }
+
+    /// Plan the one canonical Tester gate after the latest code-review round passes.
+    /// Review-only Attempts retain their Tester-first construction and never call
+    /// this method.
+    pub fn add_final_tester_task(&mut self, attempt_id: &str) -> Result<String, WorkModelError> {
+        self.ensure_not_abandoned()?;
+        let tester_instructions = self.write_task_instructions();
+        let Some(attempt) = self
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.id == attempt_id)
+        else {
+            return Err(WorkModelError::AttemptNotFound {
+                id: attempt_id.to_string(),
+            });
+        };
+        if attempt.kind.is_review_only_like() {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        }
+        let Some(write_output) = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .cloned()
+        else {
+            return Err(WorkModelError::AttemptMissingCompletedWriteTask {
+                attempt_id: attempt_id.to_string(),
+            });
+        };
+        let review_round = attempt
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Review)
+            .filter_map(|task| review_task_round(attempt_id, task))
+            .max()
+            .unwrap_or(1);
+        let tester_id = if review_round == 1 {
+            format!("{attempt_id}-tester")
+        } else {
+            format!("{attempt_id}-tester-{review_round}")
+        };
+        validate_id("task", &tester_id)?;
+        if attempt.tasks.iter().any(|task| task.id == tester_id) {
+            return Err(WorkModelError::TaskAlreadyExists { id: tester_id });
+        }
+        let candidate = WorkspaceRef {
+            id: write_output.workspace_id.clone(),
+            path: write_output.workspace_path.clone(),
+        };
+        attempt.tasks.push(Task {
+            id: tester_id.clone(),
+            kind: TaskKind::Tester,
+            status: TaskStatus::Planned,
+            role: "tester".to_string(),
+            instructions: tester_instructions,
+            work_item_id: self.id.clone(),
+            attempt_id: Some(attempt_id.to_string()),
+            workspace_access: WorkspaceAccess::read_only(vec![candidate]),
+            artifact_area: Some(TaskArtifactArea {
+                path: work_artifact_path(&self.id, attempt_id, &tester_id),
+            }),
+            review_context: Some(ReviewContext {
+                candidate_workspace_id: write_output.workspace_id,
+                candidate_workspace_path: write_output.workspace_path,
+                source_branch: write_output.source_branch,
+                candidate_commit: write_output.commit,
+                base_commit: None,
+            }),
+            evidence_review_context: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: Some(now_iso8601()),
+            started_at: None,
+            completed_at: None,
+        });
+        attempt.status = AttemptStatus::Reviewing;
+        attempt.review_state = Some(AttemptReviewState::NotReviewed);
+        self.validate()?;
+        Ok(tester_id)
     }
 
     pub fn add_next_write_round(
@@ -7706,62 +7750,47 @@ random banner prose that must be ignored
     }
 
     #[test]
-    fn review_tasks_include_tester_task_when_candidate_exists() {
+    fn code_review_tasks_do_not_plan_a_tester_before_review() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks("attempt-1", &["documentation", "behaviors", "tests"])
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
-        let tester_task = tasks
-            .iter()
-            .find(|t| t.kind == TaskKind::Tester)
-            .expect("should have a Tester task");
-        assert_eq!(tester_task.id, "attempt-1-tester");
-        assert_eq!(tester_task.role, "tester");
-        assert!(tester_task.depends_on.is_none());
-
-        let behaviors_review = tasks
-            .iter()
-            .find(|t| t.role == "behaviors" && t.kind == TaskKind::Review)
-            .expect("should have a behaviors review task");
-        assert_eq!(
-            behaviors_review.depends_on.as_deref(),
-            Some("attempt-1-tester")
+        assert!(
+            tasks.iter().all(|task| task.kind != TaskKind::Tester),
+            "code-producing review planning must not run the canonical suite before review"
         );
-
-        let doc_review = tasks.iter().find(|t| t.role == "documentation").unwrap();
-        assert_eq!(doc_review.depends_on.as_deref(), Some("attempt-1-tester"));
-
-        let tests_review = tasks.iter().find(|t| t.role == "tests").unwrap();
-        assert_eq!(tests_review.depends_on.as_deref(), Some("attempt-1-tester"));
+        assert!(
+            tasks
+                .iter()
+                .filter(|task| task.kind == TaskKind::Review)
+                .all(|task| task.depends_on.is_none()),
+            "reviewers must be ready immediately after the Writer"
+        );
     }
 
     #[test]
-    fn review_tasks_depend_on_tester_task() {
+    fn code_review_tasks_do_not_receive_tester_results() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks("attempt-1", &["documentation", "tests"])
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
-        let tester_task = tasks
-            .iter()
-            .find(|t| t.kind == TaskKind::Tester)
-            .expect("Tester task should be present");
-
         for task in tasks.iter().filter(|t| t.kind == TaskKind::Review) {
-            assert_eq!(
-                task.depends_on.as_deref(),
-                Some(tester_task.id.as_str()),
-                "reviewer task {} should depend on tester",
-                task.role,
+            assert!(
+                task.input_artifacts
+                    .iter()
+                    .all(|artifact| !artifact.path.ends_with("/tester-results.json")),
+                "reviewer task {} must not claim final Tester evidence exists yet",
+                task.role
             );
         }
     }
 
     #[test]
-    fn review_tasks_tester_id_includes_round_after_first() {
+    fn later_code_review_round_also_omits_a_tester() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks("attempt-1", &["tests"])
@@ -7797,19 +7826,14 @@ random banner prose that must be ignored
             .unwrap();
 
         let tasks = &work_item.attempts[0].tasks;
-        let tester_tasks: Vec<_> = tasks
-            .iter()
-            .filter(|t| t.kind == TaskKind::Tester)
-            .collect();
         assert!(
-            tester_tasks.iter().any(|t| t.id == "attempt-1-tester-2"),
-            "second round tester should have -2 suffix; got {:?}",
-            tester_tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
+            tasks.iter().all(|task| task.kind != TaskKind::Tester),
+            "corrective review rounds must not duplicate the canonical suite"
         );
     }
 
     #[test]
-    fn each_reviewer_task_receives_tester_results_in_input_artifacts() {
+    fn each_code_reviewer_receives_writer_transcript_in_input_artifacts() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item
             .add_next_review_tasks(
@@ -7826,15 +7850,51 @@ random banner prose that must be ignored
 
         let tasks = &work_item.attempts[0].tasks;
         for task in tasks.iter().filter(|t| t.kind == TaskKind::Review) {
-            let has_tester_results = task.input_artifacts.iter().any(|a| {
-                a.path.ends_with("/tester-results.json") && a.producer_id.contains("tester")
+            let has_writer_transcript = task.input_artifacts.iter().any(|artifact| {
+                artifact.producer_id == "attempt-1-write-1"
+                    && artifact
+                        .path
+                        .ends_with("/attempt-1-write-1/transcript.jsonl")
             });
             assert!(
-                has_tester_results,
-                "reviewer task {} should have tester-results.json in input_artifacts",
+                has_writer_transcript,
+                "reviewer task {} should receive the Writer's concise verification summary",
                 task.role,
             );
         }
+    }
+
+    #[test]
+    fn final_tester_is_bound_to_the_reviewed_candidate_after_review() {
+        let mut work_item = work_item_with_completed_write("work-1");
+        work_item
+            .add_next_review_tasks("attempt-1", &["tests"])
+            .unwrap();
+        for task in work_item.attempts[0]
+            .tasks
+            .iter_mut()
+            .filter(|task| task.kind == TaskKind::Review)
+        {
+            crate::work_model::set_task_terminal(task, TaskStatus::Complete);
+        }
+
+        let tester_id = work_item.add_final_tester_task("attempt-1").unwrap();
+        let tester = work_item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == tester_id)
+            .unwrap();
+        assert_eq!(tester.id, "attempt-1-tester");
+        assert_eq!(tester.kind, TaskKind::Tester);
+        assert_eq!(tester.status, TaskStatus::Planned);
+        assert_eq!(
+            tester
+                .review_context
+                .as_ref()
+                .map(|context| context.candidate_commit.as_str()),
+            Some("commit-initial")
+        );
+        assert!(tester.depends_on.is_none());
     }
 
     #[test]
@@ -8045,7 +8105,7 @@ random banner prose that must be ignored
     }
 
     #[test]
-    fn reviewers_combine_preserved_tester_and_progress_inputs() {
+    fn reviewers_combine_preserved_writer_transcript_and_progress_inputs() {
         let mut work_item = work_item_with_completed_write("work-1");
         work_item.input_artifacts = vec![preserved_input()];
         work_item.add_review_tasks("attempt-1", &["tests"]).unwrap();
@@ -8063,7 +8123,8 @@ random banner prose that must be ignored
             reviewer
                 .input_artifacts
                 .iter()
-                .any(|artifact| artifact.producer_id == "attempt-1-tester")
+                .any(|artifact| artifact.producer_id == "attempt-1-write-1"
+                    && artifact.path.ends_with("/transcript.jsonl"))
         );
         assert!(
             reviewer
@@ -8673,10 +8734,7 @@ random banner prose that must be ignored
             .add_next_review_tasks("attempt-1", &["tests"])
             .unwrap();
 
-        assert_eq!(
-            task_ids,
-            vec!["attempt-1-tester-2", "attempt-1-review-2-tests"]
-        );
+        assert_eq!(task_ids, vec!["attempt-1-review-2-tests"]);
     }
 
     #[test]
@@ -9467,7 +9525,6 @@ random banner prose that must be ignored
                 "attempt-1-write-1",
                 "attempt-1-review-tests",
                 "attempt-1-write-2",
-                "attempt-1-tester-2",
                 "attempt-1-review-2-tests"
             ]
         );
@@ -11375,10 +11432,9 @@ random banner prose that must be ignored
         });
         item.add_review_tasks("attempt-1", &["tests"]).unwrap();
         let attempt = &mut item.attempts[0];
-        attempt.tasks[1].status = TaskStatus::Complete;
         // A resumable auth failure marks the Task NeedsUser, distinct from a hard
         // Failed; reopen replans exactly these.
-        attempt.tasks[2].status = TaskStatus::NeedsUser;
+        attempt.tasks[1].status = TaskStatus::NeedsUser;
 
         suspend_attempt(attempt, PauseKind::Auth);
         assert_eq!(attempt.status, AttemptStatus::NeedsUser);
@@ -11396,11 +11452,6 @@ random banner prose that must be ignored
         );
         assert_eq!(
             attempt.tasks[1].status,
-            TaskStatus::Complete,
-            "tester stays complete"
-        );
-        assert_eq!(
-            attempt.tasks[2].status,
             TaskStatus::Planned,
             "the pause-failed review resets to planned"
         );

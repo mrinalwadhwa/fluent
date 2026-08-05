@@ -171,9 +171,9 @@ Skip TDD only when the step has no new behavior to test. Skip-eligible examples:
 {{/if}}
 Then move to the next `- [ ]` item.
 
-## Phase 4 — Final verification
+## Phase 4 — Focused verification
 
-Run all the test commands in `.fluent/tester.yaml`. Fix and re-run until everything passes.
+Run the smallest harness-native test selections that give useful feedback for the files and behaviors you changed. Do not run the complete configured suite merely to duplicate Fluent's final Tester gate; Fluent runs that canonical suite once after reviewers pass. Expand your focused selection when failures or the change's risk justify it.
 
 ### Task is done when
 
@@ -182,7 +182,7 @@ Run all the test commands in `.fluent/tester.yaml`. Fix and re-run until everyth
 {{else}}
 - Every step is committed.
 {{/if}}
-- All test commands in `.fluent/tester.yaml` succeed.
+- Your focused verification succeeds. The final canonical Tester remains Fluent's responsibility after review.
 - The workspace has no unstaged, staged, or untracked changes — commit meaningful files; add generated ones to `.gitignore`.
 
 {{#if is_followup_writer}}
@@ -190,6 +190,8 @@ A follow-up Write Task with no new commit succeeds only through the verified no-
 {{else}}
 An initial Write Task with no new commits fails automatically.
 {{/if}}
+
+In your final response, include a concise `Verification` section. For every command you ran, report the exact command, pass/fail result, and the behavior or risk it covered. Also state which canonical commands you intentionally left to Fluent's final Tester. This summary is advisory review input; Fluent's final Tester artifact is the authoritative full-suite evidence.
 
 ## Rules during step execution
 

@@ -4055,7 +4055,7 @@ fn reviewers_receive_preserved_work_item_inputs_and_attempt_inputs() {
         .iter()
         .map(|input| input["producer_id"].as_str().unwrap())
         .collect();
-    assert_eq!(producers, vec!["work-item", "attempt-1-tester", "writer"]);
+    assert_eq!(producers, vec!["work-item", "attempt-1-write-1", "writer"]);
 }
 
 #[test]
@@ -11109,7 +11109,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned 6 review Tasks for Attempt attempt-1",
+            "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains("attempt-1-review-tests"));
 
@@ -11117,7 +11117,7 @@ fn work_review_plans_review_tasks_for_completed_attempt() {
     let attempt = &value["attempts"][0];
     assert_eq!(attempt["status"], "reviewing");
     assert_eq!(attempt["review_state"], "not-reviewed");
-    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 7);
+    assert_eq!(attempt["tasks"].as_array().unwrap().len(), 6);
 
     let review_task = attempt["tasks"]
         .as_array()
@@ -11777,23 +11777,6 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
         "#!/bin/bash\nprintf 'Verdict: pass\\n' > review.md\nexit 0\n",
     );
 
-    // The tester task must run before reviewers to complete the lifecycle.
-    // Without tester.yaml it produces an error-result file but still marks
-    // the task complete, which is enough to satisfy the attempt loop.
-    fluent_cmd()
-        .current_dir(&main_dir)
-        .args([
-            "task",
-            "run",
-            "work-1",
-            "attempt-1",
-            "attempt-1-tester",
-            "--no-sandbox",
-        ])
-        .env("PATH", mock_path(&bin_dir))
-        .assert()
-        .success();
-
     for role in [
         "documentation",
         "behaviors",
@@ -11815,6 +11798,24 @@ fn work_task_run_completes_attempt_after_all_review_tasks_complete() {
             .assert()
             .success();
     }
+
+    let store = WorkModelStore::new(&main_dir);
+    let mut item = store.read_work_item("work-1").unwrap();
+    item.add_final_tester_task("attempt-1").unwrap();
+    store.write_work_item(&item).unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "task",
+            "run",
+            "work-1",
+            "attempt-1",
+            "attempt-1-tester",
+            "--no-sandbox",
+        ])
+        .env("PATH", mock_path(&bin_dir))
+        .assert()
+        .success();
 
     let value = read_work_show_json(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
@@ -11865,7 +11866,10 @@ fn work_attempt_run_drives_write_reviews_and_passes() {
         .success()
         .stdout(predicate::str::contains("Completed Task attempt-1-write-1"))
         .stdout(predicate::str::contains(
-            "Planned 6 review Tasks for Attempt attempt-1",
+            "Planned 5 review Tasks for Attempt attempt-1",
+        ))
+        .stdout(predicate::str::contains(
+            "Planned final canonical Tester Task attempt-1-tester",
         ))
         .stdout(predicate::str::contains(
             "Attempt attempt-1 reviews and Learner passed; Merge Candidate \
@@ -13394,7 +13398,7 @@ fn work_attempt_run_plans_followup_for_failed_reviews() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Planned 6 review Tasks for Attempt attempt-1",
+            "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-2",
@@ -13566,7 +13570,7 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
         ))
         .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
-            "Planned 2 review Tasks for Attempt attempt-1",
+            "Planned 1 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains("attempt-1-tester-2"))
         .stdout(predicate::str::contains("attempt-1-review-2-documentation"))
@@ -13627,9 +13631,9 @@ fn work_attempt_run_plans_followup_for_mixed_failed_and_uncertain_reviews() {
     );
     assert_eq!(
         second_round_inputs[1]["path"],
-        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester-2/tester-results.json"
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2/transcript.jsonl"
     );
-    assert_eq!(second_round_inputs[1]["producer_id"], "attempt-1-tester-2");
+    assert_eq!(second_round_inputs[1]["producer_id"], "attempt-1-write-2");
     assert_eq!(
         second_round_inputs[2]["path"],
         ".fluent/work/progress/work-1/attempt-1/progress.md"
@@ -13656,7 +13660,7 @@ fn work_attempt_run_counts_already_planned_followup_against_budget() {
         .success()
         .stdout(predicate::str::contains("Completed Task attempt-1-write-2"))
         .stdout(predicate::str::contains(
-            "Planned 6 review Tasks for Attempt attempt-1",
+            "Planned 5 review Tasks for Attempt attempt-1",
         ))
         .stdout(predicate::str::contains(
             "Planned write Task attempt-1-write-3",
@@ -15043,7 +15047,7 @@ exit 1
 }
 
 #[test]
-fn tester_error_pauses_same_attempt_before_reviewers() {
+fn final_tester_error_pauses_same_attempt_after_reviewers() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
 
@@ -15053,6 +15057,7 @@ fn tester_error_pauses_same_attempt_before_reviewers() {
         .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
+    plan_final_tester_after_passing_reviews(&main_dir);
 
     let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester");
     let blocker = artifact_dir.join("tester-results.json");
@@ -15099,8 +15104,8 @@ fn tester_error_pauses_same_attempt_before_reviewers() {
             .unwrap()
             .iter()
             .filter(|task| task["kind"] == "review")
-            .all(|task| task["status"] != "executing" && task["status"] != "complete"),
-        "no dependent Reviewer may start after a Tester harness error: {}",
+            .all(|task| task["status"] == "complete"),
+        "the final Tester starts only after every Reviewer completes: {}",
         value["attempts"][0]["tasks"]
     );
 }
@@ -15144,6 +15149,7 @@ fn work_task_run_tester_recovers_when_error_is_transient() {
         .args(["review", "work-1", "attempt-1"])
         .assert()
         .success();
+    plan_final_tester_after_passing_reviews(&main_dir);
 
     let bin_dir = tmp.path().join("bin-tester");
     write_mock_claude(&bin_dir, "#!/bin/bash\nexit 0\n");
@@ -16847,6 +16853,9 @@ fn write_planned_followup_task(main_dir: &Path, input_artifacts: Vec<serde_json:
                 }
             ]
         },
+        "artifact_area": {
+            "path": ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+        },
         "input_artifacts": input_artifacts
     });
     let task_path = work_task_record_path(main_dir, "work-1", "attempt-1", "attempt-1-write-2");
@@ -17694,6 +17703,25 @@ fn create_completed_work_attempt(tmp: &TempDir, main_dir: &Path) {
     create_completed_work_attempt_with_instructions(tmp, main_dir, None);
 }
 
+fn plan_final_tester_after_passing_reviews(main_dir: &Path) {
+    let store = WorkModelStore::new(main_dir);
+    let mut item = store.read_work_item("work-1").unwrap();
+    for task in item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind == fluent::work_model::TaskKind::Review)
+    {
+        fluent::work_model::set_task_terminal(task, fluent::work_model::TaskStatus::Complete);
+        let review_path = main_dir
+            .join(&task.artifact_area.as_ref().unwrap().path)
+            .join("review.md");
+        fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+        fs::write(review_path, "Verdict: pass\n\n## Findings\n").unwrap();
+    }
+    item.add_final_tester_task("attempt-1").unwrap();
+    store.write_work_item(&item).unwrap();
+}
+
 fn create_completed_work_attempt_with_instructions(
     tmp: &TempDir,
     main_dir: &Path,
@@ -17737,23 +17765,6 @@ exit 0
         .env("PATH", mock_path(&bin_dir))
         .assert()
         .success();
-    // Pre-write a stub tester-results.json at the path where the tester task
-    // will later produce output. Most tests that use this helper plan reviews
-    // and then run a review task directly, skipping the tester. The reviewer
-    // requires its input artifacts to exist, so we satisfy that here.
-    let tester_results = main_dir
-        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-tester/tester-results.json");
-    fs::create_dir_all(tester_results.parent().unwrap()).unwrap();
-    // The baseline tester capture may have run a tester.yaml script that left
-    // a directory at this path; remove it so the stub file can be written.
-    if tester_results.is_dir() {
-        fs::remove_dir_all(&tester_results).unwrap();
-    }
-    fs::write(
-        &tester_results,
-        r#"{"commands":[],"tests":[],"summary":{"total":0,"pass":0,"fail":0,"skipped":0},"error":null}"#,
-    )
-    .unwrap();
 }
 
 fn loop_mock_script(verdict: &str) -> String {

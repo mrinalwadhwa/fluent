@@ -4662,17 +4662,31 @@ Checklist item in progress.md, and that the review verdict
 reflects whether all items are `- [x]`.
 Test: review-behaviors prompt contains cross-check instruction
 
+### B8
+
+WHEN a Writer completes a code-producing round,
+THE SYSTEM SHALL instruct it to run focused harness-native checks instead of the
+complete configured suite that belongs to Fluent's final Tester gate.
+Test: src/work_task_executor.rs (writer_prompt_assigns_focused_checks_and_reports_them_for_review)
+
+### B9
+
+WHEN a Writer reports its focused verification,
+THE SYSTEM SHALL require the exact command, result, and covered risk for each
+check, plus the canonical commands left to Fluent's final Tester.
+Test: src/work_task_executor.rs (writer_prompt_assigns_focused_checks_and_reports_them_for_review)
+
 ## Tester Task
 
 ### B1
 
-WHEN an Attempt has a candidate workspace to test from a completed
-writer Task,
-THE SYSTEM SHALL include exactly one `TaskKind::Tester` Task with id
-`<attempt-id>-tester` (or `<attempt-id>-tester-<round>` for review
-rounds beyond the first) alongside the reviewer Tasks for that round.
-Test: src/work_model.rs (review_tasks_include_tester_task_when_candidate_exists)
-Test: src/work_model.rs (review_tasks_tester_id_includes_round_after_first)
+WHEN all scheduled reviewers pass a code-producing candidate,
+THE SYSTEM SHALL plan exactly one `TaskKind::Tester` Task with id
+`<attempt-id>-tester` (or `<attempt-id>-tester-<round>` for review rounds beyond
+the first), bound to that exact reviewed candidate commit, before Learning or
+Merge Candidate readiness.
+Test: src/work_model.rs (final_tester_is_bound_to_the_reviewed_candidate_after_review)
+Test: src/work_attempt_loop.rs (passing_code_reviews_plan_one_final_tester_before_candidate_creation)
 
 ### B2
 
@@ -4682,13 +4696,9 @@ Test: src/tester.rs (task_kind_tester_round_trips)
 
 ### B3
 
-WHEN reviewer Tasks are scheduled for the same Attempt round as a
-Tester Task,
-THE SYSTEM SHALL set each reviewer Task's `depends_on` to include
-the Tester Task id, and reviewer Tasks SHALL NOT begin until the
-Tester Task completes.
-Test: src/work_model.rs (review_tasks_depend_on_tester_task)
-Test: src/work_attempt_loop.rs (tasks_ready_to_run_skips_reviewers_until_tester_complete)
+WHEN reviewer Tasks are scheduled for a code-producing Attempt round,
+THE SYSTEM SHALL make every reviewer ready without a Tester dependency.
+Test: src/work_model.rs (code_review_tasks_do_not_plan_a_tester_before_review)
 
 ### B4
 
@@ -4750,7 +4760,8 @@ WHEN a command declared in `tester.yaml` exits non-zero,
 THE SYSTEM SHALL still run subsequent declared commands AND SHALL
 still produce `tester-results.json` containing each command's exit
 info. The Tester Task itself SHALL complete successfully — individual
-command failures are data the reviewers interpret, not Tester errors.
+command failures are data the Attempt loop interprets at the final gate, not
+Tester infrastructure errors.
 Test: src/tester.rs (tester_continues_when_command_exits_nonzero)
 Test: src/tester.rs (tester_task_succeeds_when_individual_commands_fail)
 
@@ -4850,30 +4861,24 @@ Test: src/tester.rs (tester_results_error_object_shape)
 
 ### B18
 
-WHEN Fluent schedules reviewer Tasks for an Attempt round that has a
-Tester Task,
-THE SYSTEM SHALL include the `tester-results.json` artifact path in
-each reviewer Task's `input_artifacts` list, with producer id set to
-the Tester Task id.
-Test: src/work_model.rs (each_reviewer_task_receives_tester_results_in_input_artifacts)
+WHEN Fluent schedules reviewer Tasks for a code-producing Attempt round,
+THE SYSTEM SHALL include the completed Writer transcript as advisory evidence.
+Test: src/work_model.rs (each_code_reviewer_receives_writer_transcript_in_input_artifacts)
 
-Each reviewer prompt (`prompts/review-architecture.md`,
-`prompts/review-behaviors.md`, `prompts/review-documentation.md`,
-`prompts/review-skills.md`, `prompts/review-tests.md`) SHALL state
-that `tester-results.json` is authoritative for whether the canonical
-test suite passes, that reviewers SHALL NOT re-run the canonical
-suite, and that ad-hoc verifications (targeted invocations, custom
-scripts) for judgment calls remain explicitly OK.
-Test: src/work_model.rs (reviewer_prompts_mention_tester_results_authoritative)
-Test: src/work_model.rs (reviewer_prompts_disallow_canonical_rerun)
-Test: src/work_model.rs (reviewer_prompts_allow_adhoc_verification)
+WHEN Fluent prompts a code reviewer before the final Tester,
+THE SYSTEM SHALL identify the Writer's focused verification as advisory and
+state that the canonical suite has not run.
+Test: src/work_task_executor.rs (work_review_prompt_renders_role_conditional_blocks)
 
-`prompts/review-behaviors.md` SHALL include explicit instruction to
-compute per-EARS coverage by joining `Test:` references from
-`behaviors.md` against the `tests` array in `tester-results.json`,
-flagging any EARS statement whose `Test:` references have
-`status: fail` or are not present in the `tests` array.
-Test: src/work_model.rs (review_behaviors_prompt_describes_ears_coverage_join)
+WHEN a concrete missing result prevents the tests reviewer from deciding,
+THE SYSTEM SHALL permit that reviewer to run one named harness-native check
+without permitting any reviewer to rerun the complete suite.
+Test: src/work_task_executor.rs (work_review_prompt_renders_role_conditional_blocks)
+
+WHEN Fluent prompts a behaviors reviewer before the final Tester,
+THE SYSTEM SHALL instruct it to verify that every `Test:` reference names a real
+test that directly exercises the behavior.
+Test: src/work_task_executor.rs (work_review_prompt_renders_role_conditional_blocks)
 
 `prompts/review-behaviors.md` SHALL include explicit instruction to
 interpret test failures: distinguish *real* failures (introduced by
@@ -4929,6 +4934,43 @@ reviewers can consume it, and SHALL fail closed if evidence is already bound to
 a different commit.
 Test: src/tester.rs (tester_results_bind_once_to_the_exact_candidate_commit)
 
+### B24
+
+IF a code-producing final Tester reports an introduced failure, a top-level
+infrastructure error, or no readable `tester-results.json`,
+THEN THE SYSTEM SHALL block Learning and Merge Candidate readiness and return
+the Tester artifact to a corrective Writer while write-round budget remains.
+Test: src/work_attempt_loop.rs (tester_failure_routes_to_followup_within_budget)
+Test: src/work_attempt_loop.rs (tester_error_routes_to_followup_within_budget)
+Test: src/work_attempt_loop.rs (unreadable_final_tester_results_fail_closed)
+
+### B25
+
+WHEN the final Tester completes with no introduced failure and no infrastructure
+error,
+THE SYSTEM SHALL preserve the passing review decision and advance the exact
+reviewed candidate to Learning.
+Test: src/work_attempt_loop.rs (passing_final_tester_advances_the_exact_reviewed_candidate)
+
+### B26
+
+WHEN Fluent schedules a code reviewer before the final Tester,
+THE SYSTEM SHALL omit `tester-results.json` from that reviewer's input artifacts.
+Test: src/work_model.rs (code_review_tasks_do_not_receive_tester_results)
+
+### B27
+
+WHEN an Attempt starts its initial Writer,
+THE SYSTEM SHALL capture the pre-write Tester baseline before candidate changes.
+Test: src/work_task_executor.rs (capture_baseline_tester_persists_results_as_artifact)
+
+### B28
+
+WHEN the same Attempt starts a corrective Writer,
+THE SYSTEM SHALL reuse the original pre-write Tester baseline without running it
+again, even when no final Tester Task exists yet.
+Test: src/work_task_executor.rs (corrective_writer_does_not_recapture_attempt_baseline_without_tester)
+
 ## Pre-review completion gate
 
 ### B1
@@ -4941,8 +4983,9 @@ Test: src/work_attempt_loop.rs (unchecked_required_progress_plans_writer_before_
 ### B2
 
 WHEN a completed Writer satisfies every approved required-progress entry, THE
-SYSTEM SHALL plan one Tester and one review Task for each configured reviewer.
-Test: src/work_attempt_loop.rs (checked_required_progress_plans_one_tester_and_review_round)
+SYSTEM SHALL plan one review Task for each configured reviewer without planning
+the final Tester yet.
+Test: src/work_attempt_loop.rs (checked_required_progress_plans_review_round_without_tester)
 
 ### B3
 
@@ -4955,7 +4998,7 @@ Test: src/work_attempt_loop.rs (rewritten_required_progress_pauses_before_tester
 ### B4
 
 WHEN an Attempt has no required-progress contract, THE SYSTEM SHALL preserve the
-legacy transition from a completed Writer to Tester and review planning.
+transition from a completed Writer to review planning.
 Test: src/work_attempt_loop.rs (legacy_completed_writer_plans_reviews_without_progress_contract)
 
 ### B5
@@ -4967,10 +5010,10 @@ Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_continu
 
 ### B6
 
-WHEN Fluent retries the completed-Writer planning boundary after Tester and
-review Tasks are durable, THE SYSTEM SHALL reuse those Tasks without creating
+WHEN Fluent retries the completed-Writer planning boundary after review Tasks
+are durable, THE SYSTEM SHALL reuse those Tasks without creating
 duplicates.
-Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_tester_or_review_tasks)
+Test: src/work_attempt_loop.rs (post_write_gate_retry_does_not_duplicate_review_tasks)
 
 ### B7
 

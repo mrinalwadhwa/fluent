@@ -233,17 +233,31 @@ a background post-merge review is in flight. If the source HEAD moves
 during the review (e.g. another merge lands), the guard fails the
 review Tasks with a clear error and does not attempt restoration.
 
-When a reconciled review round includes a candidate workspace, Fluent creates a
-`TaskKind::Tester` Task alongside the reviewer Tasks. The Tester is a
-deterministic subcommand (`fluent tester run`) that reads
+When a reconciled code-producing round has a candidate workspace, Fluent creates
+the reviewer Tasks immediately and makes the Writer transcript readable to them.
+The Writer's final message reports its focused, harness-native checks as advisory
+evidence. Reviewers inspect the code and tests in parallel; the tests reviewer may
+run one named missing check, but no reviewer reruns the complete suite.
+
+Only after every scheduled reviewer passes does Fluent create one
+`TaskKind::Tester` Task for that review round. The Tester is a deterministic
+subcommand (`fluent tester run`) that reads
 `.fluent/tester.yaml` from the candidate workspace, runs each declared
 test command sequentially, invokes `.fluent/extract-tester-results` to
 normalize the raw output into per-test entries, and writes
-`tester-results.json` to its artifact directory. Every reviewer Task
-declares a `depends_on` reference to the Tester Task; the Attempt
-scheduler blocks all reviewers until the Tester completes. The Tester
-does not spawn a Coder process or write a transcript — it is a
-deterministic subprocess, not an LLM agent.
+`tester-results.json` to its artifact directory. This final canonical gate is
+bound to the exact reviewed candidate and runs once per candidate that reaches
+it. An introduced failure or unreadable/error result returns to a corrective
+Writer; a pass advances to Learning. The Tester does not spawn a Coder process
+or write a transcript — it is a deterministic subprocess, not an LLM agent.
+
+Review-only Attempts keep their existing Tester-first contract because no Writer
+produces focused candidate evidence for them.
+
+The pre-write baseline remains Attempt-scoped. Fluent captures it before the
+initial Writer and identifies that boundary by the absence of an earlier Writer
+Task, so corrective Writers reuse the same baseline even though no final Tester
+has been planned yet.
 
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it
@@ -268,11 +282,11 @@ The `behaviors.md` format supports two markers on EARS statements:
 - `Test:` — names a test that verifies the behavior.
 - `Untestable:` — marks a behavior as genuinely untestable with a reason.
 
-The Tester produces host-owned `tester-results.json` and binds it once to the
-exact candidate commit. Reviewers consume that result as their default
-executable evidence. Architecture, behaviors, skills, and documentation
-reviewers do not rerun full suites. The tests reviewer may run one named check
-when the evidence lacks a result needed for a concrete finding.
+The final Tester produces host-owned `tester-results.json` and binds it once to
+the exact candidate commit. It is the authoritative canonical-suite gate used by
+the Attempt loop and Learner. Code reviewers run before it and use the Writer's
+focused verification only as advisory evidence. Review-only reviewers consume
+their Tester-first result as default executable evidence.
 
 Status and `work-item show` expose cycle-cost measurements alongside lifecycle
 state: review rounds, summed duration of completed Tasks, input/output tokens,
@@ -337,14 +351,16 @@ initial write output completes it plans review Tasks for the full Work
 reviewer set. After a follow-up write output completes it derives the
 next review roles from that Task's failed review input artifacts; when
 it cannot derive at least one role, it falls back to the full Work
-reviewer set. After a completed review round it interprets review
-artifacts with the review subsystem verdict parser and checks the
-round's `tester-results.json` for test failures — only failures the
+reviewer set. After a completed reviewer round it interprets review
+artifacts with the review subsystem verdict parser. A failed or uncertain
+review returns directly to a Writer without spending a canonical Tester run.
+When all reviews pass, Fluent plans one final Tester and checks its
+`tester-results.json` — only failures the
 Work Item introduced (tests failing now that were not failing in the
 pre-write baseline) block the Merge Candidate path; pre-existing
 failures pass through. When no baseline is available the gate falls
-back to blocking on any failure (fail-open: a missing or unparseable
-results file does not block). All pass with no introduced tester
+back to blocking on any failure. A missing or unparseable final result
+fails closed. All reviews and the final Tester passing with no introduced tester
 failures marks the Attempt review state as passed, completes
 the Attempt, and creates or returns one durable Merge Candidate for
 later merge execution. The Merge

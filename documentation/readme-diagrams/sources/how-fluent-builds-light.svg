@@ -62,28 +62,28 @@
 
   <line x1="220" y1="188" x2="234" y2="188" class="connector"/>
 
-  <!-- Tester -->
+  <!-- Reviewers -->
   <rect x="234" y="132" width="94" height="112" rx="3" class="card"/>
-  <rect x="272" y="146" width="18" height="15" rx="1" class="icon"/>
-  <line x1="272" y1="151" x2="290" y2="151" class="icon"/>
-  <path d="M276 155 L279 158 L285 153" class="icon"/>
-  <text x="281" y="181" class="title">Tester</text>
-  <text x="281" y="201" class="text">Runs declared tests</text>
-  <text x="281" y="211" class="text">and produces an</text>
-  <text x="281" y="221" class="text">independent test record.</text>
+  <rect x="257" y="146" width="14" height="17" rx="1" class="icon"/>
+  <rect x="274" y="146" width="14" height="17" rx="1" class="icon"/>
+  <rect x="291" y="146" width="14" height="17" rx="1" class="icon"/>
+  <path d="M260 154 L263 157 L268 151 M277 154 L280 157 L285 151 M294 154 L297 157 L302 151" class="icon"/>
+  <text x="281" y="181" class="title">Reviewers</text>
+  <text x="281" y="201" class="text">Inspect code and tests</text>
+  <text x="281" y="211" class="text">in parallel using</text>
+  <text x="281" y="221" class="text">focused evidence.</text>
 
   <line x1="328" y1="188" x2="342" y2="188" class="connector"/>
 
-  <!-- Reviewers -->
+  <!-- Tester -->
   <rect x="342" y="132" width="104" height="112" rx="3" class="card"/>
-  <rect x="370" y="146" width="14" height="17" rx="1" class="icon"/>
-  <rect x="387" y="146" width="14" height="17" rx="1" class="icon"/>
-  <rect x="404" y="146" width="14" height="17" rx="1" class="icon"/>
-  <path d="M373 154 L376 157 L381 151 M390 154 L393 157 L398 151 M407 154 L410 157 L415 151" class="icon"/>
-  <text x="394" y="181" class="title">Reviewers</text>
-  <text x="394" y="201" class="text">Assess every change</text>
-  <text x="394" y="211" class="text">in parallel from</text>
-  <text x="394" y="221" class="text">different perspectives.</text>
+  <rect x="385" y="146" width="18" height="15" rx="1" class="icon"/>
+  <line x1="385" y1="151" x2="403" y2="151" class="icon"/>
+  <path d="M389 155 L392 158 L398 153" class="icon"/>
+  <text x="394" y="181" class="title">Tester</text>
+  <text x="394" y="201" class="text">Runs the complete suite</text>
+  <text x="394" y="211" class="text">once after reviews</text>
+  <text x="394" y="221" class="text">and records results.</text>
 
   <line x1="446" y1="188" x2="460" y2="188" class="connector"/>
 

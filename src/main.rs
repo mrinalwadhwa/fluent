@@ -780,6 +780,11 @@ fn cmd_attempt(
                             println!("{task_id}");
                         }
                     }
+                    WorkAttemptRunOutcome::PlannedFinalTester { task_id } => {
+                        println!(
+                            "Planned final canonical Tester Task {task_id} for Attempt {attempt_id}"
+                        );
+                    }
                     WorkAttemptRunOutcome::MergeCandidateReady { candidate_id } => {
                         println!(
                             "Attempt {attempt_id} reviews and Learner passed; Merge Candidate \

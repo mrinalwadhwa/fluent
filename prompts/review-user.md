@@ -54,7 +54,11 @@ failed review at {{evidence_prior_review_path}} for commit
 ## Phase 2 — Inspect the candidate
 
 1. Run the review diff command (`{{review_diff_command}}`) to see what the Writer changed in this round.
+{{#if has_final_tester_evidence}}
 2. Read tester-results.json at {{tester_results_path}} — host-owned outcomes of the declared test commands for exact candidate commit {{candidate_commit}}. Treat this as the default executable evidence. If the file records a different candidate commit, report one blocking evidence mismatch.
+{{else}}
+2. For exact candidate commit {{candidate_commit}}, read the Writer's final verification summary in {{writer_transcript_path}}. Treat its focused commands as advisory evidence: inspect the changed tests and code yourself, and do not claim that the final canonical suite has run. If one concrete missing result prevents a decision, the tests reviewer may run one named harness-native check; other roles should report the evidence gap.
+{{/if}}
 3. Read progress.md at {{progress_md_path}} — the Writer's per-step notes, including any recorded divergences from plan, approach, or behaviors, and any `Untestable:` justifications.
 
 ## Phase 3 — Review and write the review report
@@ -68,8 +72,13 @@ failed review at {{evidence_prior_review_path}} for commit
 {{/if}}
 {{#if is_review_behaviors}}
    - Every new or changed EARS statement should have a `Test:` reference or `Untestable:` marker. Missing markers are gaps.
+{{/if}}
+{{#if is_review_behaviors_with_final_tester}}
    - For each `Test:` reference, verify the matching entry in the `tests` array of tester-results.json has `status: pass`. A failed test or a missing reference is a finding.
    - If tester-results.json has a non-null `error` field, produce a single finding naming the error `kind` and `message` — don't flag individual behaviors when the test infrastructure itself failed.
+{{/if}}
+{{#if is_review_behaviors_before_final_tester}}
+   - For each `Test:` reference, verify that the named test exists and directly exercises the behavior. Use the Writer's focused verification only as advisory evidence; the final Tester has not run yet.
 {{/if}}
 {{#if is_review_architecture}}
    - Flag structural choices that diverge from what `approach.md` specifies. Do not re-litigate `approach.md` itself — that judgment lives with `define-approach`. If the approach is itself the problem, mark Verdict `uncertain` and record the concern as a finding.
@@ -127,7 +136,11 @@ Do not edit or commit in {{candidate_workspace_path}}. Multiple reviewers run ag
 
 ### Executable evidence
 
+{{#if has_final_tester_evidence}}
 - Use tester-results.json as the default executable evidence for the exact candidate commit.
+{{else}}
+- The Writer's focused verification summary is advisory evidence. Do not describe it as host-owned or as proof that the complete canonical suite passed.
+{{/if}}
 - Do not rerun the full suite. Architecture, behavior, skills, and documentation review should inspect the candidate and existing evidence without producing build outputs.
 - Keep review.md, logs, transcripts, and small diagnostic text in {{artifact_dir}}. Do not create build caches there.
 

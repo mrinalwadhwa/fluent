@@ -155,6 +155,9 @@ write_planned_followup_task() {
         reads: [],
         writes: [{id: $workspace_id, path: $workspace_path}]
       },
+      artifact_area: {
+        path: ".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-2"
+      },
       input_artifacts: []
     }' > .fluent/work/tasks/work-1/attempt-1/attempt-1-write-2.json
   jq '.status = "planned" | .review_state = "failed"' \
@@ -281,7 +284,7 @@ test_attempt_loop_plans_followup_with_mixed_failed_and_missing_reviews() {
   run_attempt_loop > "$TEST_DIR/stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Planned write Task attempt-1-write-2" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Completed Task attempt-1-write-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 2 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/stdout")" "Planned 1 review Tasks for Attempt attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "attempt-1-review-2-documentation" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/stdout")" "Merge Candidate attempt-1-merge-candidate is ready" || RESULT=1
   [ "$(json_value '.attempts[0].status')" = "complete" ] || RESULT=1
@@ -304,7 +307,7 @@ test_attempt_loop_counts_preplanned_followup_against_budget() {
 
   run_attempt_loop > "$TEST_DIR/followup-stdout" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-2" || RESULT=1
-  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 6 review Tasks for Attempt attempt-1" || RESULT=1
+  assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned 5 review Tasks for Attempt attempt-1" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Planned write Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "Completed Task attempt-1-write-3" || RESULT=1
   assert_contains "$(cat "$TEST_DIR/followup-stdout")" "needs user input" || RESULT=1

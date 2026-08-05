@@ -151,9 +151,9 @@ pub fn after_attempt_run(
         WorkAttemptRunOutcome::ReviewOnlyFailed => {
             Some(review_only_hint(ctx.review_artifact, false))
         }
-        WorkAttemptRunOutcome::RanTask { .. } | WorkAttemptRunOutcome::PlannedReviews { .. } => {
-            None
-        }
+        WorkAttemptRunOutcome::RanTask { .. }
+        | WorkAttemptRunOutcome::PlannedReviews { .. }
+        | WorkAttemptRunOutcome::PlannedFinalTester { .. } => None,
     }
 }
 

@@ -93,9 +93,11 @@ stops at a Learner failure, or pauses at `needs-user`. Each round:
    deduplicated findings, passing evidence, executed commands, and paths to full
    historical artifacts. If the session identity is unavailable, Fluent starts a
    fresh persistent Writer session.
-3. Once required progress is complete, the Tester Task runs the project's tests.
-4. Domain reviewers evaluate in parallel.
-5. After the reviewers pass, the Learner runs in the Work Item's Learner mode:
+3. Once required progress is complete, domain reviewers evaluate the candidate
+   in parallel using the Writer's focused verification as advisory evidence.
+4. After the reviewers pass, one final Tester Task runs the project's complete
+   declared test commands against the exact reviewed commit.
+5. After the final Tester passes, the Learner runs in the Work Item's Learner mode:
    in the default `capture` mode it captures durable project expertise, while in
    `no-expertise` mode it audits the change without writing expertise. Either
    way it records possible follow-ups for materialization after land.
@@ -276,16 +278,22 @@ The writer produces tests alongside code. When committing a candidate:
 
 - `.fluent/tester.yaml` declares the project's test commands (one entry per harness, e.g., Rust nextest + shell).
 - Each EARS statement has either a `Test:` reference pointing at a real test or an `Untestable:` marker with a one-line reason.
-- Run the project's tests before committing (best practice, not enforced).
+- Run focused harness-native selections before committing and report the exact
+  commands, results, and covered risks. Leave the complete configured suite to
+  Fluent's final Tester.
 
-The Tester Task runs only after a completed Writer has satisfied the Work Item's
+Reviewer Tasks run only after a completed Writer has satisfied the Work Item's
 required-progress contract. Incomplete work continues on the Writer path and
-does not spend a Tester or review cycle. The Tester then produces
-`tester-results.json`, which the host binds to the exact candidate commit for
-reviewers. Domain reviewers use that evidence instead of rerunning the full
-suite. Only the tests reviewer may run one named missing check, using the
-candidate-keyed shared cache; reviewer artifact directories are reserved for
-verdicts, transcripts, logs, and structured evidence.
+does not spend a review or Tester cycle. Domain reviewers inspect the candidate
+and use the Writer's reported focused checks as advisory evidence instead of
+rerunning the full suite. Only the tests reviewer may run one named missing
+check, using the candidate-keyed shared cache.
+
+After every reviewer passes, one final Tester produces `tester-results.json`,
+which the host binds to the exact reviewed commit. This is the authoritative
+complete-suite gate before Learning. A failed review therefore returns to the
+Writer without spending a full Tester run; a final Tester regression returns its
+artifact to a corrective Writer.
 
 `fluent status` and `fluent work-item show <work-item-id>` also report cycle-cost
 measurements: review rounds, completed-stage duration, local transcript tokens,

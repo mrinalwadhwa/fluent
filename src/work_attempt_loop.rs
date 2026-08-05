@@ -213,6 +213,9 @@ pub enum WorkAttemptRunOutcome {
     PlannedReviews {
         task_ids: Vec<String>,
     },
+    PlannedFinalTester {
+        task_id: String,
+    },
     MergeCandidateReady {
         candidate_id: String,
     },
@@ -4357,11 +4360,11 @@ fn introduced_tester_failures(current_path: &Path, baseline_path: Option<&Path>)
 fn tester_errored(tester_results_path: &Path) -> bool {
     let content = match fs::read_to_string(tester_results_path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return true,
     };
     let results: crate::tester::TesterResults = match serde_json::from_str(&content) {
         Ok(r) => r,
-        Err(_) => return false,
+        Err(_) => return true,
     };
     results.error.is_some()
 }
@@ -4393,6 +4396,18 @@ fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<
             work_task_executor::resolve_managed_artifact_area_path(project_root, &area.path).ok()
         })
         .map(|dir| dir.join("tester-results.json"))
+}
+
+fn has_tester_after_latest_write(attempt: &Attempt) -> bool {
+    let start = attempt
+        .tasks
+        .iter()
+        .rposition(|task| task.kind == TaskKind::Write)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    attempt.tasks[start..]
+        .iter()
+        .any(|task| task.kind == TaskKind::Tester)
 }
 
 /// When a marked Attempt's current required progress does not reconcile with its
@@ -4996,25 +5011,12 @@ fn interpret_reviews(
         }
     }
 
-    let tester_result_path =
-        latest_tester_results_path(project_root, &item.attempts[attempt_index]);
-    let baseline_path = baseline_tester_results_path(project_root, &item.attempts[attempt_index]);
-    let tester_fail_count = tester_result_path
-        .as_ref()
-        .map(|p| introduced_tester_failures(p, baseline_path.as_deref()))
-        .unwrap_or(0);
-    let tester_has_error = tester_result_path
-        .as_ref()
-        .map(|p| tester_errored(p))
-        .unwrap_or(false);
-
-    // Advancement gate B2: when reviews and the tester would otherwise pass, a marked
-    // Attempt must not pass over incomplete or mismatched required progress. A
-    // violation is surfaced as a synthetic finding so a follow-up Writer materializes
-    // checked current-progress evidence before a later pass — never an ad hoc bypass.
+    // Advancement gate B2: when reviews would otherwise pass, a marked Attempt must
+    // not start the expensive final Tester over incomplete or mismatched required
+    // progress. A violation is surfaced as a synthetic finding so a follow-up Writer
+    // materializes checked current-progress evidence before a later pass.
     // An unmarked (legacy) Attempt has no contract, so this never scans its prose.
-    let reviews_would_pass =
-        failed.is_empty() && uncertain.is_empty() && tester_fail_count == 0 && !tester_has_error;
+    let reviews_would_pass = failed.is_empty() && uncertain.is_empty();
     if reviews_would_pass {
         if let Some(finding) =
             required_progress_finding(project_root, &item.attempts[attempt_index])
@@ -5022,6 +5024,36 @@ fn interpret_reviews(
             failed.push(finding);
         }
     }
+
+    // Code-producing Attempts run the canonical suite once, after every reviewer has
+    // passed. A legacy Attempt that already owns a round Tester resumes through that
+    // existing Task; review-only Attempts retain their Tester-first contract.
+    if failed.is_empty()
+        && uncertain.is_empty()
+        && !item.attempts[attempt_index].kind.is_review_only_like()
+        && !has_tester_after_latest_write(&item.attempts[attempt_index])
+    {
+        let task_id = item.add_final_tester_task(attempt_id)?;
+        store.write_work_item(&item)?;
+        return Ok(WorkAttemptRunOutcome::PlannedFinalTester { task_id });
+    }
+
+    let tester_gate_applicable = failed.is_empty() && uncertain.is_empty();
+    let tester_result_path =
+        latest_tester_results_path(project_root, &item.attempts[attempt_index]);
+    let baseline_path = baseline_tester_results_path(project_root, &item.attempts[attempt_index]);
+    let tester_fail_count = tester_result_path
+        .as_ref()
+        .filter(|_| tester_gate_applicable)
+        .map(|p| introduced_tester_failures(p, baseline_path.as_deref()))
+        .unwrap_or(0);
+    // A planned and completed canonical Tester without a readable result is an
+    // infrastructure failure, never permission to advance without evidence.
+    let tester_has_error = tester_result_path
+        .as_ref()
+        .filter(|_| tester_gate_applicable)
+        .map(|p| !p.is_file() || tester_errored(p))
+        .unwrap_or(false);
 
     let has_failures = !failed.is_empty() || tester_fail_count > 0 || tester_has_error;
 
@@ -6791,6 +6823,128 @@ mod tests {
         (store, item)
     }
 
+    fn remove_round_tester(project_root: &Path, store: &WorkModelStore) -> WorkItem {
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0]
+                    .tasks
+                    .retain(|task| task.kind != TaskKind::Tester);
+                Ok(())
+            })
+            .unwrap();
+        let tester_dir = project_root.join(work_artifact_path(
+            "work-1",
+            "attempt-1",
+            "attempt-1-tester",
+        ));
+        if tester_dir.exists() {
+            fs::remove_dir_all(tester_dir).unwrap();
+        }
+        store.read_work_item("work-1").unwrap()
+    }
+
+    #[test]
+    fn passing_code_reviews_plan_one_final_tester_before_candidate_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(passing_tester_json()));
+        let item = remove_round_tester(tmp.path(), &store);
+
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedFinalTester { ref task_id }
+                if task_id == "attempt-1-tester"
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.merge_candidates.is_empty());
+        let testers = stored.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Tester)
+            .collect::<Vec<_>>();
+        assert_eq!(testers.len(), 1);
+        assert_eq!(testers[0].status, TaskStatus::Planned);
+        assert_eq!(
+            testers[0]
+                .review_context
+                .as_ref()
+                .map(|context| context.candidate_commit.as_str()),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn failed_code_review_returns_to_writer_without_running_final_tester() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "FAIL", Some(passing_tester_json()));
+        let item = remove_round_tester(tmp.path(), &store);
+
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedWriteRound { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .all(|task| task.kind != TaskKind::Tester)
+        );
+    }
+
+    #[test]
+    fn passing_final_tester_advances_the_exact_reviewed_candidate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) =
+            make_interpret_reviews_fixture(tmp.path(), "PASS", Some(passing_tester_json()));
+        let item = remove_round_tester(tmp.path(), &store);
+        interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        store
+            .mutate_work_item("work-1", |item| {
+                let tester = item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.kind == TaskKind::Tester)
+                    .unwrap();
+                crate::work_model::set_task_terminal(tester, TaskStatus::Complete);
+                Ok(())
+            })
+            .unwrap();
+        let tester_dir = tmp.path().join(work_artifact_path(
+            "work-1",
+            "attempt-1",
+            "attempt-1-tester",
+        ));
+        fs::create_dir_all(&tester_dir).unwrap();
+        fs::write(
+            tester_dir.join("tester-results.json"),
+            passing_tester_json(),
+        )
+        .unwrap();
+
+        let item = store.read_work_item("work-1").unwrap();
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::MergeCandidateReady { .. }
+        ));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Complete);
+        assert_eq!(
+            stored.attempts[0].review_state,
+            Some(AttemptReviewState::Passed)
+        );
+        assert_eq!(stored.merge_candidates.len(), 1);
+        assert_eq!(stored.merge_candidates[0].candidate_commit, "abc123");
+    }
+
     fn add_evidence_targeted_review(
         project_root: &Path,
         store: &WorkModelStore,
@@ -7242,7 +7396,7 @@ mod tests {
     }
 
     #[test]
-    fn passing_or_missing_tester_does_not_block() {
+    fn passing_tester_advances_but_missing_final_results_fail_closed() {
         let tmp_pass = tempfile::TempDir::new().unwrap();
         let (store_pass, _) =
             make_interpret_reviews_fixture(tmp_pass.path(), "PASS", Some(passing_tester_json()));
@@ -7279,9 +7433,23 @@ mod tests {
         assert!(
             matches!(
                 outcome_missing,
-                WorkAttemptRunOutcome::MergeCandidateReady { .. }
+                WorkAttemptRunOutcome::PlannedWriteRound { .. }
             ),
-            "missing tester results should allow merge candidate; got {outcome_missing:?}"
+            "missing final Tester results should return to the Writer; got {outcome_missing:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_final_tester_results_fail_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, _) = make_interpret_reviews_fixture(tmp.path(), "PASS", Some("not valid JSON"));
+        let item = store.read_work_item("work-1").unwrap();
+
+        let outcome = interpret_reviews(tmp.path(), &store, item, "attempt-1", true, None).unwrap();
+
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::PlannedWriteRound { .. }),
+            "unreadable final Tester evidence should return to the Writer; got {outcome:?}"
         );
     }
 
@@ -7453,11 +7621,35 @@ mod tests {
             fs::write(review2_dir.join("review.md"), "Verdict: pass\n").unwrap();
         }
 
+        let tester_id = if rounds >= 2 {
+            "attempt-1-tester-2"
+        } else {
+            "attempt-1-tester"
+        };
+        let tester_path = work_artifact_path("work-1", "attempt-1", tester_id);
+        attempt.tasks.push(tester_task(tester_id, &tester_path));
+        let tester_dir = project_root.join(&tester_path);
+        fs::create_dir_all(&tester_dir).unwrap();
+        fs::write(
+            tester_dir.join("tester-results.json"),
+            passing_tester_json(),
+        )
+        .unwrap();
+
         // The reviewed change lives at `base`, so every Tester and reviewer context
         // names it. The pre-land no-expertise pointer-identity gate reads these
         // contexts, so they must reflect the real reviewed Writer SHA rather than a
         // placeholder.
         for task in &mut item.attempts[0].tasks {
+            if task.kind == TaskKind::Tester && task.review_context.is_none() {
+                task.review_context = Some(crate::work_model::ReviewContext {
+                    candidate_workspace_id: "candidate".to_string(),
+                    candidate_workspace_path: "../work-1-candidate".to_string(),
+                    source_branch: "main".to_string(),
+                    candidate_commit: base.clone(),
+                    base_commit: None,
+                });
+            }
             if let Some(context) = task.review_context.as_mut() {
                 context.candidate_commit = base.clone();
             }
@@ -8840,7 +9032,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_required_progress_plans_one_tester_and_review_round() {
+    fn checked_required_progress_plans_review_round_without_tester() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_completed_writer_gate_fixture(
             tmp.path(),
@@ -8876,7 +9068,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.kind == TaskKind::Tester)
                 .count(),
-            1
+            0
         );
         assert_eq!(stored.attempts[0].writer_runs.len(), 1);
         assert_eq!(
@@ -9060,7 +9252,7 @@ mod tests {
     }
 
     #[test]
-    fn post_write_gate_retry_does_not_duplicate_tester_or_review_tasks() {
+    fn post_write_gate_retry_does_not_duplicate_review_tasks() {
         let tmp = tempfile::TempDir::new().unwrap();
         let store = make_completed_writer_gate_fixture(
             tmp.path(),
@@ -9091,7 +9283,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.kind == TaskKind::Tester)
                 .count(),
-            1
+            0
         );
         assert_eq!(
             stored.attempts[0]
@@ -12633,9 +12825,13 @@ mod tests {
         item.attempts[0].status = AttemptStatus::Complete;
         item.attempts[0].review_state = Some(AttemptReviewState::Passed);
 
-        // A final-round Tester context at the reviewed SHA.
-        let tester_path = work_artifact_path("work-1", "attempt-1", "attempt-1-tester");
-        let mut tester = tester_task("attempt-1-tester", &tester_path);
+        // The base fixture already carries the final Tester; bind its context to
+        // the reviewed SHA rather than creating a duplicate Task identity.
+        let tester = item.attempts[0]
+            .tasks
+            .iter_mut()
+            .find(|task| task.kind == TaskKind::Tester)
+            .expect("base fixture final Tester");
         tester.review_context = Some(ReviewContext {
             candidate_workspace_id: "candidate".to_string(),
             candidate_workspace_path: "../work-1-candidate".to_string(),
@@ -12643,7 +12839,6 @@ mod tests {
             candidate_commit: base.to_string(),
             base_commit: None,
         });
-        item.attempts[0].tasks.push(tester);
 
         // A final-round context for every built-in reviewer beyond the `tests`
         // reviewer the base fixture already carries.
