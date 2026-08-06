@@ -28,7 +28,7 @@ pub fn after_init_instruction_changes(paths: &[String]) -> String {
         vec!["\n  Resolve the Fluent instruction changes before running an Attempt:".to_string()];
     lines.extend(paths.iter().map(|path| format!("    {path}")));
     lines.push(
-        "  commit or revert these files first; candidate worktrees use committed Git state."
+        "  Commit or revert these files first; candidate worktrees use committed Git state."
             .to_string(),
     );
     lines.join("\n")

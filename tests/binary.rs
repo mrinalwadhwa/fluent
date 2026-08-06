@@ -3292,7 +3292,7 @@ fn init_reports_changed_instructions_after_partial_seeding_failure() {
         "init should report the later seeding failure: {stderr}"
     );
     let expected_git_guidance = "Resolve the Fluent instruction changes before running an \
-        Attempt:\n    AGENTS.md\n  commit or revert these files first; candidate worktrees use \
+        Attempt:\n    AGENTS.md\n  Commit or revert these files first; candidate worktrees use \
         committed Git state.";
     assert!(
         stderr.contains(expected_git_guidance),
