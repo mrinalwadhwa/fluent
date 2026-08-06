@@ -1,12 +1,16 @@
 # Testing in the fluent
 
-The fluent has several types of tests:
+Fluent has four complementary test surfaces:
 
-**Behavioral tests** (`tests/behaviors/`) — verify the fluent delivers its specified behaviors. Written from EARS statements without seeing code. Test the system from the outside.
+**Rust unit tests** (`src/`) — exercise module-local logic and invariants.
 
-**Skill tests** (`tests/test-skill`) — simulate skill conversations between two agents. Test skill structure and flow.
+**Rust integration tests** (`tests/*.rs`) — exercise the public API and real CLI routes. The configured suite runs them with `cargo nextest` and the `test-support` feature.
 
-Each type catches a different class of problems. Behavioral tests catch user-visible regressions. Skill tests catch conversation design issues.
+**Behavior scripts** (`tests/behaviors/operations/`) — test user-visible EARS behaviors against the built binary from the outside.
+
+**Skill scenarios** (`tests/behaviors/skills/`, driven by `tests/test-skill` and companion shell scripts) — simulate conversations and verify interactive skill structure and flow.
+
+`.fluent/tester.yaml` is the canonical full-suite definition. Writers should run the smallest harness-native selection that covers their change and report it as advisory focused verification. For code-producing Work, Fluent runs the complete configured suite once, after code review, as the authoritative final Tester gate. Review-only Work retains Tester-first ordering.
 
 ## Where failure logs live
 

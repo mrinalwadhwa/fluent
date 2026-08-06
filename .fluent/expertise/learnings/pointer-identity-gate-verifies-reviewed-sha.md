@@ -5,14 +5,17 @@ metadata:
   type: architecture
 ---
 
-When a Work Item's release contract is "one specific reviewed Writer SHA survives
-Tester, every review, and the Learner *unchanged*," sandbox confinement that denies
-expertise/candidate/git writes is a *preventive* control — not verification that the
-invariant held. An end-of-run `denied_paths` (or clean final `git status`) bail is a
-structurally weaker substitute that cannot prove identity: a mutation staged by one
-coder invocation and reverted by a later one leaves it empty. Reviewers block this as
-"sandbox intent alone is not release evidence" and require a host-owned deterministic
-gate instead.
+When a Work Item's release contract requires the latest reviewed Writer SHA to
+survive the final Tester, every review executed for that candidate, and the Learner
+*unchanged*, sandbox confinement that denies expertise/candidate/Git writes is a
+*preventive* control — not verification that the invariant held. A passing reviewer
+from an earlier candidate may remain effective only when Fluent's host-owned
+changed-domain comparison proves that the correction did not touch its domain. That
+is explicit carry-forward review authority; it is not a claim that the historical
+Task context names the later SHA. An end-of-run `denied_paths` (or clean final `git
+status`) bail is a structurally weaker substitute that cannot prove identity: a
+mutation staged by one coder invocation and reverted by a later one leaves it empty.
+Reviewers require a host-owned deterministic gate instead.
 
 The enforced mechanism lives in `work_attempt_loop`:
 
@@ -22,10 +25,14 @@ The enforced mechanism lives in `work_attempt_loop`:
   `candidate_commit`, and every final-round Tester and built-in-reviewer
   `review_context` all name that SHA (`check_no_expertise_pointer_identity`). A
   mismatch launches no coder.
-- Select review contexts from the final passing round only — the highest-numbered
-  completed round (`final_review_round`/`task_review_round`). Earlier corrective
-  rounds carry stale `candidate_commit`s and are historical evidence, not identity
-  mismatches. Any cross-round check must scope this way.
+- Select identity contexts from the final passing round only — the
+  highest-numbered completed round (`final_review_round`/`task_review_round`). Every
+  Tester and reviewer newly executed in that round must name the reviewed SHA.
+  Earlier corrective rounds may carry older `candidate_commit`s: review admission
+  must either supersede an affected role with a current review or preserve an
+  unaffected pass through changed-domain invalidation. The identity gate must not
+  reinterpret valid historical contexts as current-pointer mismatches, and the
+  review-admission gate must not let an affected historical pass remain effective.
 - Repeat the full check inside the same fresh, lock-held mutation that advances
   Learning to `HandoffPending` (`prepare_no_expertise_handoff` calls
   `check_no_expertise_pointer_identity` against the `mutate_work_item` aggregate), so
@@ -95,6 +102,8 @@ This identity axis is complementary to — not a duplicate of — the per-return
 ledger ([[host-owned-git-transaction-over-untrusted-coder]]): the ledger proves the
 coder mutated nothing in the managed workspace; the identity gate proves the thing
 being released is exactly the reviewed commit across every pointer and review
-context. Confinement mechanics are [[sandbox-denials-track-template-grants]]; the
+context for newly executed final-round Tasks, while correction-aware review
+invalidation proves whether older role evidence remains applicable. Confinement
+mechanics are [[sandbox-denials-track-template-grants]]; the
 fail-closed posture (Fargate refused before any side effect, `--no-sandbox` ignored
 for the trusted-write mode) follows [[config-fails-open-only-for-diagnostics]].

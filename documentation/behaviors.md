@@ -6738,13 +6738,18 @@ THE SYSTEM SHALL require candidate `HEAD`, the Merge Candidate `candidate_commit
 the latest Write-output commit, and every Tester and built-in reviewer context in
 the final passing round to equal the reviewed Writer SHA with no staged,
 unstaged, or untracked candidate change, reading only the final passing round.
-Review admission SHALL first reopen any mismatched current reviewer context; this
+An earlier passing reviewer context SHALL remain effective only when
+correction-aware changed-domain invalidation proves that the later Writer did not
+touch its role; that historical context is carried-forward authority rather than
+a claim that its Task names the later SHA. Review admission SHALL first reopen
+every affected reviewer with a missing or mismatched current context; this
 preflight remains the fresh race-closing check before the Learner coder launches
 or Learning advances.
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_requires_clean_common_sha_before_launch)
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_rejects_mismatched_final_review_context)
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_preserves_every_candidate_pointer)
 Test: src/work_attempt_loop.rs (pre_land_no_expertise_ignores_historical_review_contexts)
+Test: src/work_attempt_loop.rs (corrective_review_roles_include_changed_domains_in_default_order)
 
 ### B4a
 

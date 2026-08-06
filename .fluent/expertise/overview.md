@@ -1,6 +1,6 @@
 # Codebase Overview
 
-Fluent is an autonomous software factory that orchestrates coding agents (Claude Code, Codex, Pi) to build software through a structured lifecycle: brief, behaviors, approach, plan, write, test, review, and merge. It runs agents inside macOS Seatbelt sandboxes for file-access isolation, manages work in git worktrees so the main branch stays clean, and drives an attempt loop where writers produce code, testers run declared test commands, and parallel reviewers (architecture, behaviors, documentation, skills, tests) evaluate the result. When all reviewers pass, a Merge Candidate is produced and can be landed onto main.
+Fluent is an autonomous software factory that orchestrates coding agents (Claude Code, Codex, Pi) through a structured lifecycle: brief, behaviors, approach, plan, write with focused verification, parallel review, one final Tester, Learner, and merge. It runs agents inside macOS Seatbelt sandboxes for file-access isolation and manages work in git worktrees so the main branch stays clean. For code-producing Work, reviewers inspect the Writer candidate before the final deterministic Tester runs the complete declared suite; review-only Work retains its Tester-first contract. A Merge Candidate becomes ready only after the applicable reviews, final Tester, and Learner succeed.
 
 ## Entry points
 
@@ -13,8 +13,8 @@ Fluent is an autonomous software factory that orchestrates coding agents (Claude
 | Area | Files | Purpose |
 |------|-------|---------|
 | Work model | `src/work_model.rs` | Core data structures (WorkItem, Attempt, Task, MergeCandidate) and JSON-file storage |
-| Attempt loop | `src/work_attempt_loop.rs` | Drive an Attempt through write → test → review rounds |
-| Task execution | `src/work_task_executor.rs` | Run a single Task (write, review, test, seed) by spawning a coder agent |
+| Attempt loop | `src/work_attempt_loop.rs` | Drive code-producing Attempts through write → review → final Tester → Learner, including corrective rounds |
+| Task execution | `src/work_task_executor.rs` | Execute Writer, Reviewer, Tester, and Learner Tasks; Tester is a deterministic subprocess and does not spawn a coder |
 | Merge | `src/work_merge_executor.rs` | Rebase, squash, and fast-forward merge a Merge Candidate onto main |
 | Sandbox | `src/os.rs`, `sandboxes/` | Render and apply macOS Seatbelt profiles for agent sandboxing |
 | Coder abstraction | `src/coder.rs` | Launch Claude Code, Codex, or Pi with appropriate flags and env |
@@ -48,11 +48,11 @@ Fluent is an autonomous software factory that orchestrates coding agents (Claude
 cargo build --release
 install -m 0755 target/release/fluent /Users/mrinal/.local/bin/fluent
 
-cargo test                      # all unit and integration tests
-cargo test --test behaviors     # behavior tests only (tests/behaviors/)
+cargo test                      # Rust unit and integration tests under libtest
+fluent tester check             # complete project-owned suite from .fluent/tester.yaml
 ```
 
-Behavior tests (`tests/behaviors/`) are shell scripts that test the binary from the outside against EARS-style behavior statements. Per-case output goes to `tests/output/` (gitignored).
+The canonical Tester configuration uses `cargo nextest` for Rust tests and then runs every operation and skill script under `tests/behaviors/`. Writers should use narrow harness-native selectors for feedback and leave the complete configured suite to Fluent's final Tester unless they are explicitly validating the Tester boundary. Per-case output goes to `tests/output/` (gitignored).
 
 Integration tests in `tests/` use `assert_cmd` and `predicates` to test CLI behavior. Tests that touch shared git state use `serial_test` for isolation.
 

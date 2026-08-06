@@ -11,13 +11,16 @@ every `Test:` reference declared in `documentation/behaviors.md` must resolve to
 a test that exists in the tree *and* passes in the tester results — independent of
 how many other tests pass.
 
-In this project the behaviors, tests, and architecture reviewers each verify this
-independently: they `grep` for every declared test name in `src/` and `tests/`
-and cross-check the tester-results ids. A declared reference with no backing
-definition is a blocking finding *even when the full suite is green* (a round
-shipped 1376 passing tests while five declared references were undefined). The
-absence is read as structural evidence that the production path itself is
-unfinished, not merely untested.
+Fluent now enforces this traceability at two host-owned candidate gates. Before
+review, the deterministic gate resolves every approved reference against its
+committed project-relative path and native test identifier. The behaviors
+reviewer then checks that the named test directly exercises the behavior; code
+reviewers run before the final Tester and treat Writer-focused verification as
+advisory. After the final Tester, the host gate requires every reference to match
+a passing structured Rust-test or shell-script identity for the exact candidate.
+A declared reference with no backing definition therefore blocks before review,
+and a defined reference without passing final evidence blocks before Learning,
+even when many unrelated tests are green.
 
 When you declare a `Test:` reference, either land the backing test passing in the
 same candidate, or — if the test is intentionally dropped — remove/replace the

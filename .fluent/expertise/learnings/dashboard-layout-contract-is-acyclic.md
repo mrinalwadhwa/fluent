@@ -5,9 +5,9 @@ metadata:
   type: architecture
 ---
 
-The dashboard separates immutable Work-status projection (`dashboard/snapshot.rs`),
-interaction state (`dashboard/app.rs`), layout calculations (`dashboard/layout.rs`),
-and Ratatui drawing (`dashboard/render.rs`). Preserve that dependency direction:
+The dashboard separates immutable Work-status projection (`src/dashboard/snapshot.rs`),
+interaction state (`src/dashboard/app.rs`), layout calculations (`src/dashboard/layout.rs`),
+and Ratatui drawing (`src/dashboard/render.rs`). Preserve that dependency direction:
 `app` and `render` may both consume `layout`, but neither may depend on the other.
 
 When a new control needs scroll limits, viewport dimensions, or a mapping from a
