@@ -498,11 +498,11 @@ fn ensure_lifecycle_eligible(item: &WorkItem, id: &str) -> Result<()> {
     // directly, not by dispatching new Work.
     if let Some(attempt) = item
         .attempts
-        .iter()
-        .find(|a| a.status == AttemptStatus::NeedsUser)
+        .last()
+        .filter(|attempt| attempt.status == AttemptStatus::NeedsUser)
     {
         bail!(
-            "Work Item {id:?} has Attempt {:?} suspended at needs-user; resume it instead of queueing",
+            "Work Item {id:?} has current Attempt {:?} suspended at needs-user; resume it instead of queueing",
             attempt.id
         );
     }

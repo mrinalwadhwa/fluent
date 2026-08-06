@@ -2620,9 +2620,11 @@ Attempt.
 dispatch for an execution-ready, lifecycle-eligible Work Item that has
 no active dispatch, keeping any earlier terminal history. It exits
 non-zero for an unknown, proposed, or abandoned Work Item, or one whose
-Attempt is suspended at `needs-user` or whose Merge Candidate is pending
-land. Repeating `add` while a dispatch is already active preserves its
-queue time and changes priority only when an explicit `--priority` is
+current Attempt is suspended at `needs-user` or whose Merge Candidate is
+pending land. An older suspended Attempt does not block a newer planned
+Attempt; the scheduler binds that planned Attempt instead of allocating
+another one. Repeating `add` while a dispatch is already active preserves
+its queue time and changes priority only when an explicit `--priority` is
 given.
 
 Automatic promotion enqueues through `ensure_dispatch`, which reconciles

@@ -20260,6 +20260,30 @@ fn queue_add_rejects_suspended_attempt_and_pending_candidate() {
 }
 
 #[test]
+fn queue_add_allows_planned_attempt_after_older_suspension() {
+    use fluent::work_model::{AttemptStatus, TaskStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    {
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("wi-retry", "Retry");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        item.add_initial_attempt("attempt-2").unwrap();
+        store.create_work_item(&item).unwrap();
+    }
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["queue", "add", "wi-retry"])
+        .assert()
+        .success();
+
+    assert_eq!(latest_dispatch_status(tmp.path(), "wi-retry"), "queued");
+}
+
+#[test]
 fn queue_list_shows_priority_time_status_and_work_id() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "wi-list", "List format");

@@ -4365,6 +4365,20 @@ create the queue file.
 Test: src/queue.rs (add_fails_when_work_item_does_not_exist)
 Test: tests/binary.rs (work_queue_add_unknown_work_item_errors)
 
+### B2a
+
+WHEN a Work Item's current Attempt is suspended at `needs-user`,
+THE SYSTEM SHALL reject `fluent queue add` and direct the user to resume it.
+Test: tests/binary.rs (queue_add_rejects_suspended_attempt_and_pending_candidate)
+
+### B2b
+
+WHEN a Work Item has an older Attempt suspended at `needs-user` and a newer
+planned Attempt, THE SYSTEM SHALL allow `fluent queue add` to queue the newer
+Attempt and SHALL bind the scheduler dispatch to that planned Attempt.
+Test: tests/binary.rs (queue_add_allows_planned_attempt_after_older_suspension)
+Test: src/scheduler.rs (claim_binds_existing_current_planned_attempt)
+
 ### B3
 
 WHEN `fluent queue list` is invoked,

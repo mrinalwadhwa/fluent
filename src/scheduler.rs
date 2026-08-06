@@ -533,6 +533,13 @@ fn resolve_bound_attempt_id(project_root: &Path, work_item_id: &str) -> Result<S
     }
     let store = WorkModelStore::new(project_root);
     let item = store.read_work_item(work_item_id)?;
+    if let Some(attempt) = item
+        .attempts
+        .last()
+        .filter(|attempt| attempt.status == AttemptStatus::Planned)
+    {
+        return Ok(attempt.id.clone());
+    }
     Ok(item.next_attempt_id())
 }
 
@@ -700,7 +707,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
-    use crate::work_model::MergeCandidateMergeStatus;
+    use crate::work_model::{MergeCandidateMergeStatus, TaskStatus, WorkItem};
 
     fn add_queued(project_root: &Path, id: &str, priority: i64) {
         queue::add(project_root, id, Some(priority)).unwrap();
@@ -726,6 +733,24 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             ["attempt", "run", "work-1", "attempt-1", "--no-sandbox"]
         );
+    }
+
+    #[test]
+    fn claim_binds_existing_current_planned_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_project(dir.path());
+        let store = WorkModelStore::new(dir.path());
+        let mut item = WorkItem::planned("wi-retry", "Retry");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::NeedsUser;
+        item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+        item.add_initial_attempt("attempt-2").unwrap();
+        store.create_work_item(&item).unwrap();
+        add_queued(dir.path(), "wi-retry", 0);
+
+        let (token, _lease) = claim_next(dir.path()).unwrap().unwrap();
+
+        assert_eq!(token.bound_attempt_id, "attempt-2");
     }
 
     /// Acquire and return the whole-Attempt lease for a Work Item so a test can
