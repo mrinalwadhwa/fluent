@@ -3,6 +3,11 @@
 
 Interview the user. Write a short brief in their own words that names what they want and why. The brief captures intent — behaviors, design, and implementation belong to later stages.
 
+When planning-wide delegation is active, apply the Fluent skill's delegation
+contract throughout this stage. Make grounded recommendation-level choices
+without asking for intermediate approval. A mandatory interruption still stops
+the stage for one focused user decision.
+
 ## Listen
 
 Let the user describe what they want. If they've already started, continue from where they are. Otherwise ask:
@@ -57,27 +62,46 @@ Before writing, steelman the idea — restate it in its strongest form — and c
 
 > "The strongest version of what I'm hearing: you want a status endpoint that reports cache-invalidation events directly, so the dashboard can rely on real-time state instead of polling. Is that the shape, or am I missing something?"
 
-Wait for confirmation before writing.
+Without planning-wide delegation, wait for confirmation before writing. With
+delegation active, use the strongest grounded restatement as the provisional
+brief and ask only if it exposes a mandatory interruption: a behavior or scope
+change, a consequential unsupported assumption, a project-decision conflict, or
+missing information.
 
 ## Set the draft-id
 
-After confirmation, generate a draft-id in the format `YYYYMMDD-HHMMSS-kebab-title` (example: `20260706-143022-cache-status`). If this planning conversation already has a draft-id, keep using it. On a resumed session, list `.fluent/drafts/` — if a draft already exists and the user is continuing it, keep that draft-id instead of generating a new one.
+After normal confirmation, or after establishing the provisional restatement
+under planning-wide delegation, generate a draft-id in the format
+`YYYYMMDD-HHMMSS-kebab-title` (example:
+`20260706-143022-cache-status`). If this planning conversation already has a
+draft-id, keep using it. On a resumed session, list `.fluent/drafts/` — if a
+draft already exists and the user is continuing it, keep that draft-id instead
+of generating a new one.
 
 ## Write the brief
 
 Write to `.fluent/drafts/<draft-id>/brief.md` in the format below.
 
-**Do not create the Work Item now.** `plan-execution` creates it after brief, behaviors, approach, and plan are all approved.
+**Do not create the Work Item now.** `plan-execution` creates it only after the
+brief, behaviors, approach, and plan are approved through their normal gates or
+the single delegated-planning confirmation.
 
 ## Show and confirm
 
-Show the brief and ask:
+Without planning-wide delegation, show the brief and ask:
 
 > "Confirm the brief and move to behaviors? Reply **yes (y)**, or name what to revise: (a) Listen, (b) Sharpen, (c) Ground."
 
 If a part is fuzzy, name which part and re-enter the relevant step (Listen, Sharpen, or Ground). Do not start over.
 
 Once the user confirms, stop here. `define-behaviors` picks up next.
+
+When planning-wide delegation is active, write the brief as provisional, give a
+concise progress update without asking for approval, and continue directly to
+`define-behaviors`. Do not run this stage's confirmation gate or describe the
+brief as approved. Its approval is part of the one final planning-set
+confirmation. If the user requests a change in response to the update, revise
+the brief and every affected downstream draft before that final confirmation.
 
 ## Review-only briefs
 
@@ -99,7 +123,12 @@ For a review request rather than a build request: set the draft-id as above, the
 - [Role or expertise needed, if the user specified]
 ```
 
-Omit empty sections. Run the same Confirm step. Once confirmed, stop here. The `fluent` skill handles Work Item creation and the review-only flow after confirmation.
+Omit empty sections. Without planning-wide delegation, run the same Confirm step.
+When delegation is active and this is the last applicable planning artifact,
+show the complete review-planning set and use the Fluent skill's single final
+confirmation; otherwise keep the brief provisional and continue through the
+remaining applicable planning stages. The `fluent` skill handles Work Item
+creation and the review-only flow only after that confirmation.
 
 ## Brief format
 
@@ -137,4 +166,8 @@ Omit sections with no content — a clear bug fix might only need *What* and *Wh
   - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
     (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
   Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
+- Planning-wide delegation is the only exception to the question-by-question
+  rule: after an explicit request, do not ask recommendation-level questions or
+  intermediate confirmation gates; keep mandatory interruptions and the final
+  planning-set confirmation.
 - Record unknowns explicitly. "I don't know how auth should work" is more useful than omitting auth.

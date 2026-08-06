@@ -2672,6 +2672,68 @@ sequencing as planning notes rather than executable dependencies.
 Test: tests/behaviors/skills/parallel-work-items-plan.md (test-skill)
 Test: tests/behaviors/operations/test-planning-skills-work-context.sh
 
+### B4
+
+WHEN interactive planning begins, the request is grounded enough to explain the
+choice, and the user has not already chosen a collaboration style, THE SYSTEM
+SHALL offer once that the user may say `use your judgment through the rest of
+planning`, explain the single final planning-set confirmation and mandatory
+interruption boundaries, and avoid repeating the offer after the user chooses a
+collaboration style.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (planning delegation is offered early)
+
+### B5
+
+WHEN the user explicitly delegates judgment through the rest of planning,
+THE SYSTEM SHALL keep that delegation active through the remaining applicable
+planning stages until the user revokes it or completes the final planning
+confirmation; `keep going`, silence, a saved draft, or execution autonomy SHALL
+NOT activate it.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (explicit delegation spans the remaining planning stages)
+
+### B6
+
+WHILE planning-wide delegation is active, THE SYSTEM SHALL make grounded
+recommendation-level choices, record their assumptions and tradeoffs, keep each
+intermediate planning artifact provisional, and advance without intermediate
+artifact confirmations or recommendation-level questions.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (explicit delegation spans the remaining planning stages)
+
+### B7
+
+WHILE planning-wide delegation is active, IF a choice would change a stated or
+accepted behavior or scope, make a consequential or difficult-to-reverse
+tradeoff, contradict a recorded project decision, require missing information or
+access, cross outside planning, or invoke an exceptional policy, THEN THE SYSTEM
+SHALL interrupt with one focused user decision and continue delegation afterward
+unless the user revokes it.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (delegated planning keeps mandatory interruptions)
+
+### B8
+
+WHEN delegated planning reaches its last applicable artifact, THE SYSTEM SHALL
+show the complete planning set, the consequential choices made under delegation,
+every proposed Work Item and Learner mode, and any release criteria; ask one
+confirmation; and, after a revision request, update every affected downstream
+artifact before presenting the complete set again.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (delegated planning uses one final planning-set confirmation)
+
+### B9
+
+WHEN the user delegates planning judgment without confirming the completed
+planning set, THE SYSTEM SHALL NOT create a Work Item or Attempt, execute work,
+authorize exceptional scope, or land a candidate; final planning confirmation
+may authorize only the displayed Work Item creation commands.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (delegated planning does not authorize execution)
+
+### B10
+
+WHEN the user revokes planning-wide delegation before final confirmation,
+THE SYSTEM SHALL return to the earliest provisional artifact, present each
+unapproved artifact through the normal ordered confirmation gates, and SHALL NOT
+promote a provisional artifact to approved because delegation ended.
+Test: tests/behaviors/operations/test-planning-wide-delegation.sh (revoking delegation restores ordered confirmations)
+
 ## Fargate teardown
 
 ### B1

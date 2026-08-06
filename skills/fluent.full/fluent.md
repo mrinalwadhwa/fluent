@@ -66,6 +66,63 @@ Follow the four stage procedures in order. Each is a reference file in this skil
 - `references/design-approach.md` — decide the technical approach and write `approach.md`.
 - `references/plan-execution.md` — plan the steps and write `plan.md`, then create the Work Item.
 
+Offer this choice once, early in planning after the request is grounded enough
+to explain it accurately:
+
+> "Planning normally works one decision at a time. At any point, you can say
+> **use your judgment through the rest of planning**. I’ll choose my
+> recommendations through the brief, behaviors, approach, and plan, then ask for
+> one confirmation after the last applicable planning artifact. I’ll still stop
+> for behavior or scope changes, consequential tradeoffs, and missing
+> information."
+
+Do not repeat the offer after the user has chosen a collaboration style.
+
+## Planning-wide delegation
+
+Planning-wide delegation starts only when the user explicitly asks Fluent to use
+its judgment or recommendations through the rest of planning. "Keep going" does
+not activate delegation. The user may activate it at any point, revoke it at any
+point, or narrow it in their own words. Do not infer it from prior sessions,
+saved drafts, silence, or a request to work autonomously during execution.
+
+If the user revokes delegation before the final confirmation, return to the
+earliest provisional artifact, present it through its normal confirmation gate,
+and resume the ordinary stage-by-stage path. Never promote provisional artifacts
+to approved merely because delegation ended.
+
+While it is active:
+
+- Make recommendation-level, reversible planning choices from the user’s stated
+  goal, repository evidence, recorded project decisions, and the applicable
+  stage guidance. Record chosen assumptions, alternatives, and tradeoffs in the
+  provisional artifacts.
+- Draft the remaining brief, behaviors, approach, and plan without
+  question-by-question decisions or intermediate artifact confirmations. These
+  files remain provisional and must not be called approved.
+- Give concise progress updates when useful, but do not turn them into implied
+  approval gates.
+- After the last applicable planning artifact, show the complete planning set,
+  the consequential choices Fluent made, every proposed Work Item and Learner
+  mode, and any release criteria. Ask for one final confirmation. If the user
+  requests a revision, update every affected downstream artifact and present the
+  complete set again.
+
+A mandatory interruption overrides delegation. Stop and ask one focused question
+when resolving it would change a user-stated or already accepted behavior or
+scope; add an outcome that is not grounded in the request or project; make a
+consequential or difficult-to-reverse tradeoff; contradict a recorded project
+decision; require information or access Fluent cannot obtain; authorize large
+scope or another exceptional policy; or decide something outside planning.
+Research facts that can be discovered from the project or authoritative sources
+without asking the user. Once the user resolves a true interruption, delegation
+remains active unless they revoke it.
+
+Delegation expires after the final planning confirmation. Delegation does not
+authorize Work Item creation, Attempt creation, execution, or landing. The final
+planning confirmation may authorize the documented Work Item creation step, but
+Attempt execution and landing retain their existing separate boundaries.
+
 For a codebase, module, or area review (not building something new), capture enough context to create a Work Item and use the review-only flow in the delegated stages below.
 
 ## Delegated execution

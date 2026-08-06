@@ -100,6 +100,17 @@ FLUENT_BIN_OVERRIDE="$REVIEW_ARTIFACT_DIR/target/debug/fluent" \
 | Prefer peer Work Items for independent parallel work | `parallel-work-items-plan` |
 | Define sync points without default Task dependencies or child-run groups | `parallel-work-items-plan` |
 
+### Planning-wide delegation
+
+| Behavior | Test |
+|---|---|
+| Offer explicit planning delegation once after grounding | `test-planning-wide-delegation.sh` |
+| Keep intermediate artifacts provisional and skip recommendation-level questions | `test-planning-wide-delegation.sh` |
+| Interrupt delegated planning for consequential or unsupported choices | `test-planning-wide-delegation.sh` |
+| Present the complete planning set through one final confirmation | `test-planning-wide-delegation.sh` |
+| Keep Work creation, execution, exceptional scope, and landing outside delegation | `test-planning-wide-delegation.sh` |
+| Restore ordered confirmations from the earliest provisional artifact after revocation | `test-planning-wide-delegation.sh` |
+
 ### Operational (tested by binary.rs and operation scripts)
 
 | Behavior | Test |

@@ -75,6 +75,28 @@ Candidate, stops at a Learner failure, or pauses at `needs-user`. The Work model
 is that delegated execution path. In the Local Preview, a human inspects and
 lands every ready candidate.
 
+Interactive planning has an optional conversation-scoped delegation path. After
+the request is grounded, Fluent offers once that the user may explicitly ask it
+to use its judgment through the rest of planning. `Keep going`, silence, saved
+drafts, and execution autonomy do not activate this path. When active, Fluent
+uses repository evidence and stage recommendations to write provisional Brief,
+Behaviors, Approach, and Plan artifacts without intermediate approval gates. It
+records assumptions, alternatives, and tradeoffs rather than treating its choices
+as approved.
+
+The delegation contract keeps human control at two boundaries. A behavior or
+scope change, consequential or difficult-to-reverse tradeoff, recorded-decision
+conflict, missing input or access, decision outside planning, or exceptional
+policy stops for one focused answer. At the last applicable planning artifact,
+Fluent presents the complete planning set, proposed Work Items and Learner modes,
+release criteria, and decisions it made, then asks once for approval. Revisions
+flow into every affected downstream artifact before the set is shown again.
+Delegation is not persisted in the Work model and expires at this confirmation.
+It does not authorize Work Item creation before confirmation, exceptional scope,
+Attempt execution, or landing. If the user revokes delegation sooner, Fluent
+returns to the earliest provisional artifact and restores the ordinary ordered
+confirmation gates; revocation itself approves nothing.
+
 ## Core work model
 
 Fluent's execution lifecycle uses these durable nouns: Work Item,

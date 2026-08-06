@@ -5,11 +5,18 @@ Interview the user. Write EARS statements that specify observable behaviors of t
 
 Your statements build on `documentation/behaviors.md` — an increment over what already exists, not a restatement — but the only file you write is the diff at `.fluent/drafts/<draft-id>/behaviors.diff.md`. If `documentation/behaviors.md` doesn't exist yet, this is the first behaviors set: still write `behaviors.diff.md`, where every statement is an addition.
 
+When planning-wide delegation is active, apply the Fluent skill's delegation
+contract throughout this stage. Use repository evidence and the brief to make
+recommendation-level choices without intermediate approval. A mandatory
+interruption still stops the stage for one focused user decision.
+
 ## Read the inputs
 
 Load these before starting the conversation:
 
-- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
+- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`, or read a
+  provisional brief there when planning-wide delegation is active. The
+  `<draft-id>` is set by `capture-brief`.
 - Existing behaviors at `documentation/behaviors.md` (if it exists) — what the system already guarantees.
 - Existing architecture at `documentation/architecture.md` (if it exists) — established naming conventions and system structure.
 - `.fluent/expertise/decisions.md` (if it exists) — recorded project choices. New behaviors must not contradict them; surface any conflict for the user to resolve.
@@ -31,9 +38,14 @@ Prefer vocabulary already present in `documentation/behaviors.md` or `documentat
 
 Keep this short — a few load-bearing terms, not a glossary. Move on when the core nouns and verbs are clear enough to write statements against.
 
+With planning-wide delegation active, prefer established project vocabulary and
+record any new term in the draft. Ask only when choosing a term would change the
+requested behavior or create another mandatory interruption.
+
 ## Map the space
 
-Walk the three dimensions — actors, events, states — one at a time with the user:
+Without planning-wide delegation, walk the three dimensions — actors, events,
+states — one at a time with the user:
 
 > "The actors I see are the dashboard client and the cache. Is there (a) an admin surface too, (b) an external subscriber, or (c) just those two?"
 
@@ -41,11 +53,17 @@ Walk the three dimensions — actors, events, states — one at a time with the 
 
 For small scoped work, walk only the dimensions that change.
 
-Don't write EARS statements yet. Just agree on the map. Once the map is clear, group into areas — one area per cluster of related events. When the changes span several subsystems, group by subsystem instead.
+Don't write EARS statements yet. On the normal path, agree on the map. Once the
+map is clear, group into areas — one area per cluster of related events. When
+the changes span several subsystems, group by subsystem instead.
+
+With planning-wide delegation active, derive this map from the request and
+repository evidence. Do not ask the user to confirm each dimension or area;
+record material derived assumptions for the final planning-set confirmation.
 
 ## Work area by area
 
-Handle one area per turn. For each area:
+Without planning-wide delegation, handle one area per turn. For each area:
 
 Propose the two or three core behaviors — the ones the brief clearly asks for — in EARS notation, so the user is reading the actual statement:
 
@@ -55,7 +73,9 @@ Propose the two or three core behaviors — the ones the brief clearly asks for 
 > carrying the entry key.
 > Does that match what you had in mind?"
 
-Then ask about the gaps — one question per turn. Inversion surfaces what the system should NOT do, which usually matters more than the happy path:
+Without delegation, ask about the gaps — one question per turn. Inversion
+surfaces what the system should NOT do, which usually matters more than the
+happy path:
 
 > "What should happen if the subscriber is disconnected when the event fires? (a) drop the event, (b) buffer up to N, (c) reject the write until reconnected."
 
@@ -67,29 +87,47 @@ When a statement could be read more than one way, pin it down with an `Example:`
 
 If the user rejects a proposed statement, ask what's wrong before revising. Drop it if the user says it's out of scope. Don't re-propose the same behavior reworded.
 
-Move to the next area only when the user has confirmed this one. Don't queue up remaining areas at the end.
+Without planning-wide delegation, move to the next area only when the user has
+confirmed this one. With delegation active, draft every grounded area without
+an area-by-area confirmation. Stop for a mandatory interruption when an
+ambiguity would add, remove, or change an observable outcome that the request and
+project do not settle.
 
 ## Resolve the brief's unknowns
 
 Walk each unknown recorded in the brief:
 
 - If the conversation or the codebase answered it, fold the answer into the relevant area's statements — or note it under Vocabulary if it resolved a naming question.
-- If it needs a decision about what the system should do, ask the user now.
+- If it needs a decision about what the system should do, ask the user now on
+  the normal path; under delegation, apply the grounded-choice and mandatory-
+  interruption rule below.
 - If it's a solution choice — which library, which protocol, which storage — leave it for `design-approach` and record it under Open questions.
 
 The brief may also record constraints and assumptions. Fold any that name observable behavior into the relevant area's statements; leave the rest for `design-approach`.
 
-Don't silently resolve unknowns. Don't make solution choices here.
+Without planning-wide delegation, don't silently resolve unknowns. With
+delegation active, resolve only recommendation-level behavior questions grounded
+in the request and project, record the resolution as derived, and stop for a
+mandatory interruption when user intent is required. Don't make solution choices
+here.
 
 ## Assemble and confirm
 
-Once every area is agreed, write `behaviors.diff.md` to `.fluent/drafts/<draft-id>/behaviors.diff.md` and show it to the user:
+Without planning-wide delegation, once every area is agreed, write
+`behaviors.diff.md` to `.fluent/drafts/<draft-id>/behaviors.diff.md` and show it
+to the user:
 
 > "Confirm the behaviors diff and move to approach? Reply **yes (y)**, or name what to revise: (a) vocabulary, (b) a statement, (c) an unknown."
 
 Check that terms are used consistently, no two statements contradict, and no two statements say the same thing in different words. If something needs changing, name which part — vocabulary, an area's statements, or an unresolved unknown — and re-enter that step. Don't re-run the whole area-by-area review.
 
 Once the user confirms, stop. `design-approach` picks up next.
+
+When planning-wide delegation is active, write `behaviors.diff.md` as
+provisional, give a concise progress update without asking for approval, and
+continue directly to `design-approach`. Do not call the brief or behavior diff
+approved. Both remain subject to the one final planning-set confirmation. A
+requested revision must update this draft and every affected downstream draft.
 
 ## Behaviors diff format
 
@@ -136,5 +174,9 @@ Omit sections with no content. Reference existing statements when a new one depe
   - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
     (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
   Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
+- Planning-wide delegation is the only exception to the question-by-question
+  rule: after an explicit request, do not ask recommendation-level questions or
+  intermediate confirmation gates; keep mandatory interruptions and the final
+  planning-set confirmation.
 - Every new EARS statement carries either a `Test:` reference or an `Untestable:` marker with a one-line reason. The test usually doesn't exist yet — name the intended test path in the project's style (inspect nearby tests to match the naming convention); the writer creates it during execution. Use `Untestable:` only when the behavior genuinely can't be observed from a test.
 - Number each area's statements as `### B1`, `### B2`, ... in reading order. IDs restart at `B1` in each area, so a reference like `B2` is always relative to its area.

@@ -3,13 +3,20 @@
 
 Interview the user. Decide whether this is one Work Item or several Work Items, then break each Work Item into steps the writer can follow. Once the plan is approved, create the Work Item(s).
 
+When planning-wide delegation is active, apply the Fluent skill's delegation
+contract throughout this stage. Make grounded recommendation-level choices and
+record their tradeoffs. A mandatory interruption still stops the stage for one
+focused user decision. This stage owns the one final planning-set confirmation.
+
 ## Read the inputs
 
 Load these before starting the conversation:
 
-- The confirmed brief at `.fluent/drafts/<draft-id>/brief.md`. The `<draft-id>` is set by `capture-brief`.
-- The confirmed behaviors diff at `.fluent/drafts/<draft-id>/behaviors.diff.md`. Every EARS statement needs a home in a step of some Work Item's plan or an explicit TBD.
-- The confirmed approach at `.fluent/drafts/<draft-id>/approach.md`. Its Open questions section lists anything execution must still resolve.
+- The confirmed brief, behaviors diff, and approach, or their provisional
+  versions when planning-wide delegation is active. The `<draft-id>` is set by
+  `capture-brief`. Every EARS statement needs a home in a step of some Work
+  Item's plan or an explicit TBD. The approach's Open questions section lists
+  anything execution must still resolve.
 - The code the plan will touch — enough to see where each step lands, what depends on what, and any obvious ordering constraint.
 
 If any of the three planning files is missing, stop and go back to the skill that produces it.
@@ -22,7 +29,7 @@ Splitting works when each piece is independently reviewable and shared interface
 
 One Work Item is right when the pieces share vocabulary, iterate on each other's shape as writing proceeds, or must land together for a single reviewer pass.
 
-Share your read:
+Without planning-wide delegation, share your read:
 
 > "One Work Item. The changes stay inside `dashboard/status.rs` — refactor the render loop and add the new invalidation handler in one pass. Does that match?"
 
@@ -30,15 +37,23 @@ Or when a split is on the table:
 
 > "You raised two concerns today: the SSE server that emits `invalidated` events, and the dashboard subscriber that consumes them — different services, different reviewers, converging on the event schema. Split them? (a) two Work Items with the schema pinned first (recommended: the reviewers are independent and the contract is concrete enough to pin up front); (b) one Work Item, keeping the schema malleable across both. Which?"
 
-If splitting, agree on each Work Item's slug now — short, kebab-case, unique within the draft. Handle each plan in the loop below.
+Without delegation, agree on each split Work Item's slug now. With delegation
+active, choose the independently reviewable split recommended by repository and
+scope evidence, assign short unique kebab-case slugs, and record why the chosen
+shape is preferable. Changing the accepted outcome, keeping unrelated work
+atomic, or crossing an exceptional scope policy is a mandatory interruption.
+Handle each plan in the loop below.
 
 ## Check whether a plan is needed
 
-Not every Work Item needs steps. A single mechanical change may need no steps at all:
+Not every Work Item needs steps. Without planning-wide delegation, a single
+mechanical change may prompt:
 
 > "The approach is one edit to `dashboard/status.rs` — emit the event and wire the subscriber. I don't see steps worth walking through. I'll write a minimal plan and move to Work Item creation. Sound right?"
 
-Don't invent steps that aren't there. If the user agrees, go straight to Assemble and confirm.
+Don't invent steps that aren't there. Without delegation, if the user agrees, go
+straight to Assemble and confirm. With delegation active, make that
+recommendation yourself and record it in the provisional Plan.
 
 ## Walk through the steps
 
@@ -46,22 +61,32 @@ Steps are scaffolding for the writer: explicit states, referenced behaviors, and
 
 The first step matters most: aim for a walking skeleton — the thinnest end-to-end slice that proves the approach works. Thin across every layer beats fat in one layer, because integration problems surface at the beginning rather than the end.
 
-Propose the first step in the vocabulary of the approach, and describe what will be observably true when it's done:
+Without planning-wide delegation, propose the first step in the vocabulary of
+the approach and describe what will be observably true when it's done:
 
 > "First step: emit an `invalidated` event over SSE for a single hard-coded key, and confirm the dashboard receives it. That proves the transport and the subscriber wiring end to end. Right starting point?"
 
-Then handle the rest one at a time or in small groups. For each step, agree on four things before moving on:
+Then handle the rest one at a time or in small groups. Without delegation, agree
+on four things for each step before moving on. With delegation active, derive
+and record the same four things without intermediate questions:
 
 - The observable state the step reaches. "Users see cache-invalidation events on the status feed" is a state; "wire the subscriber" is an activity. Prefer the state form.
 - The behaviors from `behaviors.diff.md` it satisfies, qualified by area since IDs restart per area — write `Feed:B1`, not `B1`. Every EARS statement must land in a step of some Work Item's plan or an explicit TBD.
 - The verification — a test path, a curl command, a screen to check. Without this the writer doesn't know when to stop.
 - Required or optional. Optional steps are the ones you'd trade away if execution runs into trouble.
 
-After discussing each step or group of steps, ask:
+Without planning-wide delegation, after discussing each step or group of steps,
+ask:
 
 > "Ordering hold? Reply **yes (y)**, or name a step to reorder or split."
 
-If a step reveals a gap in the approach or the behaviors — a missing decision, a case that wasn't specified — stop and return to `design-approach` or `define-behaviors` rather than papering over it here.
+Without planning-wide delegation, if a step reveals a gap in the approach or the
+behaviors — a missing decision, a case that wasn't specified — stop and return
+to `design-approach` or `define-behaviors` rather than papering over it here.
+
+With planning-wide delegation active, a gap that would change behavior or scope
+is a mandatory interruption. A recommendation-level implementation gap may be
+resolved from the repository and recorded in the affected provisional artifacts.
 
 If later steps depend on what execution will reveal in earlier ones, don't force detail. Plan through the visible horizon and mark the rest TBD:
 
@@ -96,7 +121,7 @@ For a single Work Item, write `plan.md` to `.fluent/drafts/<draft-id>/plan.md`.
 
 For multiple Work Items, write one plan per Work Item to `.fluent/drafts/<draft-id>/items/<slug>/plan.md`. If a Work Item's scope would be muddied by unrelated content in the shared brief, behaviors, or approach, place a sliced version next to its plan under the same `items/<slug>/` directory. Otherwise, all Work Items share the top-level files.
 
-Show the assembled plan(s) to the user:
+Without planning-wide delegation, show the assembled plan(s) to the user:
 
 > "Confirm the plan and move to Work Item creation? Reply **yes (y)**, or name what to revise: (a) a step, (b) a Work Item's scope, (c) a sync point."
 
@@ -104,9 +129,41 @@ Check that every behavior in the diff has a home, that verification is named for
 
 Once the user confirms, move to Work Item creation.
 
+## Final delegated-planning confirmation
+
+When planning-wide delegation is active, finish every provisional planning
+artifact and select the proposed Learner mode for each Work Item before asking
+for approval. For release work, include the proposed release criteria. Then show
+the complete planning set, not only the Plan or file paths:
+
+- Brief, Behaviors, Approach, and Plan contents, or every applicable artifact for
+  a shorter planning path.
+- A concise list of assumptions, recommendations, alternatives, and consequential
+  choices Fluent made under delegation.
+- Every proposed Work Item, its scope and dependencies, its Learner mode, and any
+  release criteria or exceptional authorization still requiring a separate
+  decision.
+
+Ask one confirmation:
+
+> "Confirm the complete planning set and create the Work Item(s)? Reply **yes
+> (y)**, or choose what to revise: (a) Brief or Behaviors, (b) Approach, (c) Plan
+> or Work Item settings."
+
+Do not create any Work Item before this confirmation. If the user requests a
+change, update every affected downstream artifact, show the complete planning set
+again, and repeat only this final gate. Confirmation approves all displayed
+planning artifacts and the documented Work Item creation commands. It ends
+planning-wide delegation; it does not authorize Attempt creation or execution.
+
 ## Create the Work Item(s)
 
-Creating a Work Item is irreversible: it fixes the Work Item's Learner mode. So decide each Work Item's mode *before* you run any create command — never run a default create first and reconsider the mode afterward. Select the mode, then run only the one create command that matches it.
+Creating a Work Item is irreversible: it fixes the Work Item's Learner mode. So
+decide each Work Item's mode *before* you run any create command — never run a
+default create first and reconsider the mode afterward. Under planning-wide
+delegation, select and display the mode before the final planning-set
+confirmation. Otherwise select it after Plan approval. Then run only the one
+create command that matches it.
 
 ### Select the Learner mode
 
@@ -115,7 +172,11 @@ Decide the Learner mode per Work Item, before creating it. There are two modes:
 - **capture** (default) — after reviews pass, the Learner may refine project expertise and add one `Update expertise` commit, which can retarget the Merge Candidate. This is right for ordinary Work, so omit `--learner-mode` and let it default to `capture`.
 - **no-expertise** — the Learner still runs and produces its handoff after reviews, but it is denied expertise and candidate Git writes, so it never adds a commit or moves the reviewed SHA. Missing durable knowledge is proposed as non-corrective follow-up material for a human to fold into expertise later. A no-expertise Work Item is local-only: run its Attempt on a trusted macOS host, not on Fargate.
 
-Add `--learner-mode no-expertise` only when the confirmed Work Item contract requires one exact reviewed Writer SHA to remain unchanged through Tester, every review, and the Learner — for example a release prerequisite that must land a single commit unchanged. Otherwise choose capture.
+Add `--learner-mode no-expertise` only when the confirmed Work Item contract,
+or the complete provisional contract being displayed at the delegated-planning
+confirmation, requires one exact reviewed Writer SHA to remain unchanged through
+Tester, every review, and the Learner — for example a release prerequisite that
+must land a single commit unchanged. Otherwise choose capture.
 
 For a split plan, decide each Work Item's mode against its own contract — the mode is per Work Item, not per plan.
 
@@ -163,6 +224,10 @@ before the evidence is calibrated, and it never changes the configured
 reference. Split only where outcomes are independently reviewable; pass
 `--authorize-large-scope` after the user explicitly approves keeping work
 atomic. Fluent records that authorization with the diagnostic.
+
+Planning-wide delegation never supplies this explicit large-scope authorization.
+If Work Item creation stops at this guard, present the diagnostic and ask the
+user whether to revise the planning set or authorize the combined scope.
 
 For a release exercise, define acceptance before creation. Add `--release` and
 one repeatable `--release-criterion '<id>=<accepted outcome>'` per criterion to
@@ -242,6 +307,10 @@ Brief: [one-line summary from the brief]
   - **Confirm gate** — approve or route back: "Reply **yes (y)**, or name what to revise:
     (a).../(b).../(c)...". The default is yes; a bare `y` is accepted.
   Avoid the anti-pattern: an unlabeled "X or Y?" that forces the user to re-describe an option.
+- Planning-wide delegation is the only exception to the question-by-question
+  rule: after an explicit request, do not ask recommendation-level questions or
+  intermediate confirmation gates; keep mandatory interruptions and the final
+  planning-set confirmation.
 - Each step is a state the system reaches, not an activity to perform.
 - Prefer steps that form independently verifiable, independently landable slices;
   do not group unrelated release improvements merely because they were discovered
