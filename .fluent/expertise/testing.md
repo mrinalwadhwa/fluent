@@ -19,6 +19,20 @@ The `tests/output/` directory is gitignored — it exists only on disk. After a 
 
 Set `FLUENT_TESTS_SKIP_LOG=1` to disable per-case log writing (useful for CI workers that manage their own artifact capture).
 
+## Distinguish synthetic and real Seatbelt preflights
+
+The configured test-support suite sets `FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass`
+so route tests can cross the host gate hermetically. That makes
+`os::preflight_profile` a synthetic success; it does not prove that the current
+host can apply a nested Seatbelt profile.
+
+A macOS test that executes a real `/usr/bin/sandbox-exec` confinement assertion
+must first probe the rendered profile through `os::preflight_profile_with` and a
+real harmless command, bypassing the test-support override. Skip the real
+confinement assertion only when that probe reports the parent-sandbox
+`Operation not permitted` condition. Keep route tests on the synthetic seam and
+real profile-enforcement tests on the explicit host probe.
+
 ## Patterns
 
 - [flock-lease-tests-under-libtest](testing/patterns/flock-lease-tests-under-libtest.md) — read when writing unit tests for `lease`-based singletons that must also pass under `cargo test` (libtest threads), not just nextest.
