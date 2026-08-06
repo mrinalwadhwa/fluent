@@ -666,7 +666,7 @@ after successful merge or failed review handling. After it records the
 merged state, it removes the managed candidate worktree — unless the
 Attempt's Learner run failed and is still retryable, in which case it
 retains the workspace so a post-land handoff-only Learner retry has a
-chance to run against. If cleanup
+chance to run against the merged candidate. If cleanup
 fails after the target branch has merged, merge execution prints a
 warning and leaves the merged Merge Candidate state intact. Running the
 command again
