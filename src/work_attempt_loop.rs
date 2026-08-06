@@ -931,6 +931,30 @@ enum TerminalCheck {
     Reopen,
 }
 
+fn is_writer_completion_pause(attempt: &Attempt) -> bool {
+    attempt.pause_kind == Some(PauseKind::WriterCompletion)
+        || (attempt.pause_kind == Some(PauseKind::Uncertain)
+            && attempt.review_state == Some(AttemptReviewState::NotReviewed)
+            && attempt.artifacts.iter().any(|artifact| {
+                artifact.producer_id == "required-progress"
+                    && artifact.path.ends_with("/writer-completion-needs-user.md")
+            }))
+}
+
+fn resumable_terminal_check(attempt: &Attempt) -> Result<TerminalCheck> {
+    if attempt
+        .tasks
+        .iter()
+        .any(|task| matches!(task.status, TaskStatus::Failed | TaskStatus::Executing))
+    {
+        bail!(
+            "Attempt paused on recoverable infrastructure or completion evidence but also has a \
+             hard-failed or still-running Task; resolve it before re-running."
+        );
+    }
+    Ok(TerminalCheck::Reopen)
+}
+
 fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
     match attempt.status {
         AttemptStatus::Failed => bail!("Attempt is failed and cannot be advanced"),
@@ -940,22 +964,10 @@ fn reject_terminal_attempt(attempt: &Attempt) -> Result<TerminalCheck> {
             | Some(PauseKind::HostSandbox)
             | Some(PauseKind::TesterHarness)
             | Some(PauseKind::ProviderUnavailable)
-            | Some(PauseKind::Interrupted) => {
-                // Resume only a cleanly resumable Attempt: a hard-Failed or
-                // still-live peer Task means resuming could discard a hard
-                // failure or race a running Task. Such a mixed state needs the
-                // operator, not an automatic reopen.
-                if attempt
-                    .tasks
-                    .iter()
-                    .any(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Executing))
-                {
-                    bail!(
-                        "Attempt paused on recoverable infrastructure but also has a \
-                         hard-failed or still-running Task; resolve it before re-running."
-                    );
-                }
-                Ok(TerminalCheck::Reopen)
+            | Some(PauseKind::Interrupted)
+            | Some(PauseKind::WriterCompletion) => resumable_terminal_check(attempt),
+            Some(PauseKind::Uncertain) if is_writer_completion_pause(attempt) => {
+                resumable_terminal_check(attempt)
             }
             Some(PauseKind::Uncertain) => bail!(
                 "Attempt is paused with uncertain reviews. \
@@ -1009,7 +1021,7 @@ fn reopen_resumable_attempt(
                 id: attempt_id.to_string(),
             })?;
         let can_reopen = attempt.status == AttemptStatus::NeedsUser
-            && matches!(
+            && (matches!(
                 attempt.pause_kind,
                 Some(PauseKind::Auth)
                     | Some(PauseKind::TranscriptPump)
@@ -1017,7 +1029,8 @@ fn reopen_resumable_attempt(
                     | Some(PauseKind::TesterHarness)
                     | Some(PauseKind::ProviderUnavailable)
                     | Some(PauseKind::Interrupted)
-            )
+                    | Some(PauseKind::WriterCompletion)
+            ) || is_writer_completion_pause(attempt))
             && !attempt
                 .tasks
                 .iter()
@@ -5305,7 +5318,7 @@ fn pause_writer_completion_before_reviews(
         completed_matrix,
     );
     item.attempts[attempt_index].status = AttemptStatus::NeedsUser;
-    item.attempts[attempt_index].pause_kind = Some(PauseKind::Uncertain);
+    item.attempts[attempt_index].pause_kind = Some(PauseKind::WriterCompletion);
     item.attempts[attempt_index].review_state = Some(AttemptReviewState::NotReviewed);
     store.write_work_item(item)?;
     let handoff_path = write_writer_completion_handoff(
@@ -10485,7 +10498,10 @@ mod tests {
         };
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(stored.attempts[0].status, AttemptStatus::NeedsUser);
-        assert_eq!(stored.attempts[0].pause_kind, Some(PauseKind::Uncertain));
+        assert_eq!(
+            stored.attempts[0].pause_kind,
+            Some(PauseKind::WriterCompletion)
+        );
         assert_eq!(
             stored.attempts[0].writer_runs[0].outcome,
             WriterOutcome::Blocked
@@ -12918,6 +12934,34 @@ mod tests {
             Some(PauseKind::Uncertain),
             "pause kind should be preserved"
         );
+    }
+
+    #[test]
+    fn legacy_writer_completion_pause_reopens_without_admitting_review_uncertainty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Recover completion evidence");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::Uncertain);
+        attempt.review_state = Some(AttemptReviewState::NotReviewed);
+        attempt.artifacts.push(ArtifactRef {
+            producer_id: "required-progress".to_string(),
+            path: ".fluent/work/artifacts/work-1/attempt-1/writer-completion-needs-user.md"
+                .to_string(),
+        });
+        store.create_work_item(&item).unwrap();
+
+        assert!(matches!(
+            reject_terminal_attempt(&item.attempts[0]).unwrap(),
+            TerminalCheck::Reopen
+        ));
+        reopen_resumable_attempt(&store, "work-1", "attempt-1").unwrap();
+
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].status, AttemptStatus::Planned);
+        assert_eq!(stored.attempts[0].pause_kind, None);
     }
 
     #[test]

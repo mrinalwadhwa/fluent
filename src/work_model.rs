@@ -4081,6 +4081,9 @@ fn attempt_kind_is_write(kind: &AttemptKind) -> bool {
 pub enum PauseKind {
     Auth,
     Uncertain,
+    /// Host-owned required-progress or Writer completion evidence needs repair.
+    /// Re-running re-evaluates the completed Writer before any review starts.
+    WriterCompletion,
     RoundCap,
     /// A transcript-pump infrastructure failure (capture, status persistence, or
     /// transcript phase preservation) stopped the coder. The console transport,
@@ -4111,6 +4114,7 @@ impl PauseKind {
         match self {
             Self::Auth => "auth",
             Self::Uncertain => "uncertain",
+            Self::WriterCompletion => "writer-completion",
             Self::RoundCap => "round-cap",
             Self::TranscriptPump => "transcript-pump",
             Self::HostSandbox => "host-sandbox",
@@ -4144,6 +4148,7 @@ impl<'de> Deserialize<'de> for PauseKind {
         Ok(match value.as_str() {
             "auth" => Self::Auth,
             "uncertain" => Self::Uncertain,
+            "writer-completion" => Self::WriterCompletion,
             "round-cap" => Self::RoundCap,
             "transcript-pump" => Self::TranscriptPump,
             "host-sandbox" => Self::HostSandbox,
@@ -4884,7 +4889,8 @@ fn attempt_state_rank(status: &AttemptStatus, pause: &Option<PauseKind>) -> u8 {
             Some(PauseKind::Auth)
             | Some(PauseKind::TranscriptPump)
             | Some(PauseKind::HostSandbox)
-            | Some(PauseKind::TesterHarness) => 3,
+            | Some(PauseKind::TesterHarness)
+            | Some(PauseKind::WriterCompletion) => 3,
             Some(PauseKind::ProviderUnavailable) | Some(PauseKind::Interrupted) => 3,
             // RoundCap, Uncertain, or an unclassified pause is non-resumable.
             _ => 4,
@@ -10174,6 +10180,7 @@ random banner prose that must be ignored
         for pause in [
             PauseKind::Auth,
             PauseKind::Uncertain,
+            PauseKind::WriterCompletion,
             PauseKind::RoundCap,
             PauseKind::TranscriptPump,
         ] {
@@ -12364,7 +12371,12 @@ random banner prose that must be ignored
 
     #[test]
     fn known_and_future_pause_kinds_preserve_their_wire_values() {
-        for value in ["host-sandbox", "tester-harness", "future-pause"] {
+        for value in [
+            "host-sandbox",
+            "tester-harness",
+            "writer-completion",
+            "future-pause",
+        ] {
             let parsed: PauseKind = serde_json::from_str(&format!("\"{value}\"")).unwrap();
             assert_eq!(parsed.as_str(), value);
             assert_eq!(
