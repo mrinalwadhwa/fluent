@@ -2724,7 +2724,7 @@ fn init_names_instruction_changes_that_require_git_resolution() {
         "init should name every changed instruction file: {stderr}"
     );
     assert!(
-        stderr.contains("commit or revert"),
+        stderr.contains("Commit or revert"),
         "init should tell the user how to resolve the changes: {stderr}"
     );
     assert!(
@@ -2772,7 +2772,7 @@ fn reinit_with_current_instructions_reports_no_new_instruction_changes() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("commit or revert"),
+        !stderr.contains("Commit or revert"),
         "reinit should not claim current instructions need a new resolution: {stderr}"
     );
 }
