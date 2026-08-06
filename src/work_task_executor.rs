@@ -1724,13 +1724,26 @@ fn capture_baseline_tester(
     let baseline_artifact = format!("{attempt_id}-baseline-tester");
     let artifact_rel = work_artifact_path(work_item_id, attempt_id, &baseline_artifact);
     let artifact_dir = project_root.join(&artifact_rel);
-    if let Err(e) = fs::create_dir_all(&artifact_dir) {
-        eprintln!("  Baseline tester: failed to create artifact dir: {e:#}");
-        return;
-    }
-    eprintln!("  Baseline tester   running on pre-write workspace");
-    if let Err(e) = crate::tester::run(candidate_workspace, &artifact_dir, no_sandbox, resolver) {
-        eprintln!("  Baseline tester: run failed: {e:#}");
+    eprintln!("  Baseline tester   resolving pre-write evidence");
+    match crate::baseline_cache::capture(
+        project_root,
+        candidate_workspace,
+        &artifact_dir,
+        no_sandbox,
+        resolver,
+    ) {
+        Ok(crate::baseline_cache::CaptureDisposition::AttemptLocal) => {
+            eprintln!("  Baseline tester   captured Attempt-local evidence");
+        }
+        Ok(crate::baseline_cache::CaptureDisposition::Published { cache_key }) => {
+            eprintln!("  Baseline tester   published shared {}", &cache_key[..12]);
+        }
+        Ok(crate::baseline_cache::CaptureDisposition::Reused { cache_key }) => {
+            eprintln!("  Baseline tester   reused shared {}", &cache_key[..12]);
+        }
+        Err(e) => {
+            eprintln!("  Baseline tester: run failed: {e:#}");
+        }
     }
 }
 

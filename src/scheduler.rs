@@ -12,8 +12,9 @@ use anyhow::Result;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{FlockOperation, flock};
 
@@ -63,10 +64,14 @@ impl AttemptRunner for CliAttemptRunner {
         attempt_id: &str,
     ) -> Result<AttemptOutcome> {
         let fluent_bin = std::env::current_exe()?;
-        let run_status = Command::new(&fluent_bin)
-            .current_dir(project_root)
-            .args(["attempt", "run", work_item_id, attempt_id, "--no-sandbox"])
-            .status()?;
+        let run_status = attempt_run_command(
+            &fluent_bin,
+            project_root,
+            work_item_id,
+            attempt_id,
+            scheduler_baseline_session(),
+        )
+        .status()?;
 
         if run_status.success() {
             classify_attempt_outcome(project_root, work_item_id, attempt_id)
@@ -74,6 +79,35 @@ impl AttemptRunner for CliAttemptRunner {
             Ok(AttemptOutcome::Failed)
         }
     }
+}
+
+fn scheduler_baseline_session() -> &'static str {
+    static SESSION: OnceLock<String> = OnceLock::new();
+    SESSION.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{nanos}", std::process::id())
+    })
+}
+
+fn attempt_run_command(
+    fluent_bin: &Path,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    baseline_session: &str,
+) -> Command {
+    let mut command = Command::new(fluent_bin);
+    command
+        .current_dir(project_root)
+        .args(["attempt", "run", work_item_id, attempt_id, "--no-sandbox"])
+        .env(
+            crate::baseline_cache::BASELINE_SESSION_ENV,
+            baseline_session,
+        );
+    command
 }
 
 /// Classify a bound Attempt's terminal outcome from its persisted status.
@@ -110,9 +144,13 @@ pub fn run(project_root: &Path, poll_seconds: u64, runner: &dyn AttemptRunner) -
         }
         CoordinatorStart::Elected(lease) => {
             let capacity = resolve_capacity(project_root)?;
+            let baseline_session = scheduler_baseline_session();
+            crate::baseline_cache::prepare_scheduler_session(project_root, baseline_session)?;
             let result = run_coordinator(project_root, poll_seconds, capacity, runner, &SHUTDOWN);
+            let cleanup =
+                crate::baseline_cache::finish_scheduler_session(project_root, baseline_session);
             drop(lease);
-            result
+            result.and(cleanup)
         }
     }
 }
@@ -666,6 +704,28 @@ mod tests {
 
     fn add_queued(project_root: &Path, id: &str, priority: i64) {
         queue::add(project_root, id, Some(priority)).unwrap();
+    }
+
+    #[test]
+    fn scheduler_child_receives_one_shared_baseline_session() {
+        let command = attempt_run_command(
+            Path::new("/tmp/fluent"),
+            Path::new("/tmp/project"),
+            "work-1",
+            "attempt-1",
+            "scheduler-session-1",
+        );
+        let session = command
+            .get_envs()
+            .find(|(key, _)| *key == crate::baseline_cache::BASELINE_SESSION_ENV)
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+
+        assert_eq!(session, Some("scheduler-session-1"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["attempt", "run", "work-1", "attempt-1", "--no-sandbox"]
+        );
     }
 
     /// Acquire and return the whole-Attempt lease for a Work Item so a test can

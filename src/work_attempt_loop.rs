@@ -4643,10 +4643,8 @@ fn baseline_tester_results_path(project_root: &Path, attempt: &Attempt) -> Optio
     let attempt_id = &attempt.id;
     let baseline_artifact = format!("{attempt_id}-baseline-tester");
     let artifact_path = work_artifact_path(work_item_id, attempt_id, &baseline_artifact);
-    let path = project_root
-        .join(&artifact_path)
-        .join("tester-results.json");
-    if path.is_file() { Some(path) } else { None }
+    let path = project_root.join(artifact_path).join("tester-results.json");
+    path.is_file().then_some(path)
 }
 
 fn latest_tester_results_path(project_root: &Path, attempt: &Attempt) -> Option<PathBuf> {

@@ -371,10 +371,23 @@ or write a transcript — it is a deterministic subprocess, not an LLM agent.
 Review-only Attempts keep their existing Tester-first contract because no Writer
 produces focused candidate evidence for them.
 
-The pre-write baseline remains Attempt-scoped. Fluent captures it before the
-initial Writer and identifies that boundary by the absence of an earlier Writer
-Task, so corrective Writers reuse the same baseline even though no final Tester
-has been planned yet.
+The pre-write baseline remains part of each Attempt's evidence. Fluent captures
+it before the initial Writer and identifies that boundary by the absence of an
+earlier Writer Task, so corrective Writers reuse the same baseline even though
+no final Tester has been planned yet.
+
+Scheduler-launched Attempts receive one opaque baseline-session id from their
+coordinator. Within that scheduler lifetime, Attempts with the same source
+commit, Tester configuration and extractor digests, Fluent build, platform,
+architecture, and sandbox mode use one project-wide baseline. A file lease
+serializes the first capture; peers wait, validate the published artifact
+digest, and copy the complete evidence into their own Attempt artifact with a
+digest-bearing provenance record. The scheduler deletes its temporary shared
+cache after its workers drain; a newly elected scheduler clears any cache left
+by an interrupted predecessor. Direct Attempts and later scheduler processes do
+not reuse it. Harness errors stay Attempt-local, while missing or changed
+shared results fail closed before reuse. Suite-health checks always read the
+Attempt-local copy.
 
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it

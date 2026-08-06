@@ -5097,6 +5097,32 @@ THE SYSTEM SHALL reuse the original pre-write Tester baseline without running it
 again, even when no final Tester Task exists yet.
 Test: src/work_task_executor.rs (corrective_writer_does_not_recapture_attempt_baseline_without_tester)
 
+### B29
+
+WHEN scheduler-launched Attempts have the same source commit, Tester
+configuration, result extractor, Fluent build, platform, architecture, and
+sandbox mode, THE SYSTEM SHALL run one pre-write Tester baseline and give every
+Attempt a complete local copy with digest-bearing provenance for that immutable
+evidence.
+Test: src/scheduler.rs (scheduler_child_receives_one_shared_baseline_session)
+Test: src/baseline_cache.rs (matching_identity_reuses_one_trustworthy_run)
+Test: src/baseline_cache.rs (concurrent_matching_requests_single_flight)
+
+### B30
+
+WHEN any shared-baseline identity field differs or the scheduler restarts,
+THE SYSTEM SHALL capture a new baseline instead of reusing earlier evidence.
+Test: src/baseline_cache.rs (each_identity_field_invalidates_reuse)
+
+### B31
+
+IF a pre-write Tester returns a harness error, THE SYSTEM SHALL retain that
+Attempt-local evidence and SHALL NOT publish it for another Attempt. IF a
+published artifact is changed, THEN THE SYSTEM SHALL fail closed before reusing
+it and SHALL retain every previously copied Attempt artifact independently.
+Test: src/baseline_cache.rs (harness_error_stays_attempt_local_and_is_not_cached)
+Test: src/baseline_cache.rs (tampered_shared_artifact_fails_closed_without_rerun)
+
 ## Pre-review completion gate
 
 ### B1
@@ -5485,9 +5511,12 @@ Test: src/writer_context.rs (reviewed_correction_prompt_budget_is_enforced_befor
 WHEN the first write Task of an Attempt begins and no Tester Task
 exists on the Attempt,
 THE SYSTEM SHALL run the tester suite on the pre-write workspace and
-persist results as the baseline artifact at
-`.fluent/work/artifacts/<work-item-id>/<attempt-id>/<attempt-id>-baseline-tester/tester-results.json`.
+persist Attempt-local results at
+`.fluent/work/artifacts/<work-item-id>/<attempt-id>/<attempt-id>-baseline-tester/tester-results.json`
+and, when a scheduler shares the capture, persist its digest-bearing provenance
+at the same artifact directory's `baseline-provenance.json`.
 Test: src/work_task_executor.rs (capture_baseline_tester_persists_results_as_artifact)
+Test: src/baseline_cache.rs (matching_identity_reuses_one_trustworthy_run)
 
 ### B2
 
