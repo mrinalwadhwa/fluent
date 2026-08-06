@@ -13363,6 +13363,8 @@ mod tests {
         .unwrap();
         assert!(matrix_prompt.contains("Writer completion matrix:"));
         assert!(matrix_prompt.contains("Preserve every host-owned row field"));
+        assert!(matrix_prompt.contains("as JSON arrays"));
+        assert!(matrix_prompt.contains("[\"none: <specific reason>\"]"));
         assert!(matrix_prompt.contains("writer-completion.json"));
         assert!(!matrix_prompt.contains("{{"));
 
@@ -13456,6 +13458,11 @@ mod tests {
                 }],
             )
             .unwrap();
+        item.attempts[0].writer_completion_contract =
+            Some(crate::work_model::WriterCompletionContract {
+                version: crate::work_model::WRITER_COMPLETION_CONTRACT_VERSION,
+                requirements: Vec::new(),
+            });
         let progress = progress_md_path_for(project.path(), "work-1", "attempt-1");
         fs::create_dir_all(progress.parent().unwrap()).unwrap();
         fs::write(
@@ -13482,6 +13489,8 @@ mod tests {
         assert!(prompt.contains(&context_path.display().to_string()));
         assert!(prompt.contains(&artifact_dir.display().to_string()));
         assert!(prompt.contains(&progress.display().to_string()));
+        assert!(prompt.contains("as JSON arrays"));
+        assert!(prompt.contains("[\"none: <specific reason>\"]"));
         assert!(!prompt.contains(large_output_marker));
         assert!(!prompt.contains("{{"));
 
@@ -13678,6 +13687,11 @@ mod tests {
         );
         assert!(prompt.contains("writer-completion.json"));
         assert!(prompt.contains("Writer completion matrix"));
+        assert!(
+            prompt.contains("\"implementation-evidence\": [\"src/module.rs: changed symbol\"]")
+        );
+        assert!(prompt.contains("\"verification\": ["));
+        assert!(prompt.contains("\"applicable-constraints\": []"));
         assert!(prompt.contains("harness-native"));
         assert!(prompt.contains("does not replace the project's test selectors"));
 

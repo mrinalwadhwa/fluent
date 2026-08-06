@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -2572,6 +2572,23 @@ pub struct WriterVerificationClaim {
     pub result: WriterVerificationResult,
 }
 
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        String(String),
+        Vec(Vec<String>),
+    }
+
+    Ok(match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::String(value) => vec![value],
+        StringOrVec::Vec(values) => values,
+    })
+}
+
 /// One row in a task-specific Writer completion matrix. The first five fields
 /// are host-owned and immutable. Writers fill only the remaining claim fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2585,11 +2602,11 @@ pub struct WriterCompletionRow {
     pub verification_refs: Vec<String>,
     #[serde(default)]
     pub state: WriterCompletionState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub implementation_evidence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub verification: Vec<WriterVerificationClaim>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub applicable_constraints: Vec<String>,
 }
 
@@ -7659,6 +7676,55 @@ mod tests {
                 .status_against(&contract, "attempt-1-write-2", &findings)
                 .unwrap_err()
                 .contains("pending but carries completion claims")
+        );
+    }
+
+    #[test]
+    fn writer_completion_matrix_serializes_writer_owned_array_shapes() {
+        let contract = WriterCompletionContract {
+            version: WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![WriterCompletionRequirement {
+                id: "behavior:dashboard:b1".to_string(),
+                kind: WriterCompletionRequirementKind::Behavior,
+                source: "behaviors.md#dashboard:b1".to_string(),
+                requirement: "Preserve selection".to_string(),
+                verification_refs: Vec::new(),
+            }],
+        };
+        let matrix = WriterCompletionMatrix::skeleton(&contract, "write-1", &[], None).unwrap();
+
+        let value = serde_json::to_value(matrix).unwrap();
+        let row = &value["rows"][0];
+        assert_eq!(row["implementation-evidence"], serde_json::json!([]));
+        assert_eq!(row["verification"], serde_json::json!([]));
+        assert_eq!(row["applicable-constraints"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn writer_completion_matrix_accepts_scalar_implementation_evidence() {
+        let matrix: WriterCompletionMatrix = serde_json::from_value(serde_json::json!({
+            "schema-version": 1,
+            "task-id": "write-1",
+            "rows": [{
+                "id": "plan:step-1",
+                "kind": "plan",
+                "source": "plan.md#step-1",
+                "requirement": "Complete the change",
+                "state": "complete",
+                "implementation-evidence": "commit abc123",
+                "verification": [{"command": "cargo test focused", "result": "pass"}],
+                "applicable-constraints": []
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            matrix.rows[0].implementation_evidence,
+            vec!["commit abc123"]
+        );
+        assert_eq!(
+            serde_json::to_value(matrix).unwrap()["rows"][0]["implementation-evidence"],
+            serde_json::json!(["commit abc123"])
         );
     }
 

@@ -41,8 +41,9 @@ verification proves no candidate change is needed, write
 Do not use that declaration after changing the candidate. Update progress and the completion
 matrix only with concrete passing evidence.
 {{#if has_writer_completion_matrix}}
-Preserve every host-owned matrix row and map each completed finding to its applicable behavior or
-Approach constraint, or to a specific `none:` reason.
+Preserve every host-owned matrix row. Keep `implementation-evidence`, `verification`, and
+`applicable-constraints` as JSON arrays, even when one value exists. Map each completed finding to
+its applicable behavior or Approach constraint, or to `["none: <specific reason>"]`.
 {{/if}}
 
 Finish with a concise verification summary containing each exact focused command, result, and

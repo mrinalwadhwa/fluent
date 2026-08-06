@@ -10095,6 +10095,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scalar_writer_completion_evidence_recovers_before_review() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+        let path = tmp.path().join(
+            ".fluent/work/artifacts/matrix-work/attempt-1/attempt-1-write-1/writer-completion.json",
+        );
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["rows"][0]["implementation-evidence"] =
+            serde_json::Value::String("src/dashboard.rs".to_string());
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let outcome = plan_after_completed_writer(
+            tmp.path(),
+            &store,
+            store.read_work_item("matrix-work").unwrap(),
+            "attempt-1",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            WorkAttemptRunOutcome::PlannedReviews { .. }
+        ));
+        assert_eq!(
+            store.read_work_item("matrix-work").unwrap().attempts[0].status,
+            AttemptStatus::Reviewing
+        );
+    }
+
     fn make_candidate_gate_fixture(
         project_root: &Path,
         candidate_source: &str,
