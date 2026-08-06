@@ -85,6 +85,29 @@ fn checkout_is_registered_and_read_back() {
 }
 
 #[test]
+fn checkout_register_unregister_round_trip() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let canonical = project.path().canonicalize().unwrap();
+    let identity = scheduler_service::assign_checkout_identity(project.path()).unwrap();
+
+    scheduler_service::register_checkout(home.path(), project.path(), &identity).unwrap();
+    let registered = scheduler_service::read_registry(home.path()).unwrap();
+    assert_eq!(
+        registered.get(&canonical),
+        Some(&identity),
+        "registered checkout must appear in the registry"
+    );
+
+    scheduler_service::unregister_checkout(home.path(), project.path()).unwrap();
+    let unregistered = scheduler_service::read_registry(home.path()).unwrap();
+    assert!(
+        !unregistered.contains_key(&canonical),
+        "unregistered checkout must be absent from the registry"
+    );
+}
+
+#[test]
 fn registration_is_atomic_and_overwrites_stale_entry() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
