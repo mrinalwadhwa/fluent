@@ -7836,6 +7836,7 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
         &bin_dir,
         &local_preview_flywheel_mock_script(&learner_draft(&[corrective_follow_up_json("fu-1")])),
     );
+    write_mock_sandbox_exec(&bin_dir);
 
     // The public CLI drives Writer, Tester, all five reviewers, and Learner to
     // the one release candidate.

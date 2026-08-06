@@ -102,7 +102,7 @@ fn attempt_run_command(
     let mut command = Command::new(fluent_bin);
     command
         .current_dir(project_root)
-        .args(["attempt", "run", work_item_id, attempt_id, "--no-sandbox"])
+        .args(["attempt", "run", work_item_id, attempt_id])
         .env(
             crate::baseline_cache::BASELINE_SESSION_ENV,
             baseline_session,
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_child_receives_one_shared_baseline_session() {
+    fn scheduler_child_receives_one_shared_baseline_session_without_disabling_sandbox() {
         let command = attempt_run_command(
             Path::new("/tmp/fluent"),
             Path::new("/tmp/project"),
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(session, Some("scheduler-session-1"));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["attempt", "run", "work-1", "attempt-1", "--no-sandbox"]
+            ["attempt", "run", "work-1", "attempt-1"]
         );
     }
 

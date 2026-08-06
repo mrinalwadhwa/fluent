@@ -5118,7 +5118,7 @@ configuration, result extractor, Fluent build, platform, architecture, and
 sandbox mode, THE SYSTEM SHALL run one pre-write Tester baseline and give every
 Attempt a complete local copy with digest-bearing provenance for that immutable
 evidence.
-Test: src/scheduler.rs (scheduler_child_receives_one_shared_baseline_session)
+Test: src/scheduler.rs (scheduler_child_receives_one_shared_baseline_session_without_disabling_sandbox)
 Test: src/baseline_cache.rs (matching_identity_reuses_one_trustworthy_run)
 Test: src/baseline_cache.rs (concurrent_matching_requests_single_flight)
 
@@ -5136,6 +5136,19 @@ published artifact is changed, THEN THE SYSTEM SHALL fail closed before reusing
 it and SHALL retain every previously copied Attempt artifact independently.
 Test: src/baseline_cache.rs (harness_error_stays_attempt_local_and_is_not_cached)
 Test: src/baseline_cache.rs (tampered_shared_artifact_fails_closed_without_rerun)
+
+### B32
+
+WHEN the scheduler launches an Attempt,
+THE SYSTEM SHALL retain the ordinary sandbox default for that Attempt.
+Test: src/scheduler.rs (scheduler_child_receives_one_shared_baseline_session_without_disabling_sandbox)
+
+### B33
+
+WHEN a scheduler-launched Attempt runs a baseline Tester or final Tester,
+THE SYSTEM SHALL remove the scheduler baseline-session token from every project
+test command and result extractor.
+Test: src/tester.rs (tester_children_do_not_inherit_scheduler_baseline_session)
 
 ## Pre-review completion gate
 

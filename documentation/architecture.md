@@ -389,6 +389,13 @@ not reuse it. Harness errors stay Attempt-local, while missing or changed
 shared results fail closed before reuse. Suite-health checks always read the
 Attempt-local copy.
 
+The scheduler launches each Attempt with the ordinary sandbox default. Its
+baseline-session id is host coordination data: Fluent consumes it while resolving
+the pre-write cache, then removes it from every configured Tester command and
+result extractor. Nested Fluent processes created by the repository test suite
+therefore cannot join, publish to, or recursively capture the outer scheduler's
+baseline session.
+
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it
 creates the Task artifact area or any guarded process-settlement directory.

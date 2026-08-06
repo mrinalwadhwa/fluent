@@ -759,7 +759,7 @@ fn run_command(
     let stderr_path = commands_dir.join(format!("{index}-stderr.log"));
 
     let start = Instant::now();
-    let output = if let Some(profile) = sandbox_path {
+    let mut process = if let Some(profile) = sandbox_path {
         let mut process = Command::new("sandbox-exec");
         process
             .arg("-f")
@@ -767,28 +767,22 @@ fn run_command(
             .arg("sh")
             .arg("-c")
             .arg(command);
-        if let Some(directory) = settlement_directory {
-            process
-                .env("TMPDIR", directory)
-                .env("FLUENT_RELEASE_TEST_ROOTS", directory);
-        }
         process
-            .current_dir(working_dir)
-            .output()
-            .with_context(|| format!("spawning sandboxed command: {command}"))?
     } else {
         let mut process = Command::new("sh");
         process.arg("-c").arg(command);
-        if let Some(directory) = settlement_directory {
-            process
-                .env("TMPDIR", directory)
-                .env("FLUENT_RELEASE_TEST_ROOTS", directory);
-        }
         process
-            .current_dir(working_dir)
-            .output()
-            .with_context(|| format!("spawning command: {command}"))?
     };
+    isolate_tester_child_environment(&mut process);
+    if let Some(directory) = settlement_directory {
+        process
+            .env("TMPDIR", directory)
+            .env("FLUENT_RELEASE_TEST_ROOTS", directory);
+    }
+    let output = process
+        .current_dir(working_dir)
+        .output()
+        .with_context(|| format!("spawning Tester command: {command}"))?;
     let duration = start.elapsed();
 
     fs::write(&stdout_path, &output.stdout)?;
@@ -810,25 +804,35 @@ fn run_command(
     })
 }
 
+/// Keep host-owned scheduler coordination outside project test processes. The
+/// outer Fluent process consumes this token when it elects or reuses a baseline;
+/// a nested Fluent invocation is an ordinary test subject, not a cache peer.
+fn isolate_tester_child_environment(command: &mut Command) {
+    command.env_remove(crate::baseline_cache::BASELINE_SESSION_ENV);
+}
+
 fn run_extractor(
     extractor_path: &Path,
     artifact_dir: &Path,
     sandbox_path: Option<&PathBuf>,
 ) -> Result<Vec<TestResult>> {
-    let output = if let Some(profile) = sandbox_path {
-        Command::new("sandbox-exec")
+    let mut command = if let Some(profile) = sandbox_path {
+        let mut command = Command::new("sandbox-exec");
+        command
             .arg("-f")
             .arg(profile)
             .arg(extractor_path)
-            .arg(artifact_dir)
-            .output()
-            .with_context(|| format!("running sandboxed {}", extractor_path.display()))?
+            .arg(artifact_dir);
+        command
     } else {
-        Command::new(extractor_path)
-            .arg(artifact_dir)
-            .output()
-            .with_context(|| format!("running {}", extractor_path.display()))?
+        let mut command = Command::new(extractor_path);
+        command.arg(artifact_dir);
+        command
     };
+    isolate_tester_child_environment(&mut command);
+    let output = command
+        .output()
+        .with_context(|| format!("running {}", extractor_path.display()))?;
 
     if !output.status.success() {
         let stderr_tail = String::from_utf8_lossy(&output.stderr);
@@ -1063,6 +1067,23 @@ mod tests {
         fn collect(&self, _: &Path) -> Result<Vec<ProcessEntry>> {
             panic!("unguarded commands must not collect process inventory")
         }
+    }
+
+    #[test]
+    fn tester_children_do_not_inherit_scheduler_baseline_session() {
+        let mut command = Command::new("sh");
+        command.env(
+            crate::baseline_cache::BASELINE_SESSION_ENV,
+            "outer-scheduler-session",
+        );
+
+        isolate_tester_child_environment(&mut command);
+
+        let inherited = command
+            .get_envs()
+            .find(|(name, _)| *name == crate::baseline_cache::BASELINE_SESSION_ENV)
+            .map(|(_, value)| value);
+        assert_eq!(inherited, Some(None));
     }
 
     enum ScriptedInventory {
