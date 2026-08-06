@@ -782,14 +782,29 @@ positive per-land opt-in. `fluent auto-merge`, automatic scheduler lifecycle,
 automatic landing, and Fargate are outside the Local Preview.
 
 Work intake applies two host-owned expansion guards before that execution path.
-The planning guard counts required rows in the approved Plan Steps table—the
-same rows used by the progress contract—and compares them with the layered
-`planning.scope-limit` setting (default 12). Prose, optional rows, and TBD rows do
-not affect the result. Intake rejects an over-limit plan before creating the Work
-Item or input snapshots, reports the deterministic minimum slice count, and
-requires `--authorize-large-scope` to preserve an explicit authorization in the
-Work model. Planning guidance prefers separate, independently landable Work
-Items rather than this override.
+The planning guard reuses the completion-contract parsers to count approved
+behaviors and required Plan rows, then compares the larger count with the layered
+`planning.scope-limit` setting (default 12). This avoids asking planners for a
+second set of scope labels. Prose, optional rows, and TBD rows do not affect the
+result. Intake rejects over-reference planning context before creating the Work
+Item or input snapshots. It reports both counts, the configuration source, and
+the arithmetic minimum number of policy-sized groups; that minimum is not a
+claim about the optimal number of Work Items. `--authorize-large-scope` preserves
+an explicit authorization in the Work model.
+
+The same intake boundary reports project-local calibration evidence without
+changing the configured reference. It compares the proposed breadth with
+successful code Attempts between half and twice that size that passed review and
+Learning under the current assessment version. Five nearby Attempts are required
+before Fluent reports a one-pass rate plus median reviewed Writer rounds and
+recorded active task time. Pre-review Writer continuations do not count as
+reviewed corrections. Legacy, distant, paused, failed-review, and failed-Learning
+records do not influence the nearby sample; unreadable Work Item records are
+omitted with an explicit count. If the eligible records lack task timestamps,
+the duration median is reported as unavailable. Otherwise the report names how
+many eligible Attempts contributed timing data. Planning guidance uses this
+evidence when choosing independently landable Work Items and keeps the
+combined-scope override available for work that must remain atomic.
 
 Release Work has a second immutable intake boundary: `--release` requires one or
 more `--release-criterion id=statement` arguments before the Work Item exists.

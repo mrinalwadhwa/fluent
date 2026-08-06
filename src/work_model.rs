@@ -289,7 +289,8 @@ pub struct WorkItem {
     pub model_writer_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_context: Option<PlanningContext>,
-    /// Deterministic intake diagnostic derived from required Plan rows.
+    /// Deterministic intake diagnostic derived from approved behaviors and
+    /// required Plan rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_scope: Option<PlanningScopeAssessment>,
     /// Fixed acceptance criteria and classified findings for release work.
@@ -1379,16 +1380,17 @@ impl WorkItem {
 
     pub fn validate(&self) -> Result<(), WorkModelError> {
         if let Some(scope) = &self.planning_scope {
-            let expected_slices = scope.required_steps.div_ceil(scope.limit.max(1));
-            let recorded_steps_match = self
-                .planning_context
-                .as_ref()
-                .is_some_and(|context| context.required_plan_steps() == scope.required_steps);
-            if scope.required_steps == 0
+            let expected_slices = scope.scope_units().div_ceil(scope.limit.max(1));
+            let recorded_counts_match = self.planning_context.as_ref().is_some_and(|context| {
+                context.required_plan_steps() == scope.required_steps
+                    && (scope.calibration_version == 0
+                        || context.behavior_count() == scope.behavior_count)
+            });
+            if scope.scope_units() == 0
                 || scope.limit == 0
                 || scope.recommended_slices != expected_slices
                 || (scope.is_large() && !scope.large_scope_authorized)
-                || !recorded_steps_match
+                || !recorded_counts_match
             {
                 return Err(WorkModelError::InvalidPlanningScope {
                     reason: "scope diagnostic is inconsistent or lacks large-scope authorization"
@@ -1550,20 +1552,24 @@ impl PlanningContext {
                 .is_none_or(|value| value.trim().is_empty())
     }
 
-    /// Count only required rows in the approved Plan table. This is stable
-    /// across prose rewrites and directly matches the execution progress
-    /// contract. A plan without required rows has no scope assessment.
+    /// Count approved behaviors and required Plan rows without asking planning
+    /// authors for another scope vocabulary. Both parsers already feed the
+    /// execution completion contract.
     pub fn scope_assessment(
         &self,
         limit: u32,
         large_scope_authorized: bool,
     ) -> Option<PlanningScopeAssessment> {
+        let behavior_count = self.behavior_count();
         let required_steps = self.required_plan_steps();
-        if required_steps == 0 {
+        let scope_units = behavior_count.max(required_steps);
+        if scope_units == 0 {
             return None;
         }
-        let recommended_slices = required_steps.div_ceil(limit.max(1));
+        let recommended_slices = scope_units.div_ceil(limit.max(1));
         Some(PlanningScopeAssessment {
+            calibration_version: PLANNING_SCOPE_CALIBRATION_VERSION,
+            behavior_count,
             required_steps,
             limit,
             recommended_slices,
@@ -1581,11 +1587,30 @@ impl PlanningContext {
         )
         .unwrap_or(u32::MAX)
     }
+
+    pub fn behavior_count(&self) -> u32 {
+        let source = self.behaviors.as_deref().or(self.combined.as_deref());
+        u32::try_from(
+            source
+                .map(parse_behavior_completion_requirements)
+                .unwrap_or_default()
+                .len(),
+        )
+        .unwrap_or(u32::MAX)
+    }
 }
 
 /// Host-derived scope diagnostic recorded at Work creation.
+pub const PLANNING_SCOPE_CALIBRATION_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanningScopeAssessment {
+    /// Version 0 is the legacy Plan-only assessment. Version 1 records behavior
+    /// and Plan breadth for project-local calibration.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub calibration_version: u32,
+    #[serde(default)]
+    pub behavior_count: u32,
     pub required_steps: u32,
     pub limit: u32,
     pub recommended_slices: u32,
@@ -1594,8 +1619,16 @@ pub struct PlanningScopeAssessment {
 }
 
 impl PlanningScopeAssessment {
+    pub fn scope_units(&self) -> u32 {
+        if self.calibration_version == 0 {
+            self.required_steps
+        } else {
+            self.behavior_count.max(self.required_steps)
+        }
+    }
+
     pub fn is_large(&self) -> bool {
-        self.required_steps > self.limit
+        self.scope_units() > self.limit
     }
 }
 
@@ -5613,6 +5646,10 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AttemptRecord {
     id: String,
@@ -7753,8 +7790,12 @@ mod tests {
     }
 
     #[test]
-    fn planning_scope_counts_only_required_plan_rows() {
+    fn planning_scope_counts_behaviors_and_required_plan_rows() {
         let context = PlanningContext {
+            behaviors: Some(
+                "## Dashboard\n\n### B1\n\nFirst.\n\n### B2\n\nSecond.\n\n### B3\n\nThird.\n"
+                    .to_string(),
+            ),
             plan: Some(
                 "Long prose does not change scope.\n\n\
                  | # | State reached | Verification | Req? |\n\
@@ -7769,20 +7810,38 @@ mod tests {
         };
 
         let assessment = context.scope_assessment(1, true).unwrap();
+        assert_eq!(assessment.behavior_count, 3);
         assert_eq!(assessment.required_steps, 2);
-        assert_eq!(assessment.recommended_slices, 2);
+        assert_eq!(assessment.recommended_slices, 3);
         assert!(assessment.is_large());
         assert!(assessment.large_scope_authorized);
+        assert_eq!(assessment.calibration_version, 1);
 
         let combined = PlanningContext {
-            combined: context.plan.clone(),
+            combined: Some(format!(
+                "{}\n\n{}",
+                context.behaviors.as_deref().unwrap(),
+                context.plan.as_deref().unwrap()
+            )),
             ..Default::default()
         };
         assert_eq!(combined.required_plan_steps(), 2);
+        assert_eq!(combined.behavior_count(), 3);
 
-        let boundary = context.scope_assessment(2, false).unwrap();
+        let boundary = context.scope_assessment(3, false).unwrap();
         assert!(!boundary.is_large());
         assert_eq!(boundary.recommended_slices, 1);
+    }
+
+    #[test]
+    fn legacy_plan_only_scope_assessment_keeps_legacy_semantics() {
+        let assessment: PlanningScopeAssessment =
+            serde_json::from_str(r#"{"required_steps":2,"limit":2,"recommended_slices":1}"#)
+                .unwrap();
+
+        assert_eq!(assessment.calibration_version, 0);
+        assert_eq!(assessment.behavior_count, 0);
+        assert!(!assessment.is_large());
     }
 
     #[test]

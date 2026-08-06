@@ -291,22 +291,74 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 approach_file,
                 plan_file,
             )?;
-            let planning_scope = match planning_context.as_ref() {
-                Some(context) if context.required_plan_steps() > 0 => {
-                    let scope_limit = fluent::config::resolve_planning_config(project_root)?
-                        .scope_limit
-                        .value;
-                    context.scope_assessment(scope_limit, authorize_large_scope)
+            let has_scope_inputs = planning_context.as_ref().is_some_and(|context| {
+                context.behavior_count() > 0 || context.required_plan_steps() > 0
+            });
+            let planning_config = has_scope_inputs
+                .then(|| fluent::config::resolve_planning_config(project_root))
+                .transpose()?;
+            let planning_scope = planning_context.as_ref().and_then(|context| {
+                planning_config.as_ref().and_then(|config| {
+                    context.scope_assessment(config.scope_limit.value, authorize_large_scope)
+                })
+            });
+            let local_scope_evidence = planning_scope
+                .as_ref()
+                .map(|scope| {
+                    let mut unreadable_items = 0_usize;
+                    let items = store.list_work_item_results().map(|items| {
+                        items
+                            .into_iter()
+                            .filter_map(|result| match result {
+                                Ok(item) => Some(item),
+                                Err(_) => {
+                                    unreadable_items = unreadable_items.saturating_add(1);
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })?;
+                    Ok::<_, fluent::work_model::WorkModelStorageError>((
+                        fluent::scope_calibration::summarize_local_scope_evidence(
+                            &items,
+                            scope.scope_units(),
+                        ),
+                        unreadable_items,
+                    ))
+                })
+                .transpose()?;
+            if let (Some(scope), Some((evidence, unreadable_items)), Some(config)) =
+                (&planning_scope, &local_scope_evidence, &planning_config)
+            {
+                eprintln!(
+                    "Scope assessment: {} approved behaviors, {} required plan steps; configured reference {} ({})",
+                    scope.behavior_count,
+                    scope.required_steps,
+                    scope.limit,
+                    config.scope_limit.source
+                );
+                eprintln!(
+                    "{}",
+                    fluent::scope_calibration::format_local_scope_evidence(evidence)
+                );
+                if *unreadable_items > 0 {
+                    let record = if *unreadable_items == 1 {
+                        "record"
+                    } else {
+                        "records"
+                    };
+                    eprintln!(
+                        "Project-local evidence omitted {} unreadable Work Item {}.",
+                        unreadable_items, record
+                    );
                 }
-                _ => None,
-            };
+            }
             if let Some(scope) = &planning_scope
                 && scope.is_large()
                 && !scope.large_scope_authorized
             {
                 bail!(
-                    "{} required plan steps exceed the configured scope limit {}; recommend at least {} independently landable slices; rerun with --authorize-large-scope only after approving the combined scope",
-                    scope.required_steps,
+                    "scope breadth exceeds the configured reference {}; minimum {} groups under the configured reference; this is not an optimal Work Item count. Consider independently landable outcomes, or rerun with --authorize-large-scope after approving the combined scope",
                     scope.limit,
                     scope.recommended_slices
                 );
@@ -328,8 +380,11 @@ fn cmd_work_item(project_root: &Path, command: WorkItemCommands) -> Result<()> {
                 .filter(|scope| scope.is_large())
             {
                 eprintln!(
-                    "Authorized large scope: {} required steps, limit {}, {} recommended slices",
-                    scope.required_steps, scope.limit, scope.recommended_slices
+                    "Authorized large scope: {} behaviors, {} required steps, reference {}, minimum {} policy groups (not an optimal Work Item count)",
+                    scope.behavior_count,
+                    scope.required_steps,
+                    scope.limit,
+                    scope.recommended_slices
                 );
             }
             if guidance::guidance_enabled() {

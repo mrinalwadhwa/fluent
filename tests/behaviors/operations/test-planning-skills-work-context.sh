@@ -95,6 +95,18 @@ require_in_file "$PLAN" \
   'planning.scope-limit' \
   "plan-execution skill"
 require_in_file "$PLAN" \
+  'project-local evidence' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'half to twice the proposed breadth' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'do not add technical-boundary labels' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
+  'not an optimal Work Item count' \
+  "plan-execution skill"
+require_in_file "$PLAN" \
   '--authorize-large-scope' \
   "plan-execution skill"
 require_in_file "$PLAN" \

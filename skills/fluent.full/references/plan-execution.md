@@ -150,12 +150,19 @@ fluent work-item create <work-item-id> \
 
 Do not create the Attempt or run it. That belongs to the autonomous stage in `fluent`. Stop here.
 
-Prefer separate, independently landable Work Items when a plan has many required
-Steps rows. Work intake deterministically compares those rows with the layered
-`planning.scope-limit` (default 12). If creation reports that the plan is over
-the limit, split it using the reported minimum slice count. Pass
-`--authorize-large-scope` only after the user explicitly approves keeping the
-combined scope; Fluent records that authorization with the diagnostic.
+Prefer separate, independently landable Work Items when the approved behaviors
+or required Plan rows describe broad work. Work intake reuses those existing
+counts, takes the larger one, and compares it with the layered
+`planning.scope-limit` (default 12); do not add technical-boundary labels merely
+to satisfy this check. If creation stops at the reference, treat its reported
+group count as an arithmetic minimum, not an optimal Work Item count. Use the
+project-local evidence beside it to discuss how similarly sized successful work
+performed in this repository. The report names its exact comparison band, from
+half to twice the proposed breadth. Five Attempts in that band are required
+before the evidence is calibrated, and it never changes the configured
+reference. Split only where outcomes are independently reviewable; pass
+`--authorize-large-scope` after the user explicitly approves keeping work
+atomic. Fluent records that authorization with the diagnostic.
 
 For a release exercise, define acceptance before creation. Add `--release` and
 one repeatable `--release-criterion '<id>=<accepted outcome>'` per criterion to

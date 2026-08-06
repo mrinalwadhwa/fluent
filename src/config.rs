@@ -33,8 +33,8 @@ pub const DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS: u32 = 1000;
 pub const DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB: u64 = 50;
 /// Built-in filesystem space reserved after a reviewer cache admission.
 pub const DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB: u64 = 50;
-/// Built-in maximum required Plan rows before Work creation needs an explicit
-/// large-scope authorization.
+/// Built-in maximum approved behaviors or required Plan rows before Work
+/// creation needs an explicit large-scope authorization.
 pub const DEFAULT_PLANNING_SCOPE_LIMIT: u32 = 12;
 const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 

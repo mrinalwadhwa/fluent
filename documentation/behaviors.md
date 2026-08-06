@@ -301,25 +301,29 @@ Test: src/work_model.rs (newer_model_writer_version_warns_and_blocks_mutation)
 
 ### B1
 
-WHEN Work Item intake receives an approved Plan, THE SYSTEM SHALL count only
-required rows in its Steps table and compare that deterministic count with the
-layered `planning.scope-limit` configuration.
+WHEN Work Item intake receives approved planning context, THE SYSTEM SHALL use
+the existing behavior and Plan parsers to count approved behaviors and required
+Plan rows, use the larger count as the deterministic scope breadth, and compare
+it with the layered `planning.scope-limit` configuration.
 Test: src/config.rs (planning_scope_limit_resolves_from_project_and_rejects_zero)
-Test: src/work_model.rs (planning_scope_counts_only_required_plan_rows)
+Test: src/work_model.rs (planning_scope_counts_behaviors_and_required_plan_rows)
 
 ### B2
 
-IF required Plan rows exceed the configured scope limit and the operator has not
-passed `--authorize-large-scope`, THEN THE SYSTEM SHALL reject Work creation
-without writing Work state, report the count and limit, and recommend the minimum
-number of independently landable slices.
+IF behavior or Plan breadth exceeds the configured scope reference and the
+operator has not passed `--authorize-large-scope`, THEN THE SYSTEM SHALL reject
+Work creation without writing Work state, report both counts and the configured
+source, and report the minimum policy groups while stating that this arithmetic
+minimum is not an optimal Work Item count.
 Test: tests/binary.rs (large_scope_requires_explicit_authorization_and_records_diagnostic)
+Test: tests/binary.rs (behavior_breadth_requires_scope_authorization_without_extra_plan_detail)
 
 ### B3
 
-WHEN the operator explicitly authorizes a Plan above the configured scope limit,
-THE SYSTEM SHALL persist the scope diagnostic and authorization.
+WHEN the operator explicitly authorizes planning context above the configured
+scope reference, THE SYSTEM SHALL persist the scope diagnostic and authorization.
 Test: tests/binary.rs (large_scope_requires_explicit_authorization_and_records_diagnostic)
+Test: tests/binary.rs (behavior_breadth_requires_scope_authorization_without_extra_plan_detail)
 
 ### B4
 
@@ -341,6 +345,46 @@ require an exact mapping to an accepted release criterion and reject an unknown
 mapping without recording the finding.
 Test: src/work_model.rs (release_findings_fail_closed_unless_mapped_to_accepted_criteria)
 Test: tests/binary.rs (release_findings_default_to_follow_up_and_blockers_require_criteria)
+
+### B7
+
+IF fewer than five current-calibration code Attempts between half and twice the
+proposed breadth have completed with passing reviews and successful Learning,
+THEN THE SYSTEM SHALL report that project-local scope evidence is not calibrated
+and include the eligible and comparable Attempt counts.
+Test: src/scope_calibration.rs (local_scope_evidence_excludes_old_distant_and_unsuccessful_work)
+Test: src/scope_calibration.rs (local_scope_evidence_requires_five_nearby_successful_versioned_attempts)
+
+### B8
+
+WHEN at least five current-calibration code Attempts between half and twice the
+proposed breadth have completed with passing reviews and successful Learning,
+THE SYSTEM SHALL report the project-local one-pass rate, median reviewed Writer
+rounds, and the exact comparison band, with pre-review Writer continuations
+counted outside reviewed rounds.
+Test: src/scope_calibration.rs (local_scope_evidence_requires_five_nearby_successful_versioned_attempts)
+Test: src/scope_calibration.rs (pre_review_continuations_do_not_count_as_corrective_rounds)
+
+### B9
+
+WHEN project-local scope evidence is calibrated, THE SYSTEM SHALL report median
+recorded active task time with its timed Attempt count, or report duration as
+unavailable when no eligible Attempt has timestamps.
+Test: src/scope_calibration.rs (local_scope_evidence_requires_five_nearby_successful_versioned_attempts)
+Test: src/scope_calibration.rs (calibrated_evidence_reports_unavailable_when_task_durations_are_missing)
+
+### B10
+
+IF a Work Item record cannot be read while gathering project-local scope
+evidence, THEN THE SYSTEM SHALL omit that record from calibration and report the
+number of omitted records.
+Test: tests/binary.rs (scope_evidence_reports_omitted_unreadable_work_items)
+
+### B11
+
+WHEN project-local scope evidence is reported, THE SYSTEM SHALL leave the
+layered configured scope reference unchanged.
+Test: tests/binary.rs (behavior_breadth_requires_scope_authorization_without_extra_plan_detail)
 
 ## Observations management
 

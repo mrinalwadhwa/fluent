@@ -3384,6 +3384,32 @@ fn work_create_writes_minimal_work_item() {
 }
 
 #[test]
+fn work_create_without_scope_inputs_does_not_resolve_scope_configuration() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
+    fs::write(
+        tmp.path().join(".fluent/config.yaml"),
+        "planning:\n  scope-limit: 0\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "unscoped-work",
+            "--title",
+            "Unscoped work",
+        ])
+        .assert()
+        .success();
+
+    let shown = work_item_value(tmp.path(), "unscoped-work");
+    assert!(shown.get("planning_scope").is_none());
+}
+
+#[test]
 fn work_create_refuses_existing_work_item() {
     let tmp = TempDir::new().unwrap();
     write_work_item_json(tmp.path(), "work-existing", "Original title");
@@ -3499,10 +3525,10 @@ fn large_scope_requires_explicit_authorization_and_records_diagnostic() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "3 required plan steps exceed the configured scope limit 2",
+            "Scope assessment: 0 approved behaviors, 3 required plan steps; configured reference 2 (project)",
         ))
         .stderr(predicate::str::contains(
-            "recommend at least 2 independently landable slices",
+            "minimum 2 groups under the configured reference; this is not an optimal Work Item count",
         ))
         .stderr(predicate::str::contains("--authorize-large-scope"));
     assert!(
@@ -3526,14 +3552,119 @@ fn large_scope_requires_explicit_authorization_and_records_diagnostic() {
         .assert()
         .success()
         .stderr(predicate::str::contains(
-            "Authorized large scope: 3 required steps, limit 2, 2 recommended slices",
+            "Authorized large scope: 0 behaviors, 3 required steps, reference 2, minimum 2 policy groups (not an optimal Work Item count)",
         ));
 
     let shown = work_item_value(tmp.path(), "large-work");
+    assert_eq!(shown["planning_scope"]["calibration_version"], 1);
+    assert_eq!(shown["planning_scope"]["behavior_count"], 0);
     assert_eq!(shown["planning_scope"]["required_steps"], 3);
     assert_eq!(shown["planning_scope"]["limit"], 2);
     assert_eq!(shown["planning_scope"]["recommended_slices"], 2);
     assert_eq!(shown["planning_scope"]["large_scope_authorized"], true);
+}
+
+#[test]
+fn behavior_breadth_requires_scope_authorization_without_extra_plan_detail() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent")).unwrap();
+    fs::write(
+        tmp.path().join(".fluent/config.yaml"),
+        "planning:\n  scope-limit: 2\n",
+    )
+    .unwrap();
+    let behaviors_path = tmp.path().join("behaviors.md");
+    fs::write(
+        &behaviors_path,
+        "## Dashboard\n\n### B1\n\nFirst.\n\n### B2\n\nSecond.\n\n### B3\n\nThird.\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "broad-behaviors",
+            "--title",
+            "Broad behaviors",
+            "--behaviors-file",
+            behaviors_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Scope assessment: 3 approved behaviors, 0 required plan steps; configured reference 2 (project)",
+        ))
+        .stderr(predicate::str::contains(
+            "Project-local evidence is not calibrated",
+        ))
+        .stderr(predicate::str::contains(
+            "minimum 2 groups under the configured reference; this is not an optimal Work Item count",
+        ))
+        .stderr(predicate::str::contains("--authorize-large-scope"));
+    assert!(
+        !tmp.path()
+            .join(".fluent/work/items/broad-behaviors.json")
+            .exists()
+    );
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "broad-behaviors",
+            "--title",
+            "Broad behaviors",
+            "--behaviors-file",
+            behaviors_path.to_str().unwrap(),
+            "--authorize-large-scope",
+        ])
+        .assert()
+        .success();
+
+    let shown = work_item_value(tmp.path(), "broad-behaviors");
+    assert_eq!(shown["planning_scope"]["calibration_version"], 1);
+    assert_eq!(shown["planning_scope"]["behavior_count"], 3);
+    assert_eq!(shown["planning_scope"]["required_steps"], 0);
+    assert_eq!(shown["planning_scope"]["limit"], 2);
+    assert_eq!(shown["planning_scope"]["recommended_slices"], 2);
+    assert_eq!(shown["planning_scope"]["large_scope_authorized"], true);
+}
+
+#[test]
+fn scope_evidence_reports_omitted_unreadable_work_items() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
+    fs::write(
+        tmp.path().join(".fluent/work/items/unreadable.json"),
+        "{not valid json",
+    )
+    .unwrap();
+    let behaviors_path = tmp.path().join("behaviors.md");
+    fs::write(
+        &behaviors_path,
+        "## Small change\n\n### B1\n\nOne behavior.\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "work-item",
+            "create",
+            "readable-history",
+            "--title",
+            "Readable history",
+            "--behaviors-file",
+            behaviors_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Project-local evidence omitted 1 unreadable Work Item record.",
+        ));
 }
 
 #[test]

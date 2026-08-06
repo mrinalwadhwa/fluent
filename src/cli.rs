@@ -275,8 +275,7 @@ pub enum WorkItemCommands {
         #[arg(long, value_name = "PATH")]
         input_artifact: Vec<String>,
 
-        /// Explicitly authorize creation when required Plan steps exceed the
-        /// configured planning scope limit
+        /// Authorize creation when behavior or Plan breadth exceeds the scope limit
         #[arg(long)]
         authorize_large_scope: bool,
 
