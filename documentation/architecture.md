@@ -2120,6 +2120,14 @@ command exits zero with a message saying nothing needed teardown.
 Sandbox profile unchanged — credentials injected via env vars, never by
 opening filesystem access.
 
+Autonomous Claude Writers use an Attempt-managed `HOME` so interactive Claude
+configuration and session history do not enter the worker boundary. That
+managed home is retained even when the scheduler starts an Attempt with
+`--no-sandbox`; in that route Fluent still extracts the supported Claude
+credential on the host and passes it through the inherited environment. A
+structured `authentication_failed` transcript is a typed authentication pause,
+not a generic coder failure, so it does not consume repeated Writer launches.
+
 ### Fargate runtime
 
 Claude OAuth token passed as env var at task launch. Short-lived; multi-hour

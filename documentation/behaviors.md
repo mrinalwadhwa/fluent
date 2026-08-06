@@ -3633,6 +3633,16 @@ WHEN Fluent launches an intentionally interactive Claude session,
 THE SYSTEM SHALL NOT pass `--safe-mode`, so user customizations remain enabled.
 Test: src/coder.rs (interactive_claude_commands_preserve_user_customizations)
 
+### B3
+
+WHEN Fluent launches an autonomous Claude Writer with a managed `HOME` while
+Fluent's sandbox is disabled, THE SYSTEM SHALL inject the supported Claude
+credential from the host before launch, while leaving the interactive Claude
+configuration and session state outside the managed home.
+Test: src/work_task_executor.rs (only_managed_home_claude_launches_need_the_unsandboxed_credential_bridge)
+Test: src/work_task_executor.rs (claude_writer_launch_uses_managed_home)
+Test: src/credential.rs (claude_credential_bridge_reads_oauth_for_managed_home_launch)
+
 ## Claude auth token expiry detection
 
 ### B1
@@ -3689,35 +3699,38 @@ Test: src/claude_auth.rs (tests::keychain_envelope_deserializes_without_refresh_
 ### B6
 
 WHEN `src/coder.rs::run_with_transcript_retrying` observes the
-coder process exit non-zero AND the transcript's most recent
-`result` event has `api_error_status == 401`,
+coder process exit non-zero AND the transcript reports either a most-recent
+`result` event with `api_error_status == 401` or an `assistant` event with
+`error == "authentication_failed"`,
 THE SYSTEM SHALL attempt `credential::refresh_credentials()` once
 and re-run the coder session only after the refresh probe succeeds and Fluent
 rereads the credential store. If the probe times out or exits unsuccessfully,
 THE SYSTEM SHALL return `AuthError::RefreshFailed` so the existing Attempt
-pauses for authentication recovery. If the re-run still produces a 401,
-THE SYSTEM SHALL return `AuthError::Rejected { request_id }`
-(populated from the transcript's `result.request_id` when
-present) so the caller bails with a recovery message.
+pauses for authentication recovery. If the re-run still fails authentication,
+THE SYSTEM SHALL return `AuthError::Rejected { request_id }` for a 401 or
+`AuthError::NotLoggedIn` for `authentication_failed`, so the caller pauses with
+a recovery message. The rejected variant copies `result.request_id` when present.
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_on_result_401)
 Test: src/claude_auth.rs (tests::classify_transcript_401_extracts_request_id_when_present)
 Test: src/claude_auth.rs (tests::classify_transcript_401_returns_rejected_with_none_request_id_when_missing)
+Test: src/claude_auth.rs (tests::classify_transcript_auth_failure_recognizes_not_logged_in)
 Test: src/coder.rs (coder_retries_once_after_credential_refresh_on_401)
+Test: src/coder.rs (coder_retries_once_then_surfaces_structured_login_failure)
 Test: src/coder.rs (coder_surfaces_auth_error_when_refresh_does_not_help)
 Test: src/coder.rs (failed_refresh_probe_stops_the_auth_retry)
 
 ### B7
 
-WHEN the recovery layer's 401 detection fires alongside the
+WHEN the recovery layer's structured authentication detection fires alongside the
 existing rate-limit detection on the same attempt,
-THE SYSTEM SHALL prefer the 401 surface (the auth issue is the
+THE SYSTEM SHALL prefer the authentication surface (the auth issue is the
 proximate cause; the rate-limit envelope may be incidental).
-Untestable: Structural ordering verified by code inspection — `classify_transcript_401` is called before `parse_rate_limit_from_transcript` in `run_with_transcript_retrying`
+Untestable: Structural ordering verified by code inspection — `classify_transcript_auth_failure` is called before `parse_rate_limit_from_transcript` in `run_with_transcript_retrying`
 
 ### B8
 
-WHEN the user-facing error message is constructed for either
-`AuthError::Expired`, `AuthError::Rejected`, or `AuthError::RefreshFailed`,
+WHEN the user-facing error message is constructed for `AuthError::Expired`,
+`AuthError::Rejected`, `AuthError::NotLoggedIn`, or `AuthError::RefreshFailed`,
 THE SYSTEM SHALL name the recovery action explicitly, mentioning
 `claude /login` and `fluent attempt run` in the message.
 Test: src/claude_auth.rs (tests::auth_error_expired_user_message_names_login_action)
@@ -3730,6 +3743,13 @@ WHEN any Codex coder variant (`CodexCode`) is about to launch,
 THE SYSTEM SHALL NOT call `claude_auth::ensure_not_expired()`.
 Codex auth lifecycle is out of scope for this Work Item.
 Untestable: Structural absence verified by code inspection — `CodexCode::run` does not reference `claude_auth`
+
+### B10
+
+IF a Claude Task exits with structured `authentication_failed` evidence,
+THEN THE SYSTEM SHALL classify it as an authentication pause and SHALL NOT
+consume the generic coder retry budget.
+Test: src/work_task_executor.rs (structured_claude_login_failure_is_an_auth_pause_without_retry)
 
 ## Credential refresh and retry
 

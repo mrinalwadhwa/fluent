@@ -2345,16 +2345,34 @@ fn provider_pause_error(
 ) -> Result<()> {
     match result {
         Ok(()) => Ok(()),
-        Err(error) => match transcript
-            .as_deref()
-            .and_then(|path| crate::provider_evidence::classify_provider_unavailable(coder, path))
-        {
-            Some(evidence) => Err(anyhow::Error::new(
-                crate::provider_evidence::ProviderUnavailableError(evidence),
-            )
-            .context(error)),
-            None => Err(error),
-        },
+        Err(error) => {
+            // Infrastructure errors already carry the authoritative typed
+            // failure. Their transcript may contain evidence from an earlier
+            // provider phase, but that evidence must not replace the later
+            // transport, supervision, or host-boundary failure.
+            if error.is::<crate::transcript_pump::TranscriptPumpError>()
+                || error.is::<crate::coder::SupervisionSidecarError>()
+                || error.is::<crate::os::HostSandboxPreflightError>()
+            {
+                return Err(error);
+            }
+            if coder == CoderKind::Claude
+                && let Some(auth) = transcript
+                    .as_deref()
+                    .and_then(crate::claude_auth::classify_transcript_auth_failure)
+            {
+                return Err(anyhow::Error::new(auth).context(error));
+            }
+            match transcript.as_deref().and_then(|path| {
+                crate::provider_evidence::classify_provider_unavailable(coder, path)
+            }) {
+                Some(evidence) => Err(anyhow::Error::new(
+                    crate::provider_evidence::ProviderUnavailableError(evidence),
+                )
+                .context(error)),
+                None => Err(error),
+            }
+        }
     }
 }
 
@@ -3040,7 +3058,9 @@ fn run_task_coder_with_coder(
     sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
-    if !no_sandbox || (codex_worker.is_some() && !test_hermetic_no_sandbox()) {
+    let needs_sandbox_host_preparation =
+        !no_sandbox || (codex_worker.is_some() && !test_hermetic_no_sandbox());
+    if needs_sandbox_host_preparation {
         if codex_worker.is_some() {
             os::check_sandbox_prerequisite()?;
         } else {
@@ -3048,6 +3068,8 @@ fn run_task_coder_with_coder(
         }
         credential::inject_credentials()?;
         credential::setup_git_signing();
+    } else if needs_managed_claude_credential_bridge(coder_kind, claude_home) {
+        credential::inject_claude_credentials()?;
     }
 
     let mut launch_env: Vec<(String, String)> = Vec::new();
@@ -3293,6 +3315,13 @@ fn run_task_coder_with_coder(
     } else {
         bail!("Coder exited with code {exit_code}")
     }
+}
+
+fn needs_managed_claude_credential_bridge(
+    coder_kind: CoderKind,
+    claude_home: Option<&Path>,
+) -> bool {
+    coder_kind == CoderKind::Claude && claude_home.is_some()
 }
 
 fn writer_coder_session<'a>(
@@ -7086,6 +7115,61 @@ mod tests {
     }
 
     #[test]
+    fn structured_claude_login_failure_is_an_auth_pause_without_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}\n",
+                "{\"type\":\"assistant\",\"error\":\"authentication_failed\"}\n",
+                "{\"type\":\"result\",\"is_error\":true,\"api_error_status\":null}\n"
+            ),
+        )
+        .unwrap();
+
+        let result = provider_pause_error(
+            Err(anyhow::anyhow!("Coder exited with code 1")),
+            CoderKind::Claude,
+            Some(transcript),
+        );
+
+        assert!(matches!(
+            classify_task_failure(result.as_ref().unwrap_err()),
+            TaskFailure::Auth(message) if message.contains("claude /login")
+        ));
+        assert!(
+            !should_retry_coder_error(&result),
+            "structured authentication failure must bypass the generic retry budget"
+        );
+    }
+
+    #[test]
+    fn transcript_pump_failure_takes_precedence_over_prior_auth_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"error\":\"authentication_failed\"}\n",
+        )
+        .unwrap();
+        let result = provider_pause_error(
+            Err(anyhow::Error::new(
+                crate::transcript_pump::TranscriptPumpError::new("late transcript write failed"),
+            )),
+            CoderKind::Claude,
+            Some(transcript),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.is::<crate::transcript_pump::TranscriptPumpError>());
+        assert!(matches!(
+            classify_task_failure(&error),
+            TaskFailure::TranscriptPump(_)
+        ));
+    }
+
+    #[test]
     fn transcript_pump_failure_is_not_retried() {
         // A transcript-pump infrastructure failure must not spawn another coder
         // through the generic retry budget, while an ordinary coder error still
@@ -7592,6 +7676,24 @@ mod tests {
                 .iter()
                 .any(|(key, value)| { key == "HOME" && Path::new(value) == managed_home })
         );
+    }
+
+    #[test]
+    fn only_managed_home_claude_launches_need_the_unsandboxed_credential_bridge() {
+        let home = Path::new("managed-claude-home");
+
+        assert!(needs_managed_claude_credential_bridge(
+            CoderKind::Claude,
+            Some(home)
+        ));
+        assert!(!needs_managed_claude_credential_bridge(
+            CoderKind::Claude,
+            None
+        ));
+        assert!(!needs_managed_claude_credential_bridge(
+            CoderKind::Codex,
+            Some(home)
+        ));
     }
 
     #[test]

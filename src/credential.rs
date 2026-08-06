@@ -53,10 +53,21 @@ fn set_env_var(key: &str, value: &str) {
 /// Inject credentials from macOS Keychain into environment variables.
 /// This runs OUTSIDE the sandbox.
 pub fn inject_credentials() -> Result<()> {
-    inject_oauth_token()?;
+    inject_claude_credentials()?;
     inject_brave_search_key()?;
     inject_aws_credentials()?;
     Ok(())
+}
+
+/// Inject only the supported Claude launch credential.
+///
+/// Autonomous Claude workers use a managed `HOME`, including when the caller
+/// deliberately disables Fluent's Seatbelt profile. In that route the
+/// interactive Claude credential store is intentionally hidden, so the host
+/// must bridge the credential through the process environment without copying
+/// the rest of the interactive home.
+pub fn inject_claude_credentials() -> Result<()> {
+    inject_oauth_token()
 }
 
 /// Refresh credentials before a new session.
@@ -388,6 +399,14 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: Credential tests serialize environment mutation and restore the
+            // previous value when their scoped guard is dropped.
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
     }
 
     impl Drop for ScopedEnv {
@@ -518,6 +537,37 @@ mod tests {
             "refreshed-token",
             "a successful probe must replace the process token with the Keychain reread"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn claude_credential_bridge_reads_oauth_for_managed_home_launch() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let security = bin_dir.path().join("security");
+        std::fs::write(
+            &security,
+            "#!/bin/sh\nprintf '%s\\n' '{\"claudeAiOauth\":{\"accessToken\":\"managed-home-token\"}}'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&security).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&security, permissions).unwrap();
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut path_entries = vec![bin_dir.path().to_path_buf()];
+        path_entries.extend(std::env::split_paths(&original_path));
+        let _path = ScopedEnv::set("PATH", std::env::join_paths(path_entries).unwrap());
+        let _oauth = ScopedEnv::remove("CLAUDE_CODE_OAUTH_TOKEN");
+        let _api_key = ScopedEnv::remove("ANTHROPIC_API_KEY");
+
+        inject_claude_credentials().unwrap();
+
+        assert_eq!(
+            std::env::var("CLAUDE_CODE_OAUTH_TOKEN").unwrap(),
+            "managed-home-token"
+        );
+        assert!(std::env::var_os("ANTHROPIC_API_KEY").is_none());
     }
 
     #[test]

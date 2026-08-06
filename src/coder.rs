@@ -2674,10 +2674,16 @@ where
             };
         };
 
-        if let Some(auth_err) = crate::claude_auth::classify_transcript_401(path) {
+        if let Some(auth_err) = crate::claude_auth::classify_transcript_auth_failure(path) {
             if !auth_refreshed {
                 auth_refreshed = true;
-                eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
+                if matches!(auth_err, crate::claude_auth::AuthError::NotLoggedIn) {
+                    eprintln!(
+                        "  Claude login failure detected — refreshing credentials and retrying."
+                    );
+                } else {
+                    eprintln!("  Auth 401 detected — refreshing credentials and retrying.");
+                }
                 if let Err(err) = preserve_transcript_phase(transcript_file, &mut phase) {
                     return CoderRunCompletion {
                         terminal: Err(anyhow::Error::new(err)),
@@ -5279,6 +5285,47 @@ exit 1"#
             1,
             "should invoke refresh exactly once"
         );
+    }
+
+    #[test]
+    fn coder_retries_once_then_surfaces_structured_login_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let counter = dir.path().join("counter");
+        let script = format!(
+            "count=0; [ -f '{0}' ] && count=$(cat '{0}'); count=$((count + 1)); \
+             printf '%s' \"$count\" > '{0}'; \
+             printf '%s\\n' '{{\"type\":\"assistant\",\"error\":\"authentication_failed\"}}' \
+             '{{\"type\":\"result\",\"is_error\":true,\"api_error_status\":null}}'; \
+             exit 1",
+            counter.display()
+        );
+
+        let refresh_count = Arc::new(Mutex::new(0u32));
+        let refresh_clone = Arc::clone(&refresh_count);
+        let result = run_with_transcript_retrying(
+            move || {
+                let mut cmd = Command::new("/bin/sh");
+                cmd.arg("-c").arg(&script);
+                cmd
+            },
+            Some(&transcript),
+            &crate::transcript_pump::TranscriptPumpConfig::default(),
+            &|_, _| {},
+            &move || {
+                *refresh_clone.lock().unwrap() += 1;
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::claude_auth::AuthError>(),
+            Some(crate::claude_auth::AuthError::NotLoggedIn)
+        ));
+        assert_eq!(std::fs::read_to_string(counter).unwrap(), "2");
+        assert_eq!(*refresh_count.lock().unwrap(), 1);
     }
 
     #[test]
