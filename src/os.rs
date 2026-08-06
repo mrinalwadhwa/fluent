@@ -875,7 +875,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        if let Err(error) = preflight_profile(&profile) {
+        if let Err(error) = preflight_profile_with(&profile, |profile_path| {
+            Command::new(sandbox_exec_program())
+                .args(["-f", profile_path.to_str().unwrap(), "/usr/bin/true"])
+                .output()
+        }) {
             if error.to_string().contains("Operation not permitted") {
                 // A parent Seatbelt profile cannot apply a nested profile. The
                 // production host preflight and unsandboxed macOS CI exercise the

@@ -18308,8 +18308,9 @@ done
 if [ "$HAS_PROMPT" = 0 ]; then exit 0; fi
 case "$PWD" in
   */work-6-work-1-attempt-1)
-    printf 'loop output\n' > loop-output.txt
-    git add loop-output.txt
+    mkdir -p documentation
+    printf 'loop output\n' > documentation/loop-output.txt
+    git add documentation/loop-output.txt
     git commit -m "Add loop output" >/dev/null
     ;;
   */attempt-1-review-documentation)

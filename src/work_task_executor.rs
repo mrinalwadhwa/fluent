@@ -7661,12 +7661,12 @@ mod tests {
         let project_root = tmp.path();
         let workspace = project_root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let init = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(project_root)
-            .output()
-            .unwrap();
-        assert!(init.status.success());
+        crate::git::run(
+            project_root,
+            &["init", "-q"],
+            "initialize Writer sandbox fixture",
+        )
+        .unwrap();
 
         let mut item = WorkItem {
             id: "work-1".to_string(),

@@ -575,21 +575,31 @@ mod tests {
             "pub fn value() -> u8 { 7 }\n",
         )
         .unwrap();
-        run(Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&dependency));
-        run(Command::new("git")
-            .args(["config", "user.name", "Test Writer"])
-            .current_dir(&dependency));
-        run(Command::new("git")
-            .args(["config", "user.email", "writer@example.invalid"])
-            .current_dir(&dependency));
-        run(Command::new("git")
-            .args(["add", "."])
-            .current_dir(&dependency));
-        run(Command::new("git")
-            .args(["commit", "-q", "-m", "seed dependency"])
-            .current_dir(&dependency));
+        crate::git::run(
+            &dependency,
+            &["init", "-q"],
+            "initialize dependency fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            &dependency,
+            &["config", "user.name", "Test Writer"],
+            "configure dependency fixture name",
+        )
+        .unwrap();
+        crate::git::run(
+            &dependency,
+            &["config", "user.email", "writer@example.invalid"],
+            "configure dependency fixture email",
+        )
+        .unwrap();
+        crate::git::run(&dependency, &["add", "."], "stage dependency fixture").unwrap();
+        crate::git::run(
+            &dependency,
+            &["commit", "-q", "-m", "seed dependency"],
+            "commit dependency fixture",
+        )
+        .unwrap();
 
         fs::create_dir_all(app.join("src")).unwrap();
         let dependency_url = format!("file://{}", dependency.display());
