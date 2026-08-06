@@ -519,6 +519,52 @@ fn executor_rejects_request_with_empty_attempt_id() {
     assert!(result.is_err(), "validation must reject empty attempt_id");
 }
 
+#[test]
+fn executor_rejects_request_with_mismatched_id() {
+    let project = TempDir::new().unwrap();
+    let path = project
+        .path()
+        .join(".fluent/work/scheduler/requests/requested-id.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"id":"stored-id","work_item_id":"wi-1","attempt_id":"attempt-1","created_at":"2024-01-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+
+    let error = scheduler_service::validate_executor_request(project.path(), "requested-id")
+        .err()
+        .expect("validation must reject a mismatched request id");
+
+    assert!(
+        error.to_string().contains("request id mismatch"),
+        "validation must fail at the request id check: {error:#}"
+    );
+}
+
+#[test]
+fn executor_rejects_request_with_empty_created_at() {
+    let project = TempDir::new().unwrap();
+    let path = project
+        .path()
+        .join(".fluent/work/scheduler/requests/bad-created-at.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"id":"bad-created-at","work_item_id":"wi-1","attempt_id":"attempt-1","created_at":""}"#,
+    )
+    .unwrap();
+
+    let error = scheduler_service::validate_executor_request(project.path(), "bad-created-at")
+        .err()
+        .expect("validation must reject an empty created_at");
+
+    assert!(
+        error.to_string().contains("created_at is empty"),
+        "validation must fail at the created_at check: {error:#}"
+    );
+}
+
 // ─────────────────────────────────────────────────
 // Step 4: failure isolation and resilience
 // ─────────────────────────────────────────────────
