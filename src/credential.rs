@@ -4,11 +4,14 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_CLAUDE_REFRESH_DEADLINE_SECS: u64 = 30;
 const CLAUDE_REFRESH_DEADLINE_ENV: &str = "FLUENT_CLAUDE_REFRESH_DEADLINE_SECS";
+#[cfg(any(test, feature = "test-support"))]
+const TEST_CREDENTIAL_FIXTURES_ENV: &str = "FLUENT_TEST_ALLOW_CREDENTIAL_FIXTURES";
 
 /// Keep test-support provider launches independent from operator credentials.
 #[cfg(feature = "test-support")]
 pub(crate) fn hermetic_provider_test_mode() -> bool {
     std::env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some()
+        && std::env::var(TEST_CREDENTIAL_FIXTURES_ENV).as_deref() != Ok("1")
 }
 
 #[cfg(not(feature = "test-support"))]
@@ -445,6 +448,23 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    #[serial_test::serial]
+    fn hermetic_provider_mode_requires_explicit_fixture_allowlist() {
+        let _hermetic = ScopedEnv::set("FLUENT_TEST_HERMETIC_PROVIDERS", "1");
+        let allowlist = ScopedEnv::remove(TEST_CREDENTIAL_FIXTURES_ENV);
+        assert!(hermetic_provider_test_mode());
+
+        drop(allowlist);
+        let invalid_allowlist = ScopedEnv::set(TEST_CREDENTIAL_FIXTURES_ENV, "yes");
+        assert!(hermetic_provider_test_mode());
+
+        drop(invalid_allowlist);
+        let _allowlist = ScopedEnv::set(TEST_CREDENTIAL_FIXTURES_ENV, "1");
+        assert!(!hermetic_provider_test_mode());
+    }
+
     #[test]
     fn refresh_probe_honors_configured_deadline() {
         assert_eq!(
@@ -552,6 +572,7 @@ mod tests {
         let test_path = std::env::join_paths(path_entries).unwrap();
         let _path = ScopedEnv::set("PATH", test_path);
         let _token = ScopedEnv::set("CLAUDE_CODE_OAUTH_TOKEN", "stale-token");
+        let _allowlist = ScopedEnv::set(TEST_CREDENTIAL_FIXTURES_ENV, "1");
 
         refresh_credentials().unwrap();
 
@@ -583,6 +604,7 @@ mod tests {
         let _path = ScopedEnv::set("PATH", std::env::join_paths(path_entries).unwrap());
         let _oauth = ScopedEnv::remove("CLAUDE_CODE_OAUTH_TOKEN");
         let _api_key = ScopedEnv::remove("ANTHROPIC_API_KEY");
+        let _allowlist = ScopedEnv::set(TEST_CREDENTIAL_FIXTURES_ENV, "1");
 
         inject_claude_credentials().unwrap();
 

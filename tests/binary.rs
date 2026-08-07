@@ -14518,6 +14518,11 @@ exit 1
             counter = counter_file.display()
         ),
     );
+    write_mock_executable(
+        &bin_dir,
+        "security",
+        "#!/bin/sh\nprintf '%s\\n' '{\"claudeAiOauth\":{\"accessToken\":\"fixture-token\"}}'\n",
+    );
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -14530,6 +14535,7 @@ exit 1
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ALLOW_CREDENTIAL_FIXTURES", "1")
         .env("FLUENT_MAX_TASK_RETRIES", "2")
         .assert()
         .failure()
@@ -14639,6 +14645,11 @@ echo '{"type":"result","api_error_status":401,"request_id":"req-refresh-timeout"
 exit 1
 "##,
     );
+    write_mock_executable(
+        &bin_dir,
+        "security",
+        "#!/bin/sh\nprintf '%s\\n' '{\"claudeAiOauth\":{\"accessToken\":\"fixture-token\"}}'\n",
+    );
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -14651,6 +14662,7 @@ exit 1
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ALLOW_CREDENTIAL_FIXTURES", "1")
         .env("FLUENT_CLAUDE_REFRESH_DEADLINE_SECS", "1")
         .assert()
         .failure()
@@ -15141,6 +15153,11 @@ exit 1
             counter = counter_file.display()
         ),
     );
+    write_mock_executable(
+        &bin_dir,
+        "security",
+        "#!/bin/sh\nprintf '%s\\n' '{\"claudeAiOauth\":{\"accessToken\":\"fixture-token\"}}'\n",
+    );
 
     fluent_cmd()
         .current_dir(&main_dir)
@@ -15164,6 +15181,7 @@ exit 1
             "--no-sandbox",
         ])
         .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ALLOW_CREDENTIAL_FIXTURES", "1")
         .env("FLUENT_MAX_TASK_RETRIES", "2")
         .assert()
         .failure()
