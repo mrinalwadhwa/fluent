@@ -1744,8 +1744,11 @@ fn run_learner_step(
         .coder_mapping
         .for_task_kind(TaskKind::Write)
         .coder;
-    let provider_readiness = crate::provider_readiness::ProviderReadiness::prepare(learner_coder)
-        .map_err(anyhow::Error::new)?;
+    let provider_readiness = crate::provider_readiness::ProviderReadiness::prepare_for_project(
+        learner_coder,
+        project_root,
+    )
+    .map_err(anyhow::Error::new)?;
 
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain

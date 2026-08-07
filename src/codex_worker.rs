@@ -28,6 +28,8 @@ impl std::error::Error for CodexLauncherError {}
 pub enum CodexWorkerPreparationError {
     Launcher(CodexLauncherError),
     Authentication(CodexAuthError),
+    Configuration(crate::config::FollowUpConfigError),
+    Skills(CodexSkillPreparationError),
 }
 
 impl std::fmt::Display for CodexWorkerPreparationError {
@@ -35,6 +37,8 @@ impl std::fmt::Display for CodexWorkerPreparationError {
         match self {
             Self::Launcher(error) => error.fmt(formatter),
             Self::Authentication(error) => error.fmt(formatter),
+            Self::Configuration(error) => error.fmt(formatter),
+            Self::Skills(error) => error.fmt(formatter),
         }
     }
 }
@@ -50,6 +54,18 @@ impl From<CodexLauncherError> for CodexWorkerPreparationError {
 impl From<CodexAuthError> for CodexWorkerPreparationError {
     fn from(error: CodexAuthError) -> Self {
         Self::Authentication(error)
+    }
+}
+
+impl From<crate::config::FollowUpConfigError> for CodexWorkerPreparationError {
+    fn from(error: crate::config::FollowUpConfigError) -> Self {
+        Self::Configuration(error)
+    }
+}
+
+impl From<CodexSkillPreparationError> for CodexWorkerPreparationError {
+    fn from(error: CodexSkillPreparationError) -> Self {
+        Self::Skills(error)
     }
 }
 
@@ -266,11 +282,27 @@ impl CodexAuthError {
     }
 }
 
+/// A configured Codex skill root could not be copied into the private worker
+/// home without weakening its filesystem boundary.
+#[derive(Debug)]
+pub struct CodexSkillPreparationError {
+    message: String,
+}
+
+impl std::fmt::Display for CodexSkillPreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Codex skills are unavailable: {}", self.message)
+    }
+}
+
+impl std::error::Error for CodexSkillPreparationError {}
+
 /// Private Codex state for one autonomous launch.
 ///
 /// The temporary directory removes the copied authentication state when this
-/// value drops. Only `auth.json` is staged; configuration, hooks, sessions,
-/// logs, and cache remain in the interactive home.
+/// value drops. From the interactive home, only `auth.json` is staged;
+/// configuration, hooks, sessions, logs, cache, and unconfigured skills remain
+/// outside the worker. Explicitly configured skill roots are copied separately.
 pub struct CodexWorkerEnvironment {
     home_guard: tempfile::TempDir,
     home: PathBuf,
@@ -280,42 +312,62 @@ pub struct CodexWorkerEnvironment {
 impl CodexWorkerEnvironment {
     /// Prepare a private worker home from the effective source `CODEX_HOME`.
     pub fn prepare() -> std::result::Result<Self, CodexWorkerPreparationError> {
+        Self::prepare_with_skill_roots(&[])
+    }
+
+    /// Prepare a worker with the exact skill-root snapshot configured for one
+    /// project. Configuration and copying finish before any autonomous role is
+    /// reserved.
+    pub fn prepare_for_project(
+        project_root: &Path,
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
+        let config = crate::config::resolve_codex_worker_config(project_root)?;
+        Self::prepare_with_skill_roots(&config.skill_roots)
+    }
+
+    fn prepare_with_skill_roots(
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
         let launcher = test_or_resolved_launcher()?;
         #[cfg(feature = "test-support")]
         if env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some() {
             if let Some(source_home) = env::var_os("CODEX_HOME") {
-                return Ok(Self::prepare_from_with_environment_auth(
+                return Self::prepare_from_with_environment_auth_and_skills(
                     &canonical_existing_path(PathBuf::from(source_home)),
                     has_environment_auth(),
                     launcher,
-                )?);
+                    skill_roots,
+                );
             }
             if let Some(source_home) = env::var_os("FLUENT_TEST_FIXTURE_CODEX_HOME") {
-                return Ok(Self::prepare_from_with_environment_auth(
+                return Self::prepare_from_with_environment_auth_and_skills(
                     &canonical_existing_path(PathBuf::from(source_home)),
                     has_environment_auth(),
                     launcher,
-                )?);
+                    skill_roots,
+                );
             }
             if has_environment_auth() {
-                return Ok(Self::prepare_hermetic_fixture_worker_with_environment_auth(
+                return Self::prepare_hermetic_fixture_worker_with_environment_auth(
                     launcher,
-                )?);
+                    skill_roots,
+                );
             }
-            return Ok(Self::prepare_hermetic_fixture_worker(launcher)?);
+            return Self::prepare_hermetic_fixture_worker(launcher, skill_roots);
         }
 
         #[cfg(test)]
         {
-            return Ok(Self::prepare_test_worker(launcher)?);
+            return Self::prepare_test_worker(launcher, skill_roots);
         }
 
         #[cfg(not(test))]
-        Ok(Self::prepare_from_with_environment_auth(
+        Self::prepare_from_with_environment_auth_and_skills(
             &effective_source_home(),
             has_environment_auth(),
             launcher,
-        )?)
+            skill_roots,
+        )
     }
 
     /// Give launch-route unit tests a private, authenticated worker home without
@@ -324,44 +376,78 @@ impl CodexWorkerEnvironment {
     #[cfg(test)]
     fn prepare_test_worker(
         launcher: ResolvedCodexLauncher,
-    ) -> std::result::Result<Self, CodexAuthError> {
-        Self::prepare_hermetic_fixture_worker(launcher)
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
+        Self::prepare_hermetic_fixture_worker(launcher, skill_roots)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     fn prepare_hermetic_fixture_worker(
         launcher: ResolvedCodexLauncher,
-    ) -> std::result::Result<Self, CodexAuthError> {
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
         let source = tempfile::tempdir().map_err(|error| {
             CodexAuthError::new(format!("cannot create test authentication source: {error}"))
         })?;
         fs::write(source.path().join("auth.json"), "test authentication").map_err(|error| {
             CodexAuthError::new(format!("cannot write test authentication source: {error}"))
         })?;
-        Self::prepare_from_with_environment_auth(source.path(), false, launcher)
+        Self::prepare_from_with_environment_auth_and_skills(
+            source.path(),
+            false,
+            launcher,
+            skill_roots,
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
     fn prepare_hermetic_fixture_worker_with_environment_auth(
         launcher: ResolvedCodexLauncher,
-    ) -> std::result::Result<Self, CodexAuthError> {
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
         let source = tempfile::tempdir().map_err(|error| {
             CodexAuthError::new(format!("cannot create test authentication source: {error}"))
         })?;
-        Self::prepare_from_with_environment_auth(source.path(), true, launcher)
+        Self::prepare_from_with_environment_auth_and_skills(
+            source.path(),
+            true,
+            launcher,
+            skill_roots,
+        )
     }
 
     #[cfg(test)]
-    fn prepare_from(source_home: &Path) -> std::result::Result<Self, CodexAuthError> {
+    fn prepare_from(source_home: &Path) -> std::result::Result<Self, CodexWorkerPreparationError> {
         Self::prepare_from_with_environment_auth(source_home, false, test_launcher())
     }
 
+    #[cfg(test)]
     fn prepare_from_with_environment_auth(
         source_home: &Path,
         environment_auth: bool,
         launcher: ResolvedCodexLauncher,
-    ) -> std::result::Result<Self, CodexAuthError> {
-        Self::prepare_from_with_environment_auth_in(source_home, environment_auth, None, launcher)
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
+        Self::prepare_from_with_environment_auth_and_skills(
+            source_home,
+            environment_auth,
+            launcher,
+            &[],
+        )
+    }
+
+    fn prepare_from_with_environment_auth_and_skills(
+        source_home: &Path,
+        environment_auth: bool,
+        launcher: ResolvedCodexLauncher,
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
+        Self::prepare_from_with_environment_auth_in(
+            source_home,
+            environment_auth,
+            None,
+            launcher,
+            skill_roots,
+        )
     }
 
     fn prepare_from_with_environment_auth_in(
@@ -369,7 +455,8 @@ impl CodexWorkerEnvironment {
         environment_auth: bool,
         temporary_root: Option<&Path>,
         launcher: ResolvedCodexLauncher,
-    ) -> std::result::Result<Self, CodexAuthError> {
+        skill_roots: &[PathBuf],
+    ) -> std::result::Result<Self, CodexWorkerPreparationError> {
         let mut builder = tempfile::Builder::new();
         builder.prefix("fluent-codex-worker-");
         let home_guard = match temporary_root {
@@ -399,6 +486,8 @@ impl CodexWorkerEnvironment {
                 CodexAuthError::new(format!("cannot secure copied authentication: {error}"))
             })?;
         }
+
+        stage_skill_roots(&home, skill_roots)?;
 
         Ok(Self {
             home_guard,
@@ -565,6 +654,89 @@ fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
                 source.display(),
                 source_path.display()
             );
+        }
+    }
+    Ok(())
+}
+
+fn stage_skill_roots(
+    worker_home: &Path,
+    skill_roots: &[PathBuf],
+) -> std::result::Result<(), CodexSkillPreparationError> {
+    if skill_roots.is_empty() {
+        return Ok(());
+    }
+    let destination_root = worker_home.join("skills");
+    fs::create_dir(&destination_root).map_err(|error| CodexSkillPreparationError {
+        message: format!(
+            "cannot create private skill directory {}: {error}",
+            destination_root.display()
+        ),
+    })?;
+    set_private_mode(&destination_root, 0o700).map_err(|error| CodexSkillPreparationError {
+        message: format!("cannot secure private skill directory: {error:#}"),
+    })?;
+
+    for root in skill_roots {
+        let metadata = fs::symlink_metadata(root).map_err(|error| CodexSkillPreparationError {
+            message: format!("cannot inspect configured root {}: {error}", root.display()),
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CodexSkillPreparationError {
+                message: format!(
+                    "configured root {} must be a real directory, not a symlink",
+                    root.display()
+                ),
+            });
+        }
+        let mut entries = fs::read_dir(root)
+            .map_err(|error| CodexSkillPreparationError {
+                message: format!("cannot read configured root {}: {error}", root.display()),
+            })?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| CodexSkillPreparationError {
+                message: format!(
+                    "cannot enumerate configured root {}: {error}",
+                    root.display()
+                ),
+            })?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let source = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| CodexSkillPreparationError {
+                    message: format!("cannot inspect {}: {error}", source.display()),
+                })?;
+            if file_type.is_symlink() {
+                return Err(CodexSkillPreparationError {
+                    message: format!(
+                        "configured root {} contains unsupported symlink {}",
+                        root.display(),
+                        source.display()
+                    ),
+                });
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
+            let destination = destination_root.join(entry.file_name());
+            if destination.exists() {
+                return Err(CodexSkillPreparationError {
+                    message: format!(
+                        "skill name {:?} appears in more than one configured root",
+                        entry.file_name()
+                    ),
+                });
+            }
+            copy_private_tree(&source, &destination).map_err(|error| {
+                CodexSkillPreparationError {
+                    message: format!(
+                        "cannot stage configured skill directory {}: {error:#}",
+                        source.display()
+                    ),
+                }
+            })?;
         }
     }
     Ok(())
@@ -830,6 +1002,98 @@ mod tests {
     }
 
     #[test]
+    fn configured_skills_are_snapshotted_into_the_private_codex_home() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("auth.json"), "auth").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join("project-review");
+        fs::create_dir(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: project-review\ndescription: Review this project.\n---\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("README.md"), "not a skill directory").unwrap();
+
+        let worker = CodexWorkerEnvironment::prepare_from_with_environment_auth_and_skills(
+            source.path(),
+            false,
+            test_launcher(),
+            &[root.path().to_path_buf()],
+        )
+        .unwrap();
+        fs::write(skill.join("SKILL.md"), "changed after preparation").unwrap();
+
+        assert!(
+            worker
+                .home()
+                .join("skills/project-review/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            fs::read_to_string(worker.home().join("skills/project-review/SKILL.md"))
+                .unwrap()
+                .contains("Review this project")
+        );
+        assert!(!worker.home().join("skills/README.md").exists());
+    }
+
+    #[test]
+    fn duplicate_configured_skill_names_fail_closed() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("auth.json"), "auth").unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            let skill = root.join("same-name");
+            fs::create_dir(&skill).unwrap();
+            fs::write(skill.join("SKILL.md"), "---\nname: same-name\n---\n").unwrap();
+        }
+
+        let error = CodexWorkerEnvironment::prepare_from_with_environment_auth_and_skills(
+            source.path(),
+            false,
+            test_launcher(),
+            &[first.path().to_path_buf(), second.path().to_path_buf()],
+        )
+        .err()
+        .expect("duplicate skill names must fail preparation");
+
+        assert!(error.to_string().contains("appears in more than one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_skill_tree_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("auth.json"), "auth").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join("unsafe-skill");
+        fs::create_dir(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: unsafe-skill\n---\n").unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), skill.join("reference.md")).unwrap();
+
+        let error = CodexWorkerEnvironment::prepare_from_with_environment_auth_and_skills(
+            source.path(),
+            false,
+            test_launcher(),
+            &[root.path().to_path_buf()],
+        )
+        .err()
+        .expect("skill symlinks must fail preparation");
+
+        assert!(error.to_string().contains("unsupported symlink"));
+        assert!(
+            !error
+                .to_string()
+                .contains(&outside.path().display().to_string())
+        );
+    }
+
+    #[test]
     fn worker_home_is_removed_after_launch_scope() {
         let source = tempfile::tempdir().unwrap();
         fs::write(source.path().join("auth.json"), "auth").unwrap();
@@ -937,6 +1201,7 @@ mod tests {
             false,
             Some(&alias),
             test_launcher(),
+            &[],
         )
         .unwrap();
 

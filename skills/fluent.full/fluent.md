@@ -252,6 +252,21 @@ authentication, run `codex login`, then resume the same work with `fluent attemp
 run <work-item-id> [attempt-id]`. Interactive Codex sessions continue to use the
 user's normal configuration and hooks.
 
+To make additional skills available to autonomous Codex roles, configure
+explicit skill roots. Project roots must stay inside the project and may be
+relative to its root. External roots belong in user configuration and must be
+absolute:
+
+```yaml
+codex:
+  skill-roots:
+    - /absolute/path/to/skills
+```
+
+Fluent validates and snapshots each root into the private worker home before
+the role is reserved. Symlinks and duplicate top-level skill names fail closed;
+the worker never receives access to the rest of the operator's home.
+
 Autonomous Claude Writers use an Attempt-scoped managed home. Their sandbox
 blocks the operator's persistent Claude project and memory tree; do not copy
 memory or session state from `~/.claude/projects` into a Work Item manually.

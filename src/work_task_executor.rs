@@ -204,8 +204,10 @@ fn plan_coder_kind(item: &WorkItem, attempt_id: &str, task_kind: TaskKind) -> Re
 
 fn prepare_provider_readiness(
     coder_kind: CoderKind,
+    project_root: &Path,
 ) -> Result<crate::provider_readiness::ProviderReadiness> {
-    crate::provider_readiness::ProviderReadiness::prepare(coder_kind).map_err(anyhow::Error::new)
+    crate::provider_readiness::ProviderReadiness::prepare_for_project(coder_kind, project_root)
+        .map_err(anyhow::Error::new)
 }
 
 /// Plan a Task start WITHOUT any durable write: validate identity, kind, and
@@ -646,7 +648,7 @@ fn run_write_task_with_coder(
     // Verify the selected provider before reserving execution. A readiness failure
     // leaves this Task unstarted and pauses the existing Attempt for recovery.
     let coder_kind = plan_coder_kind(&item, config.attempt_id, TaskKind::Write)?;
-    let mut provider_readiness = match prepare_provider_readiness(coder_kind) {
+    let mut provider_readiness = match prepare_provider_readiness(coder_kind, config.project_root) {
         Ok(worker) => worker,
         Err(error) => {
             mark_task_failed_attempt_needs_user(
@@ -691,7 +693,7 @@ fn run_write_task_with_coder(
         // Discard the possibly partial temporary home. Re-preparing preserves
         // authentication isolation and guarantees session selection sees no
         // stale rollout material.
-        provider_readiness = match prepare_provider_readiness(coder_kind) {
+        provider_readiness = match prepare_provider_readiness(coder_kind, config.project_root) {
             Ok(worker) => worker,
             Err(error) => {
                 mark_task_failed_attempt_needs_user(
@@ -1229,11 +1231,10 @@ fn run_review_task_with_coder(
     }
 
     let planned_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
-    let provider_readiness = match prepare_provider_readiness(plan_coder_kind(
-        &planned_item,
-        config.attempt_id,
-        TaskKind::Review,
-    )?) {
+    let provider_readiness = match prepare_provider_readiness(
+        plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
+        config.project_root,
+    ) {
         Ok(worker) => worker,
         Err(error) => {
             mark_task_failed_attempt_needs_user(
@@ -4720,8 +4721,11 @@ fn run_learner_with_coder_with_provider_readiness(
     // isolated authentication copy even when launch or execution fails.
     let local_provider_readiness = if prepared_provider_readiness.is_none() && !cfg!(test) {
         Some(
-            crate::provider_readiness::ProviderReadiness::prepare(inputs.coder_kind)
-                .map_err(anyhow::Error::new)?,
+            crate::provider_readiness::ProviderReadiness::prepare_for_project(
+                inputs.coder_kind,
+                inputs.workspace_path,
+            )
+            .map_err(anyhow::Error::new)?,
         )
     } else {
         None
@@ -5652,7 +5656,7 @@ fn run_review_coder_with_coder(
     } else if no_sandbox && codex_worker.is_none() {
         (CoderSandbox::None, None)
     } else {
-        let mut readable_roots = review_readable_sandbox_roots(readable_workspaces)?;
+        let mut readable_roots = review_readable_sandbox_roots(project_root, readable_workspaces)?;
         readable_roots.extend(input_artifact_readable_roots(
             &readable_input_artifacts_only(input_artifacts),
         ));
@@ -6498,7 +6502,10 @@ fn admit_hook_reviewer_cache_with_admission(
     }
 }
 
-fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn review_readable_sandbox_roots(
+    project_root: &Path,
+    readable_workspaces: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
     for workspace in readable_workspaces {
         roots.push(workspace.clone());
@@ -6507,7 +6514,13 @@ fn review_readable_sandbox_roots(readable_workspaces: &[PathBuf]) -> Result<Vec<
             roots.push(common_git_dir);
         }
     }
+    roots.extend(project_instruction_readable_root(project_root));
     Ok(roots)
+}
+
+fn project_instruction_readable_root(project_root: &Path) -> Option<PathBuf> {
+    let instructions = project_root.join("AGENTS.md");
+    instructions.is_file().then_some(instructions)
 }
 
 /// Render and probe the Reviewer profile from the read-only start plan.
@@ -6546,7 +6559,7 @@ fn preflight_review_sandbox_profile(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut readable_roots = review_readable_sandbox_roots(&readable_workspaces)?;
+    let mut readable_roots = review_readable_sandbox_roots(project_root, &readable_workspaces)?;
     readable_roots.extend(input_artifact_readable_roots(
         &readable_input_artifacts_only(input_artifacts),
     ));
@@ -7125,6 +7138,19 @@ mod tests {
         .unwrap();
         crate::writer_cache::prepare_writer_dependency_cache(&cache, None).unwrap();
         cache
+    }
+
+    #[test]
+    fn reviewer_project_instruction_grant_is_exact_and_optional() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(project_instruction_readable_root(root.path()), None);
+        fs::write(root.path().join("AGENTS.md"), "review instructions").unwrap();
+        fs::write(root.path().join("private-notes.md"), "not instructions").unwrap();
+
+        assert_eq!(
+            project_instruction_readable_root(root.path()),
+            Some(root.path().join("AGENTS.md"))
+        );
     }
 
     #[test]

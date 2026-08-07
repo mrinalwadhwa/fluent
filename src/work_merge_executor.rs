@@ -1893,8 +1893,11 @@ fn rebase_candidate_with_coder(
         None
     } else {
         Some(
-            crate::provider_readiness::ProviderReadiness::prepare(config.coder_kind)
-                .map_err(anyhow::Error::new)?,
+            crate::provider_readiness::ProviderReadiness::prepare_for_project(
+                config.coder_kind,
+                config.project_root,
+            )
+            .map_err(anyhow::Error::new)?,
         )
     };
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);

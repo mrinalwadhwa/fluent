@@ -2200,6 +2200,15 @@ not grant. The launch keeps that prepared capability alive through sandbox
 construction and process completion, then removes the temporary home by RAII
 cleanup.
 
+The same pre-reservation boundary resolves `codex.skill-roots` from user and
+project configuration. User configuration may name absolute external roots;
+project configuration may name only roots contained by the canonical project.
+Fluent rejects missing roots, root or bundle symlinks, non-directories, and
+duplicate top-level skill names. It copies the validated directories into
+`$CODEX_HOME/skills` before launch, so Codex discovers a stable snapshot and
+never receives read access to the source root or the rest of the operator's
+home. An absent setting keeps the private skill catalog empty.
+
 Every autonomous command disables hooks and ignores user configuration.
 Reviewer, Learner, and rebase commands use ephemeral sessions. Writer commands
 use persistent sessions inside the temporary worker home so an approved
@@ -2212,6 +2221,12 @@ enclosing operator home. Writer, Reviewer, Learner, and rebase routes execute
 the retained absolute launcher instead of searching `PATH` again. Interactive
 Codex deliberately remains outside this boundary and retains user
 configuration, hooks, and home access.
+
+Writers, Learners, and rebase workers run from a candidate worktree, where
+Codex can discover the applicable `AGENTS.md` normally. Reviewers run from a
+writable artifact directory, so their profile adds the project-root
+`AGENTS.md` as one exact read-only file. This does not grant the project root or
+adjacent files.
 
 Writer and Reviewer routes preflight before reserving their planned Tasks. An
 authentication failure pauses the existing Attempt for `codex login` recovery,

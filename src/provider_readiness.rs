@@ -48,13 +48,35 @@ impl std::error::Error for ProviderReadinessError {}
 impl ProviderReadiness {
     /// Verify readiness without sending a model prompt.
     pub fn prepare(provider: CoderKind) -> Result<Self, ProviderReadinessError> {
+        Self::prepare_with_project(provider, None)
+    }
+
+    /// Verify readiness and freeze the project's configured Codex skills into
+    /// the same private worker home retained for the subsequent launch.
+    pub fn prepare_for_project(
+        provider: CoderKind,
+        project_root: &std::path::Path,
+    ) -> Result<Self, ProviderReadinessError> {
+        Self::prepare_with_project(provider, Some(project_root))
+    }
+
+    fn prepare_with_project(
+        provider: CoderKind,
+        project_root: Option<&std::path::Path>,
+    ) -> Result<Self, ProviderReadinessError> {
+        let prepare_codex = || {
+            match project_root {
+                Some(project_root) => {
+                    crate::codex_worker::CodexWorkerEnvironment::prepare_for_project(project_root)
+                }
+                None => crate::codex_worker::CodexWorkerEnvironment::prepare(),
+            }
+            .map_err(ProviderReadinessError::Codex)
+        };
         #[cfg(test)]
         {
             let codex_worker = if provider == CoderKind::Codex {
-                Some(
-                    crate::codex_worker::CodexWorkerEnvironment::prepare()
-                        .map_err(ProviderReadinessError::Codex)?,
-                )
+                Some(prepare_codex()?)
             } else {
                 None
             };
@@ -64,8 +86,7 @@ impl ProviderReadiness {
         #[cfg(not(test))]
         match provider {
             CoderKind::Codex => {
-                let worker = crate::codex_worker::CodexWorkerEnvironment::prepare()
-                    .map_err(ProviderReadinessError::Codex)?;
+                let worker = prepare_codex()?;
                 worker.preflight().map_err(|error| {
                     ProviderReadinessError::Codex(
                         crate::codex_worker::CodexWorkerPreparationError::Authentication(error),

@@ -7320,7 +7320,8 @@ Test: src/os.rs (interactive_codex_profile_preserves_source_home_access)
 ### B5
 
 WHEN Fluent prepares an autonomous Codex worker, THE SYSTEM SHALL stage only
-the supported authentication state in the private home.
+the supported authentication state from the interactive Codex home; skills may
+enter the private home only through explicit `codex.skill-roots`.
 Test: src/codex_worker.rs (worker_home_stages_only_auth_from_effective_codex_home)
 
 ### B6
@@ -7365,6 +7366,41 @@ THEN THE SYSTEM SHALL record neither a Learner run nor an executing Rebase Task,
 and tell the user to run `codex login`.
 Test: tests/binary.rs (learner_codex_auth_preflight_precedes_run_reservation)
 Test: tests/binary.rs (rebase_codex_auth_preflight_precedes_task_creation)
+
+### B12
+
+WHEN user configuration supplies absolute `codex.skill-roots` and project
+configuration supplies project-contained `codex.skill-roots`, THE SYSTEM SHALL
+combine and canonicalize those roots for the autonomous Codex worker.
+Test: src/config.rs (codex_skill_roots_combine_user_external_and_project_local_paths)
+
+### B13
+
+IF a configured Codex skill root is relative in user configuration, escapes the
+project in project configuration, is missing, is not a directory, or is a
+symlink, THEN THE SYSTEM SHALL fail before reserving an autonomous role.
+Test: src/config.rs (user_codex_skill_root_must_be_absolute)
+Test: src/config.rs (project_codex_skill_root_cannot_escape_the_project)
+Test: src/config.rs (configured_codex_skill_root_must_exist)
+Test: src/config.rs (configured_codex_skill_root_must_be_a_directory)
+Test: src/config.rs (configured_codex_skill_root_may_not_be_a_symlink)
+
+### B14
+
+WHEN Fluent prepares configured skills for an autonomous Codex worker, THE
+SYSTEM SHALL copy one stable snapshot into the private `$CODEX_HOME/skills`,
+reject symlinks inside a copied tree and duplicate top-level skill names, and
+leave unrelated root files and later source changes outside that snapshot.
+Test: src/codex_worker.rs (configured_skills_are_snapshotted_into_the_private_codex_home)
+Test: src/codex_worker.rs (configured_skill_tree_rejects_symlinks)
+Test: src/codex_worker.rs (duplicate_configured_skill_names_fail_closed)
+
+### B15
+
+WHERE a project-root `AGENTS.md` exists and an autonomous Reviewer runs from
+its artifact directory, THE SYSTEM SHALL grant that exact instruction file as
+read-only input without granting adjacent project files.
+Test: src/work_task_executor.rs (reviewer_project_instruction_grant_is_exact_and_optional)
 
 ## Reviewer build-cache bounds
 

@@ -259,6 +259,12 @@ pub struct ResolvedPlanningConfig {
     pub scope_limit: ResolvedLeaf<u32>,
 }
 
+/// Skill roots copied into an autonomous Codex worker's private home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCodexWorkerConfig {
+    pub skill_roots: Vec<PathBuf>,
+}
+
 /// A configured follow-up or scheduler value that could not be parsed or
 /// validated. Names the configuration path and the affected key so the caller
 /// can fail closed instead of silently substituting a lower-precedence value.
@@ -402,6 +408,117 @@ fn load_layer(source: ConfigSource, path: PathBuf) -> Result<ConfigLayer, Follow
             }
         };
     Ok(ConfigLayer { source, path, doc })
+}
+
+/// Resolve the explicitly configured skill roots available to autonomous Codex
+/// workers. Project configuration may name only paths contained by the project;
+/// user configuration may additionally name absolute external paths.
+pub fn resolve_codex_worker_config(
+    project_root: &Path,
+) -> Result<ResolvedCodexWorkerConfig, FollowUpConfigError> {
+    resolve_codex_worker_config_from(
+        project_root,
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )
+}
+
+fn resolve_codex_worker_config_from(
+    project_root: &Path,
+    project_path: &Path,
+    user_path: Option<&Path>,
+) -> Result<ResolvedCodexWorkerConfig, FollowUpConfigError> {
+    let project_root =
+        std::fs::canonicalize(project_root).map_err(|error| FollowUpConfigError {
+            path: project_path.to_path_buf(),
+            key: "codex.skill-roots".to_string(),
+            detail: format!("could not resolve project root: {error}"),
+        })?;
+    let layers = load_policy_layers(project_path, user_path)?;
+    let mut skill_roots = Vec::new();
+    for layer in layers.iter().rev() {
+        let Some(doc) = layer.doc.as_ref() else {
+            continue;
+        };
+        let Some(raw) = lookup(doc, &["codex", "skill-roots"]) else {
+            continue;
+        };
+        let roots = raw.as_sequence().ok_or_else(|| FollowUpConfigError {
+            path: layer.path.clone(),
+            key: "codex.skill-roots".to_string(),
+            detail: "expected a sequence of paths".to_string(),
+        })?;
+        for (index, raw_root) in roots.iter().enumerate() {
+            let key = format!("codex.skill-roots[{index}]");
+            let text = raw_root.as_str().ok_or_else(|| FollowUpConfigError {
+                path: layer.path.clone(),
+                key: key.clone(),
+                detail: "expected a path string".to_string(),
+            })?;
+            if text.trim().is_empty() {
+                return Err(FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key,
+                    detail: "expected a non-empty path".to_string(),
+                });
+            }
+            let configured = PathBuf::from(text);
+            let candidate = match layer.source {
+                ConfigSource::Project if configured.is_relative() => project_root.join(configured),
+                ConfigSource::Project => configured,
+                ConfigSource::User if configured.is_absolute() => configured,
+                ConfigSource::User => {
+                    return Err(FollowUpConfigError {
+                        path: layer.path.clone(),
+                        key,
+                        detail: "user skill roots must be absolute paths".to_string(),
+                    });
+                }
+                ConfigSource::Default => unreachable!("configuration layers are never defaults"),
+            };
+            let candidate_metadata =
+                std::fs::symlink_metadata(&candidate).map_err(|error| FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key: key.clone(),
+                    detail: format!("could not inspect {}: {error}", candidate.display()),
+                })?;
+            if candidate_metadata.file_type().is_symlink() {
+                return Err(FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key,
+                    detail: format!("skill root {} may not be a symlink", candidate.display()),
+                });
+            }
+            let canonical =
+                std::fs::canonicalize(&candidate).map_err(|error| FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key: key.clone(),
+                    detail: format!("could not resolve {}: {error}", candidate.display()),
+                })?;
+            if !canonical.is_dir() {
+                return Err(FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key,
+                    detail: format!("{} is not a directory", canonical.display()),
+                });
+            }
+            if layer.source == ConfigSource::Project && !canonical.starts_with(&project_root) {
+                return Err(FollowUpConfigError {
+                    path: layer.path.clone(),
+                    key,
+                    detail: format!(
+                        "project skill root {} escapes project {}",
+                        canonical.display(),
+                        project_root.display()
+                    ),
+                });
+            }
+            if !skill_roots.contains(&canonical) {
+                skill_roots.push(canonical);
+            }
+        }
+    }
+    Ok(ResolvedCodexWorkerConfig { skill_roots })
 }
 
 /// Look up a nested key path in a document. A key present but null is treated as
@@ -1320,5 +1437,129 @@ coders:
         assert_eq!(inputs.review_coder.as_deref(), Some("claude"));
         assert!(inputs.review_model.is_none());
         assert!(inputs.behavior_tests_coder.is_none());
+    }
+
+    #[test]
+    fn codex_skill_roots_combine_user_external_and_project_local_paths() {
+        let project_root = tempfile::tempdir().unwrap();
+        let project_skills = project_root.path().join("project-skills");
+        std::fs::create_dir(&project_skills).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            project_root.path(),
+            "project.yaml",
+            "codex:\n  skill-roots:\n    - project-skills\n",
+        );
+        let user = write_yaml(
+            project_root.path(),
+            "user.yaml",
+            &format!(
+                "codex:\n  skill-roots:\n    - {}\n",
+                external.path().display()
+            ),
+        );
+
+        let resolved =
+            resolve_codex_worker_config_from(project_root.path(), &project, Some(&user)).unwrap();
+
+        assert_eq!(
+            resolved.skill_roots,
+            vec![
+                std::fs::canonicalize(external.path()).unwrap(),
+                std::fs::canonicalize(project_skills).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn project_codex_skill_root_cannot_escape_the_project() {
+        let project_root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            project_root.path(),
+            "project.yaml",
+            &format!(
+                "codex:\n  skill-roots:\n    - {}\n",
+                external.path().display()
+            ),
+        );
+
+        let error =
+            resolve_codex_worker_config_from(project_root.path(), &project, None).unwrap_err();
+
+        assert_eq!(error.key, "codex.skill-roots[0]");
+        assert!(error.detail.contains("escapes project"), "{error}");
+    }
+
+    #[test]
+    fn user_codex_skill_root_must_be_absolute() {
+        let project_root = tempfile::tempdir().unwrap();
+        let project = project_root.path().join("missing-project.yaml");
+        let user = write_yaml(
+            project_root.path(),
+            "user.yaml",
+            "codex:\n  skill-roots:\n    - relative-skills\n",
+        );
+
+        let error = resolve_codex_worker_config_from(project_root.path(), &project, Some(&user))
+            .unwrap_err();
+
+        assert_eq!(error.key, "codex.skill-roots[0]");
+        assert!(error.detail.contains("must be absolute"), "{error}");
+    }
+
+    #[test]
+    fn configured_codex_skill_root_must_exist() {
+        let project_root = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            project_root.path(),
+            "project.yaml",
+            "codex:\n  skill-roots:\n    - missing-skills\n",
+        );
+
+        let error =
+            resolve_codex_worker_config_from(project_root.path(), &project, None).unwrap_err();
+
+        assert_eq!(error.key, "codex.skill-roots[0]");
+        assert!(error.detail.contains("could not inspect"), "{error}");
+    }
+
+    #[test]
+    fn configured_codex_skill_root_must_be_a_directory() {
+        let project_root = tempfile::tempdir().unwrap();
+        std::fs::write(project_root.path().join("skills.txt"), "not a root").unwrap();
+        let project = write_yaml(
+            project_root.path(),
+            "project.yaml",
+            "codex:\n  skill-roots:\n    - skills.txt\n",
+        );
+
+        let error =
+            resolve_codex_worker_config_from(project_root.path(), &project, None).unwrap_err();
+
+        assert_eq!(error.key, "codex.skill-roots[0]");
+        assert!(error.detail.contains("is not a directory"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_codex_skill_root_may_not_be_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let project_root = tempfile::tempdir().unwrap();
+        let real_root = project_root.path().join("real-skills");
+        std::fs::create_dir(&real_root).unwrap();
+        symlink(&real_root, project_root.path().join("skill-alias")).unwrap();
+        let project = write_yaml(
+            project_root.path(),
+            "project.yaml",
+            "codex:\n  skill-roots:\n    - skill-alias\n",
+        );
+
+        let error =
+            resolve_codex_worker_config_from(project_root.path(), &project, None).unwrap_err();
+
+        assert_eq!(error.key, "codex.skill-roots[0]");
+        assert!(error.detail.contains("may not be a symlink"), "{error}");
     }
 }
