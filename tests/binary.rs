@@ -1108,6 +1108,10 @@ fn fluent_skills_install_writes_all_public_skills() {
         stderr.contains("Installed 6 skills"),
         "should report installing all skills: {stderr}"
     );
+    assert!(
+        !stderr.contains("replaced Fluent shim"),
+        "an ordinary installation must not report a shim replacement: {stderr}"
+    );
 
     let refs_dir = tmp.path().join(".claude/skills/fluent/references");
     assert!(
@@ -22610,11 +22614,23 @@ fn skills_add_replaces_stale_shim_installation() {
     )
     .unwrap();
 
-    fluent_cmd()
+    let output = fluent_cmd()
         .env("HOME", home.to_str().unwrap())
         .args(["skills", "add"])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "skills add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("replaced Fluent shim")
+            && stderr.contains(&home.join(".claude/skills").display().to_string()),
+        "shim replacement summary must identify the selected target: {stderr}"
+    );
 
     assert!(
         !fs::read_to_string(skill_dir.join("SKILL.md"))

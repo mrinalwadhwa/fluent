@@ -6245,6 +6245,21 @@ THE SYSTEM SHALL replace it with a managed installation of the running bundle.
 Test: src/skill_install.rs (adopts_an_exact_allowlisted_bundle_and_rejects_a_near_match)
 Test: tests/binary.rs (skills_add_replaces_stale_shim_installation)
 
+### B14
+
+WHEN `fluent skills add` replaces a sidecar-free Fluent-marked shim in a
+selected target,
+THE SYSTEM SHALL report that it replaced a Fluent shim in that target's outcome
+summary.
+Test: tests/binary.rs (skills_add_replaces_stale_shim_installation)
+
+### B15
+
+WHEN `fluent skills add` installs bundled skills into a selected target that
+did not contain a Fluent shim,
+THE SYSTEM SHALL NOT report a Fluent shim replacement for that target.
+Test: tests/binary.rs (fluent_skills_install_writes_all_public_skills)
+
 ## Documentation review — commit conventions
 
 ### B1

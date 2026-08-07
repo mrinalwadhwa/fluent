@@ -2079,6 +2079,15 @@ fn cmd_skills_add(
             .all(|outcome| *outcome == InstallOutcome::Current)
         {
             eprintln!("Skills are current in {}", dir.display());
+        } else if outcomes
+            .iter()
+            .any(|outcome| *outcome == InstallOutcome::ReplacedShim)
+        {
+            eprintln!(
+                "Installed {} skills to {} (replaced Fluent shim)",
+                names.len(),
+                dir.display()
+            );
         } else {
             eprintln!("Installed {} skills to {}", names.len(), dir.display());
         }
