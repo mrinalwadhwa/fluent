@@ -22642,6 +22642,50 @@ fn skills_add_replaces_stale_shim_installation() {
 }
 
 #[test]
+fn skills_add_reports_shim_replacement_only_for_its_target() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let claude_skills = home.join(".claude/skills");
+    let codex_skills = home.join(".codex/skills");
+    let shim_dir = claude_skills.join("fluent");
+    fs::create_dir_all(&shim_dir).unwrap();
+    fs::write(
+        shim_dir.join("SKILL.md"),
+        "---\nname: fluent\nfluent-shim: true\n---\nstale shim\n",
+    )
+    .unwrap();
+
+    let output = fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "claude,codex"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "skills add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let claude_summary = stderr
+        .lines()
+        .find(|line| line.contains(&claude_skills.display().to_string()))
+        .expect("Claude target summary must be present");
+    assert!(
+        claude_summary.contains("replaced Fluent shim"),
+        "shim target must report its replacement: {stderr}"
+    );
+    let codex_summary = stderr
+        .lines()
+        .find(|line| line.contains(&codex_skills.display().to_string()))
+        .expect("Codex target summary must be present");
+    assert!(
+        !codex_summary.contains("replaced Fluent shim"),
+        "ordinary target must not report another target's replacement: {stderr}"
+    );
+}
+
+#[test]
 fn skills_add_preserves_invalid_sidecar_on_shim_marked_installation() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
