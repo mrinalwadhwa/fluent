@@ -11661,9 +11661,18 @@ fn test_support_binary_controls_host_sandbox_preflight() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin-test-support-host-sandbox");
+    let security_log = tmp.path().join("unexpected-keychain-access");
     write_mock_claude(
         &bin_dir,
         &learner_mock_script(r#"{"learning_summary":"controlled","follow_ups":[]}"#),
+    );
+    write_mock_executable(
+        &bin_dir,
+        "security",
+        &format!(
+            "#!/bin/bash\nprintf attempted > '{}'\nexit 99\n",
+            security_log.display()
+        ),
     );
     write_mock_sandbox_exec(&bin_dir);
     create_completed_work_attempt(&tmp, &main_dir);
@@ -11685,6 +11694,10 @@ fn test_support_binary_controls_host_sandbox_preflight() {
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
         .assert()
         .success();
+    assert!(
+        !security_log.exists(),
+        "hermetic provider runs must not read operator Keychain state"
+    );
 }
 
 #[test]

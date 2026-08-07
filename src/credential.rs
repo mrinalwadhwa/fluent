@@ -5,6 +5,17 @@ use std::time::{Duration, Instant};
 const DEFAULT_CLAUDE_REFRESH_DEADLINE_SECS: u64 = 30;
 const CLAUDE_REFRESH_DEADLINE_ENV: &str = "FLUENT_CLAUDE_REFRESH_DEADLINE_SECS";
 
+/// Keep test-support provider launches independent from operator credentials.
+#[cfg(feature = "test-support")]
+pub(crate) fn hermetic_provider_test_mode() -> bool {
+    std::env::var_os("FLUENT_TEST_HERMETIC_PROVIDERS").is_some()
+}
+
+#[cfg(not(feature = "test-support"))]
+pub(crate) fn hermetic_provider_test_mode() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialRefreshError {
     InvalidDeadline(String),
@@ -53,6 +64,9 @@ fn set_env_var(key: &str, value: &str) {
 /// Inject credentials from macOS Keychain into environment variables.
 /// This runs OUTSIDE the sandbox.
 pub fn inject_credentials() -> Result<()> {
+    if hermetic_provider_test_mode() {
+        return Ok(());
+    }
     inject_claude_credentials()?;
     inject_brave_search_key()?;
     inject_aws_credentials()?;
@@ -67,6 +81,9 @@ pub fn inject_credentials() -> Result<()> {
 /// must bridge the credential through the process environment without copying
 /// the rest of the interactive home.
 pub fn inject_claude_credentials() -> Result<()> {
+    if hermetic_provider_test_mode() {
+        return Ok(());
+    }
     inject_oauth_token()
 }
 
@@ -77,6 +94,9 @@ pub fn inject_claude_credentials() -> Result<()> {
 /// Called between sessions in sandboxed mode because the sandbox blocks
 /// Keychain access — the agent cannot refresh tokens itself.
 pub fn refresh_credentials() -> Result<()> {
+    if hermetic_provider_test_mode() {
+        return Ok(());
+    }
     eprintln!("  Refreshing credentials...");
 
     let deadline = configured_refresh_deadline()?;
@@ -264,6 +284,9 @@ fn refresh_oauth_token() -> Result<()> {
 /// Force a fresh OAuth token read from the Keychain, bypassing the
 /// inject guard that skips when a token is already set.
 pub fn force_refresh_oauth_token() -> Result<()> {
+    if hermetic_provider_test_mode() {
+        return Ok(());
+    }
     refresh_oauth_token()
 }
 

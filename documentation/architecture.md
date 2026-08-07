@@ -2140,6 +2140,11 @@ command exits zero with a message saying nothing needed teardown.
 Sandbox profile unchanged — credentials injected via env vars, never by
 opening filesystem access.
 
+Test-support builds treat `FLUENT_TEST_HERMETIC_PROVIDERS` as a host credential
+boundary. They skip Keychain injection, Claude expiry checks, and credential
+refresh so nested release fixtures reach only their configured provider doubles.
+An explicitly allowlisted fixture credential may still cross that boundary.
+
 Autonomous Claude Writers use an Attempt-managed `HOME` so interactive Claude
 configuration and session history do not enter the worker boundary. That
 managed home is retained even when the scheduler starts an Attempt with
