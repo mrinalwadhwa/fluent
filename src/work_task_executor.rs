@@ -12647,7 +12647,7 @@ mod tests {
 
     #[test]
     fn execution_context_is_bounded_and_preserves_authoritative_core() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir_in("target").unwrap();
         let workspace = tmp.path().join("workspace");
         let artifact = tmp.path().join("artifact");
         let review = tmp.path().join("attempt-review-tests/review.md");
@@ -13390,8 +13390,8 @@ mod tests {
     #[test]
     fn reviewed_correction_prompt_is_bounded_and_references_full_artifacts_by_path() {
         let mut item = review_item();
-        let project = tempfile::TempDir::new().unwrap();
-        let workspace = tempfile::TempDir::new().unwrap();
+        let project = tempfile::tempdir_in("target").unwrap();
+        let workspace = tempfile::tempdir_in("target").unwrap();
         crate::git::run(
             workspace.path(),
             &["init", "-q"],

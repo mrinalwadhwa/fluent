@@ -606,7 +606,7 @@ mod tests {
         fs::write(
             app.join("Cargo.toml"),
             format!(
-                "[package]\nname = \"offline-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ncached-dependency = {{ git = {dependency_url:?} }}\n"
+                "[package]\nname = \"offline-app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ncached-dependency = {{ git = {dependency_url:?} }}\n\n[workspace]\n"
             ),
         )
         .unwrap();
