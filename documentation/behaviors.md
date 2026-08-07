@@ -5420,6 +5420,7 @@ WHEN final structured Tester evidence is available, THE SYSTEM SHALL require a
 matching passing Rust test identity or shell-script identity for every approved
 `Test:` reference.
 Test: src/candidate_gate.rs (validates_test_references_against_passing_structured_tester_evidence)
+Test: src/candidate_gate.rs (validates_nextest_integration_test_references)
 Test: src/candidate_gate.rs (shell_evidence_uses_the_harness_native_script_identity)
 
 ### B28

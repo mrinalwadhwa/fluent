@@ -453,7 +453,9 @@ fn check_tester_evidence(
             }
             match reference.selector.as_deref() {
                 Some(selector) => {
-                    test.id == selector || test.id.ends_with(&format!("::{selector}"))
+                    test.id == selector
+                        || test.id.ends_with(&format!("::{selector}"))
+                        || test.id.ends_with(&format!("${selector}"))
                 }
                 None => test.id == reference.path,
             }
@@ -844,6 +846,48 @@ mod tests {
         .unwrap();
         let artifact = fixture.artifacts.path().join("candidate-gate.json");
         let contract = behavior_contract("tests/dashboard.rs (preserves_selection)");
+
+        let evidence = run_candidate_gate(fixture.request(
+            &candidate,
+            Some(&contract),
+            Some(&tester),
+            &artifact,
+        ))
+        .unwrap();
+
+        assert_eq!(evidence.disposition, CandidateGateDisposition::Passed);
+        assert_eq!(
+            check(&evidence, "tester-reference-evidence").status,
+            CandidateCheckStatus::Passed
+        );
+    }
+
+    #[test]
+    fn validates_nextest_integration_test_references() {
+        let fixture = Fixture::new();
+        let selector = "skills_add_replaces_stale_shim_installation";
+        let candidate = fixture.commit(
+            "tests/binary.rs",
+            &format!("#[test]\nfn {selector}() {{}}\n"),
+            "Add skills test",
+        );
+        let tester = fixture.artifacts.path().join("tester-results.json");
+        let results = serde_json::json!({
+            "candidate_commit": candidate,
+            "commands": [],
+            "tests": [{
+                "id": format!("fluent::binary${selector}"),
+                "test_harness": "cargo-nextest",
+                "status": "pass",
+                "duration_ms": 1,
+                "failure_excerpt": null
+            }],
+            "summary": {"total": 1, "pass": 1, "fail": 0, "skipped": 0},
+            "error": null
+        });
+        fs::write(&tester, serde_json::to_vec(&results).unwrap()).unwrap();
+        let artifact = fixture.artifacts.path().join("candidate-gate.json");
+        let contract = behavior_contract(&format!("tests/binary.rs ({selector})"));
 
         let evidence = run_candidate_gate(fixture.request(
             &candidate,
