@@ -5150,6 +5150,14 @@ THE SYSTEM SHALL remove the scheduler baseline-session token from every project
 test command and result extractor.
 Test: src/tester.rs (tester_children_do_not_inherit_scheduler_baseline_session)
 
+### B34
+
+WHEN `fluent tester check` runs and its configured commands do not modify
+the project,
+THE SYSTEM SHALL preserve existing project files and SHALL NOT create
+initialization files such as `.fluent/.gitignore` or edit `AGENTS.md`.
+Test: tests/behaviors/operations/test-tester-check-source-integrity.sh (tester check preserves project files)
+
 ## Pre-review completion gate
 
 ### B1

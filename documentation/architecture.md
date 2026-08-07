@@ -403,7 +403,10 @@ That ordering means a peer-terminal transition rejects the start without leaving
 filesystem artifacts. After reservation, Fluent creates and canonicalizes each
 guarded directory before rendering and preflighting the sandbox that grants it
 to the command. Standalone `fluent tester check` has no Work Task reservation;
-it creates its temporary artifact as part of its own command boundary.
+it creates its temporary artifact as part of its own command boundary. That
+host-owned setup does not initialize the project, create `.fluent/.gitignore`,
+or edit `AGENTS.md`; only a project-defined Tester command can intentionally
+write inside the candidate workspace.
 
 `fluent tester check` first validates the project's Tester structure and then
 runs the same sandboxed command and normalization boundary used by a Tester
