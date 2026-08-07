@@ -1406,6 +1406,42 @@ THE SYSTEM SHALL queue excess tasks and launch each as in-flight slots
 free up, keeping at most `cap` reviewer threads in flight at any time.
 Test: src/work_attempt_loop.rs (cap_enforcement_limits_in_flight_reviewers)
 
+### B82a
+
+WHEN Writer, reviewer, and Learner logical runs use the same provider across
+concurrent Fluent processes or projects,
+THE SYSTEM SHALL admit at most the user-wide provider concurrency limit.
+Test: src/provider_admission.rs (shared_ceiling_bounds_total_in_flight_runs)
+Test: src/provider_admission.rs (cross_process_ceiling_and_exit_release_slot)
+
+### B82b
+
+WHEN concurrent logical runs use different providers,
+THE SYSTEM SHALL admit them through independent provider capacity pools.
+Test: src/provider_admission.rs (providers_use_independent_pools)
+
+### B82c
+
+WHEN a Writer or reviewer waits for provider capacity before Task reservation,
+THE SYSTEM SHALL leave the Task planned, stop waiting if the Task becomes
+ineligible, and consume no Task execution state.
+Test: src/work_task_executor.rs (capacity_wait_leaves_task_planned_and_observes_cancellation)
+
+### B82d
+
+WHEN an admitted logical provider run ends or is cancelled,
+THE SYSTEM SHALL release its provider slot automatically.
+Test: src/provider_admission.rs (cancelled_run_drop_releases_shared_slot)
+Test: src/provider_admission.rs (cross_process_ceiling_and_exit_release_slot)
+
+### B82e
+
+IF the coder-owned rate-limit retry budget exhausts,
+THEN THE SYSTEM SHALL return a typed terminal error and SHALL NOT spend the
+generic Task retry budget on another copy of the same logical run.
+Test: src/coder.rs (rate_limit_retry_helper_exhausts_every_provider_launch)
+Test: src/work_task_executor.rs (terminal_coder_failures_bypass_generic_retries)
+
 ### B83
 
 WHEN `fluent merge-candidate land <work-item-id> <merge-candidate-id>` finishes

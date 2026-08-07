@@ -2207,6 +2207,36 @@ const DEFAULT_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 1800;
 pub(crate) const RATE_LIMIT_MAX_RETRIES: u32 = 2;
 const DEFAULT_JITTER_MAX_SECS: u64 = 30;
 
+/// A provider exhausted the coder-owned rate-limit retry budget. Task orchestration
+/// must not retry this logical run again and multiply the same launch budget.
+#[derive(Debug)]
+pub(crate) struct RateLimitExhaustedError {
+    exit_code: i32,
+}
+
+impl RateLimitExhaustedError {
+    pub(crate) fn new(exit_code: i32) -> Self {
+        Self { exit_code }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+}
+
+impl std::fmt::Display for RateLimitExhaustedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "provider rate-limit retry budget exhausted with exit code {}",
+            self.exit_code
+        )
+    }
+}
+
+impl std::error::Error for RateLimitExhaustedError {}
+
 fn ensure_not_expired_with_refresh() -> Result<(), crate::claude_auth::AuthError> {
     if crate::credential::hermetic_provider_test_mode() {
         return Ok(());
@@ -2720,11 +2750,11 @@ where
 
         if attempt >= RATE_LIMIT_MAX_RETRIES {
             eprintln!(
-                "  Rate-limit detected on attempt {}; retry budget exhausted, propagating exit code {exit}.",
+                "  Rate-limit detected on attempt {}; retry budget exhausted.",
                 attempt + 1
             );
             return CoderRunCompletion {
-                terminal: Ok(exit),
+                terminal: Err(anyhow::Error::new(RateLimitExhaustedError::new(exit))),
                 report: aggregate,
             };
         }
@@ -5173,7 +5203,11 @@ exit 1"#
             &|| Ok(()),
         );
 
-        assert_eq!(result.unwrap(), 1, "exhaustion preserves the provider exit");
+        let error = result.unwrap_err();
+        let exhausted = error
+            .downcast_ref::<RateLimitExhaustedError>()
+            .expect("rate-limit exhaustion remains typed");
+        assert_eq!(exhausted.exit_code(), 1);
         assert_eq!(
             std::fs::read_to_string(&counter).unwrap(),
             (RATE_LIMIT_MAX_RETRIES + 1).to_string(),

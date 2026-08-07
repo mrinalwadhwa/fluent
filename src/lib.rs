@@ -30,6 +30,7 @@ pub mod plan;
 pub mod post_merge_review;
 pub mod prep;
 pub(crate) mod process_settlement;
+pub(crate) mod provider_admission;
 pub mod provider_evidence;
 pub mod provider_readiness;
 pub mod review;

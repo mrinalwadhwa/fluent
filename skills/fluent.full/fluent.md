@@ -281,6 +281,23 @@ coders:
     coder: claude
 ```
 
+Set a shared provider ceiling only in the user config:
+
+```yaml
+providers:
+  concurrency:
+    default: 5
+    # claude: 3
+```
+
+A project can lower only its own provider use:
+
+```yaml
+providers:
+  project-concurrency:
+    default: 5
+```
+
 ## Local Preview
 
 Fluent's first release is the **Local Preview**: a supervised, local-first path you can try before its background execution, interruption, concurrency, and remote-execution hardening is complete. The default path stays visible and human-controlled:

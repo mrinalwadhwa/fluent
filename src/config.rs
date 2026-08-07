@@ -33,6 +33,8 @@ pub const DEFAULT_TRANSCRIPT_STATUS_FLUSH_INTERVAL_MS: u32 = 1000;
 pub const DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB: u64 = 50;
 /// Built-in filesystem space reserved after a reviewer cache admission.
 pub const DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB: u64 = 50;
+/// Built-in maximum concurrent logical runs for one provider across projects.
+pub const DEFAULT_PROVIDER_CONCURRENCY: u32 = 5;
 /// Built-in maximum approved behaviors or required Plan rows before Work
 /// creation needs an explicit large-scope authorization.
 pub const DEFAULT_PLANNING_SCOPE_LIMIT: u32 = 12;
@@ -243,6 +245,13 @@ pub struct ResolvedReviewerCacheConfig {
     pub min_free_bytes: ResolvedLeaf<u64>,
 }
 
+/// Shared and project-local provider admission limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProviderAdmissionConfig {
+    pub shared_concurrency: ResolvedLeaf<u32>,
+    pub project_concurrency: ResolvedLeaf<u32>,
+}
+
 /// Planning intake limits resolved from project, then user, then built-in
 /// defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,10 +285,101 @@ impl std::error::Error for FollowUpConfigError {}
 
 /// One configuration layer: its precedence source, on-disk path, and parsed
 /// document (absent when the file does not exist).
+#[derive(Clone)]
 struct ConfigLayer {
     source: ConfigSource,
     path: PathBuf,
     doc: Option<serde_yaml::Value>,
+}
+
+/// Resolve provider capacity. Only user configuration can raise or lower the
+/// shared ceiling; a project may reduce its own use but cannot enlarge the pool.
+pub fn resolve_provider_admission_config(
+    project_root: &Path,
+    provider: &str,
+) -> Result<ResolvedProviderAdmissionConfig, FollowUpConfigError> {
+    resolve_provider_admission_config_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+        provider,
+    )
+}
+
+fn resolve_provider_admission_config_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+    provider: &str,
+) -> Result<ResolvedProviderAdmissionConfig, FollowUpConfigError> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    let user_layers = layers
+        .iter()
+        .filter(|layer| layer.source == ConfigSource::User)
+        .cloned()
+        .collect::<Vec<_>>();
+    let project_layers = layers
+        .iter()
+        .filter(|layer| layer.source == ConfigSource::Project)
+        .cloned()
+        .collect::<Vec<_>>();
+    let shared_concurrency = resolve_provider_count(
+        &user_layers,
+        "concurrency",
+        provider,
+        DEFAULT_PROVIDER_CONCURRENCY,
+    )?;
+    let project_limit = resolve_provider_count(
+        &project_layers,
+        "project-concurrency",
+        provider,
+        shared_concurrency.value,
+    )?;
+    let user_limit = resolve_provider_count(
+        &user_layers,
+        "project-concurrency",
+        provider,
+        shared_concurrency.value,
+    )?;
+    let configured_project = if project_limit.source == ConfigSource::Project {
+        project_limit
+    } else if user_limit.source == ConfigSource::User {
+        user_limit
+    } else {
+        ResolvedLeaf {
+            value: shared_concurrency.value,
+            source: shared_concurrency.source,
+        }
+    };
+    Ok(ResolvedProviderAdmissionConfig {
+        shared_concurrency,
+        project_concurrency: ResolvedLeaf {
+            value: configured_project.value.min(shared_concurrency.value),
+            source: configured_project.source,
+        },
+    })
+}
+
+fn resolve_provider_count(
+    layers: &[ConfigLayer],
+    section: &str,
+    provider: &str,
+    fallback: u32,
+) -> Result<ResolvedLeaf<u32>, FollowUpConfigError> {
+    let default = resolve_leaf(
+        layers,
+        &["providers", section, "default"],
+        fallback,
+        convert_positive_count,
+    )?;
+    let mut resolved = resolve_leaf(
+        layers,
+        &["providers", section, provider],
+        default.value,
+        convert_positive_count,
+    )?;
+    if resolved.source == ConfigSource::Default {
+        resolved.source = default.source;
+    }
+    Ok(resolved)
 }
 
 fn load_layer(source: ConfigSource, path: PathBuf) -> Result<ConfigLayer, FollowUpConfigError> {
@@ -841,6 +941,82 @@ coders:
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    #[test]
+    fn provider_capacity_is_shared_by_user_and_lowered_by_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "providers:\n  concurrency:\n    claude: 99\n  project-concurrency:\n    default: 4\n    codex: 2\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "providers:\n  concurrency:\n    default: 5\n    codex: 3\n",
+        );
+
+        let claude =
+            resolve_provider_admission_config_from(&project, Some(&user), "claude").unwrap();
+        assert_eq!(claude.shared_concurrency.value, 5);
+        assert_eq!(claude.shared_concurrency.source, ConfigSource::User);
+        assert_eq!(claude.project_concurrency.value, 4);
+
+        let codex = resolve_provider_admission_config_from(&project, Some(&user), "codex").unwrap();
+        assert_eq!(codex.shared_concurrency.value, 3);
+        assert_eq!(codex.project_concurrency.value, 2);
+    }
+
+    #[test]
+    fn project_provider_capacity_cannot_raise_shared_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "providers:\n  project-concurrency:\n    default: 20\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "providers:\n  concurrency:\n    default: 2\n",
+        );
+        let resolved = resolve_provider_admission_config_from(&project, Some(&user), "pi").unwrap();
+        assert_eq!(resolved.shared_concurrency.value, 2);
+        assert_eq!(resolved.project_concurrency.value, 2);
+    }
+
+    #[test]
+    fn project_default_lowers_user_provider_specific_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "providers:\n  project-concurrency:\n    default: 2\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "providers:\n  concurrency:\n    default: 5\n  project-concurrency:\n    claude: 4\n",
+        );
+        let resolved =
+            resolve_provider_admission_config_from(&project, Some(&user), "claude").unwrap();
+        assert_eq!(resolved.shared_concurrency.value, 5);
+        assert_eq!(resolved.project_concurrency.value, 2);
+        assert_eq!(resolved.project_concurrency.source, ConfigSource::Project);
+    }
+
+    #[test]
+    fn invalid_provider_capacity_fails_closed_at_owning_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "providers:\n  project-concurrency:\n    codex: 0\n",
+        );
+        let error = resolve_provider_admission_config_from(&project, None, "codex").unwrap_err();
+        assert_eq!(error.path, project);
+        assert_eq!(error.key, "providers.project-concurrency.codex");
     }
 
     #[test]

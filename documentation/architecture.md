@@ -460,10 +460,29 @@ next planned write Task serially through the Task executor, or by running
 planned review Tasks in parallel with concurrency limited to
 `FLUENT_MAX_PARALLEL_REVIEWERS` (default 5, minimum 1). Review-only
 Attempts run review Tasks serially because their reviewers share a source
-checkout. When a write or review Task coder errors, the Task executor
-retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times before marking
-the Task failed and pausing the Attempt at `needs-user`, except for auth
-rejections (401), which skip retries and escalate immediately. Tester
+checkout. Before a Writer or reviewer reserves its Task, and before a Learner
+records an in-progress run, it acquires one provider-scoped user lease and one
+project lease. The user lease bounds all Fluent processes and projects that use
+the same provider; the project lease can impose a lower local ceiling. Waiting
+leaves the Task planned or the Learner unreserved. The lease spans the complete
+logical role run, including provider recovery, generic Task retries, and Learner
+schema repairs, and drops on success, failure, cancellation, or process exit.
+Different providers use independent pools, so unavailable Claude capacity does
+not serialize Codex work.
+
+Set the shared ceiling only in `~/.config/fluent/config.yaml` under
+`providers.concurrency.default` or a provider key such as `codex`. A project may
+lower its own use under `providers.project-concurrency.default` or a provider
+key in `.fluent/config.yaml`; project configuration cannot raise the shared
+ceiling. Both limits default to 5.
+
+When a write or review Task coder returns an otherwise unclassified error, the
+Task executor retries up to `FLUENT_MAX_TASK_RETRIES` (default 2) times before
+marking the Task failed and pausing the Attempt at `needs-user`. Authentication
+and rate-limit recovery belong exclusively to the coder layer: one credential
+refresh or two bounded rate-limit retries occur inside the same logical run.
+Typed auth failures and typed rate-limit exhaustion bypass the generic Task
+retry loop, preventing nested retry multiplication. Tester
 Task errors follow the same retry-then-pause policy but do not check for
 auth rejections because the tester invokes test harnesses, not a coder.
 Each failed Task writes a per-task handoff file
@@ -1228,7 +1247,8 @@ parameter internally (`rate_limit_jitter_with_max`) for testability;
 the public `rate_limit_jitter()` reads the env var at call time.
 
 The wrapper retries the same coder invocation up to two more times
-before propagating the exit code. A `RateLimitState` tracker fires
+before returning a typed rate-limit-exhaustion error. Task orchestration never
+retries that typed result. A `RateLimitState` tracker fires
 macOS notifications (`osascript`) on state transitions: once on
 entering rate-limit state (naming the reason and expected resume
 time) and once on leaving (after the first successful invocation
@@ -1309,8 +1329,9 @@ string `bail!`, so callers can recover the type via
 `downcast_ref::<AuthError>()`. Both task retry loops in the task
 executor recognize `AuthError`, skip retries entirely, and escalate
 immediately to `needs-user` with the auth-specific handoff message
-from `AuthError::user_message()`. Other coder errors still retry up
-to `FLUENT_MAX_TASK_RETRIES`.
+from `AuthError::user_message()`. Typed rate-limit exhaustion follows the same
+no-outer-retry rule; other coder errors still retry up to
+`FLUENT_MAX_TASK_RETRIES`.
 
 `fluent cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item

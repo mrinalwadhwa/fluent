@@ -740,6 +740,11 @@ fn run_write_task_with_coder(
         }
     };
 
+    // Admit the complete logical Writer run before reserving durable execution.
+    // The lease spans provider-internal recovery and Task-level retries, and a
+    // capacity wait therefore consumes neither Task nor Writer-round state.
+    let _provider_lease = acquire_task_provider_capacity(&config, coder_kind, "Writer")?;
+
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here with a typed
     // StartRejected error and nothing mutated. The fresh coder mapping and the
@@ -1273,6 +1278,11 @@ fn run_review_task_with_coder(
         }
     };
 
+    let reviewer_coder = plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?;
+    // Preserve reviewer parallelism while the shared pool bounds actual provider
+    // use across Attempts, processes, and projects.
+    let _provider_lease = acquire_task_provider_capacity(&config, reviewer_coder, "Reviewer")?;
+
     // The preflight passed: reserve the start in one lock-held transaction. A peer
     // that took the Attempt terminal rejects the reservation here, leaving prior
     // review.md evidence untouched.
@@ -1283,7 +1293,7 @@ fn run_review_task_with_coder(
         config.task_id,
         TaskKind::Review,
         AttemptStatus::Reviewing,
-        plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
+        reviewer_coder,
     )?;
     // Every launch input derives from the reservation's fresh lock-held snapshot,
     // not the read-only plan used for the preflight.
@@ -2290,16 +2300,70 @@ fn is_host_sandbox_preflight_error(result: &Result<()>) -> bool {
         .map_or(false, |e| e.is::<crate::os::HostSandboxPreflightError>())
 }
 
+/// Wait for one shared provider slot while the Task remains eligible to start.
+/// The caller holds the returned lease across the complete logical role run.
+fn acquire_task_provider_capacity(
+    config: &WorkTaskRunConfig<'_>,
+    coder: CoderKind,
+    role: &str,
+) -> Result<crate::provider_admission::ProviderLease> {
+    let provider = crate::provider_admission::provider_name(coder);
+    let limits = crate::config::resolve_provider_admission_config(config.project_root, provider)
+        .map_err(anyhow::Error::new)?;
+    let user_root = crate::provider_admission::effective_user_root(config.project_root)
+        .context("resolve user Fluent directory for provider capacity")?;
+    let mut reported_wait = false;
+    loop {
+        let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
+        let still_planned = find_attempt_task_indexes(&item, config.attempt_id, config.task_id)
+            .is_some_and(|(attempt_index, task_index)| {
+                item.attempts[attempt_index].tasks[task_index].status == TaskStatus::Planned
+            });
+        if !still_planned {
+            return Err(anyhow::Error::new(StartRejected::new(
+                config.attempt_id,
+                config.task_id,
+            )));
+        }
+        match crate::provider_admission::try_acquire(
+            &user_root,
+            config.project_root,
+            provider,
+            limits.shared_concurrency.value,
+            limits.project_concurrency.value,
+        )? {
+            crate::provider_admission::AdmissionAttempt::Acquired(lease) => {
+                if reported_wait {
+                    eprintln!("  {role} resumed with available {provider} capacity.");
+                }
+                return Ok(lease);
+            }
+            crate::provider_admission::AdmissionAttempt::Contended => {
+                if !reported_wait {
+                    reported_wait = true;
+                    eprintln!("  {role} waiting for {provider} provider capacity.");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 /// Whether a failed coder run should be retried through the generic retry
 /// budget. Auth failures, transcript-pump infrastructure failures, and
 /// supervision-sidecar failures are terminal for the Task and must not spawn another
-/// coder.
+/// coder. The coder layer exclusively owns rate-limit retries, so its typed
+/// exhaustion result also bypasses this outer budget.
 fn should_retry_coder_error(result: &Result<()>) -> bool {
     result.is_err()
         && !is_auth_error(result)
         && !is_transcript_pump_error(result)
         && !is_supervision_sidecar_error(result)
         && !is_host_sandbox_preflight_error(result)
+        && !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<crate::coder::RateLimitExhaustedError>())
         && !result
             .as_ref()
             .err()
@@ -7064,6 +7128,79 @@ mod tests {
     }
 
     #[test]
+    fn capacity_wait_leaves_task_planned_and_observes_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let project_root = root.path();
+        fs::create_dir_all(project_root.join(".fluent")).unwrap();
+        fs::write(
+            project_root.join(".fluent/config.yaml"),
+            "providers:\n  project-concurrency:\n    claude: 1\n",
+        )
+        .unwrap();
+        let store = WorkModelStore::new(project_root);
+        let mut item = WorkItem {
+            id: "capacity-wait".to_string(),
+            title: "Wait for capacity".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].coder_mapping.write.coder = CoderKind::Claude;
+        let task_id = item.attempts[0].tasks[0].id.clone();
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+        let user_root = crate::provider_admission::effective_user_root(project_root).unwrap();
+        let held =
+            match crate::provider_admission::try_acquire(&user_root, project_root, "claude", 1, 1)
+                .unwrap()
+            {
+                crate::provider_admission::AdmissionAttempt::Acquired(lease) => lease,
+                crate::provider_admission::AdmissionAttempt::Contended => {
+                    panic!("fixture slot must be available")
+                }
+            };
+
+        std::thread::scope(|scope| {
+            let config = WorkTaskRunConfig {
+                project_root,
+                store: &store,
+                work_item_id: "capacity-wait",
+                attempt_id: "attempt-1",
+                task_id: &task_id,
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            };
+            let waiter = scope.spawn(move || {
+                acquire_task_provider_capacity(&config, CoderKind::Claude, "Writer")
+            });
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert_eq!(
+                store.read_work_item("capacity-wait").unwrap().attempts[0].tasks[0].status,
+                TaskStatus::Planned,
+                "waiting for provider capacity must not reserve execution"
+            );
+            store
+                .mutate_work_item("capacity-wait", |fresh| {
+                    fresh.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+                    crate::work_model::transition_attempt(
+                        &mut fresh.attempts[0],
+                        AttemptStatus::NeedsUser,
+                        Some(crate::work_model::PauseKind::Interrupted),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let error = match waiter.join().unwrap() {
+                Ok(_) => panic!("the cancelled Task must stop waiting"),
+                Err(error) => error,
+            };
+            assert!(error.is::<StartRejected>());
+        });
+        drop(held);
+    }
+
+    #[test]
     fn tester_guarded_preflight_does_not_create_before_reservation() {
         let workspace = tempfile::tempdir().unwrap();
         let artifact = tempfile::tempdir().unwrap();
@@ -7183,7 +7320,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_pump_failure_is_not_retried() {
+    fn terminal_coder_failures_bypass_generic_retries() {
         // A transcript-pump infrastructure failure must not spawn another coder
         // through the generic retry budget, while an ordinary coder error still
         // retries and an auth error stays terminal.
@@ -7201,6 +7338,14 @@ mod tests {
         assert!(
             should_retry_coder_error(&ordinary),
             "an ordinary coder error is still retryable"
+        );
+
+        let rate_limit: Result<()> = Err(anyhow::Error::new(
+            crate::coder::RateLimitExhaustedError::new(1),
+        ));
+        assert!(
+            !should_retry_coder_error(&rate_limit),
+            "coder-owned rate-limit exhaustion must bypass the outer retry budget"
         );
 
         let auth: Result<()> = Err(anyhow::Error::new(crate::claude_auth::AuthError::Expired {

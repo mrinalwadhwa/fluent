@@ -9587,6 +9587,7 @@ fn rerun_learner_trusted(
             "FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL",
             "CLAUDE_CODE_OAUTH_TOKEN",
         )
+        .env("FLUENT_TEST_ALLOW_CREDENTIAL_FIXTURES", "1")
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_API_KEY");
     for (key, value) in extra_env {

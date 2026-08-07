@@ -1782,6 +1782,20 @@ fn run_learner_step(
         }
     };
 
+    // Admit the complete logical Learner transaction, including bounded schema
+    // repairs, before recording an in-progress Learning run.
+    let Some(_provider_lease) = acquire_learner_provider_capacity(
+        store,
+        project_root,
+        &work_item_id,
+        &attempt_id,
+        learner_coder,
+    )?
+    else {
+        *item = store.read_work_item(&work_item_id)?;
+        return Ok(());
+    };
+
     // A fresh, lock-held reservation with landing validation. It re-reads the durable
     // state under the model lock and decides whether THIS runner launches, so a
     // record a peer already succeeded, took non-relaunchable (its coder already ran
@@ -1845,6 +1859,60 @@ fn run_learner_step(
     finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
         crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
     })
+}
+
+fn acquire_learner_provider_capacity(
+    store: &WorkModelStore,
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    coder: CoderKind,
+) -> Result<Option<crate::provider_admission::ProviderLease>> {
+    let provider = crate::provider_admission::provider_name(coder);
+    let limits = crate::config::resolve_provider_admission_config(project_root, provider)
+        .map_err(anyhow::Error::new)?;
+    let user_root = crate::provider_admission::effective_user_root(project_root)
+        .context("resolve user Fluent directory for Learner provider capacity")?;
+    let mut reported_wait = false;
+    loop {
+        let item = store.read_work_item(work_item_id)?;
+        let eligible = item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .is_some_and(|attempt| {
+                attempt.status == AttemptStatus::Complete
+                    && attempt.review_state == Some(AttemptReviewState::Passed)
+                    && attempt.coder_mapping.for_task_kind(TaskKind::Write).coder == coder
+                    && attempt.learning.as_ref().is_none_or(|learning| {
+                        !learning.is_succeeded() && learning.is_relaunchable()
+                    })
+            });
+        if !eligible {
+            return Ok(None);
+        }
+        match crate::provider_admission::try_acquire(
+            &user_root,
+            project_root,
+            provider,
+            limits.shared_concurrency.value,
+            limits.project_concurrency.value,
+        )? {
+            crate::provider_admission::AdmissionAttempt::Acquired(lease) => {
+                if reported_wait {
+                    eprintln!("  Learner resumed with available {provider} capacity.");
+                }
+                return Ok(Some(lease));
+            }
+            crate::provider_admission::AdmissionAttempt::Contended => {
+                if !reported_wait {
+                    reported_wait = true;
+                    eprintln!("  Learner waiting for {provider} provider capacity.");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 /// The exact initial Learner launch retained across host preflight, reservation,
