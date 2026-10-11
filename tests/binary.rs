@@ -25865,6 +25865,67 @@ fn tester_permissions_show_current_request_without_mutation() {
 }
 
 #[test]
+fn tester_permissions_reject_symlinked_request_inputs() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let config = project.join(".fluent/tester.yaml");
+    fs::write(
+        &config,
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+
+    for (index, path) in [config, project.join(".fluent/extract-tester-results")]
+        .into_iter()
+        .enumerate()
+    {
+        let outside = tmp.path().join(format!("outside-{index}"));
+        fs::write(&outside, fs::read(&path).unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        let relative = path.strip_prefix(&project).unwrap().to_str().unwrap();
+        git::run(&project, &["add", relative], "stage alias").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Alias Tester input"],
+            "commit alias",
+        )
+        .unwrap();
+        let candidate =
+            git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .assert()
+            .failure();
+        fs::remove_file(&path).unwrap();
+        fs::copy(&outside, &path).unwrap();
+        git::run(&project, &["add", relative], "stage restored input").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Restore Tester input"],
+            "commit restored input",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn tester_permissions_approve_exact_request_without_launch() {
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);

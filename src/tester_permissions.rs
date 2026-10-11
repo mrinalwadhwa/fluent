@@ -50,6 +50,21 @@ fn digest(bytes: impl AsRef<[u8]>) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+fn committed_request_input(checkout: &Path, candidate: &str, relative: &str) -> Result<Vec<u8>> {
+    let path = checkout.join(relative);
+    ensure!(
+        fs::symlink_metadata(&path)?.file_type().is_file(),
+        "Tester request input is not a regular file: {relative}"
+    );
+    let bytes = fs::read(&path)?;
+    let committed = git::run_raw(checkout, &["show", &format!("{candidate}:{relative}")])?;
+    ensure!(
+        committed.status.success() && committed.stdout == bytes,
+        "Tester request input differs from committed {relative}"
+    );
+    Ok(bytes)
+}
+
 /// Inspect a request without persisting an approval or starting work.
 pub fn show_request(
     checkout: &Path,
@@ -91,7 +106,7 @@ pub fn show_request(
         "Git common directory must use its canonical path"
     );
 
-    let config_bytes = fs::read(checkout.join(".fluent/tester.yaml"))?;
+    let config_bytes = committed_request_input(checkout, candidate, ".fluent/tester.yaml")?;
     let config = tester::read_tester_config(&checkout.join(".fluent/tester.yaml"))?;
     let command = config
         .commands
@@ -103,7 +118,8 @@ pub fn show_request(
             .contains(&TesterPermission::ProcessTableRead),
         "Tester command does not request process-table-read"
     );
-    let extractor_bytes = fs::read(checkout.join(".fluent/extract-tester-results"))?;
+    let extractor_bytes =
+        committed_request_input(checkout, candidate, ".fluent/extract-tester-results")?;
     let config_digest = digest(config_bytes);
     let extractor_digest = digest(extractor_bytes);
     let policy_digest = digest(
