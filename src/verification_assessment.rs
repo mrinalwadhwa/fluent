@@ -151,6 +151,7 @@ pub(crate) fn assess_landed_tester_history(
             && manifest.commands.len() == results.commands.len(),
         "retained Tester manifest does not describe a complete run"
     );
+    reject_unproven_tester_permissions(&manifest.commands)?;
     for (name, digest) in [
         (".fluent/tester.yaml", &manifest.config_digest),
         (".fluent/extract-tester-results", &manifest.extractor_digest),
@@ -594,6 +595,7 @@ fn assess_canonical_checks_at(
         manifest.schema_version == 1 && manifest.full_run,
         "Tester manifest does not prove a complete canonical run"
     );
+    reject_unproven_tester_permissions(&manifest.commands)?;
     for (path, bytes, expected) in [
         (
             ".fluent/tester.yaml",
@@ -1141,6 +1143,7 @@ pub(crate) fn reconstruct_legacy_manifest(
         "legacy checker source exceeds the supported bound"
     );
     let config: crate::tester::TesterConfig = serde_yaml::from_slice(config_bytes)?;
+    reject_unproven_tester_permissions(&config.commands)?;
     anyhow::ensure!(
         !config.commands.is_empty()
             && config.commands.len() <= 1024
@@ -1167,6 +1170,41 @@ pub(crate) fn reconstruct_legacy_manifest(
         environment: vec![],
         applicability: vec![],
     })
+}
+
+fn reject_unproven_tester_permissions(commands: &[crate::tester::TesterCommand]) -> Result<()> {
+    anyhow::ensure!(
+        commands
+            .iter()
+            .all(|command| command.permissions.is_empty()),
+        "legacy Tester evidence cannot prove a requested permission"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tester_permission_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_tester_evidence_cannot_prove_a_permission_request() {
+        let config = b"commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n";
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{
+                "command": "true", "test_harness": "shell-harness", "exit_code": 0,
+                "duration_ms": 1, "stdout_log": "commands/0-stdout.log",
+                "stderr_log": "commands/0-stderr.log"
+            }],
+            "tests": [],
+            "summary": {"total": 0, "pass": 0, "fail": 0, "skipped": 0},
+            "error": null
+        }))
+        .unwrap();
+        let error = reconstruct_legacy_manifest(config, b"extractor", &results)
+            .expect_err("legacy output cannot prove applied permission");
+        assert!(error.to_string().contains("permission"));
+    }
 }
 
 pub(crate) struct UnresolvedReviewCheck {

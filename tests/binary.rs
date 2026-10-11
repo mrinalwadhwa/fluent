@@ -57042,6 +57042,24 @@ fn canonical_evidence_fixture_with_sources(
 }
 
 #[test]
+fn tester_permissions_reject_unproven_or_mismatched_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let work = "unproven-permission-evidence";
+    let (project, _, results) = canonical_evidence_fixture(&tmp, work, &["true"]);
+    let manifest_path = results.with_file_name("canonical-run.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["commands"][0]["permissions"] = serde_json::json!(["process-table-read"]);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let item = WorkModelStore::new(&project).read_work_item(work).unwrap();
+    let error =
+        fluent::verification_assessment::assess_current_verification(&project, &item.attempts[0])
+            .expect_err("version 1 evidence cannot prove a requested permission");
+    assert!(error.to_string().contains("permission"), "{error:#}");
+}
+
+#[test]
 fn canonical_tester_host_evidence_enters_targeted_review() {
     let tmp = TempDir::new().unwrap();
     let work = "canonical-evidence";
