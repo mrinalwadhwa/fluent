@@ -31,6 +31,18 @@ pub fn profile_with_terminal_socket(
         "terminal socket directory must be absolute"
     );
     let mut content = std::fs::read_to_string(&profile.path)?;
+    content = content.replace(
+        "(allow file-write* (subpath \"/private/tmp\"))",
+        "; managed terminals use an invocation-private socket grant",
+    );
+    content = content.replace(
+        "(allow file-read* (subpath \"/private/tmp\"))",
+        "; managed terminals read only their private socket namespace",
+    );
+    content = content.replace(
+        "(allow file-read* (subpath \"/tmp\"))",
+        "; /tmp aliases the private temporary namespace",
+    );
     let physical = socket_dir.canonicalize()?;
     for dir in [socket_dir, physical.as_path()] {
         content.push_str(&format!(
@@ -42,6 +54,20 @@ pub fn profile_with_terminal_socket(
             sbpl_string(dir)
         ));
     }
+    content
+        .push_str("\n(deny network-outbound (local unix-socket (path-prefix \"/private/tmp/\")))");
+    content.push_str(&format!(
+        "\n(allow network-bind (local unix-socket (path-prefix {})))",
+        sbpl_string(&physical)
+    ));
+    content.push_str(&format!(
+        "\n(allow network-inbound (local unix-socket (path-prefix {})))",
+        sbpl_string(&physical)
+    ));
+    content.push_str(&format!(
+        "\n(allow network-outbound (local unix-socket (path-prefix {})))",
+        sbpl_string(&physical)
+    ));
     let temp_file = NamedTempFile::with_prefix("fluent-terminal-sandbox-")?;
     std::fs::write(temp_file.path(), content)?;
     Ok(SandboxProfile {

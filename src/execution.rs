@@ -772,6 +772,7 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
     // A settled child may be followed by another command in the same Task.
     // Preserve the stop so that command cannot launch without a new reservation.
     if !identity_is_held(path)? {
+        crate::terminal_sessions::settle_for_execution(path, &record)?;
         record.state = ExecutionState::Canceled;
         record.settled_at = Some(crate::work_model::now_iso8601());
         crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
@@ -784,6 +785,8 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
             record.process_group_id
         );
     }
+
+    crate::terminal_sessions::settle_for_execution(path, &record)?;
 
     let (_, group) = effective_identity(path, &record)?
         .ok_or_else(|| anyhow::anyhow!("local execution identity is unbound"))?;

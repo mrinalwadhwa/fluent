@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -75,6 +77,13 @@ struct StoredTerminal {
     descriptor: TerminalDescriptor,
     execution_record: PathBuf,
     socket: Option<PathBuf>,
+    registry_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TerminalResource {
+    execution_record: PathBuf,
+    socket: PathBuf,
 }
 
 pub struct TerminalSession {
@@ -113,11 +122,15 @@ pub fn unavailable_reason(
     ) {
         return "This worker has completed; its invocation cannot receive input.".into();
     }
-    if matches!(
+    if !matches!(
         kind,
-        TaskKind::Tester | TaskKind::Verification | TaskKind::Probe
+        TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
     ) {
-        return "This Tester or verification worker has no agent conversation to attach to.".into();
+        return if matches!(kind, TaskKind::Tester | TaskKind::Verification) {
+            "This Tester or verification worker has no agent conversation to attach to.".into()
+        } else {
+            "This deterministic worker has no agent conversation to attach to.".into()
+        };
     }
     if has_execution {
         "This worker uses headless execution and has no live agent terminal.".into()
@@ -147,6 +160,24 @@ pub fn availability(
         .iter()
         .find(|task| task.id == task_id)
         .context("selected Task does not exist")?;
+    if !matches!(
+        task.kind,
+        crate::work_model::TaskKind::Write
+            | crate::work_model::TaskKind::Review
+            | crate::work_model::TaskKind::Rebase
+            | crate::work_model::TaskKind::Learn
+    ) || matches!(
+        task.status,
+        crate::work_model::TaskStatus::Complete
+            | crate::work_model::TaskStatus::Failed
+            | crate::work_model::TaskStatus::NeedsUser
+            | crate::work_model::TaskStatus::Superseded
+    ) {
+        return Ok(TerminalAvailability {
+            descriptor: None,
+            unavailable_reason: Some(unavailable_reason(task.kind, task.status.clone(), true)),
+        });
+    }
     if let Some(descriptor) = list(&source_root)?.into_iter().find(|descriptor| {
         descriptor.work_item_id == work_id
             && descriptor.attempt_id == attempt_id
@@ -183,8 +214,21 @@ fn record_for(identity: &TerminalIdentity) -> PathBuf {
     identity.artifact_dir.join("execution.json")
 }
 
-fn descriptor_path(record: &Path) -> PathBuf {
-    record.with_file_name(DESCRIPTOR)
+fn registry_dir(identity: &TerminalIdentity) -> PathBuf {
+    identity
+        .source_root
+        .join(".fluent/work/terminal-sessions")
+        .join(&identity.work_item_id)
+        .join(&identity.attempt_id)
+        .join(&identity.task_id)
+}
+
+fn descriptor_path(identity: &TerminalIdentity) -> PathBuf {
+    registry_dir(identity).join(DESCRIPTOR)
+}
+
+fn resource_path(identity: &TerminalIdentity) -> PathBuf {
+    registry_dir(identity).join("resource.json")
 }
 
 fn read_record(path: &Path) -> Result<ExecutionRecord> {
@@ -206,8 +250,7 @@ fn find_tmux() -> Result<PathBuf> {
 
 fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<()> {
     ensure!(stored.descriptor == *requested, "terminal identity changed");
-    let published: StoredTerminal =
-        serde_json::from_slice(&std::fs::read(descriptor_path(&stored.execution_record))?)?;
+    let published: StoredTerminal = serde_json::from_slice(&std::fs::read(&stored.registry_path)?)?;
     ensure!(
         published.descriptor == *requested,
         "terminal descriptor changed"
@@ -217,6 +260,10 @@ fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<(
         "terminal owner path changed"
     );
     ensure!(published.socket == stored.socket, "terminal socket changed");
+    ensure!(
+        published.registry_path == stored.registry_path,
+        "terminal registry changed"
+    );
     let record = read_record(&stored.execution_record)?;
     ensure!(
         record.state == ExecutionState::Running
@@ -238,6 +285,11 @@ impl TerminalSession {
         ready: impl FnOnce(Option<&Path>) -> Result<()>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&identity.artifact_dir)?;
+        ensure!(
+            identity.artifact_dir.canonicalize()? == identity.artifact_dir,
+            "terminal artifact area resolves outside its Task"
+        );
+        std::fs::create_dir_all(registry_dir(&identity))?;
         let transcript = identity.artifact_dir.join("transcript.jsonl");
         let owner = attempt_owner.then(|| execution::AttemptExecutionOwner {
             project_root: identity.source_root.clone(),
@@ -249,9 +301,6 @@ impl TerminalSession {
         let mut child = match execution::spawn(&mut command, &transcript) {
             Ok(child) => child,
             Err(error) => {
-                if let Some(dir) = &socket_dir {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
                 return Err(error).context("starting managed terminal server");
             }
         };
@@ -268,6 +317,7 @@ impl TerminalSession {
             );
             let session_id = format!("{}-{}", identity.task_id, generation);
             let root = identity.source_root.canonicalize()?;
+            let registry_path = descriptor_path(&identity);
             let descriptor = TerminalDescriptor {
                 schema_version: 1,
                 source_id: root.to_string_lossy().into_owned(),
@@ -288,9 +338,10 @@ impl TerminalSession {
                 descriptor,
                 execution_record: record_path.clone(),
                 socket: socket_dir.as_ref().map(|dir| dir.join("socket")),
+                registry_path,
             };
             crate::atomic_write::atomic_write(
-                &descriptor_path(&record_path),
+                &stored.registry_path,
                 &serde_json::to_vec_pretty(&stored)?,
             )?;
             Ok(stored)
@@ -300,8 +351,10 @@ impl TerminalSession {
             Err(error) => {
                 let cleanup = execution::cancel(&record_path)
                     .and_then(|_| child.wait().map(|_| ()).map_err(Into::into));
-                if let Some(dir) = &socket_dir {
-                    let _ = std::fs::remove_dir_all(dir);
+                if cleanup.is_ok() {
+                    if let Some(dir) = &socket_dir {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
                 }
                 return Err(error)
                     .context(format!("setting up managed terminal; cleanup: {cleanup:?}"));
@@ -323,21 +376,97 @@ impl TerminalSession {
         Self::start_command(identity, child, None, false, |_| Ok(()))
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn start_fixture_failed_setup(identity: TerminalIdentity) -> Result<Self> {
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg("sleep 30");
+        Self::start_command(identity, child, None, false, |_| {
+            bail!("injected terminal setup failure")
+        })
+    }
+
     /// Start a foreground tmux server inside the supplied worker profile.
     /// Pane commands inherit that server's sandbox and private environment.
     pub fn start_managed(
-        identity: TerminalIdentity,
+        mut identity: TerminalIdentity,
         worker_profile: &crate::os::SandboxProfile,
+        working_dir: &Path,
         shell_command: &str,
         environment: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> Result<Self> {
-        let socket_dir = tempfile::Builder::new()
+        identity.source_root = identity.source_root.canonicalize()?;
+        for id in [
+            &identity.work_item_id,
+            &identity.attempt_id,
+            &identity.task_id,
+        ] {
+            ensure!(
+                Path::new(id).components().count() == 1
+                    && Path::new(id)
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "terminal identity contains an invalid path component"
+            );
+        }
+        let expected_artifact = identity
+            .source_root
+            .join(".fluent/work/artifacts")
+            .join(&identity.work_item_id)
+            .join(&identity.attempt_id)
+            .join(&identity.task_id);
+        ensure!(
+            identity.artifact_dir == expected_artifact,
+            "terminal artifact area is outside its Task"
+        );
+        let store = crate::work_model::WorkModelStore::new(&identity.source_root);
+        let item = store.read_work_item_snapshot(&identity.work_item_id)?;
+        let task = item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == identity.attempt_id)
+            .and_then(|attempt| {
+                attempt
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == identity.task_id)
+            })
+            .context("managed terminal Task is absent from its source")?;
+        ensure!(
+            matches!(
+                task.kind,
+                crate::work_model::TaskKind::Write
+                    | crate::work_model::TaskKind::Review
+                    | crate::work_model::TaskKind::Rebase
+                    | crate::work_model::TaskKind::Learn
+            ),
+            "this worker has no agent conversation to steer"
+        );
+        let socket_guard = tempfile::Builder::new()
             .prefix("fluent-t-")
-            .tempdir_in("/private/tmp")?
-            .keep();
+            .tempdir_in("/private/tmp")?;
+        let socket_dir = socket_guard.path().to_path_buf();
         let socket = socket_dir.join("socket");
         let profile = crate::os::profile_with_terminal_socket(worker_profile, &socket_dir)?;
         let tmux = find_tmux()?;
+        std::fs::create_dir_all(registry_dir(&identity))?;
+        let resource = TerminalResource {
+            execution_record: record_for(&identity),
+            socket: socket.clone(),
+        };
+        let resource_path = resource_path(&identity);
+        let mut resource_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&resource_path)
+            .context("reserving managed terminal resource")?;
+        if let Err(error) = resource_file
+            .write_all(&serde_json::to_vec_pretty(&resource)?)
+            .and_then(|_| resource_file.sync_all())
+        {
+            drop(resource_file);
+            let _ = std::fs::remove_file(&resource_path);
+            return Err(error).context("writing managed terminal resource");
+        }
         let mut command = crate::os::command_under_profile(&profile, &tmux);
         command
             .arg("-S")
@@ -346,20 +475,36 @@ impl TerminalSession {
             .arg("/dev/null")
             .arg("-D");
         command.env_clear();
+        command.current_dir(working_dir);
         for (key, value) in environment {
             command.env(key, value);
         }
-        let mut session = Self::start_command(identity, command, Some(socket_dir), true, |_| {
+        command.env_remove("TMUX");
+        let result = Self::start_command(identity, command, Some(socket_dir), true, |_| {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !socket.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
             ensure!(socket.exists(), "tmux server did not create its socket");
+            #[cfg(feature = "test-support")]
+            if let Some(barrier) = std::env::var_os("FLUENT_TEST_TERMINAL_SETUP_BARRIER") {
+                let barrier = PathBuf::from(barrier);
+                std::fs::write(barrier.with_extension("ready"), b"server-ready")?;
+                while !barrier.exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            #[cfg(feature = "test-support")]
+            if std::env::var_os("FLUENT_TEST_TERMINAL_FAIL_AFTER_SERVER").is_some() {
+                bail!("injected terminal failure after server startup");
+            }
             let output = Command::new(&tmux)
+                .env_remove("TMUX")
                 .arg("-S")
                 .arg(&socket)
                 .arg("new-session")
                 .arg("-d")
+                .arg("-E")
                 .arg("-s")
                 .arg("fluent")
                 .arg(shell_command)
@@ -371,13 +516,36 @@ impl TerminalSession {
                 String::from_utf8_lossy(&output.stderr)
             );
             Ok(())
-        })?;
+        });
+        let mut session = match result {
+            Ok(session) => session,
+            Err(error) => {
+                let record_path = resource.execution_record;
+                let settled = read_record(&record_path)
+                    .map(|record| record.state == ExecutionState::Canceled)
+                    .unwrap_or(false);
+                let no_server = !execution::execution_is_live(&record_path).unwrap_or(false)
+                    && !socket.exists();
+                if settled || no_server {
+                    let _ = std::fs::remove_file(resource_path);
+                } else {
+                    let _ = socket_guard.keep();
+                }
+                return Err(error);
+            }
+        };
+        let _ = socket_guard.keep();
         session._profile = Some(profile);
         Ok(session)
     }
 
     pub fn descriptor(&self) -> &TerminalDescriptor {
         &self.stored.descriptor
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn socket_path(&self) -> Option<&Path> {
+        self.stored.socket.as_deref()
     }
 
     pub fn is_live(&self) -> Result<bool> {
@@ -394,6 +562,12 @@ impl TerminalSession {
 
     pub fn stop(&mut self) -> Result<()> {
         if self.child.is_some() {
+            let record = read_record(&self.stored.execution_record)?;
+            ensure!(
+                record.launch_generation.as_deref()
+                    == Some(&self.stored.descriptor.execution_generation),
+                "managed terminal generation changed before settlement"
+            );
             execution::cancel(&self.stored.execution_record)?;
             if let Some(mut child) = self.child.take() {
                 child.wait()?;
@@ -401,6 +575,10 @@ impl TerminalSession {
         }
         if let Some(dir) = self.socket_dir.take() {
             std::fs::remove_dir_all(dir)?;
+            let resource = self.stored.registry_path.with_file_name("resource.json");
+            if resource.exists() {
+                std::fs::remove_file(resource)?;
+            }
         }
         Ok(())
     }
@@ -418,7 +596,7 @@ impl Attachment {
         }
         let path = self
             .stored
-            .execution_record
+            .registry_path
             .with_file_name("terminal-control.lock");
         match lease::try_acquire(&path)? {
             LeaseAttempt::Acquired(lease) => {
@@ -430,8 +608,37 @@ impl Attachment {
         }
     }
 
-    pub fn resize(&self, _columns: u16, _rows: u16) -> Result<()> {
-        validate(&self.stored, &self.stored.descriptor)
+    pub fn resize(&self, columns: u16, rows: u16) -> Result<()> {
+        validate(&self.stored, &self.stored.descriptor)?;
+        ensure!(
+            self.control.is_some(),
+            "Control is required to resize the shared terminal"
+        );
+        ensure!(
+            columns > 0 && rows > 0,
+            "terminal dimensions must be positive"
+        );
+        let socket = self
+            .stored
+            .socket
+            .as_ref()
+            .context("fixture has no tmux socket")?;
+        let status = Command::new(find_tmux()?)
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(socket)
+            .args([
+                "resize-window",
+                "-t",
+                "fluent",
+                "-x",
+                &columns.to_string(),
+                "-y",
+                &rows.to_string(),
+            ])
+            .status()?;
+        ensure!(status.success(), "resizing managed terminal failed");
+        Ok(())
     }
 
     pub fn run(&self) -> Result<i32> {
@@ -441,8 +648,13 @@ impl Attachment {
             .socket
             .as_ref()
             .context("fixture has no tmux socket")?;
-        let mut command = Command::new("tmux");
-        command.arg("-S").arg(socket).arg("attach-session");
+        let mut command = Command::new(find_tmux()?);
+        command.env_remove("TMUX");
+        command
+            .arg("-S")
+            .arg(socket)
+            .arg("attach-session")
+            .arg("-E");
         if self.control.is_none() {
             command.arg("-r");
         }
@@ -468,7 +680,7 @@ pub fn resolve(source_root: &Path, session_id: &str) -> Result<Attachment> {
 
 fn list_stored(source_root: &Path) -> Result<Vec<StoredTerminal>> {
     let source_root = source_root.canonicalize()?;
-    let root = source_root.join(".fluent/work/artifacts");
+    let root = source_root.join(".fluent/work/terminal-sessions");
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -502,9 +714,19 @@ fn list_stored(source_root: &Path) -> Result<Vec<StoredTerminal>> {
                     .join(&stored.descriptor.work_item_id)
                     .join(&stored.descriptor.attempt_id)
                     .join(&stored.descriptor.task_id)
+                    .join(DESCRIPTOR);
+                ensure!(
+                    stored.registry_path == expected && entry.path() == expected,
+                    "terminal registry path escapes its source"
+                );
+                let execution = source_root
+                    .join(".fluent/work/artifacts")
+                    .join(&stored.descriptor.work_item_id)
+                    .join(&stored.descriptor.attempt_id)
+                    .join(&stored.descriptor.task_id)
                     .join("execution.json");
                 ensure!(
-                    stored.execution_record == expected,
+                    stored.execution_record == execution,
                     "terminal owner path escapes its source"
                 );
                 ensure!(
@@ -532,4 +754,289 @@ pub fn list(source_root: &Path) -> Result<Vec<TerminalDescriptor>> {
         descriptors.push(descriptor);
     }
     Ok(descriptors)
+}
+
+/// Follow parent links from tmux pane PIDs, including children in other
+/// process groups. A server PID or socket alone cannot prove pane settlement.
+pub fn descendants_from_ps(table: &str, pane_pids: &[u32]) -> Result<Vec<u32>> {
+    let mut parents = BTreeMap::new();
+    for line in table.lines() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        ensure!(parts.len() == 3, "invalid process inventory row");
+        let pid: u32 = parts[0].parse()?;
+        let ppid: u32 = parts[1].parse()?;
+        let _group: u32 = parts[2].parse()?;
+        parents.insert(pid, ppid);
+    }
+    let mut owned: BTreeSet<u32> = pane_pids.iter().copied().collect();
+    loop {
+        let before = owned.len();
+        for (&pid, &ppid) in &parents {
+            if owned.contains(&ppid) {
+                owned.insert(pid);
+            }
+        }
+        if owned.len() == before {
+            break;
+        }
+    }
+    Ok(owned.into_iter().collect())
+}
+
+fn process_table() -> Result<String> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,pgid="])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "reading terminal process inventory failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).context("terminal process inventory is not UTF-8")
+}
+
+fn signal_pid(pid: u32, signal: i32) -> Result<()> {
+    let pid = i32::try_from(pid)?;
+    let result = unsafe { libc::kill(pid, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).context("signaling terminal pane descendant")
+}
+
+fn process_start(pid: u32) -> Result<Option<String>> {
+    let output = Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        output.status.success(),
+        "reading terminal process start time failed"
+    );
+    let value = String::from_utf8(output.stdout)?;
+    Ok((!value.trim().is_empty()).then(|| value.trim().to_string()))
+}
+
+fn signal_same_process(pid: u32, started: &str, signal: i32) -> Result<()> {
+    match process_start(pid)? {
+        None => Ok(()),
+        Some(actual) if actual == started => signal_pid(pid, signal),
+        Some(_) => bail!("terminal descendant PID {pid} was reused before settlement"),
+    }
+}
+
+fn live_pids(pids: &[u32]) -> Result<Vec<u32>> {
+    let output = Command::new("/bin/ps")
+        .args(["-axo", "pid=,stat="])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "reading terminal process states failed"
+    );
+    let table = String::from_utf8(output.stdout)?;
+    let live: BTreeSet<u32> = table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let state = fields.next()?;
+            (!state.starts_with('Z')).then_some(pid)
+        })
+        .collect();
+    Ok(pids
+        .iter()
+        .copied()
+        .filter(|pid| live.contains(pid))
+        .collect())
+}
+
+struct StoppedPanes(Vec<u32>);
+
+impl StoppedPanes {
+    fn stop(&mut self, pid: u32) -> Result<()> {
+        signal_pid(pid, libc::SIGSTOP)?;
+        self.0.push(pid);
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        while let Some(pid) = self.0.pop() {
+            if let Err(error) = signal_pid(pid, libc::SIGCONT) {
+                self.0.push(pid);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StoppedPanes {
+    fn drop(&mut self) {
+        for pid in self.0.drain(..) {
+            let _ = signal_pid(pid, libc::SIGCONT);
+        }
+    }
+}
+
+fn settle_panes(socket: &Path, leader_pid: u32) -> Result<()> {
+    if !socket.exists() {
+        return Ok(());
+    }
+    let output = Command::new(find_tmux()?)
+        .env_remove("TMUX")
+        .arg("-S")
+        .arg(socket)
+        .args(["list-panes", "-a", "-F", "#{pane_pid}"])
+        .output()?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        if error.contains("no sessions") {
+            return Ok(());
+        }
+        bail!("reading managed pane owners failed: {error}");
+    }
+    let panes: Vec<u32> = String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()?;
+    let server_tree = descendants_from_ps(&process_table()?, &[leader_pid])?;
+    ensure!(
+        panes.iter().all(|pane| server_tree.contains(pane)),
+        "tmux pane owner is outside the verified execution tree"
+    );
+    let mut stopped = StoppedPanes(Vec::new());
+    for pid in &panes {
+        stopped.stop(*pid)?;
+    }
+    let mut owned = BTreeSet::new();
+    let mut stable = false;
+    for _ in 0..8 {
+        let now = descendants_from_ps(&process_table()?, &panes)?;
+        let before = owned.len();
+        for pid in now {
+            if owned.insert(pid) {
+                stopped.stop(pid)?;
+            }
+        }
+        if before == owned.len() {
+            stable = true;
+            break;
+        }
+    }
+    ensure!(
+        stable,
+        "terminal descendants changed throughout settlement inventory"
+    );
+    let pids: Vec<u32> = owned.into_iter().collect();
+    let mut starts = BTreeMap::new();
+    for pid in &pids {
+        if let Some(start) = process_start(*pid)? {
+            starts.insert(*pid, start);
+        }
+    }
+    for pid in pids.iter().rev() {
+        if let Some(start) = starts.get(pid) {
+            signal_same_process(*pid, start, libc::SIGTERM)?;
+        }
+    }
+    stopped.resume()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if live_pids(&pids)?.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for pid in live_pids(&pids)? {
+        let start = starts
+            .get(&pid)
+            .context("terminal descendant lacked a start identity")?;
+        signal_same_process(pid, start, libc::SIGKILL)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if live_pids(&pids)?.is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("managed terminal pane descendants did not settle")
+}
+
+/// Settle pane descendants before the existing execution owner signals its
+/// server group. The resource receipt lives outside worker-writable artifacts.
+pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Result<()> {
+    let Some(owner) = &record.attempt_owner else {
+        return Ok(());
+    };
+    let task = path
+        .parent()
+        .and_then(Path::file_name)
+        .context("terminal execution has no Task directory")?;
+    for id in [&owner.work_item_id, &owner.attempt_id] {
+        ensure!(
+            Path::new(id).components().count() == 1
+                && Path::new(id)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "terminal execution owner contains an invalid identifier"
+        );
+    }
+    let registry = owner
+        .project_root
+        .join(".fluent/work/terminal-sessions")
+        .join(&owner.work_item_id)
+        .join(&owner.attempt_id)
+        .join(task);
+    let resource_path = registry.join("resource.json");
+    let metadata = match std::fs::symlink_metadata(&resource_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let expected = owner
+        .project_root
+        .join(".fluent/work/artifacts")
+        .join(&owner.work_item_id)
+        .join(&owner.attempt_id)
+        .join(task)
+        .join("execution.json");
+    ensure!(
+        path == expected,
+        "terminal execution record is outside its owner Task"
+    );
+    ensure!(
+        metadata.is_file(),
+        "terminal resource receipt is not a regular file"
+    );
+    let resource: TerminalResource = serde_json::from_slice(&std::fs::read(&resource_path)?)?;
+    ensure!(
+        resource.execution_record == path,
+        "terminal resource owner changed"
+    );
+    let socket_dir = resource
+        .socket
+        .parent()
+        .context("terminal socket has no directory")?;
+    ensure!(
+        socket_dir.parent() == Some(Path::new("/private/tmp"))
+            && socket_dir
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("fluent-t-"))
+            && resource
+                .socket
+                .file_name()
+                .is_some_and(|name| name == "socket"),
+        "terminal socket path is outside its private namespace"
+    );
+    if !resource.socket.exists() && registry.join(DESCRIPTOR).exists() {
+        bail!("managed terminal socket disappeared before pane descendants could be verified");
+    }
+    settle_panes(&resource.socket, record.leader_pid)
 }

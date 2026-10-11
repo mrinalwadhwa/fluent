@@ -182,6 +182,15 @@ It does not cancel Attempts, start a replacement, or signal the displayed PID.
 If an Attempt does not finish, use its existing explicit cancellation or
 recovery path and retry the stop for the same service instance.
 
+Use `fluent terminal list --source <checkout>` to inspect managed worker
+sessions. `fluent terminal attach <session-id> --source <checkout>` observes a
+live session; add `--control` to request the single writable lease. If Control
+is occupied, Fluent reports that fact and opens an Observe attachment. Use
+`fluent terminal explain --source <checkout> <work-item> <attempt> <task>` to
+see why a selected worker has no live agent terminal. Managed sessions are
+created only by native worker execution; existing headless Tasks do not gain
+one retroactively.
+
 An older shared service may answer health without the instance identity and
 drain capability. The new client cannot stop that process safely. Stop it from
 its original terminal or supervisor, wait for its active work to settle, then

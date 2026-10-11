@@ -3568,6 +3568,24 @@ The author escalates to `needs-user` only when genuinely stuck.
 
 ### Local
 
+Managed terminal sessions use one foreground tmux server per worker invocation.
+`terminal_sessions` publishes a versioned descriptor under the source's
+host-owned `.fluent/work/terminal-sessions/` tree only after the server and
+session start. The descriptor names the source, Work Item, Attempt, Task, and
+execution generation; attachment rechecks the child-owned execution receipt
+and live owner lock. A private socket directory has an exact Seatbelt grant in
+the worker's profile. The server starts under that profile, so its pane
+commands inherit the worker's workspace permissions. An attachment has no
+authority to start a worker.
+
+`fluent terminal attach` observes by default. Control uses a process-held
+lock beside the host-owned descriptor. A second controller may still observe,
+and detaching releases only the client lease. Cancellation inventories tmux
+pane descendants before stopping the server; the inventory includes children
+in other process groups. If it cannot verify settlement, cancellation fails
+without claiming successful cleanup. The separate host acceptance check must
+prove this behavior on a real macOS Seatbelt and tmux runtime.
+
 The fluent command runs Tasks on the local machine. Claude and Codex
 run inside a macOS Seatbelt sandbox rendered by Fluent. Fluent renders
 each sandbox from `common.sb` plus the selected coder's profile layer:

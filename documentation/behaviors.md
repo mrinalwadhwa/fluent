@@ -75,6 +75,13 @@ Test: tests/binary.rs (verification_worker_does_not_block_unrelated_attempt_prog
 
 ## Terminal cancellation ownership
 
+Managed terminals bind attachment to an execution generation and retain their
+worker when a client detaches. Observe is read-only; a single process-held
+Control lease permits input and releases on client death. A changed or ended
+generation rejects attachment. Existing headless workers, completed Tasks,
+and deterministic Tester workers explain why they have no live agent terminal.
+Cancellation must settle the server and pane descendants before success.
+
 ### B1
 
 WHEN an operator cancels a local Attempt,

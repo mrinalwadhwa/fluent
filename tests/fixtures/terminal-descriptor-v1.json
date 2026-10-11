@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source_id": "/source",
+  "project_identity": "/source",
+  "work_item_id": "work-1",
+  "attempt_id": "attempt-1",
+  "task_id": "task-1",
+  "execution_generation": "0123456789abcdef0123456789abcdef",
+  "session_id": "task-1-0123456789abcdef0123456789abcdef",
+  "role": "writer",
+  "provider": "codex",
+  "lifecycle": "running",
+  "can_observe": true,
+  "can_control": true
+}
