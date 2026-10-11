@@ -2239,13 +2239,20 @@ fn cmd_cleanup(search_root: &Path, apply: bool, prune_all_review_worktrees: bool
     }
 
     if apply {
-        println!("Cleaned:");
+        println!("Cleanup results:");
     } else {
         println!("Dry run. Use --apply to clean:");
     }
 
     for result in work_results {
         match result {
+            WorkCleanupResult::RetainedSource {
+                work_item_id,
+                asset,
+                reason,
+            } => {
+                println!("  retained Work Item {work_item_id}: {asset}: {reason}");
+            }
             WorkCleanupResult::WorkItem(result) => {
                 let action = if result.applied {
                     "cleaned Work Item"

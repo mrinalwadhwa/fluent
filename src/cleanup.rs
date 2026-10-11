@@ -35,6 +35,11 @@ pub enum WorkBranchCleanup {
 #[derive(Debug, Clone)]
 pub enum WorkCleanupResult {
     WorkItem(WorkItemCleanupResult),
+    RetainedSource {
+        work_item_id: String,
+        asset: String,
+        reason: String,
+    },
     OrphanArtifact(OrphanWorkArtifactCleanupResult),
 }
 
@@ -177,8 +182,41 @@ pub fn cleanup_work_items(
                 }
             }
         }
-        let plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, options.apply)?;
+        let mut plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, false)?;
+        let source = match assess_owned_source(&source_root, &work_item, &registered) {
+            Ok(source) => source,
+            Err((asset, reason)) => {
+                results.push(WorkCleanupResult::RetainedSource {
+                    work_item_id: work_item.id.clone(),
+                    asset,
+                    reason,
+                });
+                continue;
+            }
+        };
         if options.apply {
+            let current = registered_worktrees(&source_root)?;
+            match assess_owned_source(&source_root, &work_item, &current) {
+                Ok(again) if again == source => {}
+                Ok(_) => {
+                    results.push(WorkCleanupResult::RetainedSource {
+                        work_item_id: work_item.id.clone(),
+                        asset: work_item.id.clone(),
+                        reason: "owned source identity changed before removal".into(),
+                    });
+                    continue;
+                }
+                Err((asset, reason)) => {
+                    results.push(WorkCleanupResult::RetainedSource {
+                        work_item_id: work_item.id.clone(),
+                        asset,
+                        reason,
+                    });
+                    continue;
+                }
+            }
+            remove_owned_source(&source_root, &mut plan, &source)?;
+            plan.applied = true;
             apply_work_item_cleanup(&plan)?;
         }
         results.push(WorkCleanupResult::WorkItem(plan));
@@ -477,6 +515,245 @@ fn work_cleanup_plan(
         worktrees,
         branches,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedSource {
+    worktrees: Vec<(PathBuf, String)>,
+    branches: Vec<(String, String)>,
+}
+
+fn assess_owned_source(
+    root: &Path,
+    item: &WorkItem,
+    registered: &[PathBuf],
+) -> std::result::Result<OwnedSource, (String, String)> {
+    let mut source = OwnedSource {
+        worktrees: Vec::new(),
+        branches: Vec::new(),
+    };
+    let registrations = git::run_stdout(
+        root,
+        &["worktree", "list", "--porcelain"],
+        "inspect worktree registrations",
+    )
+    .map_err(|err| (item.id.clone(), err.to_string()))?;
+    for attempt in &item.attempts {
+        for workspace in attempt.tasks.iter().flat_map(|task| &task.workspace_access.writes) {
+            resolve_expected_candidate_workspace_path(
+                root, &workspace.path, &item.id, &attempt.id, "Work cleanup",
+            )
+            .map_err(|err| (workspace.path.clone(), err.to_string()))?;
+        }
+        for candidate in item.merge_candidates.iter().filter(|candidate| candidate.attempt_id == attempt.id) {
+            resolve_expected_candidate_workspace_path(
+                root, &candidate.source_workspace.path, &item.id, &attempt.id, "Work cleanup",
+            )
+            .map_err(|err| (candidate.source_workspace.path.clone(), err.to_string()))?;
+        }
+        let mut targets = Vec::new();
+        for candidate in item
+            .merge_candidates
+            .iter()
+            .filter(|candidate| candidate.attempt_id == attempt.id)
+        {
+            targets.push(candidate.target_branch.as_str());
+        }
+        for task in &attempt.tasks {
+            if let Some(output) = &task.output {
+                targets.push(output.source_branch.as_str());
+            }
+        }
+        let target = targets
+            .first()
+            .copied()
+            .filter(|first| targets.iter().all(|other| other == first));
+        let workspace = crate::work_model::initial_candidate_workspace_path(&item.id, &attempt.id);
+        let path = resolve_expected_candidate_workspace_path(
+            root,
+            &workspace,
+            &item.id,
+            &attempt.id,
+            "Work cleanup",
+        )
+        .map_err(|err| (workspace.clone(), err.to_string()))?;
+        let registration_head = registered_head(&registrations, &path);
+        if path_is_registered(&path, registered) && registration_head.is_none() {
+            return Err((
+                path.display().to_string(),
+                "cannot resolve registered candidate HEAD".into(),
+            ));
+        }
+        let has_path = path.exists();
+        let has_worktree = has_path || registration_head.is_some();
+        let mut branch_tips = Vec::new();
+        for task in &attempt.tasks {
+            let branch = format!("work/{}/{}/{}", item.id, attempt.id, task.id);
+            let exists = git_branch_exists(root, &branch)
+                .map_err(|err| (branch.clone(), err.to_string()))?;
+            if exists {
+                let tip = git::run_stdout(
+                    root,
+                    &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+                    "resolve Work branch",
+                )
+                .map_err(|err| (branch.clone(), err.to_string()))?;
+                branch_tips.push((branch, tip));
+            }
+        }
+        if !has_worktree && branch_tips.is_empty() {
+            continue;
+        }
+        let target = target.ok_or_else(|| {
+            (
+                attempt.id.clone(),
+                "missing or conflicting target branch identity".into(),
+            )
+        })?;
+        let target_ref = format!("refs/heads/{target}");
+        let target_tip = git::run_stdout(
+            root,
+            &["rev-parse", "--verify", &target_ref],
+            "resolve cleanup target branch",
+        )
+        .map_err(|err| (target_ref.clone(), err.to_string()))?;
+        for (branch, tip) in branch_tips {
+            ensure_integrated(root, &branch, &tip, &target_tip)?;
+            source.branches.push((branch, tip));
+        }
+        if has_worktree {
+            let head = if has_path {
+                if registration_head.is_none() {
+                    return Err((
+                        path.display().to_string(),
+                        "existing candidate directory is not a registered worktree".into(),
+                    ));
+                }
+                let actual_root = git::run_stdout(
+                    &path,
+                    &["rev-parse", "--show-toplevel"],
+                    "check candidate ownership",
+                )
+                .map_err(|err| (path.display().to_string(), err.to_string()))?;
+                if fs::canonicalize(&actual_root).ok() != fs::canonicalize(&path).ok() {
+                    return Err((
+                        path.display().to_string(),
+                        "candidate worktree ownership changed".into(),
+                    ));
+                }
+                let status = git::run_stdout(
+                    &path,
+                    &["status", "--porcelain", "--untracked-files=all"],
+                    "check candidate changes",
+                )
+                .map_err(|err| (path.display().to_string(), err.to_string()))?;
+                if !status.is_empty() {
+                    return Err((path.display().to_string(), "pending file changes".into()));
+                }
+                git::run_stdout(&path, &["rev-parse", "HEAD"], "resolve candidate HEAD")
+                    .map_err(|err| (path.display().to_string(), err.to_string()))?
+            } else {
+                registration_head.unwrap().to_string()
+            };
+            ensure_integrated(root, &path.display().to_string(), &head, &target_tip)?;
+            if !path_is_registered(&path, registered) {
+                return Err((
+                    path.display().to_string(),
+                    "candidate registration changed".into(),
+                ));
+            }
+            source.worktrees.push((path, head));
+        }
+    }
+    Ok(source)
+}
+
+fn registered_head<'a>(porcelain: &'a str, path: &Path) -> Option<&'a str> {
+    porcelain.split("\n\n").find_map(|record| {
+        let mut lines = record.lines();
+        let registered = lines.next()?.strip_prefix("worktree ")?;
+        (Path::new(registered) == path)
+            .then(|| lines.find_map(|line| line.strip_prefix("HEAD ")))
+            .flatten()
+    })
+}
+
+fn ensure_integrated(
+    root: &Path,
+    asset: &str,
+    source: &str,
+    target: &str,
+) -> std::result::Result<(), (String, String)> {
+    let output = git::run_raw(root, &["merge-base", "--is-ancestor", source, target])
+        .map_err(|err| (asset.into(), err.to_string()))?;
+    match output.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => Err((
+            asset.into(),
+            "source commits are not integrated into the target branch".into(),
+        )),
+        _ => Err((
+            asset.into(),
+            format!(
+                "cannot verify source integration: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )),
+    }
+}
+
+fn remove_owned_source(
+    root: &Path,
+    plan: &mut WorkItemCleanupResult,
+    source: &OwnedSource,
+) -> Result<()> {
+    for (path, head) in &source.worktrees {
+        let current = registered_worktrees(root)?;
+        anyhow::ensure!(
+            path_is_registered(path, &current),
+            "candidate registration changed: {}",
+            path.display()
+        );
+        let registration = git::run_stdout(
+            root,
+            &["worktree", "list", "--porcelain"],
+            "check candidate registration",
+        )?;
+        anyhow::ensure!(
+            registered_head(&registration, path) == Some(head.as_str()),
+            "candidate HEAD changed: {}",
+            path.display()
+        );
+        let path_text = path.to_string_lossy();
+        if path.exists() {
+            git::run(
+                root,
+                &["worktree", "remove", &path_text],
+                "remove clean registered worktree",
+            )?;
+        } else {
+            remove_registered_worktree(root, path)?;
+        }
+        for worktree in &mut plan.worktrees {
+            if matches!(worktree, WorktreeCleanup::WouldRemove(existing) | WorktreeCleanup::Missing(existing) if existing == path)
+            {
+                *worktree = WorktreeCleanup::Removed(path.clone());
+            }
+        }
+    }
+    for (branch, tip) in &source.branches {
+        git::run(
+            root,
+            &["update-ref", "-d", &format!("refs/heads/{branch}"), tip],
+            "remove unchanged Work branch",
+        )?;
+        for entry in &mut plan.branches {
+            if matches!(entry, WorkBranchCleanup::WouldRemove(existing) if existing == branch) {
+                *entry = WorkBranchCleanup::Removed(branch.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn orphan_work_artifact_cleanup_plans(
