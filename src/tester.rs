@@ -243,6 +243,7 @@ pub struct TesterSandbox {
 pub struct TesterSettlement {
     settlement_directories: Vec<Option<PathBuf>>,
     commands: Vec<TesterCommand>,
+    original_indexes: Vec<usize>,
 }
 
 impl TesterSandbox {
@@ -545,35 +546,6 @@ pub fn prepare_sandbox_profile(
     resolver: &ContentResolver,
     plan: &TesterPlan,
 ) -> Result<TesterSandbox> {
-    if plan
-        .commands
-        .iter()
-        .any(|command| !command.permissions.is_empty())
-    {
-        anyhow::ensure!(!no_sandbox, "process-table-read requires the macOS sandbox");
-        anyhow::ensure!(
-            cfg!(target_os = "macos"),
-            "process-table-read requires macOS"
-        );
-        let candidate = crate::git::run_stdout(
-            candidate_workspace,
-            &["rev-parse", "HEAD"],
-            "resolve Tester candidate",
-        )?;
-        for (command, original_index) in plan.commands.iter().zip(&plan.original_indexes) {
-            if command
-                .permissions
-                .contains(&TesterPermission::ProcessTableRead)
-            {
-                crate::tester_permissions::check_current_approval(
-                    candidate_workspace,
-                    &candidate,
-                    *original_index,
-                )?;
-            }
-        }
-        anyhow::bail!("permission profile is not ready; approved commands remain blocked");
-    }
     let settlement = prepare_settlement_directories(artifact_dir, plan)?;
     render_sandbox_profile(
         candidate_workspace,
@@ -633,6 +605,7 @@ fn prepare_settlement_directories_with(
     Ok(TesterSettlement {
         settlement_directories,
         commands: plan.commands.clone(),
+        original_indexes: plan.original_indexes.clone(),
     })
 }
 
@@ -667,7 +640,14 @@ pub(crate) fn render_sandbox_profile_with_cache(
     let TesterSettlement {
         settlement_directories,
         commands,
+        original_indexes,
     } = settlement;
+    check_requested_permissions(
+        candidate_workspace,
+        no_sandbox,
+        &commands,
+        &original_indexes,
+    )?;
     let launch_env = dependency_cache
         .map(|cache| cache.launch_env())
         .unwrap_or_default();
@@ -733,6 +713,47 @@ pub(crate) fn render_sandbox_profile_with_cache(
         }
         Err(err) => Err(err),
     }
+}
+
+fn check_requested_permissions(
+    candidate_workspace: &Path,
+    no_sandbox: bool,
+    commands: &[TesterCommand],
+    original_indexes: &[usize],
+) -> Result<()> {
+    anyhow::ensure!(
+        commands.len() == original_indexes.len(),
+        "Tester command identity mapping is incomplete"
+    );
+    if commands
+        .iter()
+        .all(|command| command.permissions.is_empty())
+    {
+        return Ok(());
+    }
+    anyhow::ensure!(!no_sandbox, "process-table-read requires the macOS sandbox");
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        "process-table-read requires macOS"
+    );
+    let candidate = crate::git::run_stdout(
+        candidate_workspace,
+        &["rev-parse", "HEAD"],
+        "resolve Tester candidate",
+    )?;
+    for (command, original_index) in commands.iter().zip(original_indexes) {
+        if command
+            .permissions
+            .contains(&TesterPermission::ProcessTableRead)
+        {
+            crate::tester_permissions::check_current_approval(
+                candidate_workspace,
+                &candidate,
+                *original_index,
+            )?;
+        }
+    }
+    anyhow::bail!("permission profile is not ready; approved commands remain blocked")
 }
 
 pub fn run_with_sandbox_profile(
@@ -1600,6 +1621,31 @@ mod tests {
         let result = run(workspace.path(), artifact_dir.path(), true, &resolver());
         assert!(result.is_err(), "an unapproved command must not launch");
         assert!(!workspace.path().join("launched").exists());
+    }
+
+    #[test]
+    fn tester_requested_permission_cannot_bypass_render_boundary() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        );
+        let plan = plan(workspace.path()).unwrap();
+        let settlement = prepare_settlement_directories(artifact_dir.path(), &plan).unwrap();
+
+        let error = render_sandbox_profile(
+            workspace.path(),
+            artifact_dir.path(),
+            true,
+            &resolver(),
+            settlement,
+        )
+        .err()
+        .expect("direct profile rendering must reject a permission request");
+
+        assert!(error.to_string().contains("requires the macOS sandbox"));
     }
 
     #[test]
