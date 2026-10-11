@@ -168,6 +168,33 @@ the boundary.
 
 Before starting review work, run `fluent tester check` to validate the Tester through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun the check.
 
+On macOS, a test command that needs the host process table can request
+`permissions: [process-table-read]` on that command's `.fluent/tester.yaml`
+entry. The request alone grants nothing. From the clean candidate checkout,
+inspect and explicitly approve its exact commit and original zero-based command
+index:
+
+```sh
+candidate=$(git rev-parse HEAD)
+fluent tester permissions show --candidate "$candidate" --command-index 0
+fluent tester permissions approve --candidate "$candidate" --command-index 0 \
+  --capability process-table-read --request-digest 'sha256:<digest from show>'
+```
+
+`show` reports the command, checkout, metadata exposure, approval state, and
+request digest without starting work. `approve` records host-owned authority
+without launching or resuming a Tester. Run `fluent tester check` or resume the
+paused Attempt separately. Use `fluent tester permissions revoke <approval-id>`
+to stop later launches; an already running command settles under its applied
+profile. A new commit, rebase, checkout, Tester configuration, extractor, or
+permission policy needs a fresh inspection and approval. Only the named
+command and its descendants receive the read-only `kern.proc.all` query; other
+commands and worker roles retain their default sandbox. This query exposes
+host-wide process metadata, including IDs, ancestry, names, user and group IDs,
+terminal data, and runtime fields. It does not grant process arguments,
+environment contents, memory, or control. It requires a capability-aware Fluent
+build and an active macOS sandbox; `--no-sandbox` cannot fulfill the request.
+
 If a production Tester Task needs a tracked change to `.fluent/tester.yaml` or `.fluent/extract-tester-results`, run the exact `fluent attempt repair-tester <work-item-id> <attempt-id> --resolution "<repair needed>"` command reported by `fluent status` or the needs-user handoff. Fluent records the decision and failed Tester artifacts, schedules a narrowly scoped Writer, and accepts only a clean commit whose changes stay inside those two project Tester files. If the Writer exceeds that boundary, Fluent records the rejected commit and restores the approved candidate so a public resume can retry. After Fluent accepts the repair request, resume through the scheduler or foreground Attempt command. Fresh reviews and the final Tester bind to the repair commit; the failed Tester and original candidate remain in the Attempt history.
 
 An environmental repair that does not change the candidate can retry the same Tester directly. A SwiftPM nested-sandbox diagnostic has its separate one-Task `--no-sandbox` approval. Fluent never edits project test configuration or scripts itself.

@@ -6573,6 +6573,44 @@ THE SYSTEM SHALL require the exact command, result, and covered risk for each
 check, plus the canonical commands left to Fluent's final Tester.
 Test: src/work_task_executor.rs (writer_prompt_assigns_focused_checks_and_reports_them_for_review)
 
+## Tester process-table permission
+
+### B1
+
+WHEN an operator inspects a configured `process-table-read` request, THE SYSTEM
+SHALL display its exact candidate and command identity, metadata exposure,
+scope, request digest, and current approval without launching work.
+Test: tests/binary.rs (tester_permissions_show_current_request_without_mutation)
+
+### B2
+
+WHEN an operator approves that exact request, THE SYSTEM SHALL record
+host-owned approval without running a Tester; revocation SHALL block later
+launches while retaining prior execution evidence.
+Test: tests/binary.rs (tester_permissions_approve_exact_request_without_launch, tester_permissions_revoke_blocks_future_launches)
+
+### B3
+
+IF a requested command lacks current approval for its candidate, command,
+configuration, extractor, or policy, THE SYSTEM SHALL refuse its launch as an
+unmet prerequisite.
+Test: tests/binary.rs (tester_permissions_reject_unapproved_or_stale_launch)
+
+### B4
+
+WHILE an approved command runs, THE SYSTEM SHALL apply the read-only
+`kern.proc.all` rule only to its process tree and retain protected provenance
+for the applied profile and settled result. Other commands, the extractor, and
+other worker roles SHALL retain their default profile.
+Test: tests/binary.rs (tester_permissions_record_applied_authority_in_evidence, tester_permissions_do_not_leak_to_other_execution_scopes)
+Test: tests/fixtures/verify-tester-process-table-permissions-host.sh
+
+### B5
+
+IF permission evidence lacks matching host provenance, THE SYSTEM SHALL refuse
+to credit it, including when it comes from an older unannotated Tester result.
+Test: tests/binary.rs (tester_permissions_reject_unproven_or_mismatched_evidence)
+
 ## Tester Task
 
 ### B1
