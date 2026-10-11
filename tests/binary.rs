@@ -51719,6 +51719,109 @@ fn legacy_round_cap_chain_rejects_altered_history() {
 }
 
 #[test]
+fn attempt_extend_after_writer_overrun_round_trips() {
+    use fluent::work_model::{
+        AttemptReviewState, AttemptStatus, EvidenceRecovery, PauseKind, TaskKind, TaskStatus,
+    };
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work_id = format!("currentcap{}", run_token(&tmp));
+    prepare_legacy_round_cap_chain(&project, &work_id);
+    let store = WorkModelStore::new(&project);
+    let mut item = store.read_work_item(&work_id).unwrap();
+    item.attempts[0].round_cap_extensions.clear();
+    store.write_work_item(&item).unwrap();
+    for (writers, evidence, new_cap) in [(3, 0, 4), (6, 1, 7), (9, 2, 10)] {
+        let mut item = store.read_work_item(&work_id).unwrap();
+        let output = item.attempts[0].tasks[0].output.clone().unwrap();
+        while item.attempts[0].materialized_write_rounds() < writers {
+            let writer_id = item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+            let writer = item.attempts[0]
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == writer_id)
+                .unwrap();
+            fluent::work_model::set_task_terminal(writer, TaskStatus::Complete);
+            writer.output = Some(output.clone());
+        }
+        if evidence > 0 {
+            let review_id = format!("evidence-{evidence}-tests");
+            let path = format!(".fluent/work/artifacts/{work_id}/attempt-1/{review_id}/review.md");
+            let writer = item.attempts[0]
+                .tasks
+                .iter_mut()
+                .rev()
+                .find(|task| task.kind == TaskKind::Write)
+                .unwrap();
+            writer
+                .input_artifacts
+                .push(fluent::work_model::ArtifactRef {
+                    producer_id: review_id.clone(),
+                    path: path.clone(),
+                });
+            item.attempts[0].evidence_recoveries.push(serde_json::from_value::<EvidenceRecovery>(serde_json::json!({
+                "id": format!("evidence-{evidence}"), "candidate_commit": output.commit,
+                "attachment": {"snapshot_path": format!("{path}.json"), "digest": "sha256:evidence"},
+                "targets": [{"role": "tests", "prior_review_artifact": path, "review_task_id": review_id}],
+                "state": "code-change", "created_at": "2026-10-01T01:00:00Z"
+            })).unwrap());
+            item.add_next_review_tasks("attempt-1", &["tests"]).unwrap();
+            let review = item.attempts[0].tasks.last_mut().unwrap();
+            fluent::work_model::set_task_terminal(review, TaskStatus::Complete);
+            let path = project
+                .join(&review.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "Verdict: fail\n").unwrap();
+        }
+        let attempt = &mut item.attempts[0];
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::RoundCap);
+        attempt.review_state = Some(AttemptReviewState::Failed);
+        store.write_work_item(&item).unwrap();
+        let prior = item.attempts[0].round_cap_extensions.clone();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "attempt",
+                "extend",
+                &work_id,
+                "attempt-1",
+                "--additional-write-rounds",
+                "1",
+                "--resolution",
+                "Preserve the public contract.",
+            ])
+            .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "2")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "cap {writers} -> {new_cap}"
+            )));
+        let loaded = store.read_work_item(&work_id).unwrap();
+        let attempt = &loaded.attempts[0];
+        assert_eq!(
+            &attempt.round_cap_extensions[..prior.len()],
+            prior.as_slice()
+        );
+        let extension = attempt.round_cap_extensions.last().unwrap();
+        assert_eq!(extension.old_cap, writers);
+        assert_eq!(extension.new_cap, new_cap);
+        assert_eq!(extension.pre_extension_write_rounds, Some(writers));
+        assert_eq!(extension.evidence_write_rounds, evidence);
+        assert_eq!(
+            attempt.tasks, item.attempts[0].tasks,
+            "approval never plans another Writer"
+        );
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "show", &work_id])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
 #[serial]
 fn attempt_extend_binds_candidate_and_failed_review_bytes() {
     use fluent::work_model::{

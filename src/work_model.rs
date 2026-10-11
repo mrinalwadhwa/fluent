@@ -23198,6 +23198,35 @@ random banner prose that must be ignored
     }
 
     #[test]
+    fn round_cap_extension_after_writer_overrun_round_trips() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Current round caps");
+        item.add_initial_attempt("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        // Each stage has more materialized Writers than the preceding cap plus
+        // its new evidence allowances. Use the actual extension writer each time.
+        for (writers, evidence, new_cap) in [(3, 0, 4), (6, 1, 7), (9, 2, 10)] {
+            let history = historical_round_cap_attempt(2, evidence, writers, new_cap);
+            let attempt = &mut item.attempts[0];
+            attempt.tasks = history.tasks[..writers].to_vec();
+            attempt.evidence_recoveries = history.evidence_recoveries;
+            let mut request = round_cap_request(1);
+            request.old_cap = writers;
+            request.candidate_commit = format!("candidate-{writers}");
+            let extension = attempt.record_round_cap_extension(2, request).unwrap();
+            assert_eq!(extension.new_cap, new_cap);
+            assert_eq!(extension.pre_extension_write_rounds, Some(writers));
+            assert_eq!(extension.evidence_write_rounds, evidence);
+            let expected = attempt.clone();
+            store.write_work_item(&item).unwrap();
+            item = store.read_work_item("work-1").unwrap();
+            assert_eq!(item.attempts[0], expected);
+            assert_eq!(item.attempts[0].effective_write_round_cap(99), new_cap);
+        }
+    }
+
+    #[test]
     fn legacy_attempt_omits_empty_round_cap_extensions() {
         let attempt: Attempt = serde_json::from_str(
             r#"{"id":"attempt-1","work_item_id":"work-1","status":"planned"}"#,
