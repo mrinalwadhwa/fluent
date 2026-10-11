@@ -450,6 +450,8 @@ impl TerminalSession {
             .tempdir_in("/private/tmp")?;
         let socket_dir = socket_guard.path().to_path_buf();
         let socket = socket_dir.join("socket");
+        let owner_handle = socket_dir.join("owner");
+        std::fs::File::create(&owner_handle).context("creating terminal owner handle")?;
         let profile = crate::os::profile_with_terminal_socket(worker_profile, &socket_dir)?;
         let tmux = find_tmux()?;
         std::fs::create_dir_all(registry_dir(&identity))?;
@@ -490,29 +492,12 @@ impl TerminalSession {
             command.env(key, value);
         }
         command.env_remove("TMUX");
-        command.env("FLUENT_TERMINAL_OWNER", &resource.owner_marker);
         let result = Self::start_command(identity, command, Some(socket_dir), true, |_| {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !socket.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
             ensure!(socket.exists(), "tmux server did not create its socket");
-            let environment = Command::new(&tmux)
-                .env_remove("TMUX")
-                .arg("-S")
-                .arg(&socket)
-                .args([
-                    "set-environment",
-                    "-g",
-                    "FLUENT_TERMINAL_OWNER",
-                    &resource.owner_marker,
-                ])
-                .output()?;
-            ensure!(
-                environment.status.success(),
-                "setting managed pane owner: {}",
-                String::from_utf8_lossy(&environment.stderr)
-            );
             #[cfg(feature = "test-support")]
             if let Some(barrier) = std::env::var_os("FLUENT_TEST_TERMINAL_SETUP_BARRIER") {
                 let barrier = PathBuf::from(barrier);
@@ -525,6 +510,13 @@ impl TerminalSession {
             if std::env::var_os("FLUENT_TEST_TERMINAL_FAIL_AFTER_SERVER").is_some() {
                 bail!("injected terminal failure after server startup");
             }
+            // The open handle survives exec, environment replacement, setsid,
+            // and reparenting. Its private inode identifies this generation.
+            let quoted_handle = format!(
+                "'{}'",
+                owner_handle.display().to_string().replace('\'', "'\\''")
+            );
+            let pane_command = format!("exec 9<{quoted_handle}; exec {shell_command}");
             let output = Command::new(&tmux)
                 .env_remove("TMUX")
                 .arg("-S")
@@ -534,7 +526,7 @@ impl TerminalSession {
                 .arg("-E")
                 .arg("-s")
                 .arg("fluent")
-                .arg(shell_command)
+                .arg(&pane_command)
                 .output()
                 .context("creating managed tmux session")?;
             ensure!(
@@ -860,38 +852,29 @@ fn session_members(sessions: &[i32]) -> Result<Vec<u32>> {
     Ok(members)
 }
 
-/// Find processes that inherited this invocation's environment, including
-/// children that have moved to another session and been reparented.
-pub fn owner_members_from_ps(table: &str, marker: &str) -> Result<Vec<u32>> {
-    ensure!(!marker.is_empty(), "terminal owner marker is empty");
-    let token = format!("FLUENT_TERMINAL_OWNER={marker}");
+/// Parse the kernel's open-file inventory for the private owner handle.
+pub fn owner_members_from_lsof(table: &str) -> Result<Vec<u32>> {
     let mut members = BTreeSet::new();
     for line in table.lines() {
-        let mut fields = line.split_whitespace();
-        let pid: u32 = fields
-            .next()
-            .context("invalid owner process inventory row")?
-            .parse()?;
-        if fields.any(|field| field == token) {
-            members.insert(pid);
+        if let Some(pid) = line.strip_prefix('p') {
+            members.insert(pid.parse()?);
         }
     }
     Ok(members.into_iter().collect())
 }
 
-fn owner_members(marker: &str) -> Result<Vec<u32>> {
-    if marker.is_empty() {
-        return Ok(Vec::new());
-    }
-    let output = Command::new("/bin/ps")
-        .args(["-A", "-E", "-ww", "-o", "pid=,command="])
+fn owner_members(handle: &Path) -> Result<Vec<u32>> {
+    ensure!(handle.is_file(), "terminal owner handle is missing");
+    let output = Command::new("/usr/sbin/lsof")
+        .args(["-F", "p", "--"])
+        .arg(handle)
         .output()?;
     ensure!(
-        output.status.success(),
-        "reading terminal owner inventory failed: {}",
+        output.status.success() || (output.status.code() == Some(1) && output.stdout.is_empty()),
+        "reading terminal owner handles failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    owner_members_from_ps(&String::from_utf8(output.stdout)?, marker)
+    owner_members_from_lsof(&String::from_utf8(output.stdout)?)
 }
 
 fn tmux_pane_pids(socket: &Path) -> Result<Vec<u32>> {
@@ -1044,7 +1027,9 @@ fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32], marker: &str) 
     for _ in 0..8 {
         let mut now = descendants_from_ps(&process_table()?, &panes)?;
         now.extend(session_members(sessions)?);
-        now.extend(owner_members(marker)?);
+        if !marker.is_empty() {
+            now.extend(owner_members(&socket.with_file_name("owner"))?);
+        }
         now.retain(|pid| *pid != leader_pid);
         let before = owned.len();
         for pid in now {
@@ -1314,6 +1299,41 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn open_owner_handle_survives_environment_clear_without_adopting_arguments() {
+        let dir = tempfile::tempdir_in("/private/tmp").unwrap();
+        let handle = dir.path().join("owner");
+        std::fs::File::create(&handle).unwrap();
+        let command = format!(
+            "exec 9<'{}'; exec /usr/bin/env -i /bin/sleep 30",
+            handle.display()
+        );
+        let mut owned = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .spawn()
+            .unwrap();
+        let marker = format!("FLUENT_TERMINAL_OWNER={}", dir.path().display());
+        let mut unrelated = Command::new("/usr/bin/perl")
+            .args(["-e", "sleep 30", &marker])
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let members = owner_members(&handle).unwrap();
+            if members.contains(&owned.id()) {
+                assert!(!members.contains(&unrelated.id()));
+                break;
+            }
+            assert!(Instant::now() < deadline, "open owner handle was not found");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        owned.kill().unwrap();
+        unrelated.kill().unwrap();
+        owned.wait().unwrap();
+        unrelated.wait().unwrap();
+    }
 
     #[test]
     fn empty_server_pane_query_allows_partial_setup_cleanup() {

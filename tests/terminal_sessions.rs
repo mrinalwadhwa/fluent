@@ -219,11 +219,11 @@ fn settlement_covers_terminal_process_scope() {
 }
 
 #[test]
-fn terminal_owner_inventory_finds_reparented_new_session() {
-    let table = " 20 /bin/sh FLUENT_TERMINAL_OWNER=other\n 41 sleep 30 FLUENT_TERMINAL_OWNER=owned\n 42 sleep 30 FLUENT_TERMINAL_OWNER=owned-extra\n";
+fn terminal_owner_inventory_parses_open_handle_pids() {
+    let table = "p20\nf9\np41\nf9\n";
     assert_eq!(
-        fluent::terminal_sessions::owner_members_from_ps(table, "owned").unwrap(),
-        vec![41]
+        fluent::terminal_sessions::owner_members_from_lsof(table).unwrap(),
+        vec![20, 41]
     );
 }
 
@@ -379,6 +379,16 @@ fn host_managed_terminal_acceptance() {
     .unwrap();
     let first_socket = first.socket_path().unwrap().to_path_buf();
     let second_socket = second.socket_path().unwrap().to_path_buf();
+    let marker = first_socket
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
+    let mut unrelated = Command::new("/usr/bin/perl")
+        .args(["-e", "sleep 30", &format!("FLUENT_TERMINAL_OWNER={marker}")])
+        .spawn()
+        .unwrap();
     let allowed = worker1.join("allowed");
     let denied = worker2.join("denied");
     send(
@@ -488,7 +498,7 @@ fn host_managed_terminal_acceptance() {
     send(
         &first_socket,
         &format!(
-            "/usr/bin/perl -MPOSIX -e 'if (fork()) {{ exit 0 }} POSIX::setsid(); open my $fh, \">\", $ARGV[0] or die $!; print $fh \"$$\\n\"; close $fh; exec \"/bin/sleep\", \"30\"' {}",
+            "/usr/bin/perl -MPOSIX -e 'if (fork()) {{ exit 0 }} POSIX::setsid(); open my $fh, \">\", $ARGV[0] or die $!; print $fh \"$$\\n\"; close $fh; %ENV = (); exec \"/bin/sleep\", \"30\"' {}",
             new_session_file.display()
         ),
     );
@@ -559,6 +569,12 @@ fn host_managed_terminal_acceptance() {
         new_session_state.trim().is_empty() || new_session_state.trim().starts_with('Z'),
         "reparented new-session child remained live: {new_session_state}"
     );
+    assert!(
+        unrelated.try_wait().unwrap().is_none(),
+        "unrelated process with owner marker in its argument was signaled"
+    );
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
     let first_resource = source
         .join(".fluent/work/terminal-sessions/work-1/attempt-1/attempt-1-write-1/resource.json");
     assert!(

@@ -3583,8 +3583,10 @@ authority to start a worker.
 `fluent terminal attach` observes by default. Control uses a process-held
 lock beside the host-owned descriptor. A second controller may still observe,
 and detaching releases only the client lease. Cancellation inventories tmux
-pane descendants and the captured pane process sessions before stopping the
-server; the inventory includes reparented children in other process groups.
+pane descendants, the captured pane process sessions, and processes holding a
+private per-generation file handle before stopping the server. The inherited
+handle identifies children after they clear their environment, start a new
+session, or are reparented.
 After cancellation settles, it retires the generation's socket and resource
 receipt. If it cannot verify settlement, cancellation fails
 without claiming successful cleanup. The separate host acceptance check must
