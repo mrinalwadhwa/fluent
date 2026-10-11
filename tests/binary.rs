@@ -26125,6 +26125,100 @@ fn tester_permissions_revoke_blocks_future_launches() {
     let approval = approve();
     let approval_id = approval["approval_id"].as_str().unwrap();
     assert_eq!(show()["approval_state"], "approved");
+    let launcher = tmp.path().join("sandbox-launcher");
+    fs::write(&launcher, "#!/bin/sh\nshift 2\nexec \"$@\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .args(["tester", "check"])
+        .assert()
+        .success();
+    assert!(sentinel.exists());
+    fs::remove_file(&sentinel).unwrap();
+    assert!(fs::read_dir(&authority).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("receipt-")
+    }));
+
+    let later_tmp = TempDir::new().unwrap();
+    let later_project = setup_git_project(&later_tmp);
+    fs::write(
+        later_project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(
+        &later_project,
+        &["add", ".fluent/tester.yaml"],
+        "stage later request",
+    )
+    .unwrap();
+    git::run(
+        &later_project,
+        &["commit", "-m", "Request process metadata"],
+        "commit later request",
+    )
+    .unwrap();
+    let later_candidate = git::run_stdout(
+        &later_project,
+        &["rev-parse", "HEAD"],
+        "read later candidate",
+    )
+    .unwrap();
+    let later_show = fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &later_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(later_show.status.success());
+    let later_request: serde_json::Value = serde_json::from_slice(&later_show.stdout).unwrap();
+    let later_approve = fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &later_candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            later_request["request_digest"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(later_approve.status.success());
+    let later_approval: serde_json::Value = serde_json::from_slice(&later_approve.stdout).unwrap();
+    fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "revoke",
+            later_approval["approval_id"].as_str().unwrap(),
+        ])
+        .assert()
+        .success();
     fluent_cmd()
         .current_dir(&project)
         .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
@@ -26135,7 +26229,9 @@ fn tester_permissions_revoke_blocks_future_launches() {
     fluent_cmd()
         .current_dir(&project)
         .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
-        .args(["tester", "check", "--no-sandbox"])
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .args(["tester", "check"])
         .assert()
         .failure();
     assert!(!sentinel.exists());

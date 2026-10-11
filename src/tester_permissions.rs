@@ -852,6 +852,9 @@ pub fn revoke_approval(approval_id: &str) -> Result<RevocationResponse> {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .context("invalid approval record name")?;
+        if name.starts_with("receipt-") {
+            continue;
+        }
         let request_digest = format!("sha256:{name}");
         let mut records = read_records(&root, &request_digest)?;
         if let Some(record) = records
