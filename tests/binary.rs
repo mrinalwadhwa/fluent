@@ -26084,6 +26084,66 @@ fn tester_permissions_revoke_blocks_future_launches() {
 }
 
 #[test]
+fn tester_permissions_enforce_one_contract_across_routes() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let sentinel = tmp.path().join("permission-command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: 'true'\n    test_harness: shell-harness\n  - command: 'touch {}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process-table-read requires the macOS sandbox",
+        ));
+    assert!(!sentinel.exists());
+
+    let source: fluent::tester::TesterResults = serde_json::from_value(serde_json::json!({
+        "candidate_commit": null,
+        "commands": [
+            {"command":"true", "test_harness":"shell-harness", "exit_code":0,
+             "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"},
+            {"command":format!("touch {}", sentinel.display()), "test_harness":"shell-harness", "exit_code":1,
+             "duration_ms":1, "stdout_log":"commands/1-stdout.log", "stderr_log":"commands/1-stderr.log"}
+        ],
+        "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+    })).unwrap();
+    let (recheck, indexes) = fluent::tester::plan_failed_commands(&project, &source).unwrap();
+    assert_eq!(indexes, vec![1]);
+    let error = fluent::tester::prepare_sandbox_profile(
+        &project,
+        tmp.path(),
+        true,
+        &fluent::content::ContentResolver::new(None),
+        &recheck,
+    )
+    .err()
+    .expect("recheck must preserve the selected command's permission request");
+    assert!(
+        error
+            .to_string()
+            .contains("process-table-read requires the macOS sandbox")
+    );
+    assert!(!sentinel.exists());
+}
+
+#[test]
 fn tester_permissions_do_not_leak_to_other_execution_scopes() {
     let tmp = TempDir::new().unwrap();
     let resolver = fluent::content::ContentResolver::new(None);
