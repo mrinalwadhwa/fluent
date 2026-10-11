@@ -218,13 +218,16 @@ pub(crate) struct CanonicalRunManifest {
 #[derive(Debug, Clone)]
 pub struct TesterPlan {
     commands: Vec<TesterCommand>,
+    original_indexes: Vec<usize>,
 }
 
 /// Read Tester configuration without creating an artifact or settlement path.
 pub fn plan(candidate_workspace: &Path) -> Result<TesterPlan> {
     let config = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
+    let original_indexes = (0..config.commands.len()).collect();
     Ok(TesterPlan {
         commands: config.commands,
+        original_indexes,
     })
 }
 
@@ -288,7 +291,13 @@ pub fn plan_failed_commands(
         commands.push(configured.clone());
     }
 
-    Ok((TesterPlan { commands }, failed_indexes))
+    Ok((
+        TesterPlan {
+            commands,
+            original_indexes: failed_indexes.clone(),
+        },
+        failed_indexes,
+    ))
 }
 
 /// Build a recheck plan from a prior failed-command recheck result.
@@ -315,6 +324,7 @@ pub(crate) fn plan_chained_failed_commands(
 
     let mut used = std::collections::BTreeSet::new();
     let mut commands = Vec::with_capacity(failed_indexes.len());
+    let mut original_indexes = Vec::with_capacity(failed_indexes.len());
     for index in &failed_indexes {
         let source = &source_results.commands[*index];
         let matches = current
@@ -333,10 +343,17 @@ pub(crate) fn plan_chained_failed_commands(
             );
         };
         used.insert(*configured_index);
+        original_indexes.push(*configured_index);
         commands.push((*configured).clone());
     }
 
-    Ok((TesterPlan { commands }, failed_indexes))
+    Ok((
+        TesterPlan {
+            commands,
+            original_indexes,
+        },
+        failed_indexes,
+    ))
 }
 
 /// Return whether a path uses the host-owned Tester command-log spelling.
@@ -533,9 +550,29 @@ pub fn prepare_sandbox_profile(
         .iter()
         .any(|command| !command.permissions.is_empty())
     {
-        anyhow::bail!(
-            "process-table-read needs explicit operator approval; no permission-bearing Tester command may launch yet"
+        anyhow::ensure!(!no_sandbox, "process-table-read requires the macOS sandbox");
+        anyhow::ensure!(
+            cfg!(target_os = "macos"),
+            "process-table-read requires macOS"
         );
+        let candidate = crate::git::run_stdout(
+            candidate_workspace,
+            &["rev-parse", "HEAD"],
+            "resolve Tester candidate",
+        )?;
+        for (command, original_index) in plan.commands.iter().zip(&plan.original_indexes) {
+            if command
+                .permissions
+                .contains(&TesterPermission::ProcessTableRead)
+            {
+                crate::tester_permissions::check_current_approval(
+                    candidate_workspace,
+                    &candidate,
+                    *original_index,
+                )?;
+            }
+        }
+        anyhow::bail!("permission profile is not ready; approved commands remain blocked");
     }
     let settlement = prepare_settlement_directories(artifact_dir, plan)?;
     render_sandbox_profile(
@@ -1945,6 +1982,7 @@ mod tests {
 
         assert_eq!(indexes, vec![1, 2]);
         assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.original_indexes, vec![1, 2]);
         assert_eq!(plan.commands[0].command, "second");
         assert_eq!(plan.commands[1].command, "third");
     }
@@ -1974,6 +2012,34 @@ mod tests {
             .expect_err("changed command must invalidate the targeted recheck");
 
         assert!(error.to_string().contains("no longer matches"));
+    }
+
+    #[test]
+    fn chained_failed_command_plan_keeps_original_configuration_index() {
+        let workspace = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: first\n    test_harness: shell\n  - command: second\n    test_harness: shell\n",
+        );
+        let source = TesterResults {
+            candidate_commit: Some("candidate".to_string()),
+            commands: vec![command_result("second", "shell", 1)],
+            tests: Vec::new(),
+            summary: Summary {
+                total: 0,
+                pass: 0,
+                fail: 0,
+                skipped: 0,
+            },
+            error: None,
+        };
+
+        let (plan, local_indexes) =
+            plan_chained_failed_commands(workspace.path(), &source).unwrap();
+
+        assert_eq!(local_indexes, vec![0]);
+        assert_eq!(plan.original_indexes, vec![1]);
     }
 
     fn command_result(command: &str, harness: &str, exit_code: i32) -> CommandResult {

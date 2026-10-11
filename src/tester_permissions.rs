@@ -414,6 +414,40 @@ pub fn approve_request(
     })
 }
 
+/// Check current host authority before preparing a permission-bearing launch.
+/// The launch boundary repeats this check when it can retain the lease through
+/// process creation; this preparation check alone never admits execution.
+pub(crate) fn check_current_approval(
+    checkout: &Path,
+    candidate: &str,
+    command_index: usize,
+) -> Result<()> {
+    let shown = show_request(checkout, candidate, command_index)?;
+    ensure!(
+        shown.approval_state == "approved",
+        "unmet prerequisite: process-table-read has no current operator approval for command {command_index}"
+    );
+    let root = store_root()?;
+    validate_store_directory(&root)?;
+    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    let current = show_request(checkout, candidate, command_index)?;
+    ensure!(
+        current.request_digest == shown.request_digest && current.approval_state == "approved",
+        "unmet prerequisite: process-table-read approval changed for command {command_index}"
+    );
+    let records = read_records(&root, &current.request_digest)?;
+    let record = records
+        .last()
+        .context("unmet prerequisite: approval record is absent")?;
+    ensure!(
+        record.revoked_at.is_none()
+            && record.candidate_commit == candidate
+            && record.command_index == command_index,
+        "unmet prerequisite: process-table-read approval does not match command {command_index}"
+    );
+    Ok(())
+}
+
 /// Revoke one approval while retaining its audit record.
 pub fn revoke_approval(approval_id: &str) -> Result<RevocationResponse> {
     ensure!(

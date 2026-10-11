@@ -25953,6 +25953,14 @@ fn tester_permissions_approve_exact_request_without_launch() {
             .starts_with("sha256:")
     );
     assert_eq!(show()["approval_state"], "approved");
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("permission profile is not ready"));
     assert!(!approve("sha256:wrong").status.success());
     let alias = fs::canonicalize(tmp.path())
         .unwrap()
@@ -26105,14 +26113,17 @@ fn tester_permissions_reject_unapproved_or_stale_launch() {
         fluent_cmd()
             .current_dir(&project)
             .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
-            .args(["tester", "check", "--no-sandbox"])
+            .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+            .args(["tester", "check"])
             .output()
             .unwrap()
     };
+    let unapproved = check();
     assert!(
-        !check().status.success(),
+        !unapproved.status.success(),
         "unapproved request must not launch"
     );
+    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("unmet prerequisite"));
     assert!(!sentinel.exists());
     let shown = fluent_cmd()
         .current_dir(&project)
@@ -26151,10 +26162,12 @@ fn tester_permissions_reject_unapproved_or_stale_launch() {
         .success();
     let changed = write_request(&format!("touch {} && true", sentinel.display()));
     assert_ne!(original, changed);
+    let stale = check();
     assert!(
-        !check().status.success(),
+        !stale.status.success(),
         "old approval must not launch changed command"
     );
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("unmet prerequisite"));
     assert!(!sentinel.exists());
     fluent_cmd()
         .current_dir(&project)
