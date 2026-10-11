@@ -166,6 +166,35 @@ pub(crate) struct TesterCommand {
     pub(crate) test_harness: String,
     #[serde(default)]
     pub(crate) reject_process_leaks: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_tester_permissions"
+    )]
+    pub(crate) permissions: Vec<TesterPermission>,
+}
+
+/// A request in project configuration never grants host authority by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TesterPermission {
+    ProcessTableRead,
+}
+
+fn deserialize_tester_permissions<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<TesterPermission>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let permissions = Vec::<TesterPermission>::deserialize(deserializer)?;
+    let mut seen = std::collections::HashSet::new();
+    for permission in &permissions {
+        if !seen.insert(*permission) {
+            return Err(serde::de::Error::custom("duplicate Tester permission"));
+        }
+    }
+    Ok(permissions)
 }
 
 /// Capture the complete configured command list before a canonical execution.
@@ -499,6 +528,15 @@ pub fn prepare_sandbox_profile(
     resolver: &ContentResolver,
     plan: &TesterPlan,
 ) -> Result<TesterSandbox> {
+    if plan
+        .commands
+        .iter()
+        .any(|command| !command.permissions.is_empty())
+    {
+        anyhow::bail!(
+            "process-table-read needs explicit operator approval; no permission-bearing Tester command may launch yet"
+        );
+    }
     let settlement = prepare_settlement_directories(artifact_dir, plan)?;
     render_sandbox_profile(
         candidate_workspace,
@@ -1489,6 +1527,42 @@ mod tests {
             .find(|(name, _)| *name == crate::baseline_cache::BASELINE_SESSION_ENV)
             .map(|(_, value)| value);
         assert_eq!(inherited, Some(None));
+    }
+
+    #[test]
+    fn tester_process_table_requests_reject_unknown_and_duplicate_capabilities() {
+        for permissions in ["[process-table-read, process-table-read]", "[file-write]"] {
+            let yaml = format!(
+                "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: {permissions}\n"
+            );
+            assert!(serde_yaml::from_str::<TesterConfig>(&yaml).is_err());
+        }
+        let yaml = "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n";
+        let config: TesterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.commands[0].permissions.len(), 1);
+    }
+
+    #[test]
+    fn tester_legacy_command_serialization_omits_permissions() {
+        let yaml = "commands:\n  - command: 'true'\n    test_harness: shell-harness\n";
+        let config: TesterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.commands[0].permissions.is_empty());
+        let serialized = serde_json::to_string(&config.commands[0]).unwrap();
+        assert!(!serialized.contains("permissions"));
+    }
+
+    #[test]
+    fn tester_process_table_request_fails_closed_before_launch() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'touch launched'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        );
+        let result = run(workspace.path(), artifact_dir.path(), true, &resolver());
+        assert!(result.is_err(), "an unapproved command must not launch");
+        assert!(!workspace.path().join("launched").exists());
     }
 
     #[test]
