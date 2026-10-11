@@ -877,6 +877,57 @@ fn owner_members(handle: &Path) -> Result<Vec<u32>> {
     owner_members_from_lsof(&String::from_utf8(output.stdout)?)
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn sandbox_check(
+        pid: libc::pid_t,
+        operation: *const libc::c_char,
+        filter: libc::c_int,
+        ...
+    ) -> libc::c_int;
+}
+
+/// The private socket grant remains in a descendant's Seatbelt policy after
+/// it closes descriptors, clears its environment, or changes POSIX session.
+/// Compare it with a sibling path so an unrestricted process is not adopted.
+#[cfg(target_os = "macos")]
+fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
+    use std::ffi::CString;
+
+    let dir = socket
+        .parent()
+        .context("terminal socket has no directory")?;
+    let owned = CString::new(dir.join("owner").as_os_str().as_encoded_bytes())?;
+    let outside = CString::new(b"/private/tmp/fluent-t-unowned-probe/owner".as_slice())?;
+    let operation = c"file-write-data";
+    let matches = |pid: u32| -> Result<bool> {
+        let pid = i32::try_from(pid)?;
+        // SANDBOX_FILTER_PATH is 1. sandbox_check returns zero for an allow.
+        let own = unsafe { sandbox_check(pid, operation.as_ptr(), 1, owned.as_ptr()) };
+        let peer = unsafe { sandbox_check(pid, operation.as_ptr(), 1, outside.as_ptr()) };
+        Ok(own == 0 && peer > 0)
+    };
+    for pane in panes {
+        ensure!(
+            matches(*pane)?,
+            "terminal pane does not have its generation-specific sandbox grant"
+        );
+    }
+    let output = Command::new("/bin/ps").args(["-axo", "pid="]).output()?;
+    ensure!(
+        output.status.success(),
+        "reading terminal policy process inventory failed"
+    );
+    let mut members = Vec::new();
+    for line in String::from_utf8(output.stdout)?.lines() {
+        let pid: u32 = line.trim().parse()?;
+        if matches(pid)? {
+            members.push(pid);
+        }
+    }
+    Ok(members)
+}
+
 fn tmux_pane_pids(socket: &Path) -> Result<Vec<u32>> {
     let output = Command::new(find_tmux()?)
         .env_remove("TMUX")
@@ -1029,6 +1080,8 @@ fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32], marker: &str) 
         now.extend(session_members(sessions)?);
         if !marker.is_empty() {
             now.extend(owner_members(&socket.with_file_name("owner"))?);
+            #[cfg(target_os = "macos")]
+            now.extend(policy_members(socket, &panes)?);
         }
         now.retain(|pid| *pid != leader_pid);
         let before = owned.len();

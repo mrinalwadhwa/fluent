@@ -532,6 +532,52 @@ fn host_managed_terminal_acceptance() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    let closed_handle_file = worker1.join("closed-handle.pid");
+    send(
+        &first_socket,
+        &format!(
+            "/usr/bin/perl -MPOSIX -e 'if (fork()) {{ exit 0 }} POSIX::setsid(); POSIX::close(9); open my $fh, \">\", $ARGV[0] or die $!; print $fh \"$$\\n\"; close $fh; %ENV = (); exec \"/bin/sleep\", \"30\"' {}",
+            closed_handle_file.display()
+        ),
+    );
+    wait_file(&closed_handle_file);
+    let closed_handle: u32 = std::fs::read_to_string(&closed_handle_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_ne!(group(closed_handle), pane_group);
+    let closed_handle_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let parent = String::from_utf8(
+            Command::new("/bin/ps")
+                .args(["-o", "ppid=", "-p", &closed_handle.to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        if parent.trim() == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < closed_handle_deadline,
+            "closed-handle child was not reparented"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let open_handles = Command::new("/usr/sbin/lsof")
+        .args(["-F", "p", "--"])
+        .arg(first_socket.with_file_name("owner"))
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8(open_handles.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line == format!("p{closed_handle}")),
+        "fixture child retained the terminal owner handle"
+    );
     let first_record =
         source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
     let canceled = fluent::execution::cancel(&first_record).unwrap();
@@ -568,6 +614,18 @@ fn host_managed_terminal_acceptance() {
     assert!(
         new_session_state.trim().is_empty() || new_session_state.trim().starts_with('Z'),
         "reparented new-session child remained live: {new_session_state}"
+    );
+    let closed_handle_state = String::from_utf8(
+        Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &closed_handle.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        closed_handle_state.trim().is_empty() || closed_handle_state.trim().starts_with('Z'),
+        "closed-handle new-session child remained live: {closed_handle_state}"
     );
     assert!(
         unrelated.try_wait().unwrap().is_none(),
