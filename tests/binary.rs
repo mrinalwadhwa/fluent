@@ -32829,6 +32829,121 @@ fn cleanup_retains_unverifiable_source() {
 }
 
 #[test]
+fn cleanup_retains_one_item_when_its_git_probe_fails() {
+    for probe in ["branch", "worktree-list"] {
+        let tmp = TempDir::new().unwrap();
+        let main = setup_git_project(&tmp);
+        for id in ["work-bad-probe", "work-safe-probe"] {
+            fluent_cmd()
+                .current_dir(&main)
+                .args(["work-item", "create", id, "--title", id])
+                .assert()
+                .success();
+        }
+        let (path, branch) =
+            cleanup_terminal_attempt(&main, "work-bad-probe", "attempt-1", "failed", Some("main"));
+        cleanup_terminal_attempt(
+            &main,
+            "work-safe-probe",
+            "attempt-1",
+            "failed",
+            Some("main"),
+        );
+        git::run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                path.to_str().unwrap(),
+                "-b",
+                &branch,
+                "HEAD",
+            ],
+            "create probed Work source",
+        )
+        .unwrap();
+        let fake_bin = tmp.path().join("fake-git");
+        let marker = tmp.path().join("probe-failed");
+        let script = if probe == "branch" {
+            r#"#!/bin/sh
+case " $* " in
+  *" show-ref --verify --quiet refs/heads/work/work-bad-probe/attempt-1/attempt-1-write-1 "*)
+    echo 'injected branch probe failure' >&2
+    exit 128 ;;
+esac
+exec /usr/bin/git "$@"
+"#
+        } else {
+            r#"#!/bin/sh
+case " $* " in
+  *" worktree list --porcelain "*)
+    if [ ! -e "$FLUENT_GIT_PROBE_MARKER" ]; then
+      touch "$FLUENT_GIT_PROBE_MARKER"
+      echo 'injected worktree probe failure' >&2
+      exit 128
+    fi ;;
+esac
+exec /usr/bin/git "$@"
+"#
+        };
+        write_mock_executable(&fake_bin, "git", script);
+        let path_env = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+        let reason = if probe == "branch" {
+            "Failed to check Work branch"
+        } else {
+            "inspect worktree registrations"
+        };
+        for args in [vec!["cleanup"], vec!["cleanup", "--apply"]] {
+            if marker.exists() {
+                fs::remove_file(&marker).unwrap();
+            }
+            fluent_cmd()
+                .current_dir(&main)
+                .args(&args)
+                .env("PATH", &path_env)
+                .env("FLUENT_GIT_PROBE_MARKER", &marker)
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(
+                    "retained Work Item work-bad-probe",
+                ))
+                .stdout(predicate::str::contains(reason))
+                .stdout(predicate::str::contains(if probe == "branch" {
+                    branch.as_str()
+                } else {
+                    path.file_name().unwrap().to_str().unwrap()
+                }))
+                .stdout(predicate::str::contains(if args.len() == 1 {
+                    "would clean Work Item work-safe-probe"
+                } else {
+                    "cleaned Work Item work-safe-probe"
+                }));
+            assert!(main.join(".fluent/work/items/work-bad-probe.json").exists());
+            assert!(path.exists());
+            assert!(
+                git::run_raw(
+                    &main,
+                    &[
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}")
+                    ]
+                )
+                .unwrap()
+                .status
+                .success()
+            );
+        }
+        assert!(
+            !main
+                .join(".fluent/work/items/work-safe-probe.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn cleanup_retains_unmerged_branch_without_worktree() {
     let tmp = TempDir::new().unwrap();
     let main = setup_git_project(&tmp);

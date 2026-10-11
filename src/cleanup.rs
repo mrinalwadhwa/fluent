@@ -159,7 +159,6 @@ pub fn cleanup_work_items(
             }
             _ => continue,
         };
-        let registered = registered_worktrees(&source_root)?;
         #[cfg(feature = "test-support")]
         if options.apply
             && std::env::var("FLUENT_TEST_CLEANUP_LOCKED_ITEM")
@@ -182,8 +181,7 @@ pub fn cleanup_work_items(
                 }
             }
         }
-        let mut plan = work_cleanup_plan(&source_root, &store, &work_item, &registered, false)?;
-        let source = match assess_owned_source(&source_root, &work_item, &registered) {
+        let source = match assess_owned_source(&source_root, &work_item) {
             Ok(source) => source,
             Err((asset, reason)) => {
                 results.push(WorkCleanupResult::RetainedSource {
@@ -194,6 +192,7 @@ pub fn cleanup_work_items(
                 continue;
             }
         };
+        let mut plan = work_cleanup_plan(&source_root, &store, &work_item, &source)?;
         #[cfg(feature = "test-support")]
         cleanup_source_barrier(
             &work_item.id,
@@ -202,8 +201,7 @@ pub fn cleanup_work_items(
             "FLUENT_TEST_CLEANUP_ASSESSED_RELEASE",
         )?;
         if options.apply {
-            let current = registered_worktrees(&source_root)?;
-            match assess_owned_source(&source_root, &work_item, &current) {
+            match assess_owned_source(&source_root, &work_item) {
                 Ok(again) if again == source => {}
                 Ok(again) => {
                     results.push(WorkCleanupResult::RetainedSource {
@@ -451,8 +449,7 @@ fn work_cleanup_plan(
     source_root: &Path,
     store: &WorkModelStore,
     work_item: &WorkItem,
-    registered: &[PathBuf],
-    apply: bool,
+    source: &OwnedSource,
 ) -> Result<WorkItemCleanupResult> {
     let mut worktrees = Vec::new();
     let mut branches = Vec::new();
@@ -474,17 +471,11 @@ fn work_cleanup_plan(
                 ) else {
                     continue;
                 };
-                push_unique_worktree(
-                    &mut worktrees,
-                    cleanup_managed_worktree(source_root, &path, registered, apply)?,
-                );
+                push_unique_worktree(&mut worktrees, planned_worktree(&path, source));
             }
 
             let branch_name = format!("work/{}/{}/{}", work_item.id, attempt.id, task.id);
-            push_unique_branch(
-                &mut branches,
-                cleanup_work_branch(source_root, &branch_name, apply)?,
-            );
+            push_unique_branch(&mut branches, planned_branch(&branch_name, source));
         }
     }
 
@@ -496,10 +487,7 @@ fn work_cleanup_plan(
             &candidate.attempt_id,
             "Work cleanup",
         ) {
-            push_unique_worktree(
-                &mut worktrees,
-                cleanup_managed_worktree(source_root, &path, registered, apply)?,
-            );
+            push_unique_worktree(&mut worktrees, planned_worktree(&path, source));
         }
     }
 
@@ -516,13 +504,31 @@ fn work_cleanup_plan(
 
     Ok(WorkItemCleanupResult {
         work_item_id: work_item.id.clone(),
-        applied: apply,
+        applied: false,
         item_path,
         state_paths,
         artifacts,
         worktrees,
         branches,
     })
+}
+
+fn planned_worktree(path: &Path, source: &OwnedSource) -> WorktreeCleanup {
+    if !path.exists() {
+        WorktreeCleanup::Missing(path.to_path_buf())
+    } else if source.worktrees.iter().any(|(owned, _)| owned == path) {
+        WorktreeCleanup::WouldRemove(path.to_path_buf())
+    } else {
+        WorktreeCleanup::SkippedUnregistered(path.to_path_buf())
+    }
+}
+
+fn planned_branch(branch: &str, source: &OwnedSource) -> WorkBranchCleanup {
+    if source.branches.iter().any(|(owned, _)| owned == branch) {
+        WorkBranchCleanup::WouldRemove(branch.to_string())
+    } else {
+        WorkBranchCleanup::Missing(branch.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,7 +592,6 @@ fn cleanup_source_barrier(
 fn assess_owned_source(
     root: &Path,
     item: &WorkItem,
-    registered: &[PathBuf],
 ) -> std::result::Result<OwnedSource, (String, String)> {
     let mut source = OwnedSource {
         worktrees: Vec::new(),
@@ -597,7 +602,12 @@ fn assess_owned_source(
         &["worktree", "list", "--porcelain"],
         "inspect worktree registrations",
     )
-    .map_err(|err| (item.id.clone(), err.to_string()))?;
+    .map_err(|err| (source_context_asset(root, item), err.to_string()))?;
+    let registered = registrations
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
     for attempt in &item.attempts {
         for workspace in attempt
             .tasks
@@ -654,7 +664,7 @@ fn assess_owned_source(
         )
         .map_err(|err| (workspace.clone(), err.to_string()))?;
         let registration_head = registered_head(&registrations, &path);
-        if path_is_registered(&path, registered) && registration_head.is_none() {
+        if path_is_registered(&path, &registered) && registration_head.is_none() {
             return Err((
                 path.display().to_string(),
                 "cannot resolve registered candidate HEAD".into(),
@@ -740,7 +750,7 @@ fn assess_owned_source(
                 registration_head.unwrap().to_string()
             };
             ensure_integrated(root, &path.display().to_string(), &head, &target_tip)?;
-            if !path_is_registered(&path, registered) {
+            if !path_is_registered(&path, &registered) {
                 return Err((
                     path.display().to_string(),
                     "candidate registration changed".into(),
@@ -750,6 +760,25 @@ fn assess_owned_source(
         }
     }
     Ok(source)
+}
+
+fn source_context_asset(root: &Path, item: &WorkItem) -> String {
+    item.attempts
+        .first()
+        .map(|attempt| {
+            let workspace =
+                crate::work_model::initial_candidate_workspace_path(&item.id, &attempt.id);
+            resolve_expected_candidate_workspace_path(
+                root,
+                &workspace,
+                &item.id,
+                &attempt.id,
+                "Work cleanup",
+            )
+            .map(|path| path.display().to_string())
+            .unwrap_or(workspace)
+        })
+        .unwrap_or_else(|| format!("work/{}/", item.id))
 }
 
 fn registered_head<'a>(porcelain: &'a str, path: &Path) -> Option<&'a str> {
@@ -924,68 +953,6 @@ fn push_unique_branch(branches: &mut Vec<WorkBranchCleanup>, cleanup: WorkBranch
         return;
     }
     branches.push(cleanup);
-}
-
-fn cleanup_managed_worktree(
-    search_root: &Path,
-    path: &Path,
-    _registered: &[PathBuf],
-    apply: bool,
-) -> Result<WorktreeCleanup> {
-    // Re-read Git's authoritative registration immediately before each
-    // decision. The plan-level snapshot is only advisory and may be stale.
-    let registered = registered_worktrees(search_root)?;
-    if !path.exists() {
-        if apply && path_is_registered(path, &registered) {
-            remove_registered_worktree(search_root, path)?;
-            if path_is_registered(path, &registered_worktrees(search_root)?) {
-                anyhow::bail!(
-                    "Git still registers missing worktree {} after exact removal",
-                    path.display()
-                );
-            }
-        }
-        return Ok(WorktreeCleanup::Missing(path.to_path_buf()));
-    }
-
-    if !path_is_registered(path, &registered) {
-        return Ok(WorktreeCleanup::SkippedUnregistered(path.to_path_buf()));
-    }
-
-    if !apply {
-        return Ok(WorktreeCleanup::WouldRemove(path.to_path_buf()));
-    }
-
-    remove_registered_worktree(search_root, path)?;
-    if path_is_registered(path, &registered_worktrees(search_root)?) {
-        anyhow::bail!(
-            "Git still registers worktree {} after removal",
-            path.display()
-        );
-    }
-    Ok(WorktreeCleanup::Removed(path.to_path_buf()))
-}
-
-fn cleanup_work_branch(
-    source_root: &Path,
-    branch_name: &str,
-    apply: bool,
-) -> Result<WorkBranchCleanup> {
-    if !git_branch_exists(source_root, branch_name)? {
-        return Ok(WorkBranchCleanup::Missing(branch_name.to_string()));
-    }
-
-    if !apply {
-        return Ok(WorkBranchCleanup::WouldRemove(branch_name.to_string()));
-    }
-
-    git::run(
-        source_root,
-        &["branch", "-D", branch_name],
-        "remove Work branch",
-    )?;
-
-    Ok(WorkBranchCleanup::Removed(branch_name.to_string()))
 }
 
 fn git_branch_exists(source_root: &Path, branch_name: &str) -> Result<bool> {
@@ -1537,9 +1504,7 @@ mod tests {
         let registered = registered_worktrees(&project).unwrap();
         assert!(path_is_registered(&missing, &registered));
 
-        let outcome = cleanup_managed_worktree(&project, &missing, &registered, true).unwrap();
-
-        assert_eq!(outcome, WorktreeCleanup::Missing(missing.clone()));
+        remove_registered_worktree(&project, &missing).unwrap();
         assert!(!path_is_registered(
             &missing,
             &registered_worktrees(&project).unwrap()
@@ -1593,7 +1558,7 @@ mod tests {
         fs::remove_dir_all(&missing).unwrap();
         let registered = registered_worktrees(&project).unwrap();
 
-        let error = cleanup_managed_worktree(&project, &missing, &registered, true).unwrap_err();
+        let error = remove_registered_worktree(&project, &missing).unwrap_err();
 
         assert!(error.to_string().contains("remove registered worktree"));
         assert!(path_is_registered(
