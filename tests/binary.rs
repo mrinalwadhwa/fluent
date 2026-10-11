@@ -25984,6 +25984,195 @@ fn tester_permissions_approve_exact_request_without_launch() {
 }
 
 #[test]
+fn tester_permissions_revoke_blocks_future_launches() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let request = show();
+    let digest = request["request_digest"].as_str().unwrap();
+    let approve = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "approve",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+                "--capability",
+                "process-table-read",
+                "--request-digest",
+                digest,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let approval = approve();
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    assert_eq!(show()["approval_state"], "approved");
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args(["tester", "permissions", "revoke", approval_id])
+        .assert()
+        .success();
+    assert_eq!(show()["approval_state"], "revoked");
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure();
+    assert!(!sentinel.exists());
+    let renewed = approve();
+    assert_ne!(renewed["approval_id"], approval_id);
+    assert_eq!(show()["approval_state"], "approved");
+}
+
+#[test]
+fn tester_permissions_reject_unapproved_or_stale_launch() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    let write_request = |command: &str| {
+        fs::write(
+            project.join(".fluent/tester.yaml"),
+            format!(
+                "commands:\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n"
+            ),
+        )
+        .unwrap();
+        git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Update Tester command"],
+            "commit request",
+        )
+        .unwrap();
+        git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap()
+    };
+    let original = write_request(&format!("touch {}", sentinel.display()));
+    let check = || {
+        fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args(["tester", "check", "--no-sandbox"])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !check().status.success(),
+        "unapproved request must not launch"
+    );
+    assert!(!sentinel.exists());
+    let shown = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let request: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let digest = request["request_digest"].as_str().unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            digest,
+        ])
+        .assert()
+        .success();
+    let changed = write_request(&format!("touch {} && true", sentinel.display()));
+    assert_ne!(original, changed);
+    assert!(
+        !check().status.success(),
+        "old approval must not launch changed command"
+    );
+    assert!(!sentinel.exists());
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn tester_sandbox_recovery_reruns_same_tester_without_writer() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

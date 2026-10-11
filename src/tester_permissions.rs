@@ -173,6 +173,12 @@ pub struct ApprovalResponse {
     request_digest: String,
 }
 
+#[derive(Serialize)]
+pub struct RevocationResponse {
+    approval_id: String,
+    revoked_at: String,
+}
+
 fn operator_home() -> Result<PathBuf> {
     let mut password = std::mem::MaybeUninit::<libc::passwd>::uninit();
     let mut buffer = vec![0u8; 16 * 1024];
@@ -406,4 +412,51 @@ pub fn approve_request(
         approval_id,
         request_digest: request_digest.to_owned(),
     })
+}
+
+/// Revoke one approval while retaining its audit record.
+pub fn revoke_approval(approval_id: &str) -> Result<RevocationResponse> {
+    ensure!(
+        approval_id.starts_with("sha256:")
+            && approval_id.len() == 71
+            && approval_id[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "invalid approval ID"
+    );
+    let root = store_root()?;
+    validate_store_directory(&root)?;
+    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("invalid approval record name")?;
+        let request_digest = format!("sha256:{name}");
+        let mut records = read_records(&root, &request_digest)?;
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record.approval_id == approval_id)
+        {
+            let revoked_at = match &record.revoked_at {
+                Some(revoked_at) => revoked_at.clone(),
+                None => {
+                    let revoked_at = crate::work_model::now_iso8601();
+                    record.revoked_at = Some(revoked_at.clone());
+                    write_records(&root, &request_digest, &records)?;
+                    revoked_at
+                }
+            };
+            return Ok(RevocationResponse {
+                approval_id: approval_id.to_owned(),
+                revoked_at,
+            });
+        }
+    }
+    anyhow::bail!("approval ID is not in the host authority store")
 }

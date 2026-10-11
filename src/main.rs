@@ -1938,6 +1938,10 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
                 )?;
                 println!("{}", serde_json::to_string_pretty(&approval)?);
             }
+            TesterPermissionCommands::Revoke { approval_id } => {
+                let revoked = fluent::tester_permissions::revoke_approval(&approval_id)?;
+                println!("{}", serde_json::to_string_pretty(&revoked)?);
+            }
         },
         TesterCommands::Check { no_sandbox } => {
             match fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)? {

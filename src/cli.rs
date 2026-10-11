@@ -1084,6 +1084,11 @@ pub enum TesterPermissionCommands {
         #[arg(long)]
         request_digest: String,
     },
+    /// Withdraw an approval from future Tester launches
+    Revoke {
+        /// Approval ID returned by `approve`
+        approval_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
