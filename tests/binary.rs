@@ -57748,6 +57748,52 @@ fn tester_permissions_reject_unproven_or_mismatched_evidence() {
 }
 
 #[test]
+fn tester_permissions_old_reader_refuses_version_two_evidence() {
+    let binary = PathBuf::from(std::env::var_os("FLUENT_TESTER_PERMISSION_OLD_BIN").expect(
+        "build tests/fixtures/build-tester-permission-old-reader.sh before this selection",
+    ));
+    let reader_root = binary.parent().unwrap().parent().unwrap().parent().unwrap();
+    let identity = read_json_path(&reader_root.join("identity.json"));
+    assert_eq!(
+        identity["source_commit"],
+        "330bdba6281a394580da0a0194b3cd8d0fcb8295"
+    );
+    assert_eq!(
+        identity["binary_sha256"],
+        format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()))
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let work = "permission-old-reader";
+    let (project, _, results) = canonical_evidence_fixture(&tmp, work, &["true"]);
+    let manifest_path = results.with_file_name("canonical-run.json");
+    let mut manifest = read_json_path(&manifest_path);
+    manifest["schema_version"] = serde_json::json!(2);
+    manifest["commands"][0]["permissions"] = serde_json::json!(["process-table-read"]);
+    manifest["original_command_indexes"] = serde_json::json!([0]);
+    manifest["permission_receipts"] = serde_json::json!([null]);
+    write_json_path(&manifest_path, &manifest);
+    let work_root = project.join(".fluent/work");
+    let before = snapshot_tree(&work_root);
+    let output = Command::new(&binary)
+        .current_dir(&project)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .args(["attempt", "run", work, "attempt-1", "--no-sandbox"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "older reader accepted version 2 permission evidence"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Tester manifest"),
+        "older reader must reject the manifest before another failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(snapshot_tree(&work_root), before);
+}
+
+#[test]
 fn canonical_tester_host_evidence_enters_targeted_review() {
     let tmp = TempDir::new().unwrap();
     let work = "canonical-evidence";
