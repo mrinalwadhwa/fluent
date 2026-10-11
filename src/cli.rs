@@ -1036,6 +1036,11 @@ pub enum QueueCommands {
 
 #[derive(Subcommand)]
 pub enum TesterCommands {
+    /// Inspect requests for elevated Tester permissions
+    Permissions {
+        #[command(subcommand)]
+        command: TesterPermissionCommands,
+    },
     /// Validate Tester readiness and run declared test commands
     Check {
         /// Disable sandbox
@@ -1056,6 +1061,17 @@ pub enum TesterCommands {
         /// Disable sandbox
         #[arg(long)]
         no_sandbox: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TesterPermissionCommands {
+    /// Show the current request for one configured command
+    Show {
+        #[arg(long)]
+        candidate: String,
+        #[arg(long)]
+        command_index: usize,
     },
 }
 

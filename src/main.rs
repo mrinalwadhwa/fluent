@@ -13,7 +13,8 @@ use fluent::cleanup::{
 use fluent::cli::{
     AttemptCommands, AttemptEvidenceCommands, Cli, Commands, FargateCommands, KeepAwakeCommands,
     MergeCandidateCommands, ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands,
-    SkillsCommands, SlackCommands, TaskCommands, TesterCommands, WorkItemCommands,
+    SkillsCommands, SlackCommands, TaskCommands, TesterCommands, TesterPermissionCommands,
+    WorkItemCommands,
 };
 use fluent::coder::CoderKind;
 use fluent::content::ContentResolver;
@@ -1910,6 +1911,19 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
     let store = WorkModelStore::new(project_root);
     let resolver = ContentResolver::new(Some(project_root));
     match command {
+        TesterCommands::Permissions { command } => match command {
+            TesterPermissionCommands::Show {
+                candidate,
+                command_index,
+            } => {
+                let request = fluent::tester_permissions::show_request(
+                    project_root,
+                    &candidate,
+                    command_index,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&request)?);
+            }
+        },
         TesterCommands::Check { no_sandbox } => {
             match fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)? {
                 fluent::tester::TesterOutcome::Passed => println!("Tester passed"),

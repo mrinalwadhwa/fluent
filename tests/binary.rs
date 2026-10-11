@@ -25793,6 +25793,78 @@ fn tester_permissions_preserve_legacy_default_contract() {
 }
 
 #[test]
+fn tester_permissions_show_current_request_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let args = [
+        "tester",
+        "permissions",
+        "show",
+        "--candidate",
+        candidate.as_str(),
+        "--command-index",
+        "0",
+    ];
+    let before = git::run_stdout(
+        &project,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "read status",
+    )
+    .unwrap();
+    let first = fluent_cmd()
+        .current_dir(&project)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = fluent_cmd()
+        .current_dir(&project)
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(first.stdout, second.stdout);
+    let shown: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(shown["candidate_commit"], candidate);
+    assert_eq!(shown["command_index"], 0);
+    assert_eq!(shown["command"], "true");
+    assert_eq!(shown["capability"], "process-table-read");
+    assert_eq!(shown["approval_state"], "absent");
+    assert!(shown["metadata_exposure"].as_array().unwrap().len() > 2);
+    assert!(
+        shown["request_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(
+        before,
+        git::run_stdout(
+            &project,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "read status"
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn tester_sandbox_recovery_reruns_same_tester_without_writer() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

@@ -1127,7 +1127,7 @@ fn extract_and_normalize(
     Ok((tests, summary))
 }
 
-fn read_tester_config(path: &Path) -> Result<TesterConfig> {
+pub(crate) fn read_tester_config(path: &Path) -> Result<TesterConfig> {
     let content =
         fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let config: TesterConfig =
