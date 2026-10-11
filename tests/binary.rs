@@ -32929,77 +32929,88 @@ fn cleanup_reports_retained_source_and_cleans_safe_work() {
 
 #[test]
 fn cleanup_rechecks_source_before_removal() {
-    let tmp = TempDir::new().unwrap();
-    let main = setup_git_project(&tmp);
-    fluent_cmd()
-        .current_dir(&main)
-        .args([
-            "work-item",
-            "create",
-            "work-race",
-            "--title",
-            "Race cleanup",
-        ])
-        .assert()
-        .success();
-    let (path, branch) =
-        cleanup_terminal_attempt(&main, "work-race", "attempt-1", "failed", Some("main"));
-    git::run(
-        &main,
-        &[
-            "worktree",
-            "add",
-            path.to_str().unwrap(),
-            "-b",
-            &branch,
-            "HEAD",
-        ],
-        "create cleanup candidate",
-    )
-    .unwrap();
-    let reached = tmp.path().join("selected");
-    let release = tmp.path().join("release");
-    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
-    command
-        .current_dir(&main)
-        .args(["cleanup", "--apply"])
-        .env("FLUENT_TEST_CLEANUP_SELECTED", &reached)
-        .env("FLUENT_TEST_CLEANUP_RELEASE", &release)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = OwnedFixtureProcess::spawn(&mut command);
-    for _ in 0..500 {
-        if reached.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(reached.exists());
-    fs::write(path.join("late.txt"), "late edit").unwrap();
-    fs::write(&release, b"continue").unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("retained Work Item work-race"));
-    assert!(path.join("late.txt").exists());
-    assert!(main.join(".fluent/work/items/work-race.json").exists());
-    assert!(
-        git::run_raw(
+    for change in ["file edit", "branch advance"] {
+        let tmp = TempDir::new().unwrap();
+        let main = setup_git_project(&tmp);
+        fluent_cmd()
+            .current_dir(&main)
+            .args([
+                "work-item",
+                "create",
+                "work-race",
+                "--title",
+                "Race cleanup",
+            ])
+            .assert()
+            .success();
+        let (path, branch) =
+            cleanup_terminal_attempt(&main, "work-race", "attempt-1", "failed", Some("main"));
+        git::run(
             &main,
             &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{branch}")
-            ]
+                "worktree",
+                "add",
+                path.to_str().unwrap(),
+                "-b",
+                &branch,
+                "HEAD",
+            ],
+            "create cleanup candidate",
         )
-        .unwrap()
-        .status
-        .success()
-    );
+        .unwrap();
+        let reached = tmp.path().join("selected");
+        let release = tmp.path().join("release");
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main)
+            .args(["cleanup", "--apply"])
+            .env("FLUENT_TEST_CLEANUP_SELECTED", &reached)
+            .env("FLUENT_TEST_CLEANUP_RELEASE", &release)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = OwnedFixtureProcess::spawn(&mut command);
+        for _ in 0..500 {
+            if reached.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(reached.exists());
+        fs::write(path.join("late.txt"), "late edit").unwrap();
+        if change == "branch advance" {
+            git::run(&path, &["add", "late.txt"], "stage late edit").unwrap();
+            git::run(
+                &path,
+                &["commit", "-m", "Add late edit"],
+                "advance cleanup branch",
+            )
+            .unwrap();
+        }
+        fs::write(&release, b"continue").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("retained Work Item work-race"));
+        assert!(path.join("late.txt").exists());
+        assert!(main.join(".fluent/work/items/work-race.json").exists());
+        assert!(
+            git::run_raw(
+                &main,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}")
+                ]
+            )
+            .unwrap()
+            .status
+            .success()
+        );
+    }
 }
 
 #[test]

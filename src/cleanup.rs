@@ -539,15 +539,31 @@ fn assess_owned_source(
     )
     .map_err(|err| (item.id.clone(), err.to_string()))?;
     for attempt in &item.attempts {
-        for workspace in attempt.tasks.iter().flat_map(|task| &task.workspace_access.writes) {
+        for workspace in attempt
+            .tasks
+            .iter()
+            .flat_map(|task| &task.workspace_access.writes)
+        {
             resolve_expected_candidate_workspace_path(
-                root, &workspace.path, &item.id, &attempt.id, "Work cleanup",
+                root,
+                &workspace.path,
+                &item.id,
+                &attempt.id,
+                "Work cleanup",
             )
             .map_err(|err| (workspace.path.clone(), err.to_string()))?;
         }
-        for candidate in item.merge_candidates.iter().filter(|candidate| candidate.attempt_id == attempt.id) {
+        for candidate in item
+            .merge_candidates
+            .iter()
+            .filter(|candidate| candidate.attempt_id == attempt.id)
+        {
             resolve_expected_candidate_workspace_path(
-                root, &candidate.source_workspace.path, &item.id, &attempt.id, "Work cleanup",
+                root,
+                &candidate.source_workspace.path,
+                &item.id,
+                &attempt.id,
+                "Work cleanup",
             )
             .map_err(|err| (candidate.source_workspace.path.clone(), err.to_string()))?;
         }
