@@ -15,6 +15,7 @@
 - [backward-compatible-serde-fields](backward-compatible-serde-fields.md) — Persisted Work model field additions and renames must preserve backward compatibility with existing on-disk JSON
 - [baseline-attribution-does-not-satisfy-references](baseline-attribution-does-not-satisfy-references.md) — Exclude proven pre-existing suite failures from Writer defects while still requiring passing evidence for every explicit reference
 - [behavior-ids-must-be-numeric](behavior-ids-must-be-numeric.md) — Use numeric B headings in behaviors.md because completion-contract extraction ignores suffixed IDs
+- [behavior-script-guards-scan-fixture-text](behavior-script-guards-scan-fixture-text.md) — Operation-script binary-override guards scan embedded fixture text as well as real CLI invocations
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
 - [bound-conversation-state-follows-project-authority](bound-conversation-state-follows-project-authority.md) — Keep bound conversation payloads and active state in the project runtime; the runner-owner root retains only routing, deduplication, and unbound ingress
 - [candidate-commits-should-use-separated-body](candidate-commits-should-use-separated-body.md) — Candidate commits should use a non-whitespace body separated from the subject by a blank line
