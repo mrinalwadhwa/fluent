@@ -1,6 +1,6 @@
 #![cfg(feature = "test-support")]
 
-use fluent::terminal_sessions::{TerminalIdentity, TerminalSession};
+use fluent::terminal_sessions::{ControlOutcome, TerminalIdentity, TerminalSession};
 
 #[test]
 fn terminal_is_bound_before_attachment() {
@@ -85,4 +85,31 @@ fn terminal_commands_preserve_role_confinement() {
     let added = content.strip_prefix(&base).unwrap();
     assert!(added.contains(&format!("(subpath \"{}\")", socket_dir.display())));
     assert!(!added.contains("(subpath \"/private/tmp\")"));
+}
+
+#[test]
+fn second_controller_is_observer_until_control_is_released() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+    let mut session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+    let descriptor = session.descriptor().clone();
+    let mut first = session.observe(&descriptor).unwrap();
+    let mut second = session.observe(&descriptor).unwrap();
+    assert_eq!(first.acquire_control().unwrap(), ControlOutcome::Acquired);
+    assert_eq!(second.acquire_control().unwrap(), ControlOutcome::Occupied);
+    assert_eq!(second.descriptor(), &descriptor);
+    first.detach();
+    assert_eq!(second.acquire_control().unwrap(), ControlOutcome::Acquired);
+    second.detach();
+    session.stop().unwrap();
+}
+
+#[test]
+fn unavailable_terminal_has_specific_reason() {
+    use fluent::terminal_sessions::unavailable_reason;
+    use fluent::work_model::{TaskKind, TaskStatus};
+    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Planned, false).contains("legacy"));
+    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Executing, true).contains("headless"));
+    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Complete, true).contains("completed"));
+    assert!(unavailable_reason(TaskKind::Tester, TaskStatus::Executing, true).contains("Tester"));
 }

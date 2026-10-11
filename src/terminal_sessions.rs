@@ -95,6 +95,90 @@ pub enum ControlOutcome {
     Acquired,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalAvailability {
+    pub descriptor: Option<TerminalDescriptor>,
+    pub unavailable_reason: Option<String>,
+}
+
+pub fn unavailable_reason(
+    kind: crate::work_model::TaskKind,
+    status: crate::work_model::TaskStatus,
+    has_execution: bool,
+) -> String {
+    use crate::work_model::{TaskKind, TaskStatus};
+    if matches!(
+        status,
+        TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser | TaskStatus::Superseded
+    ) {
+        return "This worker has completed; its invocation cannot receive input.".into();
+    }
+    if matches!(
+        kind,
+        TaskKind::Tester | TaskKind::Verification | TaskKind::Probe
+    ) {
+        return "This Tester or verification worker has no agent conversation to attach to.".into();
+    }
+    if has_execution {
+        "This worker uses headless execution and has no live agent terminal.".into()
+    } else {
+        "This legacy or not-yet-started worker has no managed terminal session.".into()
+    }
+}
+
+/// Explain availability for one selected Task using the source's published
+/// Work model and the generation-bound terminal descriptor.
+pub fn availability(
+    source_root: &Path,
+    work_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<TerminalAvailability> {
+    let source_root = source_root.canonicalize()?;
+    let store = crate::work_model::WorkModelStore::new(&source_root);
+    let item = store.read_work_item_snapshot(work_id)?;
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .context("selected Attempt does not exist")?;
+    let task = attempt
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .context("selected Task does not exist")?;
+    if let Some(descriptor) = list(&source_root)?.into_iter().find(|descriptor| {
+        descriptor.work_item_id == work_id
+            && descriptor.attempt_id == attempt_id
+            && descriptor.task_id == task_id
+    }) {
+        if descriptor.lifecycle == TerminalLifecycle::Running {
+            return Ok(TerminalAvailability {
+                descriptor: Some(descriptor),
+                unavailable_reason: None,
+            });
+        }
+        return Ok(TerminalAvailability {
+            descriptor: None,
+            unavailable_reason: descriptor.unavailable_reason,
+        });
+    }
+    let execution = source_root
+        .join(".fluent/work/artifacts")
+        .join(work_id)
+        .join(attempt_id)
+        .join(task_id)
+        .join("execution.json");
+    Ok(TerminalAvailability {
+        descriptor: None,
+        unavailable_reason: Some(unavailable_reason(
+            task.kind,
+            task.status.clone(),
+            execution.exists(),
+        )),
+    })
+}
+
 fn record_for(identity: &TerminalIdentity) -> PathBuf {
     identity.artifact_dir.join("execution.json")
 }

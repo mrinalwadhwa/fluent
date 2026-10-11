@@ -242,6 +242,14 @@ pub enum TerminalCommands {
         #[arg(long)]
         control: bool,
     },
+    /// Explain why a selected worker has no live agent terminal
+    Explain {
+        #[arg(long)]
+        source: PathBuf,
+        work_item_id: String,
+        attempt_id: String,
+        task_id: String,
+    },
 }
 
 #[derive(Subcommand)]

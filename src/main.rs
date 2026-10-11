@@ -118,6 +118,22 @@ fn main() -> Result<()> {
                     bail!("terminal attachment exited with {code}");
                 }
             }
+            TerminalCommands::Explain {
+                source,
+                work_item_id,
+                attempt_id,
+                task_id,
+            } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fluent::terminal_sessions::availability(
+                        &source,
+                        &work_item_id,
+                        &attempt_id,
+                        &task_id,
+                    )?)?
+                );
+            }
         },
         Some(Commands::Status { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
