@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::fmt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
@@ -18,6 +19,34 @@ host agent full-session access to recover this boundary.";
 pub struct SandboxProfile {
     _temp_file: NamedTempFile,
     pub path: PathBuf,
+}
+
+/// Move a prepared Tester profile into host-only storage before any child can
+/// receive its path. The original shared temporary file is removed on drop.
+pub(crate) fn protect_tester_profile(
+    profile: SandboxProfile,
+    directory: &Path,
+) -> Result<SandboxProfile> {
+    anyhow::ensure!(
+        directory == std::fs::canonicalize(directory)?,
+        "protected profile directory must be canonical"
+    );
+    let metadata = std::fs::symlink_metadata(directory)?;
+    anyhow::ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0,
+        "protected profile directory has unsafe ownership or permissions"
+    );
+    let mut protected = NamedTempFile::new_in(directory)?;
+    use std::io::Write;
+    protected.write_all(&std::fs::read(&profile.path)?)?;
+    protected.as_file().sync_all()?;
+    let path = protected.path().to_path_buf();
+    Ok(SandboxProfile {
+        _temp_file: protected,
+        path,
+    })
 }
 
 /// Resolve the account home independently of a worker-controlled HOME value.
@@ -1087,6 +1116,49 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn protected_tester_profile_uses_private_canonical_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let profile = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        let original = profile.path.clone();
+        let original_bytes = std::fs::read(&original).unwrap();
+        let protected = protect_tester_profile(profile, &private).unwrap();
+        assert!(protected.path.starts_with(&private));
+        assert_eq!(std::fs::read(&protected.path).unwrap(), original_bytes);
+        assert!(!original.exists());
+        assert_eq!(
+            std::fs::metadata(&protected.path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&private, &alias).unwrap();
+        let profile = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        assert!(protect_tester_profile(profile, &alias).is_err());
+    }
 
     #[test]
     fn worker_profiles_cannot_read_or_write_operator_permission_store() {

@@ -642,6 +642,9 @@ pub(crate) fn render_sandbox_profile_with_cache(
         commands,
         original_indexes,
     } = settlement;
+    let has_permission_request = commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
     check_requested_permissions(
         candidate_workspace,
         no_sandbox,
@@ -703,6 +706,15 @@ pub(crate) fn render_sandbox_profile_with_cache(
         std::slice::from_ref(&common_git_dir),
     ) {
         Ok(profile) => {
+            let profile = if has_permission_request {
+                let mut forbidden_roots = writable_roots.clone();
+                forbidden_roots.push(common_git_dir.clone());
+                let protected =
+                    crate::tester_permissions::protected_profile_directory(&forbidden_roots)?;
+                os::protect_tester_profile(profile, &protected)?
+            } else {
+                profile
+            };
             os::preflight_profile(&profile)?;
             Ok(TesterSandbox {
                 profile: Some(profile),

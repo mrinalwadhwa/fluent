@@ -210,6 +210,22 @@ fn store_root() -> Result<PathBuf> {
     Ok(home.join(".config/fluent/tester-permissions"))
 }
 
+/// Select host-only launch storage after checking every worker-writable root.
+/// Approval preparation creates the store; launch preparation never creates it.
+pub(crate) fn protected_profile_directory(writable_roots: &[PathBuf]) -> Result<PathBuf> {
+    let root = store_root()?;
+    validate_store_directory(&root)?;
+    for writable in writable_roots {
+        let writable = fs::canonicalize(writable)
+            .with_context(|| format!("resolving worker-writable root {}", writable.display()))?;
+        ensure!(
+            !root.starts_with(&writable) && !writable.starts_with(&root),
+            "protected Tester profile overlaps a worker-writable root"
+        );
+    }
+    Ok(root)
+}
+
 fn validate_store_parent(root: &Path) -> Result<()> {
     let parent = root.parent().context("permission store has no parent")?;
     ensure!(
