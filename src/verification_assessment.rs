@@ -1206,8 +1206,7 @@ fn validate_manifest_permissions(
     for (index, (definition, result)) in manifest.commands.iter().zip(&results.commands).enumerate()
     {
         anyhow::ensure!(
-            definition.command == result.command
-                && definition.test_harness == result.test_harness,
+            definition.command == result.command && definition.test_harness == result.test_harness,
             "permission-bearing Tester command identity differs from its settled result"
         );
         let original_index = manifest.original_command_indexes[index];
@@ -1318,8 +1317,13 @@ mod tester_permission_tests {
             "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
         })).unwrap();
         let error = validate_manifest_permissions(
-            root.path(), "artifacts", "candidate", &manifest, &results,
-        ).expect_err("a changed result identity cannot claim the configured command's receipt");
+            root.path(),
+            "artifacts",
+            "candidate",
+            &manifest,
+            &results,
+        )
+        .expect_err("a changed result identity cannot claim the configured command's receipt");
         assert!(error.to_string().contains("command identity"), "{error:#}");
     }
 
