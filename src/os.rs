@@ -27,6 +27,23 @@ pub(crate) fn protect_tester_profile(
     profile: SandboxProfile,
     directory: &Path,
 ) -> Result<SandboxProfile> {
+    private_tester_profile(&std::fs::read(&profile.path)?, directory)
+}
+
+/// Give only one approved Tester command the exact process-table read rule.
+/// Keep the baseline profile available for adjacent commands and extraction.
+pub(crate) fn protect_process_table_profile(
+    baseline: &SandboxProfile,
+    directory: &Path,
+) -> Result<SandboxProfile> {
+    let mut content = std::fs::read(&baseline.path)?;
+    content.extend_from_slice(b"\n");
+    content.extend_from_slice(crate::tester_permissions::PROCESS_TABLE_RULE.as_bytes());
+    content.extend_from_slice(b"\n");
+    private_tester_profile(&content, directory)
+}
+
+fn private_tester_profile(content: &[u8], directory: &Path) -> Result<SandboxProfile> {
     anyhow::ensure!(
         directory == std::fs::canonicalize(directory)?,
         "protected profile directory must be canonical"
@@ -40,7 +57,7 @@ pub(crate) fn protect_tester_profile(
     );
     let mut protected = NamedTempFile::new_in(directory)?;
     use std::io::Write;
-    protected.write_all(&std::fs::read(&profile.path)?)?;
+    protected.write_all(content)?;
     protected.as_file().sync_all()?;
     let path = protected.path().to_path_buf();
     Ok(SandboxProfile {
@@ -1158,6 +1175,37 @@ mod tests {
         )
         .unwrap();
         assert!(protect_tester_profile(profile, &alias).is_err());
+    }
+
+    #[test]
+    fn process_table_profile_adds_only_the_declared_read_rule() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let baseline = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(&baseline.path).unwrap();
+        assert!(!original.contains("kern.proc.all"));
+        let granted = protect_process_table_profile(&baseline, &private).unwrap();
+        let content = std::fs::read_to_string(&granted.path).unwrap();
+        assert_eq!(
+            content,
+            format!(
+                "{original}\n{}\n",
+                crate::tester_permissions::PROCESS_TABLE_RULE
+            )
+        );
+        assert_eq!(std::fs::read_to_string(&baseline.path).unwrap(), original);
+        assert!(granted.path.starts_with(&private));
     }
 
     #[test]

@@ -234,6 +234,7 @@ pub fn plan(candidate_workspace: &Path) -> Result<TesterPlan> {
 /// The sandbox profile and host-owned settlement paths prepared for one Tester run.
 pub struct TesterSandbox {
     profile: Option<os::SandboxProfile>,
+    command_profiles: Vec<Option<os::SandboxProfile>>,
     settlement_directories: Vec<Option<PathBuf>>,
     commands: Vec<TesterCommand>,
     launch_env: Vec<(String, String)>,
@@ -657,6 +658,7 @@ pub(crate) fn render_sandbox_profile_with_cache(
     if no_sandbox {
         return Ok(TesterSandbox {
             profile: None,
+            command_profiles: Vec::new(),
             settlement_directories,
             commands,
             launch_env,
@@ -673,6 +675,7 @@ pub(crate) fn render_sandbox_profile_with_cache(
     {
         return Ok(TesterSandbox {
             profile: None,
+            command_profiles: Vec::new(),
             settlement_directories,
             commands,
             launch_env,
@@ -706,18 +709,24 @@ pub(crate) fn render_sandbox_profile_with_cache(
         std::slice::from_ref(&common_git_dir),
     ) {
         Ok(profile) => {
-            let profile = if has_permission_request {
+            let (profile, command_profiles) = if has_permission_request {
                 let mut forbidden_roots = writable_roots.clone();
                 forbidden_roots.push(common_git_dir.clone());
                 let protected =
                     crate::tester_permissions::protected_profile_directory(&forbidden_roots)?;
-                os::protect_tester_profile(profile, &protected)?
+                let baseline = os::protect_tester_profile(profile, &protected)?;
+                let selected = render_command_profiles(&commands, &baseline, &protected)?;
+                (baseline, selected)
             } else {
-                profile
+                (profile, Vec::new())
             };
             os::preflight_profile(&profile)?;
+            for selected in command_profiles.iter().flatten() {
+                os::preflight_profile(selected)?;
+            }
             Ok(TesterSandbox {
                 profile: Some(profile),
+                command_profiles,
                 settlement_directories,
                 commands,
                 launch_env,
@@ -725,6 +734,26 @@ pub(crate) fn render_sandbox_profile_with_cache(
         }
         Err(err) => Err(err),
     }
+}
+
+fn render_command_profiles(
+    commands: &[TesterCommand],
+    baseline: &os::SandboxProfile,
+    protected_directory: &Path,
+) -> Result<Vec<Option<os::SandboxProfile>>> {
+    commands
+        .iter()
+        .map(|command| {
+            if command
+                .permissions
+                .contains(&TesterPermission::ProcessTableRead)
+            {
+                os::protect_process_table_profile(baseline, protected_directory).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect()
 }
 
 fn check_requested_permissions(
@@ -777,6 +806,7 @@ pub fn run_with_sandbox_profile(
         candidate_workspace,
         artifact_dir,
         sandbox.profile(),
+        Some(&sandbox.command_profiles),
         &sandbox.commands,
         Some(&sandbox.settlement_directories),
         &sandbox.launch_env,
@@ -788,12 +818,27 @@ fn run_with_prepared_sandbox_profile_and_collector(
     candidate_workspace: &Path,
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    command_profiles: Option<&[Option<os::SandboxProfile>]>,
     commands: &[TesterCommand],
     settlement_directories: Option<&[Option<PathBuf>]>,
     launch_env: &[(String, String)],
     collector: &dyn ProcessInventoryCollector,
 ) -> Result<TesterOutcome> {
     record_test_boundary(sandbox_profile.is_some());
+    if commands
+        .iter()
+        .any(|command| !command.permissions.is_empty())
+    {
+        anyhow::ensure!(
+            command_profiles.is_some_and(|selected| {
+                selected.len() == commands.len()
+                    && commands.iter().zip(selected).all(|(command, profile)| {
+                        command.permissions.is_empty() || profile.is_some()
+                    })
+            }),
+            "permission-bearing Tester commands lack per-command profiles"
+        );
+    }
     let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
     if !extractor_path.is_file() || !is_executable(&extractor_path) {
         return persist_harness_error(
@@ -927,7 +972,10 @@ fn run_with_prepared_sandbox_profile_and_collector(
             &cmd.test_harness,
             index,
             &commands_dir,
-            sandbox_profile,
+            command_profiles
+                .and_then(|selected| selected.get(index))
+                .and_then(Option::as_ref)
+                .or(sandbox_profile),
             launch_env,
             settlement
                 .as_ref()
@@ -1071,6 +1119,7 @@ fn run_with_sandbox_profile_and_collector(
         candidate_workspace,
         artifact_dir,
         sandbox_profile,
+        None,
         &plan.commands,
         settlement_directories.or_else(|| {
             prepared
@@ -1462,6 +1511,60 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_profile_is_selected_only_for_its_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let baseline = os::render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n- command: 'true'\n  test_harness: shell-harness\n",
+        )
+        .unwrap();
+        let profiles = render_command_profiles(&commands, &baseline, &private).unwrap();
+        assert_eq!(profiles.len(), 3);
+        assert!(profiles[0].is_none());
+        assert!(profiles[2].is_none());
+        let requested = fs::read_to_string(&profiles[1].as_ref().unwrap().path).unwrap();
+        assert!(requested.contains(crate::tester_permissions::PROCESS_TABLE_RULE));
+        assert!(
+            !fs::read_to_string(&baseline.path)
+                .unwrap()
+                .contains("kern.proc.all")
+        );
+    }
+
+    #[test]
+    fn requested_command_cannot_fall_back_to_baseline_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let error = run_with_prepared_sandbox_profile_and_collector(
+            tmp.path(),
+            tmp.path(),
+            None,
+            None,
+            &commands,
+            None,
+            &[],
+            &HostProcessInventoryCollector,
+        )
+        .expect_err("a requested command needs its own profile");
+        assert!(error.to_string().contains("per-command profiles"));
+    }
 
     #[test]
     fn tester_results_bind_once_to_the_exact_candidate_commit() {
@@ -1999,6 +2102,7 @@ mod tests {
             workspace.path(),
             artifact_dir.path(),
             sandbox.profile(),
+            Some(&sandbox.command_profiles),
             &sandbox.commands,
             Some(&sandbox.settlement_directories),
             &[],

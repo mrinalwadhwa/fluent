@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::git;
 use crate::tester::{self, TesterPermission};
 
-const PROCESS_TABLE_RULE: &str = "(allow sysctl-read (sysctl-name \"kern.proc.all\"))";
+pub(crate) const PROCESS_TABLE_RULE: &str = "(allow sysctl-read (sysctl-name \"kern.proc.all\"))";
 
 #[derive(Serialize)]
 struct RequestIdentity<'a> {
