@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 #[path = "lib/release_trace.rs"]
 mod release_trace;
+#[path = "lib/released_predecessor.rs"]
+mod released_predecessor;
 
 struct ReleaseServiceChild {
     child: Option<std::process::Child>,
@@ -721,19 +723,8 @@ fn scheduler_released_upgrade_preserves_shared_ownership() {
     let home = &dirs.home;
     let first = &dirs.first;
     let second = &dirs.second;
-    let source =
-        fs::read("/Users/mrinal/.local/bin/fluent").expect("actual v0.5.0 executable is required");
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&source)),
-        "8bb76717be942e4a0c97c297c318c0a1331e92105180edb386354dddbae12974"
-    );
-    let predecessor = home.path().join("fluent-v0.5.0");
-    fs::write(&predecessor, source).unwrap();
+    let predecessor = released_predecessor::copy_to(home.path()).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&predecessor, fs::Permissions::from_mode(0o755)).unwrap();
-    let release_version = Command::new(&predecessor).arg("version").output().unwrap();
-    assert!(release_version.status.success());
-    assert!(String::from_utf8_lossy(&release_version.stdout).contains("0.5.0 6875b409"));
 
     let provider_bin = home.path().join("bin");
     fs::create_dir_all(&provider_bin).unwrap();
@@ -1334,7 +1325,7 @@ fn scheduler_released_upgrade_preserves_shared_ownership() {
                     "health-after":{"generation":health_after_incompatible.generation,"build":health_after_incompatible.build,
                         "instance_id":health_after_incompatible.instance_id,"state":health_after_incompatible.state}},
                 "coordinators":legacy_coordinators,
-                "predecessor-sha256":"8bb76717be942e4a0c97c297c318c0a1331e92105180edb386354dddbae12974"}},
+                "predecessor-sha256":format!("{:x}", Sha256::digest(fs::read(&predecessor).unwrap()))}},
             {"sequence":2,"actor":"operator","operation-id":"scheduler-stop",
              "generation":null,"boundary":"old-owner-settled",
              "causal-predecessors":[1],"raw-facts":{"stop-exit-codes":stopped.iter().map(|output| output.status.code()).collect::<Vec<_>>(),

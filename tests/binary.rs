@@ -2,6 +2,8 @@
 mod log;
 #[path = "lib/release_trace.rs"]
 mod release_trace;
+#[path = "lib/released_predecessor.rs"]
+mod released_predecessor;
 
 use fluent::git;
 use fluent::review;
@@ -22,21 +24,42 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use tempfile::TempDir;
 
-const RELEASED_050_SHA256: &str =
-    "8bb76717be942e4a0c97c297c318c0a1331e92105180edb386354dddbae12974";
+#[test]
+fn released_predecessor_fixture_rejects_changed_bytes() {
+    let source = TempDir::new().unwrap();
+    let scenario = TempDir::new().unwrap();
+    let prepared = released_predecessor::copy_to(source.path()).unwrap();
+    let mut bytes = fs::read(&prepared).unwrap();
+    bytes.push(0);
+    fs::write(&prepared, bytes).unwrap();
+
+    let error = released_predecessor::copy_from(&prepared, scenario.path()).unwrap_err();
+    assert!(error.to_string().contains("SHA-256"), "{error:#}");
+    assert_eq!(fs::read_dir(scenario.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn released_predecessor_fixture_rejects_unreadable_input() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = TempDir::new().unwrap();
+    let scenario = TempDir::new().unwrap();
+    let missing = source.path().join("missing");
+    let unreadable = source.path().join("unreadable");
+    fs::write(&unreadable, "unreadable").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0)).unwrap();
+    for path in [&missing, &unreadable] {
+        let error = released_predecessor::copy_from(path, scenario.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("FLUENT_RELEASED_050_BIN"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read_dir(scenario.path()).unwrap().count(), 0);
+    }
+}
 
 fn released_050_binary(tmp: &TempDir) -> PathBuf {
-    let source = Path::new("/Users/mrinal/.local/bin/fluent");
-    let bytes = fs::read(source).expect("actual v0.5.0 release executable is required");
-    assert_eq!(format!("{:x}", Sha256::digest(&bytes)), RELEASED_050_SHA256);
-    let copy = tmp.path().join("fluent-v0.5.0");
-    fs::write(&copy, bytes).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
-    let version = Command::new(&copy).arg("version").output().unwrap();
-    assert!(version.status.success());
-    assert!(String::from_utf8_lossy(&version.stdout).contains("0.5.0 6875b409"));
-    copy
+    released_predecessor::copy_to(tmp.path()).unwrap()
 }
 
 fn released_fixture_cargo_home(tmp: &TempDir) -> PathBuf {
