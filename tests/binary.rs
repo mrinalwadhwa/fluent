@@ -12676,6 +12676,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
     // A successful setup is the control. Failures must stop even if the helper
     // has already printed a path, and must preserve its diagnostic and status.
     let helpers = [
+        ("released-predecessor", "FLUENT_RELEASED_050_BIN"),
         ("ownership", "FLUENT_OWNERSHIP_OLD_BIN"),
         ("launch-handoff", "FLUENT_LAUNCH_HANDOFF_OLD_BIN"),
         ("verification", "FLUENT_VERIFICATION_OLD_BIN"),
@@ -12720,6 +12721,8 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
     ];
     for (failed_helper, setup_status, prints_path) in [
         ("", 0, true),
+        ("released-predecessor", 37, false),
+        ("released-predecessor", 37, true),
         ("launch-handoff", 37, false),
         ("launch-handoff", 37, true),
         ("ownership", 37, false),
@@ -12773,9 +12776,14 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             } else {
                 String::new()
             };
+            let script = if helper == "released-predecessor" {
+                "prepare-released-predecessor.sh".to_string()
+            } else {
+                format!("build-{helper}-old-reader.sh")
+            };
             write_mock_executable(
                 &fixtures,
-                &format!("build-{helper}-old-reader.sh"),
+                &script,
                 &format!(
                     "#!/bin/sh\nprintf '%s' '{reader_output}'\nif [ {status} -ne 0 ]; then echo 'historical reader build failed' >&2; fi\nexit {status}\n"
                 ),
@@ -12788,7 +12796,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FLUENT_TEST_CARGO_CALLS"
-printf '%s\n' "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
+printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
 case "$1" in
     build) mkdir -p target/debug; touch target/debug/fluent ;;
     nextest) exit 0 ;;
@@ -12802,6 +12810,7 @@ esac
         let output = Command::new("sh")
             .args(["-c", command])
             .current_dir(&project)
+            .env_remove("FLUENT_RELEASED_050_BIN")
             .env_remove("FLUENT_OWNERSHIP_OLD_BIN")
             .env_remove("FLUENT_LAUNCH_HANDOFF_OLD_BIN")
             .env_remove("FLUENT_VERIFICATION_OLD_BIN")
