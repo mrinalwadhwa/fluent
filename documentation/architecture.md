@@ -4287,9 +4287,18 @@ must be relative paths made only of normal path components and must
 resolve under `.fluent/work/artifacts/`; cleanup ignores absolute paths
 and parent escapes. Managed Work worktrees are resolved with the same
 expected workspace path rules used by Work task and merge execution, and
-registered worktrees are removed through `git worktree remove --force`.
-Missing worktree paths and unregistered
-directories are reported without deleting arbitrary filesystem paths.
+cleanup inspects every Work branch and registered candidate HEAD against the
+target branch saved by its Writer output or Merge Candidate. A missing or
+conflicting target, unmerged commit, dirty worktree, failed Git probe, or
+existing unregistered candidate directory retains the whole Work Item.
+Cleanup reports the affected source and reason in both preview and apply.
+The read-only inventory precedes every removal. Apply repeats the source
+assessment while holding the dependency, land, and Work model locks, removes
+clean registered worktrees without force, and deletes Work branches only at
+their assessed tips. It removes artifacts and model records after Git assets.
+Missing worktree registrations can be removed with force after their saved HEAD
+is proved integrated. Unregistered directories are retained without deleting
+arbitrary filesystem paths.
 After planning stored Work Item cleanup, cleanup scans the top level of
 `.fluent/work/artifacts/` for directories whose names do not match any
 stored Work Item JSON under `.fluent/work/items/`. Dry runs report those

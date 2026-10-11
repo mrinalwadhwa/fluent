@@ -3898,7 +3898,7 @@ Test: tests/behaviors/operations/test-work-status-dashboard.sh (status reports i
 
 ### B1
 
-WHEN `fluent cleanup` sees terminal Work Items,
+WHEN `fluent cleanup` sees eligible terminal Work Items,
 THE SYSTEM SHALL report Work Item state, artifacts, managed candidate
 worktrees, and Work branches without removing them unless `--apply` is
 passed.
@@ -3906,7 +3906,7 @@ Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktre
 
 ### B2
 
-WHEN `fluent cleanup --apply` cleans a terminal Work Item,
+WHEN `fluent cleanup --apply` cleans an eligible terminal Work Item,
 THE SYSTEM SHALL remove the Work Item state, referenced managed Work
 artifacts, registered managed candidate worktrees, and Work branches.
 The cleanup SHALL also remove any Fargate runtime metadata directories
@@ -3919,7 +3919,8 @@ Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktre
 WHEN `fluent cleanup` sees an abandoned Work Item with no executing or
 reviewing Attempts, no executing Tasks, no reviewing Merge Candidates,
 and no executing Merge Candidate merges,
-THE SYSTEM SHALL select it for cleanup, including its managed sibling
+THE SYSTEM SHALL select it for cleanup when its owned source is clean and
+integrated or no owned source remains, including its managed sibling
 worktree, Work branch, state records, and Work artifacts.
 Test: tests/behaviors/operations/test-cleanup.sh (cleanup selects abandoned needs-user Work Items)
 Test: tests/behaviors/operations/test-cleanup.sh (cleanup skips abandoned Work with reviewing Attempt)
@@ -3954,7 +3955,8 @@ Test: tests/binary.rs (cleanup_work_items_dry_run_and_apply_manage_state_worktre
 
 ### B7
 
-WHEN Work cleanup sees failed terminal Work Items,
+WHEN Work cleanup sees failed terminal Work Items with clean, integrated source
+or no remaining source assets,
 THE SYSTEM SHALL select them for cleanup.
 Test: tests/binary.rs (cleanup_work_items_selects_failed_terminal_and_skips_pending_merge_candidate)
 
@@ -3989,6 +3991,28 @@ WHEN Work cleanup selects a candidate for removal, THE SYSTEM SHALL recheck
 its current eligibility and keep that eligibility protected through removal
 of its managed worktrees, branches, artifacts, and state.
 Test: tests/binary.rs (workflow_cleanup_rechecks_current_eligibility), tests/binary.rs (workflow_cleanup_holds_eligibility_through_removal)
+
+### B12
+
+WHEN an otherwise eligible Work Item has unmerged source commits or pending
+file changes in a managed candidate worktree, THE SYSTEM SHALL retain its
+state, artifacts, worktrees, and branches and report the affected source in
+preview and apply results.
+Test: tests/binary.rs (cleanup_retains_unmerged_source_across_attempts), tests/binary.rs (cleanup_retains_pending_file_changes)
+
+### B13
+
+IF cleanup cannot establish an existing source asset's identity, cleanliness,
+target branch, or integration status, THE SYSTEM SHALL retain the whole Work
+Item and report the reason.
+Test: tests/binary.rs (cleanup_retains_unverifiable_source), tests/binary.rs (cleanup_reports_retained_source_and_cleans_safe_work)
+
+### B14
+
+WHEN cleanup applies a selected Work Item's removal, THE SYSTEM SHALL repeat
+the source check under the cleanup locks before removal and refuse changed
+source identities at each Git removal boundary.
+Test: tests/binary.rs (cleanup_rechecks_source_before_removal)
 
 ## Dashboard
 
