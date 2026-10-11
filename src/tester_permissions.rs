@@ -334,7 +334,23 @@ fn read_records(root: &Path, request_digest: &str) -> Result<Vec<ApprovalRecord>
         metadata.permissions().mode() & 0o077 == 0,
         "permission record is accessible to others"
     );
-    let records: Vec<ApprovalRecord> = serde_json::from_slice(&fs::read(&path)?)?;
+    ensure!(
+        metadata.nlink() == 1,
+        "permission record has a writable alias"
+    );
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    ensure!(
+        opened.dev() == metadata.dev() && opened.ino() == metadata.ino() && opened.nlink() == 1,
+        "permission record changed while opening"
+    );
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let records: Vec<ApprovalRecord> = serde_json::from_slice(&bytes)?;
     for (index, record) in records.iter().enumerate() {
         ensure!(
             record.request_digest == request_digest,

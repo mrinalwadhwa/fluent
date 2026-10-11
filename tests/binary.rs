@@ -26564,6 +26564,35 @@ fn tester_permissions_reject_worker_authority_tampering() {
         !inspection.status.success(),
         "a writable authority parent must invalidate inspection"
     );
+
+    let record = authority.join(format!(
+        "{}.json",
+        request["request_digest"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("sha256:")
+            .unwrap()
+    ));
+    let alias = project.join("approval-alias.json");
+    fs::hard_link(&record, &alias).unwrap();
+    let inspection = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !inspection.status.success(),
+        "a worker-writable hard link must invalidate approval inspection"
+    );
 }
 
 #[test]
