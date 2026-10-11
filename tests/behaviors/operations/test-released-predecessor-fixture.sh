@@ -175,19 +175,7 @@ target.write_bytes(pathlib.Path(os.environ["DOWNLOAD_SOURCE"]).read_bytes())
             if Path(helper).name != self.helper.name:
                 (self.root / helper).write_text('#!/bin/sh\nprintf "/unused-old-reader\\n"\n')
         cargo = self.root / "bin/cargo"
-        cargo.write_text('''#!/usr/bin/env python3
-import os, pathlib, sys
-if sys.argv[1] == "build":
-    binary = pathlib.Path("target/debug/fluent")
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.touch()
-elif sys.argv[1:3] == ["nextest", "run"]:
-    prepared = pathlib.Path(os.environ["FLUENT_RELEASED_050_BIN"])
-    assert prepared.read_bytes() == pathlib.Path(os.environ["DOWNLOAD_SOURCE"]).read_bytes()
-    pathlib.Path("scenarios-started").touch()
-else:
-    sys.exit("unexpected Cargo invocation")
-''')
+        shutil.copyfile(PROJECT / "tests/fixtures/released-predecessor-cargo.py", cargo)
         cargo.chmod(0o755)
         env = dict(self.env, FLUENT_RELEASED_050_SOURCE=str(self.root / "missing"))
         env.pop("FLUENT_RELEASED_050_BIN", None)
