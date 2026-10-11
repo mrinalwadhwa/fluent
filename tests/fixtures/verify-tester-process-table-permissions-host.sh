@@ -44,6 +44,7 @@ trap cleanup EXIT
 
 {
     printf 'candidate=%s\n' "$before_head"
+    printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'host=%s\n' "$(sw_vers -productVersion)"
     printf 'architecture=%s\n' "$(uname -m)"
 } > "$evidence_dir/identity.txt"
@@ -195,4 +196,38 @@ export FLUENT_FIXTURE_APPROVAL_ID="$approval_id"
 
 (cd "$fixture" && "$binary" tester check) \
     > "$evidence_dir/approved-run.log" 2>&1 || fail 'approved production Tester run failed'
+python3 - "$evidence_dir" "$fixture_head" "$approval_id" "$request_digest" <<'PY'
+import json, os, pwd, shutil, sys
+from pathlib import Path
+
+evidence = Path(sys.argv[1])
+candidate, approval, request = sys.argv[2:]
+authority = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve() / '.config/fluent/tester-permissions'
+matches = []
+for path in authority.glob('receipt-*.json'):
+    receipt = json.loads(path.read_text())
+    if receipt.get('candidate_commit') == candidate and receipt.get('approval_id') == approval:
+        matches.append((path, receipt))
+if len(matches) != 1:
+    raise SystemExit(f'expected one protected receipt for fixture, found {len(matches)}')
+path, receipt = matches[0]
+if (receipt.get('request_digest') != request or
+        receipt.get('execution_mode') != 'macos-seatbelt' or
+        receipt.get('host_platform') != 'macos' or
+        receipt.get('command_index') != 0 or
+        receipt.get('exit_code') != 0):
+    raise SystemExit('protected receipt does not prove the approved production command')
+shutil.copy2(path, evidence / 'protected-receipt.json')
+print(json.dumps({
+    'candidate': candidate,
+    'approval_id': approval,
+    'request_digest': request,
+    'receipt_id': path.name,
+    'profile_digest': receipt['profile_digest'],
+    'execution_mode': receipt['execution_mode'],
+    'admitted_at': receipt['admitted_at'],
+    'settled_at': receipt['settled_at'],
+}, indent=2), file=(evidence / 'observed-permission.json').open('w'))
+PY
+printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$evidence_dir/identity.txt"
 printf 'production Tester process-table acceptance passed\n' > "$evidence_dir/result.txt"
