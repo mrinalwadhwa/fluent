@@ -215,6 +215,10 @@ pub(crate) struct CanonicalRunManifest {
     pub extractor_digest: String,
     pub commands: Vec<TesterCommand>,
     pub full_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub original_command_indexes: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_receipts: Vec<Option<String>>,
 }
 
 /// Read-only Tester configuration used to defer filesystem setup until a Task
@@ -652,6 +656,12 @@ pub(crate) fn render_sandbox_profile_with_cache(
     let has_permission_request = commands
         .iter()
         .any(|command| !command.permissions.is_empty());
+    check_requested_permissions(
+        candidate_workspace,
+        no_sandbox,
+        &commands,
+        &original_indexes,
+    )?;
     let candidate_commit = if has_permission_request {
         Some(crate::git::run_stdout(
             candidate_workspace,
@@ -661,12 +671,6 @@ pub(crate) fn render_sandbox_profile_with_cache(
     } else {
         None
     };
-    check_requested_permissions(
-        candidate_workspace,
-        no_sandbox,
-        &commands,
-        &original_indexes,
-    )?;
     let launch_env = dependency_cache
         .map(|cache| cache.launch_env())
         .unwrap_or_default();
@@ -882,7 +886,10 @@ fn run_with_prepared_sandbox_profile_and_collector(
 
     use sha2::{Digest, Sha256};
     let configured = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
-    let manifest = CanonicalRunManifest {
+    let has_permission_request = commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    let mut manifest = CanonicalRunManifest {
         run_at: Some(crate::work_model::now_iso8601()),
         environment: commands
             .iter()
@@ -911,7 +918,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 )
             })
             .collect::<Result<Vec<_>>>()?,
-        schema_version: 1,
+        schema_version: if has_permission_request { 2 } else { 1 },
         config_digest: format!(
             "sha256:{:x}",
             Sha256::digest(fs::read(candidate_workspace.join(TESTER_YAML_PATH))?)
@@ -919,10 +926,23 @@ fn run_with_prepared_sandbox_profile_and_collector(
         extractor_digest: format!("sha256:{:x}", Sha256::digest(fs::read(&extractor_path)?)),
         full_run: configured.commands == commands,
         commands: commands.to_vec(),
+        original_command_indexes: if has_permission_request {
+            admission
+                .context("permission-bearing run lacks pinned command indexes")?
+                .1
+                .to_vec()
+        } else {
+            Vec::new()
+        },
+        permission_receipts: if has_permission_request {
+            vec![None; commands.len()]
+        } else {
+            Vec::new()
+        },
     };
-    fs::write(
-        artifact_dir.join("canonical-run.json"),
-        serde_json::to_vec_pretty(&manifest)?,
+    crate::tester_permissions::write_command_artifact(
+        &artifact_dir.join("canonical-run.json"),
+        &serde_json::to_vec_pretty(&manifest)?,
     )?;
 
     let commands_dir = artifact_dir.join("commands");
@@ -946,12 +966,16 @@ fn run_with_prepared_sandbox_profile_and_collector(
         {
             let stdout_log = format!("commands/{index}-stdout.log");
             let stderr_log = format!("commands/{index}-stderr.log");
-            fs::write(artifact_dir.join(&stdout_log), b"")?;
-            fs::write(
-                artifact_dir.join(&stderr_log),
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join(&stdout_log),
+                b"",
+            )?;
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join(&stderr_log),
                 format!(
                     "Required {fact}={required}, observed {observed}; prerequisite prevented execution.\n"
-                ),
+                )
+                .as_bytes(),
             )?;
             command_results.push(CommandResult {
                 failure_cause: Some(CommandFailureCause::UnmetPrerequisite {
@@ -1063,8 +1087,21 @@ fn run_with_prepared_sandbox_profile_and_collector(
         command_results.push(result);
     }
 
+    if has_permission_request {
+        manifest.permission_receipts = command_results
+            .iter()
+            .map(|result| result.permission_receipt_id.clone())
+            .collect();
+        crate::tester_permissions::write_command_artifact(
+            &artifact_dir.join("canonical-run.json"),
+            &serde_json::to_vec_pretty(&manifest)?,
+        )?;
+    }
     let commands_json = serde_json::to_string_pretty(&command_results)?;
-    fs::write(artifact_dir.join("commands.json"), &commands_json)?;
+    crate::tester_permissions::write_command_artifact(
+        &artifact_dir.join("commands.json"),
+        commands_json.as_bytes(),
+    )?;
 
     if let Some(result) = command_results.iter().find(|result| {
         fs::read_to_string(artifact_dir.join(&result.stderr_log))
@@ -1227,7 +1264,10 @@ fn structural_problems(
     } else if !is_executable(&extractor) {
         problems.push(format!("{EXTRACTOR_PATH}: not executable"));
     } else {
-        if let Err(error) = fs::write(artifact_dir.join("commands.json"), "[]") {
+        if let Err(error) = crate::tester_permissions::write_command_artifact(
+            &artifact_dir.join("commands.json"),
+            b"[]",
+        ) {
             problems.push(format!("readiness artifact: {error}"));
         } else if let Err(error) =
             extract_and_normalize(candidate_workspace, &extractor, artifact_dir, profile, &[])
@@ -1349,8 +1389,8 @@ fn run_command(
     .with_context(|| format!("spawning Tester command: {command}"))?;
     let duration = start.elapsed();
 
-    fs::write(&stdout_path, &output.stdout)?;
-    fs::write(&stderr_path, &output.stderr)?;
+    crate::tester_permissions::write_command_artifact(&stdout_path, &output.stdout)?;
+    crate::tester_permissions::write_command_artifact(&stderr_path, &output.stderr)?;
 
     let exit_code = output.status.code().unwrap_or(-1);
 
@@ -1536,7 +1576,7 @@ pub fn is_nested_swiftpm_harness_error(artifact_dir: &Path) -> bool {
 fn write_results(artifact_dir: &Path, results: &TesterResults) -> Result<()> {
     let json = serde_json::to_string_pretty(results)?;
     let path = artifact_dir.join("tester-results.json");
-    crate::atomic_write::atomic_write(&path, json.as_bytes())?;
+    crate::tester_permissions::write_command_artifact(&path, json.as_bytes())?;
     eprintln!("  Wrote {}", path.display());
     Ok(())
 }
@@ -1582,6 +1622,29 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_logs_do_not_follow_worker_created_aliases() {
+        let workspace = TempDir::new().unwrap();
+        let commands = workspace.path().join("commands");
+        fs::create_dir(&commands).unwrap();
+        let target = workspace.path().join("host-target");
+        fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, commands.join("0-stdout.log")).unwrap();
+        let result = run_command(
+            workspace.path(),
+            "printf output",
+            "shell-harness",
+            0,
+            &commands,
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
 
     #[test]
     fn requested_profile_is_selected_only_for_its_command() {
@@ -1863,7 +1926,10 @@ mod tests {
         .err()
         .expect("direct profile rendering must reject a permission request");
 
-        assert!(error.to_string().contains("requires the macOS sandbox"));
+        assert!(
+            error.to_string().contains("requires the macOS sandbox"),
+            "{error:#}"
+        );
     }
 
     #[test]

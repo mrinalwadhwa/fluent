@@ -146,12 +146,10 @@ pub(crate) fn assess_landed_tester_history(
         crate::verification_assessment::bound_recovery_artifact(root, &manifest_path)?;
     let manifest: crate::tester::CanonicalRunManifest = serde_json::from_slice(&manifest_bytes)?;
     anyhow::ensure!(
-        manifest.schema_version == 1
-            && manifest.full_run
-            && manifest.commands.len() == results.commands.len(),
+        manifest.full_run && manifest.commands.len() == results.commands.len(),
         "retained Tester manifest does not describe a complete run"
     );
-    reject_unproven_tester_permissions(&manifest.commands)?;
+    validate_manifest_permissions(root, area, merged_commit, &manifest, &results)?;
     for (name, digest) in [
         (".fluent/tester.yaml", &manifest.config_digest),
         (".fluent/extract-tester-results", &manifest.extractor_digest),
@@ -592,10 +590,10 @@ fn assess_canonical_checks_at(
     };
     let manifest: crate::tester::CanonicalRunManifest = serde_json::from_slice(&manifest_bytes)?;
     anyhow::ensure!(
-        manifest.schema_version == 1 && manifest.full_run,
+        manifest.full_run,
         "Tester manifest does not prove a complete canonical run"
     );
-    reject_unproven_tester_permissions(&manifest.commands)?;
+    validate_manifest_permissions(project_root, area, candidate_commit, &manifest, &results)?;
     for (path, bytes, expected) in [
         (
             ".fluent/tester.yaml",
@@ -1169,7 +1167,88 @@ pub(crate) fn reconstruct_legacy_manifest(
         run_at: None,
         environment: vec![],
         applicability: vec![],
+        original_command_indexes: vec![],
+        permission_receipts: vec![],
     })
+}
+
+fn validate_manifest_permissions(
+    project_root: &Path,
+    area: &str,
+    candidate_commit: &str,
+    manifest: &crate::tester::CanonicalRunManifest,
+    results: &crate::tester::TesterResults,
+) -> Result<()> {
+    let requests_permission = manifest
+        .commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    if !requests_permission {
+        anyhow::ensure!(
+            manifest.schema_version == 1
+                && manifest.original_command_indexes.is_empty()
+                && manifest.permission_receipts.is_empty()
+                && results.commands.iter().all(|command| {
+                    command.permission_receipt.is_none() && command.permission_receipt_id.is_none()
+                }),
+            "default Tester evidence has unexpected permission provenance"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        manifest.schema_version == 2
+            && manifest.original_command_indexes.len() == manifest.commands.len()
+            && manifest.permission_receipts.len() == manifest.commands.len()
+            && results.commands.len() == manifest.commands.len()
+            && results.candidate_commit.as_deref() == Some(candidate_commit),
+        "permission-bearing Tester manifest lacks complete version 2 provenance"
+    );
+    for (index, (definition, result)) in manifest.commands.iter().zip(&results.commands).enumerate()
+    {
+        let original_index = manifest.original_command_indexes[index];
+        anyhow::ensure!(
+            !manifest.full_run || original_index == index,
+            "canonical Tester changed a configured command index"
+        );
+        if definition.permissions.is_empty() {
+            anyhow::ensure!(
+                manifest.permission_receipts[index].is_none()
+                    && result.permission_receipt.is_none()
+                    && result.permission_receipt_id.is_none(),
+                "unrequested command carries a permission receipt"
+            );
+            continue;
+        }
+        let receipt_id = manifest.permission_receipts[index]
+            .as_deref()
+            .context("permission-bearing command is missing a host receipt")?;
+        anyhow::ensure!(
+            result.permission_receipt_id.as_deref() == Some(receipt_id)
+                && result.permission_receipt.as_deref()
+                    == Some(format!("commands/{index}-permission-receipt.json").as_str()),
+            "permission receipt identity differs from the command result"
+        );
+        let (_, copy) = bound_recovery_artifact(
+            project_root,
+            &format!("{area}/commands/{index}-permission-receipt.json"),
+        )?;
+        let (_, stdout) =
+            bound_recovery_artifact(project_root, &format!("{area}/commands/{index}-stdout.log"))?;
+        let (_, stderr) =
+            bound_recovery_artifact(project_root, &format!("{area}/commands/{index}-stderr.log"))?;
+        crate::tester_permissions::validate_applied_receipt(
+            receipt_id,
+            &copy,
+            candidate_commit,
+            original_index,
+            &manifest.config_digest,
+            &manifest.extractor_digest,
+            result,
+            &stdout,
+            &stderr,
+        )?;
+    }
+    Ok(())
 }
 
 fn reject_unproven_tester_permissions(commands: &[crate::tester::TesterCommand]) -> Result<()> {
@@ -1185,6 +1264,35 @@ fn reject_unproven_tester_permissions(commands: &[crate::tester::TesterCommand])
 #[cfg(test)]
 mod tester_permission_tests {
     use super::*;
+
+    #[test]
+    fn version_two_manifest_needs_host_receipt_for_requested_command() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest: crate::tester::CanonicalRunManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "permissions":["process-table-read"]}],
+            "full_run": true,
+            "original_command_indexes": [0],
+            "permission_receipts": [null]
+        })).unwrap();
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "exit_code":0,
+                "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"}],
+            "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+        })).unwrap();
+        let error = validate_manifest_permissions(
+            root.path(),
+            "artifacts",
+            "candidate",
+            &manifest,
+            &results,
+        )
+        .expect_err("a requested command without host receipt cannot receive credit");
+        assert!(error.to_string().contains("receipt"), "{error:#}");
+    }
 
     #[test]
     fn legacy_tester_evidence_cannot_prove_a_permission_request() {

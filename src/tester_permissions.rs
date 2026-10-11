@@ -397,19 +397,21 @@ pub(crate) struct LaunchAdmission {
     pub authority: LaunchAuthority,
 }
 
-#[derive(Serialize)]
-struct AppliedPermissionReceipt<'a> {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppliedPermissionReceipt {
     schema_version: u32,
-    approval_id: &'a str,
-    request_digest: &'a str,
-    candidate_commit: &'a str,
+    approval_id: String,
+    request_digest: String,
+    candidate_commit: String,
     command_index: usize,
-    config_digest: &'a str,
-    extractor_digest: &'a str,
-    policy_digest: &'a str,
+    config_digest: String,
+    extractor_digest: String,
+    policy_digest: String,
     profile_digest: String,
-    execution_mode: &'static str,
-    admitted_at: &'a str,
+    host_platform: String,
+    execution_mode: String,
+    admitted_at: String,
     settled_at: String,
     exit_code: i32,
     stdout_digest: String,
@@ -435,20 +437,21 @@ pub(crate) fn record_applied_authority(
     );
     let receipt = AppliedPermissionReceipt {
         schema_version: 1,
-        approval_id: &authority.approval_id,
-        request_digest: &authority.request_digest,
-        candidate_commit: &authority.candidate_commit,
+        approval_id: authority.approval_id.clone(),
+        request_digest: authority.request_digest.clone(),
+        candidate_commit: authority.candidate_commit.clone(),
         command_index: authority.command_index,
-        config_digest: &authority.config_digest,
-        extractor_digest: &authority.extractor_digest,
-        policy_digest: &authority.policy_digest,
+        config_digest: authority.config_digest.clone(),
+        extractor_digest: authority.extractor_digest.clone(),
+        policy_digest: authority.policy_digest.clone(),
         profile_digest: digest(&profile_bytes),
+        host_platform: std::env::consts::OS.to_string(),
         execution_mode: if cfg!(feature = "test-support") {
-            "synthetic"
+            "synthetic".to_string()
         } else {
-            "macos-seatbelt"
+            "macos-seatbelt".to_string()
         },
-        admitted_at: &authority.admitted_at,
+        admitted_at: authority.admitted_at.clone(),
         settled_at: crate::work_model::now_iso8601(),
         exit_code,
         stdout_digest: digest(stdout),
@@ -465,12 +468,228 @@ pub(crate) fn record_applied_authority(
     protected.write_all(&bytes)?;
     protected.as_file().sync_all()?;
     let (_, protected_path) = protected.keep()?;
-    fs::write(artifact, bytes)?;
+    write_command_artifact(artifact, &bytes)?;
     Ok(protected_path
         .file_name()
         .context("protected permission receipt has no name")?
         .to_string_lossy()
         .into_owned())
+}
+
+pub(crate) fn write_command_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, unlinkat};
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().context("permission artifact has no parent")?;
+    let named = fs::symlink_metadata(parent)?;
+    ensure!(
+        named.is_dir(),
+        "permission artifact parent is not a directory"
+    );
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    let opened = directory.metadata()?;
+    ensure!(
+        opened.dev() == named.dev() && opened.ino() == named.ino(),
+        "permission artifact parent changed while opening"
+    );
+    let name = path
+        .file_name()
+        .context("permission artifact has no name")?;
+    match fs::symlink_metadata(path) {
+        Ok(existing) => ensure!(
+            existing.is_file() && existing.nlink() == 1,
+            "command artifact is not a regular unaliased file"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary_name = format!(
+        ".fluent-command-{}-{}",
+        std::process::id(),
+        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = openat(
+        &directory,
+        temporary_name.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    let mut file = File::from(file);
+    let result = (|| -> Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        renameat(&directory, temporary_name.as_str(), &directory, name)?;
+        directory.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = unlinkat(&directory, temporary_name.as_str(), AtFlags::empty());
+    }
+    result
+}
+
+/// Read the host record by its bounded name and require an exact artifact copy.
+/// An artifact digest alongside a worker-writable copy is never authority.
+fn read_verified_receipt_at(
+    root: &Path,
+    receipt_id: &str,
+    artifact_copy: &[u8],
+) -> Result<AppliedPermissionReceipt> {
+    let suffix = receipt_id
+        .strip_prefix("receipt-")
+        .and_then(|name| name.strip_suffix(".json"))
+        .context("invalid protected permission receipt ID")?;
+    ensure!(
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+        "invalid protected permission receipt ID"
+    );
+    validate_store_directory(root)?;
+    let path = root.join(receipt_id);
+    let named = fs::symlink_metadata(&path)?;
+    ensure!(
+        named.is_file()
+            && named.uid() == unsafe { libc::geteuid() }
+            && named.permissions().mode() & 0o077 == 0
+            && named.nlink() == 1,
+        "protected permission receipt has unsafe ownership or type"
+    );
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    ensure!(
+        opened.dev() == named.dev() && opened.ino() == named.ino(),
+        "protected permission receipt changed while opening"
+    );
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 64 * 1024 && bytes == artifact_copy,
+        "permission artifact copy differs from protected host receipt"
+    );
+    let receipt: AppliedPermissionReceipt = serde_json::from_slice(&bytes)?;
+    ensure!(
+        receipt.schema_version == 1,
+        "unsupported permission receipt version"
+    );
+    Ok(receipt)
+}
+
+/// Credit a permission-bearing command only when the protected host receipt,
+/// inspectable copy, current policy, approval history, and settled logs agree.
+pub(crate) fn validate_applied_receipt(
+    receipt_id: &str,
+    artifact_copy: &[u8],
+    candidate_commit: &str,
+    command_index: usize,
+    config_digest: &str,
+    extractor_digest: &str,
+    result: &tester::CommandResult,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<()> {
+    validate_applied_receipt_at(
+        &store_root()?,
+        receipt_id,
+        artifact_copy,
+        candidate_commit,
+        command_index,
+        config_digest,
+        extractor_digest,
+        result,
+        stdout,
+        stderr,
+    )
+}
+
+fn validate_applied_receipt_at(
+    root: &Path,
+    receipt_id: &str,
+    artifact_copy: &[u8],
+    candidate_commit: &str,
+    command_index: usize,
+    config_digest: &str,
+    extractor_digest: &str,
+    result: &tester::CommandResult,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<()> {
+    let receipt = read_verified_receipt_at(root, receipt_id, artifact_copy)?;
+    validate_receipt_claims(
+        &receipt,
+        candidate_commit,
+        command_index,
+        config_digest,
+        extractor_digest,
+        result,
+        stdout,
+        stderr,
+    )?;
+    let records = read_records(root, &receipt.request_digest)?;
+    let record = records
+        .iter()
+        .find(|record| {
+            record.approval_id == receipt.approval_id
+                && record.candidate_commit == candidate_commit
+                && record.command_index == command_index
+        })
+        .context("permission receipt has no matching host approval history")?;
+    let admitted = chrono::DateTime::parse_from_rfc3339(&receipt.admitted_at)?;
+    let settled = chrono::DateTime::parse_from_rfc3339(&receipt.settled_at)?;
+    let approved = chrono::DateTime::parse_from_rfc3339(&record.approved_at)?;
+    ensure!(
+        approved <= admitted && admitted <= settled,
+        "permission receipt has impossible approval or settlement time"
+    );
+    if let Some(revoked_at) = &record.revoked_at {
+        let revoked = chrono::DateTime::parse_from_rfc3339(revoked_at)?;
+        ensure!(
+            admitted <= revoked,
+            "permission receipt claims admission after revocation"
+        );
+    }
+    Ok(())
+}
+
+fn validate_receipt_claims(
+    receipt: &AppliedPermissionReceipt,
+    candidate_commit: &str,
+    command_index: usize,
+    config_digest: &str,
+    extractor_digest: &str,
+    result: &tester::CommandResult,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<()> {
+    ensure!(
+        cfg!(target_os = "macos")
+            && receipt.host_platform == "macos"
+            && receipt.execution_mode == "macos-seatbelt",
+        "permission receipt does not prove a production macOS Seatbelt launch"
+    );
+    ensure!(
+        receipt.candidate_commit == candidate_commit
+            && receipt.command_index == command_index
+            && receipt.config_digest == config_digest
+            && receipt.extractor_digest == extractor_digest
+            && receipt.policy_digest == permission_policy_digest(),
+        "permission receipt differs from candidate, command, or policy identity"
+    );
+    ensure!(
+        receipt.exit_code == result.exit_code
+            && receipt.stdout_digest == digest(stdout)
+            && receipt.stderr_digest == digest(stderr),
+        "permission receipt differs from settled command output"
+    );
+    Ok(())
 }
 
 fn acquire_permission_lease(root: &Path) -> Result<PermissionLease> {
@@ -655,4 +874,265 @@ pub fn revoke_approval(approval_id: &str) -> Result<RevocationResponse> {
         }
     }
     anyhow::bail!("approval ID is not in the host authority store")
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_receipt_write_rejects_worker_path_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("commands");
+        fs::create_dir(&directory).unwrap();
+        let target = temporary.path().join("host-target");
+        fs::write(&target, b"original").unwrap();
+        let artifact = directory.join("0-permission-receipt.json");
+        std::os::unix::fs::symlink(&target, &artifact).unwrap();
+        assert!(write_command_artifact(&artifact, b"receipt").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        fs::remove_file(&artifact).unwrap();
+        write_command_artifact(&artifact, b"receipt").unwrap();
+        assert_eq!(fs::read(&artifact).unwrap(), b"receipt");
+        write_command_artifact(&artifact, b"updated").unwrap();
+        assert_eq!(fs::read(&artifact).unwrap(), b"updated");
+        let aliased_parent = temporary.path().join("commands-alias");
+        std::os::unix::fs::symlink(&directory, &aliased_parent).unwrap();
+        assert!(write_command_artifact(&aliased_parent.join("other"), b"receipt").is_err());
+    }
+
+    #[test]
+    fn receipt_claims_reject_synthetic_or_changed_result() {
+        let mut receipt: AppliedPermissionReceipt = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "approval_id": "sha256:approval",
+            "request_digest": "sha256:request",
+            "candidate_commit": "candidate",
+            "command_index": 1,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "policy_digest": permission_policy_digest(),
+            "profile_digest": "sha256:profile",
+            "host_platform": "macos",
+            "execution_mode": "synthetic",
+            "admitted_at": "2026-10-11T00:00:00Z",
+            "settled_at": "2026-10-11T00:00:01Z",
+            "exit_code": 0,
+            "stdout_digest": digest(b"ok"),
+            "stderr_digest": digest(b"")
+        }))
+        .unwrap();
+        let result: tester::CommandResult = serde_json::from_value(serde_json::json!({
+            "command":"true", "test_harness":"shell-harness", "exit_code":0,
+            "duration_ms":1, "stdout_log":"commands/0-stdout.log",
+            "stderr_log":"commands/0-stderr.log"
+        }))
+        .unwrap();
+        assert!(
+            validate_receipt_claims(
+                &receipt,
+                "candidate",
+                1,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"ok",
+                b""
+            )
+            .is_err()
+        );
+        receipt.execution_mode = "macos-seatbelt".to_string();
+        if cfg!(target_os = "macos") {
+            assert!(
+                validate_receipt_claims(
+                    &receipt,
+                    "candidate",
+                    1,
+                    "sha256:config",
+                    "sha256:extractor",
+                    &result,
+                    b"ok",
+                    b""
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_receipt_claims(
+                &receipt,
+                "candidate",
+                1,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"changed",
+                b""
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_receipt_matches_revoked_approval_history() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap().join("operator");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let request_digest = digest(b"request");
+        let approval_id = digest(format!("tester-approval-v1\0{request_digest}\01"));
+        write_records(
+            &root,
+            &request_digest,
+            &[ApprovalRecord {
+                approval_id: approval_id.clone(),
+                request_digest: request_digest.clone(),
+                candidate_commit: "candidate".to_string(),
+                command_index: 0,
+                generation: 1,
+                approved_at: "2026-10-11T00:00:00Z".to_string(),
+                revoked_at: Some("2026-10-11T00:00:02Z".to_string()),
+            }],
+        )
+        .unwrap();
+        let id = "receipt-test.json";
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "approval_id": approval_id,
+            "request_digest": request_digest, "candidate_commit": "candidate",
+            "command_index": 0, "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "policy_digest": permission_policy_digest(),
+            "profile_digest": "sha256:profile", "host_platform": "macos",
+            "execution_mode": "macos-seatbelt",
+            "admitted_at": "2026-10-11T00:00:00Z",
+            "settled_at": "2026-10-11T00:00:01Z", "exit_code": 0,
+            "stdout_digest": digest(b"ok"), "stderr_digest": digest(b"")
+        }))
+        .unwrap();
+        let path = root.join(id);
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let result: tester::CommandResult = serde_json::from_value(serde_json::json!({
+            "command":"true", "test_harness":"shell-harness", "exit_code":0,
+            "duration_ms":1, "stdout_log":"commands/0-stdout.log",
+            "stderr_log":"commands/0-stderr.log"
+        }))
+        .unwrap();
+        assert!(
+            validate_applied_receipt_at(
+                &root,
+                id,
+                &bytes,
+                "candidate",
+                0,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"ok",
+                b""
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_applied_receipt_at(
+                &root,
+                id,
+                b"forged",
+                "candidate",
+                0,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"ok",
+                b""
+            )
+            .is_err()
+        );
+        assert!(
+            validate_applied_receipt_at(
+                &root,
+                id,
+                &bytes,
+                "different",
+                0,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"ok",
+                b""
+            )
+            .is_err()
+        );
+        write_records(
+            &root,
+            &request_digest,
+            &[ApprovalRecord {
+                approval_id,
+                request_digest: request_digest.clone(),
+                candidate_commit: "candidate".to_string(),
+                command_index: 0,
+                generation: 1,
+                approved_at: "2026-10-10T00:00:00Z".to_string(),
+                revoked_at: Some("2026-10-10T00:00:01Z".to_string()),
+            }],
+        )
+        .unwrap();
+        assert!(
+            validate_applied_receipt_at(
+                &root,
+                id,
+                &bytes,
+                "candidate",
+                0,
+                "sha256:config",
+                "sha256:extractor",
+                &result,
+                b"ok",
+                b""
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_receipt_must_match_artifact_copy_and_private_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap().join("operator");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let id = "receipt-test.json";
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "approval_id": "sha256:approval",
+            "request_digest": "sha256:request",
+            "candidate_commit": "candidate",
+            "command_index": 0,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "policy_digest": "sha256:policy",
+            "profile_digest": "sha256:profile",
+            "host_platform": "macos",
+            "execution_mode": "macos-seatbelt",
+            "admitted_at": "2026-10-11T00:00:00Z",
+            "settled_at": "2026-10-11T00:00:01Z",
+            "exit_code": 0,
+            "stdout_digest": "sha256:stdout",
+            "stderr_digest": "sha256:stderr"
+        }))
+        .unwrap();
+        let path = root.join(id);
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_verified_receipt_at(&root, id, &bytes).is_ok());
+        assert!(read_verified_receipt_at(&root, id, b"forged artifact").is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_verified_receipt_at(&root, id, &bytes).is_err());
+        fs::remove_file(&path).unwrap();
+        let outside = root.join("outside.json");
+        fs::write(&outside, &bytes).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(read_verified_receipt_at(&root, id, &bytes).is_err());
+    }
 }
