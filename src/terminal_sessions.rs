@@ -86,6 +86,8 @@ struct TerminalResource {
     socket: PathBuf,
     #[serde(default)]
     pane_sessions: Vec<i32>,
+    #[serde(default)]
+    owner_marker: String,
 }
 
 pub struct TerminalSession {
@@ -455,6 +457,11 @@ impl TerminalSession {
             execution_record: record_for(&identity),
             socket: socket.clone(),
             pane_sessions: Vec::new(),
+            owner_marker: socket_dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
         };
         let resource_path = resource_path(&identity);
         let mut resource_file = std::fs::OpenOptions::new()
@@ -483,12 +490,29 @@ impl TerminalSession {
             command.env(key, value);
         }
         command.env_remove("TMUX");
+        command.env("FLUENT_TERMINAL_OWNER", &resource.owner_marker);
         let result = Self::start_command(identity, command, Some(socket_dir), true, |_| {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !socket.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
             ensure!(socket.exists(), "tmux server did not create its socket");
+            let environment = Command::new(&tmux)
+                .env_remove("TMUX")
+                .arg("-S")
+                .arg(&socket)
+                .args([
+                    "set-environment",
+                    "-g",
+                    "FLUENT_TERMINAL_OWNER",
+                    &resource.owner_marker,
+                ])
+                .output()?;
+            ensure!(
+                environment.status.success(),
+                "setting managed pane owner: {}",
+                String::from_utf8_lossy(&environment.stderr)
+            );
             #[cfg(feature = "test-support")]
             if let Some(barrier) = std::env::var_os("FLUENT_TEST_TERMINAL_SETUP_BARRIER") {
                 let barrier = PathBuf::from(barrier);
@@ -836,6 +860,40 @@ fn session_members(sessions: &[i32]) -> Result<Vec<u32>> {
     Ok(members)
 }
 
+/// Find processes that inherited this invocation's environment, including
+/// children that have moved to another session and been reparented.
+pub fn owner_members_from_ps(table: &str, marker: &str) -> Result<Vec<u32>> {
+    ensure!(!marker.is_empty(), "terminal owner marker is empty");
+    let token = format!("FLUENT_TERMINAL_OWNER={marker}");
+    let mut members = BTreeSet::new();
+    for line in table.lines() {
+        let mut fields = line.split_whitespace();
+        let pid: u32 = fields
+            .next()
+            .context("invalid owner process inventory row")?
+            .parse()?;
+        if fields.any(|field| field == token) {
+            members.insert(pid);
+        }
+    }
+    Ok(members.into_iter().collect())
+}
+
+fn owner_members(marker: &str) -> Result<Vec<u32>> {
+    if marker.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("/bin/ps")
+        .args(["-A", "-E", "-ww", "-o", "pid=,command="])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "reading terminal owner inventory failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    owner_members_from_ps(&String::from_utf8(output.stdout)?, marker)
+}
+
 fn tmux_pane_pids(socket: &Path) -> Result<Vec<u32>> {
     let output = Command::new(find_tmux()?)
         .env_remove("TMUX")
@@ -943,7 +1001,7 @@ impl Drop for StoppedPanes {
     }
 }
 
-fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32]) -> Result<()> {
+fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32], marker: &str) -> Result<()> {
     let output = if socket.exists() {
         Some(
             Command::new(find_tmux()?)
@@ -986,6 +1044,8 @@ fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32]) -> Result<()> 
     for _ in 0..8 {
         let mut now = descendants_from_ps(&process_table()?, &panes)?;
         now.extend(session_members(sessions)?);
+        now.extend(owner_members(marker)?);
+        now.retain(|pid| *pid != leader_pid);
         let before = owned.len();
         for pid in now {
             if owned.insert(pid) {
@@ -1139,6 +1199,13 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
                 .is_some_and(|name| name == "socket"),
         "terminal socket path is outside its private namespace"
     );
+    ensure!(
+        resource.owner_marker.is_empty()
+            || socket_dir
+                .file_name()
+                .is_some_and(|name| name == resource.owner_marker.as_str()),
+        "terminal owner marker changed"
+    );
     // A stopped earlier generation may leave its descriptor in this Task.
     let published = match std::fs::read(registry.join(DESCRIPTOR)) {
         Ok(bytes) => {
@@ -1155,7 +1222,12 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
     if !resource.socket.exists() && published && resource.pane_sessions.is_empty() {
         bail!("managed terminal socket disappeared before pane descendants could be verified");
     }
-    settle_panes(&resource.socket, record.leader_pid, &resource.pane_sessions)
+    settle_panes(
+        &resource.socket,
+        record.leader_pid,
+        &resource.pane_sessions,
+        &resource.owner_marker,
+    )
 }
 
 /// Release only the resource receipt owned by the settled execution generation.
@@ -1268,6 +1340,7 @@ mod setup_cleanup_tests {
             execution_record: stored.execution_record.clone(),
             socket: stored.socket.clone().unwrap(),
             pane_sessions: vec![],
+            owner_marker: String::new(),
         };
         assert!(!descriptor_publishes_resource(
             &stored,
@@ -1301,6 +1374,7 @@ mod setup_cleanup_tests {
             execution_record: record_path.clone(),
             socket: socket.clone(),
             pane_sessions: vec![],
+            owner_marker: String::new(),
         };
         std::fs::write(
             registry.join("resource.json"),

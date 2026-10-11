@@ -219,6 +219,15 @@ fn settlement_covers_terminal_process_scope() {
 }
 
 #[test]
+fn terminal_owner_inventory_finds_reparented_new_session() {
+    let table = " 20 /bin/sh FLUENT_TERMINAL_OWNER=other\n 41 sleep 30 FLUENT_TERMINAL_OWNER=owned\n 42 sleep 30 FLUENT_TERMINAL_OWNER=owned-extra\n";
+    assert_eq!(
+        fluent::terminal_sessions::owner_members_from_ps(table, "owned").unwrap(),
+        vec![41]
+    );
+}
+
+#[test]
 fn terminal_descriptor_v1_fixture_round_trips() {
     let value = include_str!("fixtures/terminal-descriptor-v1.json");
     let descriptor: fluent::terminal_sessions::TerminalDescriptor =
@@ -475,6 +484,44 @@ fn host_managed_terminal_acceptance() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    let new_session_file = worker1.join("new-session.pid");
+    send(
+        &first_socket,
+        &format!(
+            "/usr/bin/perl -MPOSIX -e 'if (fork()) {{ exit 0 }} POSIX::setsid(); open my $fh, \">\", $ARGV[0] or die $!; print $fh \"$$\\n\"; close $fh; exec \"/bin/sleep\", \"30\"' {}",
+            new_session_file.display()
+        ),
+    );
+    wait_file(&new_session_file);
+    let new_session: u32 = std::fs::read_to_string(&new_session_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_ne!(
+        group(new_session),
+        pane_group,
+        "fixture child did not enter a new session"
+    );
+    let new_session_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let parent = String::from_utf8(
+            Command::new("/bin/ps")
+                .args(["-o", "ppid=", "-p", &new_session.to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        if parent.trim() == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < new_session_deadline,
+            "new-session child was not reparented"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let first_record =
         source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
     let canceled = fluent::execution::cancel(&first_record).unwrap();
@@ -499,6 +546,18 @@ fn host_managed_terminal_acceptance() {
     assert!(
         orphan_state.trim().is_empty() || orphan_state.trim().starts_with('Z'),
         "orphan descendant remained live: {orphan_state}"
+    );
+    let new_session_state = String::from_utf8(
+        Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &new_session.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        new_session_state.trim().is_empty() || new_session_state.trim().starts_with('Z'),
+        "reparented new-session child remained live: {new_session_state}"
     );
     let first_resource = source
         .join(".fluent/work/terminal-sessions/work-1/attempt-1/attempt-1-write-1/resource.json");
