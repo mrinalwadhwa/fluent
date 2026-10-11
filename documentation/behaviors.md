@@ -420,6 +420,61 @@ WHEN the same accepted Test-reference revision is repeated, THE SYSTEM SHALL
 reuse its audit and schedule no additional reviews.
 Test: src/planning_reference_recovery.rs (public_recovery_revises_selected_test_references)
 
+## Historical round-cap compatibility
+
+The historical Writer count includes only Writer Tasks already materialized
+when a saved extension was approved. Later Tasks do not contribute.
+
+### B1
+
+WHEN a saved extension chain follows Fluent's effective-cap rule and its
+historical Writer count is supported by the saved Task history,
+THE SYSTEM SHALL accept the chain when loading the Work Item.
+Test: tests/binary.rs (legacy_round_cap_chain_is_readable)
+Test: src/work_model.rs (round_cap_chain_uses_historical_writer_count)
+
+### B2
+
+WHEN an operator inspects supported historical chains through status, Work Item
+list, Work Item show, or cleanup preview,
+THE SYSTEM SHALL preserve the stored Work history.
+Test: tests/binary.rs (legacy_round_cap_observation_preserves_history)
+
+### B3
+
+IF a chain requires a higher starting cap than prior approvals and evidence
+allowances establish, and the saved historical Writer count does not support
+that cap,
+THEN THE SYSTEM SHALL reject the chain with the affected extension identified.
+Test: src/work_model.rs (round_cap_chain_rejects_unproven_writer_count)
+Test: tests/binary.rs (legacy_round_cap_chain_rejects_altered_history)
+Example: Writers created after approval cannot explain a gap in an earlier cap.
+
+### B4
+
+WHEN Fluent records a bounded extension after the materialized Writer count has
+exceeded a preceding extension's cap,
+THE SYSTEM SHALL write an extension chain that remains valid after reloading.
+Test: src/work_model.rs (round_cap_extension_after_writer_overrun_round_trips)
+Test: tests/binary.rs (attempt_extend_after_writer_overrun_round_trips)
+
+### B5
+
+WHEN a historical chain becomes readable,
+THE SYSTEM SHALL continue to require the existing independent authorization and
+evidence checks before recovery or resume.
+Test: tests/binary.rs (legacy_round_cap_readability_does_not_authorize_recovery)
+Test: tests/binary.rs (attempt_extend_binds_candidate_and_failed_review_bytes)
+
+### B6
+
+WHEN Fluent evaluates cleanup eligibility for Work with a supported historical
+chain,
+THE SYSTEM SHALL apply the existing terminal-state and workspace-safety rules.
+Test: tests/binary.rs (legacy_round_cap_cleanup_preserves_unfinished_work)
+Example: A paused unfinished Work Item remains present while eligible terminal
+Work in the same isolated fixture can be cleaned.
+
 ## Canonical Tester confinement
 
 ### B1

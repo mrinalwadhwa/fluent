@@ -1233,6 +1233,38 @@ without approving mutable or unreadable evidence. The append-only approval does
 no code work. Resume revalidates that frontier before reopening the same
 Attempt; any changed candidate or correction content fails closed.
 
+`Attempt::effective_write_round_cap` uses the greater of the approved cap plus
+subsequent evidence allowances and the materialized Writer count. Structural
+validation in `src/work_model.rs` applies the same rule between extensions:
+the next `old_cap` must equal the greater of the preceding `new_cap` plus the
+recorded evidence delta and the proven Writer count at approval. For example,
+a preceding cap of 16 with no new evidence allowance can support an extension
+from 18 to 19 when 18 Writers already existed at approval. Later Writers cannot
+explain that historical gap. Increment bounds, checked arithmetic, extension
+identities, evidence monotonicity, paired approval fields, and human-resolution
+digests continue to apply.
+
+Current extensions record their configured base cap and pre-approval Writer
+count in `authorized_base_cap` and `pre_extension_write_rounds`. When a legacy
+entry lacks both fields and needs a Writer-count floor to explain a gap, the
+validator parses saved Writer creation times and the approval time as instants.
+It requires an unambiguous creation order, excludes Writers created after
+approval, and binds the last pre-approval Writer to a completed output matching
+the approved candidate. That Writer must have completed between its creation
+and approval. Missing or invalid timestamps, tied or contradictory creation
+order, creation at the approval instant, and candidate mismatches reject the
+entry with its extension identity. Partial explicit fields cannot use legacy
+inference. Contiguous legacy chains need no timestamp reconstruction.
+
+This proof uses only saved model values. Status, Work Item list/show, and cleanup
+preview preserve history without loading historical review files or publishing
+a migration. Cleanup still applies its terminal-state and workspace-safety
+rules, so a readable paused Work Item remains unfinished Work. Recovery retains
+its independent authorization, exact review-byte, candidate-worktree,
+cancellation, and live-owner checks. Failed-review Approach revision still
+requires explicit bound approval fields; a derived legacy count supplies no
+such authorization.
+
 A failed-review `round-cap` may also authorize an Approach revision, but only
 after a separately recorded bounded extension leaves an unused Writer round.
 The extension binds the exact candidate and failed-review bytes. Then submit the
