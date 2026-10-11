@@ -25865,6 +25865,125 @@ fn tester_permissions_show_current_request_without_mutation() {
 }
 
 #[test]
+fn tester_permissions_approve_exact_request_without_launch() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let request = show();
+    let digest = request["request_digest"].as_str().unwrap();
+    assert_eq!(request["approval_state"], "absent");
+    let approve = |digest: &str| {
+        fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "approve",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+                "--capability",
+                "process-table-read",
+                "--request-digest",
+                digest,
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = approve(digest);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let repeated = approve(digest);
+    assert!(repeated.status.success());
+    assert_eq!(
+        first.stdout, repeated.stdout,
+        "same approval must be idempotent"
+    );
+    let approved: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert!(
+        approved["approval_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(show()["approval_state"], "approved");
+    assert!(!approve("sha256:wrong").status.success());
+    let alias = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("authority-alias");
+    std::os::unix::fs::symlink(&authority, &alias).unwrap();
+    let alias_attempt = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &alias)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            digest,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !alias_attempt.status.success(),
+        "authority alias must fail closed"
+    );
+    assert!(!sentinel.exists(), "approval must not launch the command");
+}
+
+#[test]
 fn tester_sandbox_recovery_reruns_same_tester_without_writer() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);

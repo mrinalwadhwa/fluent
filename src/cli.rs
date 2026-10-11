@@ -1073,6 +1073,17 @@ pub enum TesterPermissionCommands {
         #[arg(long)]
         command_index: usize,
     },
+    /// Approve the exact displayed request without starting Tester
+    Approve {
+        #[arg(long)]
+        candidate: String,
+        #[arg(long)]
+        command_index: usize,
+        #[arg(long)]
+        capability: String,
+        #[arg(long)]
+        request_digest: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

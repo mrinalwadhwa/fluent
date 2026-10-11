@@ -1923,6 +1923,21 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
                 )?;
                 println!("{}", serde_json::to_string_pretty(&request)?);
             }
+            TesterPermissionCommands::Approve {
+                candidate,
+                command_index,
+                capability,
+                request_digest,
+            } => {
+                let approval = fluent::tester_permissions::approve_request(
+                    project_root,
+                    &candidate,
+                    command_index,
+                    &capability,
+                    &request_digest,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&approval)?);
+            }
         },
         TesterCommands::Check { no_sandbox } => {
             match fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)? {

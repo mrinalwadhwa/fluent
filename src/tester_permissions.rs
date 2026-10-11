@@ -1,10 +1,11 @@
 //! Bind a configured Tester permission request to one clean candidate.
 
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use crate::git;
 use crate::tester::{self, TesterPermission};
@@ -129,6 +130,7 @@ pub fn show_request(
         policy_digest: &policy_digest,
     };
     let request_digest = digest(serde_json::to_vec(&identity)?);
+    let approval_state = approval_state(&request_digest)?;
     Ok(DisplayedRequest {
         git_common_directory,
         candidate_checkout: candidate_checkout.clone(),
@@ -149,6 +151,259 @@ pub fn show_request(
             "terminal and runtime metadata",
         ],
         permission_scope: "read-only kern.proc.all for this configured command and its descendants",
-        approval_state: "absent",
+        approval_state,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalRecord {
+    approval_id: String,
+    request_digest: String,
+    candidate_commit: String,
+    command_index: usize,
+    generation: usize,
+    approved_at: String,
+    revoked_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ApprovalResponse {
+    approval_id: String,
+    request_digest: String,
+}
+
+fn operator_home() -> Result<PathBuf> {
+    let mut password = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0u8; 16 * 1024];
+    let mut result = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes to the provided passwd and buffer, and the
+    // returned pointer remains valid while the buffer is alive.
+    let code = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            password.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    ensure!(
+        code == 0 && !result.is_null(),
+        "cannot resolve operator home"
+    );
+    // SAFETY: a successful getpwuid_r returned an initialized passwd and a
+    // NUL-terminated pw_dir inside the still-live buffer.
+    let home = unsafe {
+        std::ffi::CStr::from_ptr((*result).pw_dir)
+            .to_str()
+            .context("operator home is not UTF-8")?
+            .to_owned()
+    };
+    Ok(PathBuf::from(home))
+}
+
+fn store_root() -> Result<PathBuf> {
+    #[cfg(feature = "test-support")]
+    if let Some(root) = std::env::var_os("FLUENT_TEST_TESTER_PERMISSION_STORE") {
+        let root = PathBuf::from(root);
+        ensure!(root.is_absolute(), "test permission store must be absolute");
+        return Ok(root);
+    }
+    let home = operator_home()?;
+    ensure!(
+        home == fs::canonicalize(&home)?,
+        "operator home must be canonical"
+    );
+    Ok(home.join(".config/fluent/tester-permissions"))
+}
+
+fn validate_store_directory(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    ensure!(metadata.is_dir(), "permission store is not a directory");
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() },
+        "permission store owner differs"
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "permission store is accessible to others"
+    );
+    ensure!(
+        root == fs::canonicalize(root)?,
+        "permission store path is not canonical"
+    );
+    Ok(())
+}
+
+fn prepare_store_directory(root: &Path, checkout: &Path) -> Result<()> {
+    ensure!(
+        !root.starts_with(checkout) && !checkout.starts_with(root),
+        "permission store overlaps candidate checkout"
+    );
+    let common = git::run_stdout(
+        checkout,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        "resolve Git common directory",
+    )?;
+    let common = Path::new(&common);
+    ensure!(
+        !root.starts_with(common) && !common.starts_with(root),
+        "permission store overlaps Git metadata"
+    );
+    let parent = root.parent().context("permission store has no parent")?;
+    fs::create_dir_all(parent)?;
+    ensure!(
+        parent == fs::canonicalize(parent)?,
+        "permission store parent is not canonical"
+    );
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        parent_metadata.is_dir() && parent_metadata.uid() == unsafe { libc::geteuid() },
+        "permission store parent has an unsafe owner or type"
+    );
+    ensure!(
+        parent_metadata.permissions().mode() & 0o022 == 0,
+        "permission store parent is writable by others"
+    );
+    match fs::symlink_metadata(root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(root)?;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    validate_store_directory(root)
+}
+
+fn record_path(root: &Path, request_digest: &str) -> Result<PathBuf> {
+    let hex = request_digest
+        .strip_prefix("sha256:")
+        .context("invalid request digest")?;
+    ensure!(
+        hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid request digest"
+    );
+    Ok(root.join(format!("{hex}.json")))
+}
+
+fn read_records(root: &Path, request_digest: &str) -> Result<Vec<ApprovalRecord>> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    }
+    validate_store_directory(root)?;
+    let path = record_path(root, request_digest)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_file(),
+        "permission record is not a regular file"
+    );
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() },
+        "permission record owner differs"
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "permission record is accessible to others"
+    );
+    let records: Vec<ApprovalRecord> = serde_json::from_slice(&fs::read(&path)?)?;
+    for (index, record) in records.iter().enumerate() {
+        ensure!(
+            record.request_digest == request_digest,
+            "permission record request mismatch"
+        );
+        ensure!(
+            record.generation == index + 1,
+            "permission record generation mismatch"
+        );
+        ensure!(
+            record.approval_id
+                == digest(format!(
+                    "tester-approval-v1\0{request_digest}\0{}",
+                    record.generation
+                )),
+            "permission record identity mismatch"
+        );
+    }
+    Ok(records)
+}
+
+fn approval_state(request_digest: &str) -> Result<&'static str> {
+    let records = read_records(&store_root()?, request_digest)?;
+    Ok(match records.last() {
+        Some(record) if record.revoked_at.is_none() => "approved",
+        Some(_) => "revoked",
+        None => "absent",
+    })
+}
+
+fn write_records(root: &Path, request_digest: &str, records: &[ApprovalRecord]) -> Result<()> {
+    let path = record_path(root, request_digest)?;
+    let mut file = tempfile::NamedTempFile::new_in(root)?;
+    use std::io::Write;
+    file.write_all(&serde_json::to_vec_pretty(records)?)?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+/// Record a displayed request as host authority without launching Tester.
+pub fn approve_request(
+    checkout: &Path,
+    candidate: &str,
+    command_index: usize,
+    capability: &str,
+    request_digest: &str,
+) -> Result<ApprovalResponse> {
+    ensure!(
+        capability == "process-table-read",
+        "unsupported Tester capability"
+    );
+    let shown = show_request(checkout, candidate, command_index)?;
+    ensure!(
+        shown.request_digest == request_digest,
+        "request digest differs from current request"
+    );
+    let root = store_root()?;
+    prepare_store_directory(&root, checkout)?;
+    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    // Recheck after acquiring the host lease, before recording consent.
+    let current = show_request(checkout, candidate, command_index)?;
+    ensure!(
+        current.request_digest == request_digest,
+        "request changed before approval"
+    );
+    let mut records = read_records(&root, request_digest)?;
+    if let Some(record) = records.last().filter(|record| record.revoked_at.is_none()) {
+        return Ok(ApprovalResponse {
+            approval_id: record.approval_id.clone(),
+            request_digest: request_digest.to_owned(),
+        });
+    }
+    let generation = records.len() + 1;
+    let approval_id = digest(format!(
+        "tester-approval-v1\0{request_digest}\0{generation}"
+    ));
+    records.push(ApprovalRecord {
+        approval_id: approval_id.clone(),
+        request_digest: request_digest.to_owned(),
+        candidate_commit: candidate.to_owned(),
+        command_index,
+        generation,
+        approved_at: crate::work_model::now_iso8601(),
+        revoked_at: None,
+    });
+    write_records(&root, request_digest, &records)?;
+    Ok(ApprovalResponse {
+        approval_id,
+        request_digest: request_digest.to_owned(),
     })
 }
