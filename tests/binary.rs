@@ -26084,6 +26084,85 @@ fn tester_permissions_revoke_blocks_future_launches() {
 }
 
 #[test]
+fn tester_permissions_reject_worker_authority_tampering() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let request: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    let approve = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            request["request_digest"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        approve.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approve.stderr)
+    );
+    let approved: serde_json::Value = serde_json::from_slice(&approve.stdout).unwrap();
+    let foreign_lock = tmp.path().join("foreign.lock");
+    fs::write(&foreign_lock, b"foreign").unwrap();
+    fs::remove_file(authority.join("approval.lock")).unwrap();
+    std::os::unix::fs::symlink(&foreign_lock, authority.join("approval.lock")).unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "revoke",
+            approved["approval_id"].as_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&foreign_lock).unwrap(), b"foreign");
+}
+
+#[test]
 fn tester_permissions_reject_unapproved_or_stale_launch() {
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);

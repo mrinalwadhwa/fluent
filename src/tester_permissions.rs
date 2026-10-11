@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::git;
@@ -361,6 +361,37 @@ fn write_records(root: &Path, request_digest: &str, records: &[ApprovalRecord]) 
     Ok(())
 }
 
+struct PermissionLease {
+    _file: File,
+}
+
+fn acquire_permission_lease(root: &Path) -> Result<PermissionLease> {
+    validate_store_directory(root)?;
+    let lock = root.join("approval.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&lock)
+        .context("open protected permission lease")?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .context("lock protected permission lease")?;
+    let opened = file.metadata()?;
+    let named = fs::symlink_metadata(&lock)?;
+    ensure!(
+        opened.is_file()
+            && named.is_file()
+            && opened.uid() == unsafe { libc::geteuid() }
+            && opened.permissions().mode() & 0o077 == 0
+            && opened.nlink() == 1
+            && opened.dev() == named.dev()
+            && opened.ino() == named.ino(),
+        "permission lease is not a protected regular file"
+    );
+    Ok(PermissionLease { _file: file })
+}
+
 /// Record a displayed request as host authority without launching Tester.
 pub fn approve_request(
     checkout: &Path,
@@ -380,7 +411,7 @@ pub fn approve_request(
     );
     let root = store_root()?;
     prepare_store_directory(&root, checkout)?;
-    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    let _lease = acquire_permission_lease(&root)?;
     // Recheck after acquiring the host lease, before recording consent.
     let current = show_request(checkout, candidate, command_index)?;
     ensure!(
@@ -429,7 +460,7 @@ pub(crate) fn check_current_approval(
     );
     let root = store_root()?;
     validate_store_directory(&root)?;
-    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    let _lease = acquire_permission_lease(&root)?;
     let current = show_request(checkout, candidate, command_index)?;
     ensure!(
         current.request_digest == shown.request_digest && current.approval_state == "approved",
@@ -460,7 +491,7 @@ pub fn revoke_approval(approval_id: &str) -> Result<RevocationResponse> {
     );
     let root = store_root()?;
     validate_store_directory(&root)?;
-    let _lease = crate::lease::acquire_blocking(&root.join("approval.lock"))?;
+    let _lease = acquire_permission_lease(&root)?;
     for entry in fs::read_dir(&root)? {
         let entry = entry?;
         let path = entry.path();
