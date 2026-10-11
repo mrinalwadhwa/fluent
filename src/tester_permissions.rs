@@ -179,36 +179,6 @@ pub struct RevocationResponse {
     revoked_at: String,
 }
 
-fn operator_home() -> Result<PathBuf> {
-    let mut password = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut buffer = vec![0u8; 16 * 1024];
-    let mut result = std::ptr::null_mut();
-    // SAFETY: getpwuid_r writes to the provided passwd and buffer, and the
-    // returned pointer remains valid while the buffer is alive.
-    let code = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            password.as_mut_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    ensure!(
-        code == 0 && !result.is_null(),
-        "cannot resolve operator home"
-    );
-    // SAFETY: a successful getpwuid_r returned an initialized passwd and a
-    // NUL-terminated pw_dir inside the still-live buffer.
-    let home = unsafe {
-        std::ffi::CStr::from_ptr((*result).pw_dir)
-            .to_str()
-            .context("operator home is not UTF-8")?
-            .to_owned()
-    };
-    Ok(PathBuf::from(home))
-}
-
 fn store_root() -> Result<PathBuf> {
     #[cfg(feature = "test-support")]
     if let Some(root) = std::env::var_os("FLUENT_TEST_TESTER_PERMISSION_STORE") {
@@ -216,7 +186,7 @@ fn store_root() -> Result<PathBuf> {
         ensure!(root.is_absolute(), "test permission store must be absolute");
         return Ok(root);
     }
-    let home = operator_home()?;
+    let home = crate::os::operator_home()?;
     ensure!(
         home == fs::canonicalize(&home)?,
         "operator home must be canonical"

@@ -26084,6 +26084,41 @@ fn tester_permissions_revoke_blocks_future_launches() {
 }
 
 #[test]
+fn tester_permissions_do_not_leak_to_other_execution_scopes() {
+    let tmp = TempDir::new().unwrap();
+    let resolver = fluent::content::ContentResolver::new(None);
+    let staged_home = tmp.path().join("worker-home");
+    let writable = [tmp.path().join("workspace")];
+    let baseline = fluent::os::render_profile_common_only(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+    )
+    .unwrap();
+    let writer = fluent::os::render_profile_for_access_for_coder(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        fluent::coder::CoderKind::Codex,
+    )
+    .unwrap();
+    for profile in [&baseline, &writer] {
+        let rules = fs::read_to_string(&profile.path).unwrap();
+        assert!(!rules.contains("(allow sysctl-read (sysctl-name \"kern.proc.all\"))"));
+        assert!(rules.contains("(deny file-read-data (subpath \""));
+        assert!(rules.contains(".config/fluent/tester-permissions"));
+        let deny = rules.find(".config/fluent/tester-permissions").unwrap();
+        let writable_grant = rules.find("(allow file-write* (subpath").unwrap();
+        assert!(
+            deny < writable_grant,
+            "host authority denial must precede broad grants"
+        );
+    }
+}
+
+#[test]
 fn tester_permissions_reject_worker_authority_tampering() {
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);

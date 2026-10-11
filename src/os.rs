@@ -20,6 +20,36 @@ pub struct SandboxProfile {
     pub path: PathBuf,
 }
 
+/// Resolve the account home independently of a worker-controlled HOME value.
+pub(crate) fn operator_home() -> Result<PathBuf> {
+    let mut password = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0u8; 16 * 1024];
+    let mut result = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes within the supplied passwd and buffer. Its
+    // returned pointer remains valid while the buffer is alive.
+    let code = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            password.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    anyhow::ensure!(
+        code == 0 && !result.is_null(),
+        "cannot resolve operator home"
+    );
+    // SAFETY: successful getpwuid_r initialized pw_dir in the live buffer.
+    let home = unsafe {
+        std::ffi::CStr::from_ptr((*result).pw_dir)
+            .to_str()
+            .context("operator home is not UTF-8")?
+            .to_owned()
+    };
+    Ok(PathBuf::from(home))
+}
+
 /// Deny existing source product entries after the profile's broad temporary
 /// directory grants. Include the physical path because macOS resolves /var to
 /// /private/var before applying Seatbelt rules.
@@ -894,6 +924,20 @@ fn render_profile_for_access(
         .iter()
         .map(|root| format!("(deny file-write* (subpath {}))", sbpl_string(root)))
         .collect::<Vec<_>>();
+    let operator_home = operator_home()?;
+    anyhow::ensure!(
+        operator_home == std::fs::canonicalize(&operator_home)?,
+        "operator home must be canonical"
+    );
+    let permission_store = operator_home.join(".config/fluent/tester-permissions");
+    deny_rules.push(format!(
+        "(deny file-read-data (subpath {}))",
+        sbpl_string(&permission_store)
+    ));
+    deny_rules.push(format!(
+        "(deny file-write* (subpath {}))",
+        sbpl_string(&permission_store)
+    ));
     // Autonomous Codex workers use a staged home.  Deny the interactive source
     // explicitly before common.sb's broad home read grants so the profile cannot
     // reach hooks, configuration, sessions, or the original credentials.
@@ -1043,6 +1087,25 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn worker_profiles_cannot_read_or_write_operator_permission_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[tmp.path().to_path_buf()],
+            &[],
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(profile.path).unwrap();
+        let authority = operator_home()
+            .unwrap()
+            .join(".config/fluent/tester-permissions");
+        let quoted = sbpl_string(&authority);
+        assert!(content.contains(&format!("(deny file-read-data (subpath {quoted}))")));
+        assert!(content.contains(&format!("(deny file-write* (subpath {quoted}))")));
+    }
 
     #[test]
     fn scoped_writer_tools_allow_mapping_and_deny_installed_writes() {
