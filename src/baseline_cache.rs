@@ -33,6 +33,8 @@ struct BaselineIdentity {
     source_commit: String,
     tester_config_digest: String,
     extractor_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permission_policy_digest: Option<String>,
     fluent_version: String,
     operating_system: String,
     architecture: String,
@@ -253,8 +255,18 @@ fn resolve_identity(
     no_sandbox: bool,
     scheduler_session: Option<&str>,
 ) -> Result<BaselineIdentity> {
+    let config =
+        crate::tester::read_tester_config(&candidate_workspace.join(".fluent/tester.yaml"))?;
+    let requests_permission = config
+        .commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    anyhow::ensure!(
+        !requests_permission || !no_sandbox,
+        "process-table-read requires the macOS sandbox"
+    );
     Ok(BaselineIdentity {
-        schema_version: 2,
+        schema_version: if requests_permission { 3 } else { 2 },
         scheduler_session: scheduler_session.map(str::to_string),
         source_commit: crate::git::run_stdout(
             candidate_workspace,
@@ -263,6 +275,8 @@ fn resolve_identity(
         )?,
         tester_config_digest: digest_file(&candidate_workspace.join(".fluent/tester.yaml"))?,
         extractor_digest: digest_file(&candidate_workspace.join(".fluent/extract-tester-results"))?,
+        permission_policy_digest: requests_permission
+            .then(crate::tester_permissions::permission_policy_digest),
         fluent_version: crate::version::version_tag(),
         operating_system: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
@@ -685,6 +699,7 @@ mod tests {
             source_commit: commit.to_string(),
             tester_config_digest: "sha256:config".to_string(),
             extractor_digest: "sha256:extractor".to_string(),
+            permission_policy_digest: None,
             fluent_version: "0.1.5 test".to_string(),
             operating_system: "test-os".to_string(),
             architecture: "test-arch".to_string(),
@@ -697,6 +712,36 @@ mod tests {
             scheduler_session: None,
             ..identity("unused", commit)
         }
+    }
+
+    #[test]
+    fn permission_request_adds_policy_to_cache_identity() {
+        let root = tempfile::tempdir().unwrap();
+        initialized_project(root.path());
+        let legacy = resolve_identity(root.path(), false, None).unwrap();
+        let legacy_value = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_value.get("permission-policy-digest").is_none());
+
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: echo ok\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let requested = resolve_identity(root.path(), false, None).unwrap();
+        assert_eq!(legacy.schema_version, 2);
+        assert_eq!(requested.schema_version, 3);
+        let requested_value = serde_json::to_value(&requested).unwrap();
+        assert!(
+            requested_value["permission-policy-digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_ne!(
+            identity_key(&legacy).unwrap(),
+            identity_key(&requested).unwrap()
+        );
+        assert!(resolve_identity(root.path(), true, None).is_err());
     }
 
     fn write_trustworthy_artifact(path: &Path, marker: &str) -> Result<TesterOutcome> {
@@ -925,6 +970,9 @@ mod tests {
         changed.extractor_digest = "sha256:other-extractor".to_string();
         identities.push(changed);
         let mut changed = original.clone();
+        changed.permission_policy_digest = Some("sha256:other-policy".to_string());
+        identities.push(changed);
+        let mut changed = original.clone();
         changed.fluent_version = "0.1.6 test".to_string();
         identities.push(changed);
         let mut changed = original.clone();
@@ -949,7 +997,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(runs.load(Ordering::SeqCst), 10);
+        assert_eq!(runs.load(Ordering::SeqCst), 11);
     }
 
     #[test]

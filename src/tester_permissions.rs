@@ -50,6 +50,19 @@ fn digest(bytes: impl AsRef<[u8]>) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// Identify the semantic Seatbelt policy independently of an ephemeral profile
+/// path or a particular approval generation.
+pub(crate) fn permission_policy_digest() -> String {
+    digest(
+        [
+            b"tester-process-table-policy-v1\n".as_slice(),
+            PROCESS_TABLE_RULE.as_bytes(),
+            include_bytes!("../sandboxes/common.sb").as_slice(),
+        ]
+        .concat(),
+    )
+}
+
 fn committed_request_input(checkout: &Path, candidate: &str, relative: &str) -> Result<Vec<u8>> {
     let path = checkout.join(relative);
     ensure!(
@@ -122,14 +135,7 @@ pub fn show_request(
         committed_request_input(checkout, candidate, ".fluent/extract-tester-results")?;
     let config_digest = digest(config_bytes);
     let extractor_digest = digest(extractor_bytes);
-    let policy_digest = digest(
-        [
-            b"tester-process-table-policy-v1\n".as_slice(),
-            PROCESS_TABLE_RULE.as_bytes(),
-            include_bytes!("../sandboxes/common.sb").as_slice(),
-        ]
-        .concat(),
-    );
+    let policy_digest = permission_policy_digest();
     let candidate_checkout = canonical_checkout.to_string_lossy().into_owned();
     let git_common_directory = canonical_common.to_string_lossy().into_owned();
     let identity = RequestIdentity {
