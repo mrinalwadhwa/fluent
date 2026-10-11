@@ -2,6 +2,8 @@ commands:
   - command: |
       set -eu
       unset FLUENT_MAX_TOTAL_WRITE_ROUNDS
+      FLUENT_RELEASED_050_BIN="$(bash tests/fixtures/prepare-released-predecessor.sh)"
+      export FLUENT_RELEASED_050_BIN
       FLUENT_OWNERSHIP_OLD_BIN="$(bash tests/fixtures/build-ownership-old-reader.sh)"
       export FLUENT_OWNERSHIP_OLD_BIN
       FLUENT_LAUNCH_HANDOFF_OLD_BIN="$(bash tests/fixtures/build-launch-handoff-old-reader.sh)"

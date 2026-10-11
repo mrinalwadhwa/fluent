@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 
@@ -162,6 +164,44 @@ target.write_bytes(pathlib.Path(os.environ["DOWNLOAD_SOURCE"]).read_bytes())
                 if process.poll() is None:
                     process.kill()
                 process.communicate()
+
+    def test_declared_preparation_gates_scenario_execution(self):
+        # Execute the real declared command; double only unrelated prerequisites
+        # and Cargo so this focused check cannot launch the complete Rust suite.
+        config = (PROJECT / ".fluent/tester.yaml").read_text()
+        command = textwrap.dedent(config.split("  - command: |\n", 1)[1]
+                                 .split("\n    test_harness:", 1)[0])
+        for helper in re.findall(r"bash (tests/fixtures/[a-z0-9-]+\.sh)", command):
+            if Path(helper).name != self.helper.name:
+                (self.root / helper).write_text('#!/bin/sh\nprintf "/unused-old-reader\\n"\n')
+        cargo = self.root / "bin/cargo"
+        cargo.write_text('''#!/usr/bin/env python3
+import os, pathlib, sys
+if sys.argv[1] == "build":
+    binary = pathlib.Path("target/debug/fluent")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.touch()
+elif sys.argv[1:3] == ["nextest", "run"]:
+    prepared = pathlib.Path(os.environ["FLUENT_RELEASED_050_BIN"])
+    assert prepared.read_bytes() == pathlib.Path(os.environ["DOWNLOAD_SOURCE"]).read_bytes()
+    pathlib.Path("scenarios-started").touch()
+else:
+    sys.exit("unexpected Cargo invocation")
+''')
+        cargo.chmod(0o755)
+        env = dict(self.env, FLUENT_RELEASED_050_SOURCE=str(self.root / "missing"))
+        env.pop("FLUENT_RELEASED_050_BIN", None)
+        result = subprocess.run(["sh", "-c", command], cwd=self.root, env=env,
+                                capture_output=True, text=True, timeout=25)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read FLUENT_RELEASED_050_SOURCE", result.stderr)
+        self.assertFalse((self.root / "scenarios-started").exists())
+        self.assertFalse((self.root / "target").exists())
+        env["FLUENT_RELEASED_050_SOURCE"] = str(self.source)
+        result = subprocess.run(["sh", "-c", command], cwd=self.root, env=env,
+                                capture_output=True, text=True, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "scenarios-started").exists())
 
 
 unittest.main()
