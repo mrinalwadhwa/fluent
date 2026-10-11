@@ -3998,21 +3998,22 @@ WHEN an otherwise eligible Work Item has unmerged source commits or pending
 file changes in a managed candidate worktree, THE SYSTEM SHALL retain its
 state, artifacts, worktrees, and branches and report the affected source in
 preview and apply results.
-Test: tests/binary.rs (cleanup_retains_unmerged_source_across_attempts), tests/binary.rs (cleanup_retains_pending_file_changes)
+Test: tests/binary.rs (cleanup_retains_unmerged_source_across_attempts), tests/binary.rs (cleanup_preserves_earlier_integrated_source_when_later_source_is_unmerged), tests/binary.rs (cleanup_retains_pending_file_changes)
 
 ### B13
 
 IF cleanup cannot establish an existing source asset's identity, cleanliness,
 target branch, or integration status, THE SYSTEM SHALL retain the whole Work
 Item and report the reason.
-Test: tests/binary.rs (cleanup_retains_unverifiable_source), tests/binary.rs (cleanup_reports_retained_source_and_cleans_safe_work)
+Test: tests/binary.rs (cleanup_retains_unverifiable_source), tests/binary.rs (cleanup_retains_unmerged_head_in_missing_registered_worktree), tests/binary.rs (cleanup_reports_retained_source_and_cleans_safe_work)
 
 ### B14
 
-WHEN cleanup applies a selected Work Item's removal, THE SYSTEM SHALL repeat
-the source check under the cleanup locks before removal and refuse changed
-source identities at each Git removal boundary.
-Test: tests/binary.rs (cleanup_rechecks_source_before_removal)
+WHEN cleanup applies a selected Work Item's removal, THE SYSTEM SHALL recheck
+its source before deletion and retain the whole Work Item if that source has
+changed. IF source changes during removal, THE SYSTEM SHALL refuse remaining
+removals.
+Test: tests/binary.rs (cleanup_rechecks_source_before_removal), tests/binary.rs (cleanup_refuses_late_source_changes)
 
 ## Dashboard
 

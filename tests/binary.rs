@@ -32856,6 +32856,7 @@ fn cleanup_retains_unverifiable_source() {
     for mode in [
         "missing-target",
         "unresolved-target",
+        "conflicting-target",
         "unregistered",
         "detached",
         "failed-probe",
@@ -32897,6 +32898,34 @@ fn cleanup_retains_unverifiable_source() {
                 "create cleanup candidate",
             )
             .unwrap();
+            if mode == "conflicting-target" {
+                let first_task =
+                    main.join(".fluent/work/tasks/work-unknown/attempt-1/attempt-1-write-1.json");
+                let second_task =
+                    main.join(".fluent/work/tasks/work-unknown/attempt-1/attempt-1-write-2.json");
+                let mut followup = read_json_path(&first_task);
+                followup["id"] = serde_json::json!("attempt-1-write-2");
+                followup["order"] = serde_json::json!(1);
+                followup["output"]["source_branch"] = serde_json::json!("other-target");
+                write_json_path(&second_task, &followup);
+                let candidate_path =
+                    main.join(".fluent/work/merge-candidates/work-unknown/candidate-1.json");
+                fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
+                write_json_path(
+                    &candidate_path,
+                    &serde_json::json!({
+                        "id": "candidate-1",
+                        "attempt_id": "attempt-1",
+                        "source_workspace": {"id": "candidate", "path": path.strip_prefix(&main).unwrap()},
+                        "target_workspace": {"id": "target", "path": "."},
+                        "source_branch": "other-target",
+                        "target_branch": "other-target",
+                        "candidate_commit": git_head(&main),
+                        "review_state": "failed",
+                        "merge_state": {"status": "failed"}
+                    }),
+                );
+            }
             if mode == "detached" {
                 fs::write(path.join("source.txt"), "detached source").unwrap();
                 git::run(&path, &["add", "source.txt"], "stage detached source").unwrap();
@@ -32915,6 +32944,7 @@ fn cleanup_retains_unverifiable_source() {
         let reason = match mode {
             "missing-target" => "missing or conflicting target branch identity",
             "unresolved-target" => "resolve cleanup target branch",
+            "conflicting-target" => "missing or conflicting target branch identity",
             "unregistered" => "not a registered worktree",
             "detached" => "not integrated",
             "failed-probe" => "check candidate ownership",
@@ -33892,6 +33922,85 @@ fn cleanup_apply_fails_closed_for_a_missing_locked_registration() {
     )
     .unwrap();
     assert!(registrations.contains(workspace.file_name().unwrap().to_str().unwrap()));
+}
+
+#[test]
+fn cleanup_retains_unmerged_head_in_missing_registered_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let main = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main)
+        .args([
+            "work-item",
+            "create",
+            "work-missing-head",
+            "--title",
+            "Missing source",
+        ])
+        .assert()
+        .success();
+    let (path, _branch) = cleanup_terminal_attempt(
+        &main,
+        "work-missing-head",
+        "attempt-1",
+        "failed",
+        Some("main"),
+    );
+    git::run(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            path.to_str().unwrap(),
+            "HEAD",
+        ],
+        "create detached cleanup candidate",
+    )
+    .unwrap();
+    fs::write(path.join("source.txt"), "unmerged source").unwrap();
+    git::run(&path, &["add", "source.txt"], "stage detached source").unwrap();
+    git::run(
+        &path,
+        &["commit", "-m", "Add detached source"],
+        "commit detached source",
+    )
+    .unwrap();
+    let source_head = git::run_stdout(&path, &["rev-parse", "HEAD"], "read detached HEAD").unwrap();
+    fs::remove_dir_all(&path).unwrap();
+    let artifact = main.join(".fluent/work/artifacts/work-missing-head/attempt-1/keep.txt");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::write(&artifact, "keep source evidence").unwrap();
+    let item = main.join(".fluent/work/items/work-missing-head.json");
+    let attempt = main.join(".fluent/work/attempts/work-missing-head/attempt-1.json");
+    let task = main.join(".fluent/work/tasks/work-missing-head/attempt-1/attempt-1-write-1.json");
+
+    for args in [vec!["cleanup"], vec!["cleanup", "--apply"]] {
+        fluent_cmd()
+            .current_dir(&main)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "retained Work Item work-missing-head",
+            ))
+            .stdout(predicate::str::contains(
+                path.file_name().unwrap().to_str().unwrap(),
+            ))
+            .stdout(predicate::str::contains("not integrated"));
+        for record in [&item, &attempt, &task, &artifact] {
+            assert!(record.exists(), "record {} was removed", record.display());
+        }
+        assert!(!path.exists());
+        let registrations = git::run_stdout(
+            &main,
+            &["worktree", "list", "--porcelain"],
+            "inspect retained registration",
+        )
+        .unwrap();
+        assert!(registrations.contains(path.file_name().unwrap().to_str().unwrap()));
+        assert!(registrations.contains(source_head.trim()));
+    }
 }
 
 #[test]
