@@ -25768,6 +25768,31 @@ fn tester_check_uses_production_tester_boundary() {
 }
 
 #[test]
+fn tester_permissions_preserve_legacy_default_contract() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let result = tmp.path().join("legacy-command-ran");
+    for permissions in ["", "    permissions: []\n"] {
+        fs::write(
+            project.join(".fluent/tester.yaml"),
+            format!(
+                "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n{permissions}",
+                result.display()
+            ),
+        )
+        .unwrap();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["tester", "check", "--no-sandbox"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Tester passed"));
+        assert!(result.exists(), "legacy command should still launch");
+        fs::remove_file(&result).unwrap();
+    }
+}
+
+#[test]
 fn tester_sandbox_recovery_reruns_same_tester_without_writer() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
