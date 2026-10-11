@@ -2,6 +2,17 @@
 
 use fluent::terminal_sessions::{ControlOutcome, TerminalIdentity, TerminalSession};
 
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_policy_membership_requires_distinct_valid_grants() {
+    use fluent::terminal_sessions::policy_grants_owner_only;
+
+    assert!(policy_grants_owner_only(0, 1));
+    for (own, peer) in [(0, 0), (1, 1), (1, 0), (-1, 1), (0, -1), (-1, -1)] {
+        assert!(!policy_grants_owner_only(own, peer), "{own}, {peer}");
+    }
+}
+
 #[test]
 fn terminal_is_bound_before_attachment() {
     let root = tempfile::tempdir().unwrap();
@@ -578,6 +589,40 @@ fn host_managed_terminal_acceptance() {
             .any(|line| line == format!("p{closed_handle}")),
         "fixture child retained the terminal owner handle"
     );
+    #[cfg(target_os = "macos")]
+    {
+        let members =
+            fluent::terminal_sessions::policy_members_for_test(&first_socket, &[pane]).unwrap();
+        assert!(
+            members.contains(&closed_handle),
+            "closed-handle child lost its policy grant"
+        );
+        assert!(
+            !members.contains(&unrelated.id()),
+            "unrestricted host process was adopted"
+        );
+        assert!(
+            !members.contains(&std::process::id()),
+            "unrestricted test process was adopted"
+        );
+        let second_pane: u32 = String::from_utf8(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&second_socket)
+                .args(["list-panes", "-F", "#{pane_pid}"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+        assert!(
+            !members.contains(&second_pane),
+            "another invocation was adopted"
+        );
+    }
     let first_record =
         source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
     let canceled = fluent::execution::cancel(&first_record).unwrap();

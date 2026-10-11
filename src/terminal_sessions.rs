@@ -889,7 +889,8 @@ unsafe extern "C" {
 
 /// The private socket grant remains in a descendant's Seatbelt policy after
 /// it closes descriptors, clears its environment, or changes POSIX session.
-/// Compare it with a sibling path so an unrestricted process is not adopted.
+/// Compare it with the existing temporary root so an unrestricted process is
+/// not adopted. A nonexistent path gives unreliable policy query results.
 #[cfg(target_os = "macos")]
 fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
     use std::ffi::CString;
@@ -897,15 +898,21 @@ fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
     let dir = socket
         .parent()
         .context("terminal socket has no directory")?;
-    let owned = CString::new(dir.join("owner").as_os_str().as_encoded_bytes())?;
-    let outside = CString::new(b"/private/tmp/fluent-t-unowned-probe/owner".as_slice())?;
+    let owner = dir.join("owner");
+    ensure!(owner.is_file(), "terminal policy owner probe is missing");
+    ensure!(
+        Path::new("/private/tmp").is_dir(),
+        "terminal policy outside probe is missing"
+    );
+    let owned = CString::new(owner.as_os_str().as_encoded_bytes())?;
+    let outside = CString::new(b"/private/tmp".as_slice())?;
     let operation = c"file-write-data";
     let matches = |pid: u32| -> Result<bool> {
         let pid = i32::try_from(pid)?;
         // SANDBOX_FILTER_PATH is 1. sandbox_check returns zero for an allow.
         let own = unsafe { sandbox_check(pid, operation.as_ptr(), 1, owned.as_ptr()) };
         let peer = unsafe { sandbox_check(pid, operation.as_ptr(), 1, outside.as_ptr()) };
-        Ok(own == 0 && peer > 0)
+        Ok(policy_grants_owner_only(own, peer))
     };
     for pane in panes {
         ensure!(
@@ -926,6 +933,20 @@ fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
         }
     }
     Ok(members)
+}
+
+/// Require an explicit allow for the generation handle and an explicit deny
+/// for a real path outside its private grant. Negative query results are errors.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn policy_grants_owner_only(own: i32, outside: i32) -> bool {
+    own == 0 && outside == 1
+}
+
+#[cfg(all(target_os = "macos", feature = "test-support"))]
+#[doc(hidden)]
+pub fn policy_members_for_test(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
+    policy_members(socket, panes)
 }
 
 fn tmux_pane_pids(socket: &Path) -> Result<Vec<u32>> {
