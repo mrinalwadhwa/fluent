@@ -26672,6 +26672,92 @@ fn tester_permissions_reject_unapproved_or_stale_launch() {
         ])
         .assert()
         .success();
+    let other_checkout = tmp.path().join("other-checkout");
+    git::run(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            other_checkout.to_str().unwrap(),
+            &original,
+        ],
+        "create identical candidate checkout",
+    )
+    .unwrap();
+    let other_show = fluent_cmd()
+        .current_dir(&other_checkout)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(other_show.status.success());
+    let other_request: serde_json::Value = serde_json::from_slice(&other_show.stdout).unwrap();
+    assert_ne!(other_request["request_digest"], request["request_digest"]);
+    assert_eq!(other_request["approval_state"], "absent");
+    let other_launch = fluent_cmd()
+        .current_dir(&other_checkout)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!other_launch.status.success());
+    assert!(String::from_utf8_lossy(&other_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let extractor = project.join(".fluent/extract-tester-results");
+    let mut extractor_bytes = fs::read(&extractor).unwrap();
+    extractor_bytes.extend_from_slice(b"\n# changed extractor\n");
+    fs::write(&extractor, extractor_bytes).unwrap();
+    git::run(
+        &project,
+        &["add", ".fluent/extract-tester-results"],
+        "stage changed extractor",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Update Tester extractor"],
+        "commit changed extractor",
+    )
+    .unwrap();
+    let extractor_candidate =
+        git::run_stdout(&project, &["rev-parse", "HEAD"], "read extractor candidate").unwrap();
+    let extractor_show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &extractor_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(extractor_show.status.success());
+    let extractor_request: serde_json::Value =
+        serde_json::from_slice(&extractor_show.stdout).unwrap();
+    assert_eq!(extractor_request["config_digest"], request["config_digest"]);
+    assert_ne!(
+        extractor_request["extractor_digest"],
+        request["extractor_digest"]
+    );
+    assert_eq!(extractor_request["approval_state"], "absent");
+    let extractor_launch = check();
+    assert!(!extractor_launch.status.success());
+    assert!(String::from_utf8_lossy(&extractor_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
     let changed = write_request(&format!("touch {} && true", sentinel.display()));
     assert_ne!(original, changed);
     let stale = check();
@@ -26695,6 +26781,83 @@ fn tester_permissions_reject_unapproved_or_stale_launch() {
         ])
         .assert()
         .failure();
+}
+
+#[test]
+fn tester_permissions_identical_command_indexes_do_not_share_approval() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    let command = format!("touch {}", sentinel.display());
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n"
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = |index: &str| {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                index,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let first = show("0");
+    let second = show("1");
+    assert_eq!(first["command"], second["command"]);
+    assert_ne!(first["request_digest"], second["request_digest"]);
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            first["request_digest"].as_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(show("1")["approval_state"], "absent");
+    let denied = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("command 1"));
+    assert!(!sentinel.exists());
 }
 
 #[test]
