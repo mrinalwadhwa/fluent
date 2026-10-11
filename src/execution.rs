@@ -736,6 +736,21 @@ pub fn execution_is_live(path: &Path) -> Result<bool> {
     identity_is_held(path)
 }
 
+/// Confirm the generation and child-owned receipt before another client uses an
+/// execution as attachment authority.
+pub fn verified_running_generation(path: &Path, generation: &str) -> Result<bool> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let record: ExecutionRecord = serde_json::from_slice(&bytes)?;
+    check_protocol(&record)?;
+    Ok(record.state == ExecutionState::Running
+        && record.launch_generation.as_deref() == Some(generation)
+        && recorded_identity_is_signalable(path, &record)?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelOutcome {
     Canceled,

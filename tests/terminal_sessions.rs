@@ -48,3 +48,41 @@ fn detach_does_not_cancel_owned_worker() {
     assert!(session.is_live().unwrap());
     session.stop().unwrap();
 }
+
+#[test]
+fn stale_terminal_identity_cannot_attach_or_signal() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+    let record_path = identity.artifact_dir.join("execution.json");
+    let mut session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+    let descriptor = session.descriptor().clone();
+    let original = std::fs::read(&record_path).unwrap();
+    let mut record: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    record["launch_generation"] = "changed".into();
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(session.observe(&descriptor).is_err());
+    assert!(session.is_live().unwrap());
+    std::fs::write(&record_path, original).unwrap();
+    session.stop().unwrap();
+}
+
+#[test]
+fn terminal_commands_preserve_role_confinement() {
+    let root = tempfile::tempdir().unwrap();
+    let resolver = fluent::content::ContentResolver::new(Some(root.path()));
+    let profile = fluent::os::render_profile_common_only(
+        &resolver,
+        root.path().to_str().unwrap(),
+        &[root.path().join("worker")],
+        &[],
+    )
+    .unwrap();
+    let socket_dir = root.path().join("socket-dir");
+    std::fs::create_dir(&socket_dir).unwrap();
+    let terminal_profile = fluent::os::profile_with_terminal_socket(&profile, &socket_dir).unwrap();
+    let content = std::fs::read_to_string(&terminal_profile.path).unwrap();
+    let base = std::fs::read_to_string(&profile.path).unwrap();
+    let added = content.strip_prefix(&base).unwrap();
+    assert!(added.contains(&format!("(subpath \"{}\")", socket_dir.display())));
+    assert!(!added.contains("(subpath \"/private/tmp\")"));
+}

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::execution::{self, ExecutionRecord, ExecutionState};
 use crate::lease::{self, LeaseAttempt, TaskLease};
@@ -24,8 +25,9 @@ pub struct TerminalIdentity {
 impl TerminalIdentity {
     #[cfg(feature = "test-support")]
     pub fn fixture(root: &Path, work: &str, attempt: &str, task: &str) -> Self {
+        let root = root.canonicalize().unwrap();
         Self {
-            source_root: root.to_path_buf(),
+            source_root: root.clone(),
             work_item_id: work.into(),
             attempt_id: attempt.into(),
             task_id: task.into(),
@@ -79,6 +81,7 @@ pub struct TerminalSession {
     stored: StoredTerminal,
     child: Option<Child>,
     socket_dir: Option<PathBuf>,
+    _profile: Option<crate::os::SandboxProfile>,
 }
 
 pub struct Attachment {
@@ -105,6 +108,18 @@ fn read_record(path: &Path) -> Result<ExecutionRecord> {
         .context("parsing terminal execution owner")
 }
 
+fn find_tmux() -> Result<PathBuf> {
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let candidate = dir.join("tmux");
+        if candidate.is_file() {
+            return candidate
+                .canonicalize()
+                .context("resolving tmux executable");
+        }
+    }
+    bail!("tmux is required for managed terminal sessions")
+}
+
 fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<()> {
     ensure!(stored.descriptor == *requested, "terminal identity changed");
     let published: StoredTerminal =
@@ -121,8 +136,10 @@ fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<(
     let record = read_record(&stored.execution_record)?;
     ensure!(
         record.state == ExecutionState::Running
-            && record.launch_generation.as_deref() == Some(&requested.execution_generation)
-            && execution::execution_is_live(&stored.execution_record)?,
+            && execution::verified_running_generation(
+                &stored.execution_record,
+                &requested.execution_generation
+            )?,
         "terminal execution generation is no longer running"
     );
     Ok(())
@@ -133,12 +150,19 @@ impl TerminalSession {
         identity: TerminalIdentity,
         mut command: Command,
         socket_dir: Option<PathBuf>,
+        attempt_owner: bool,
+        ready: impl FnOnce(Option<&Path>) -> Result<()>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&identity.artifact_dir)?;
         let transcript = identity.artifact_dir.join("transcript.jsonl");
-        execution::prepare_launch(&transcript, None)?;
+        let owner = attempt_owner.then(|| execution::AttemptExecutionOwner {
+            project_root: identity.source_root.clone(),
+            work_item_id: identity.work_item_id.clone(),
+            attempt_id: identity.attempt_id.clone(),
+        });
+        execution::prepare_launch(&transcript, owner)?;
         command.stdout(Stdio::null()).stderr(Stdio::null());
-        let child = match execution::spawn(&mut command, &transcript) {
+        let mut child = match execution::spawn(&mut command, &transcript) {
             Ok(child) => child,
             Err(error) => {
                 if let Some(dir) = &socket_dir {
@@ -148,47 +172,63 @@ impl TerminalSession {
             }
         };
         let record_path = record_for(&identity);
-        let record = read_record(&record_path)?;
-        let generation = record
-            .launch_generation
-            .context("terminal has no launch generation")?;
-        let session_id = format!("{}-{}", identity.task_id, generation);
-        let root = identity.source_root.canonicalize()?;
-        let descriptor = TerminalDescriptor {
-            schema_version: 1,
-            source_id: root.to_string_lossy().into_owned(),
-            project_identity: root.to_string_lossy().into_owned(),
-            work_item_id: identity.work_item_id,
-            attempt_id: identity.attempt_id,
-            task_id: identity.task_id,
-            execution_generation: generation,
-            session_id,
-            role: identity.role,
-            provider: identity.provider,
-            lifecycle: TerminalLifecycle::Running,
-            can_observe: true,
-            can_control: true,
-            unavailable_reason: None,
+        let setup = (|| -> Result<StoredTerminal> {
+            ready(socket_dir.as_deref())?;
+            let record = read_record(&record_path)?;
+            let generation = record
+                .launch_generation
+                .context("terminal has no launch generation")?;
+            ensure!(
+                execution::verified_running_generation(&record_path, &generation)?,
+                "terminal server stopped during setup"
+            );
+            let session_id = format!("{}-{}", identity.task_id, generation);
+            let root = identity.source_root.canonicalize()?;
+            let descriptor = TerminalDescriptor {
+                schema_version: 1,
+                source_id: root.to_string_lossy().into_owned(),
+                project_identity: root.to_string_lossy().into_owned(),
+                work_item_id: identity.work_item_id,
+                attempt_id: identity.attempt_id,
+                task_id: identity.task_id,
+                execution_generation: generation,
+                session_id,
+                role: identity.role,
+                provider: identity.provider,
+                lifecycle: TerminalLifecycle::Running,
+                can_observe: true,
+                can_control: true,
+                unavailable_reason: None,
+            };
+            let stored = StoredTerminal {
+                descriptor,
+                execution_record: record_path.clone(),
+                socket: socket_dir.as_ref().map(|dir| dir.join("socket")),
+            };
+            crate::atomic_write::atomic_write(
+                &descriptor_path(&record_path),
+                &serde_json::to_vec_pretty(&stored)?,
+            )?;
+            Ok(stored)
+        })();
+        let stored = match setup {
+            Ok(stored) => stored,
+            Err(error) => {
+                let cleanup = execution::cancel(&record_path)
+                    .and_then(|_| child.wait().map(|_| ()).map_err(Into::into));
+                if let Some(dir) = &socket_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                return Err(error)
+                    .context(format!("setting up managed terminal; cleanup: {cleanup:?}"));
+            }
         };
-        let stored = StoredTerminal {
-            descriptor,
-            execution_record: record_path.clone(),
-            socket: socket_dir.as_ref().map(|dir| dir.join("socket")),
-        };
-        let mut session = Self {
+        let session = Self {
             stored,
             child: Some(child),
             socket_dir,
+            _profile: None,
         };
-        if let Err(error) = crate::atomic_write::atomic_write(
-            &descriptor_path(&record_path),
-            &serde_json::to_vec_pretty(&session.stored)?,
-        ) {
-            let cleanup = session.stop();
-            return Err(error).context(format!(
-                "publishing managed terminal descriptor; cleanup: {cleanup:?}"
-            ));
-        }
         Ok(session)
     }
 
@@ -196,7 +236,60 @@ impl TerminalSession {
     pub fn start_fixture(identity: TerminalIdentity, command: &str) -> Result<Self> {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(command);
-        Self::start_command(identity, child, None)
+        Self::start_command(identity, child, None, false, |_| Ok(()))
+    }
+
+    /// Start a foreground tmux server inside the supplied worker profile.
+    /// Pane commands inherit that server's sandbox and private environment.
+    pub fn start_managed(
+        identity: TerminalIdentity,
+        worker_profile: &crate::os::SandboxProfile,
+        shell_command: &str,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<Self> {
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fluent-t-")
+            .tempdir_in("/private/tmp")?
+            .keep();
+        let socket = socket_dir.join("socket");
+        let profile = crate::os::profile_with_terminal_socket(worker_profile, &socket_dir)?;
+        let tmux = find_tmux()?;
+        let mut command = crate::os::command_under_profile(&profile, &tmux);
+        command
+            .arg("-S")
+            .arg(&socket)
+            .arg("-f")
+            .arg("/dev/null")
+            .arg("-D");
+        command.env_clear();
+        for (key, value) in environment {
+            command.env(key, value);
+        }
+        let mut session = Self::start_command(identity, command, Some(socket_dir), true, |_| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            ensure!(socket.exists(), "tmux server did not create its socket");
+            let output = Command::new(&tmux)
+                .arg("-S")
+                .arg(&socket)
+                .arg("new-session")
+                .arg("-d")
+                .arg("-s")
+                .arg("fluent")
+                .arg(shell_command)
+                .output()
+                .context("creating managed tmux session")?;
+            ensure!(
+                output.status.success(),
+                "creating managed tmux session: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        })?;
+        session._profile = Some(profile);
+        Ok(session)
     }
 
     pub fn descriptor(&self) -> &TerminalDescriptor {
@@ -290,11 +383,12 @@ pub fn resolve(source_root: &Path, session_id: &str) -> Result<Attachment> {
 }
 
 fn list_stored(source_root: &Path) -> Result<Vec<StoredTerminal>> {
+    let source_root = source_root.canonicalize()?;
     let root = source_root.join(".fluent/work/artifacts");
     if !root.exists() {
         return Ok(Vec::new());
     }
-    let mut pending = vec![root];
+    let mut pending = vec![root.clone()];
     let mut found = Vec::new();
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(dir)? {
@@ -302,7 +396,38 @@ fn list_stored(source_root: &Path) -> Result<Vec<StoredTerminal>> {
             if entry.file_type()?.is_dir() {
                 pending.push(entry.path());
             } else if entry.file_name() == DESCRIPTOR {
-                found.push(serde_json::from_slice(&std::fs::read(entry.path())?)?);
+                ensure!(
+                    entry.file_type()?.is_file(),
+                    "terminal descriptor is not a regular file"
+                );
+                let stored: StoredTerminal = serde_json::from_slice(&std::fs::read(entry.path())?)?;
+                for id in [
+                    &stored.descriptor.work_item_id,
+                    &stored.descriptor.attempt_id,
+                    &stored.descriptor.task_id,
+                ] {
+                    ensure!(
+                        Path::new(id).components().count() == 1
+                            && Path::new(id)
+                                .components()
+                                .all(|part| matches!(part, std::path::Component::Normal(_))),
+                        "terminal identity contains an invalid path component"
+                    );
+                }
+                let expected = root
+                    .join(&stored.descriptor.work_item_id)
+                    .join(&stored.descriptor.attempt_id)
+                    .join(&stored.descriptor.task_id)
+                    .join("execution.json");
+                ensure!(
+                    stored.execution_record == expected,
+                    "terminal owner path escapes its source"
+                );
+                ensure!(
+                    stored.descriptor.source_id == source_root.to_string_lossy(),
+                    "terminal source identity changed"
+                );
+                found.push(stored);
             }
         }
     }

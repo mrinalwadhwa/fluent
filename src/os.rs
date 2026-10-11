@@ -20,6 +20,36 @@ pub struct SandboxProfile {
     pub path: PathBuf,
 }
 
+/// Add only one invocation's private socket directory to an existing worker
+/// profile. The caller retains the returned file until the server has started.
+pub fn profile_with_terminal_socket(
+    profile: &SandboxProfile,
+    socket_dir: &Path,
+) -> Result<SandboxProfile> {
+    anyhow::ensure!(
+        socket_dir.is_absolute(),
+        "terminal socket directory must be absolute"
+    );
+    let mut content = std::fs::read_to_string(&profile.path)?;
+    let physical = socket_dir.canonicalize()?;
+    for dir in [socket_dir, physical.as_path()] {
+        content.push_str(&format!(
+            "\n(allow file-read* (subpath {}))",
+            sbpl_string(dir)
+        ));
+        content.push_str(&format!(
+            "\n(allow file-write* (subpath {}))",
+            sbpl_string(dir)
+        ));
+    }
+    let temp_file = NamedTempFile::with_prefix("fluent-terminal-sandbox-")?;
+    std::fs::write(temp_file.path(), content)?;
+    Ok(SandboxProfile {
+        path: temp_file.path().into(),
+        _temp_file: temp_file,
+    })
+}
+
 /// Deny existing source product entries after the profile's broad temporary
 /// directory grants. Include the physical path because macOS resolves /var to
 /// /private/var before applying Seatbelt rules.
