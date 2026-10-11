@@ -235,6 +235,8 @@ pub fn plan(candidate_workspace: &Path) -> Result<TesterPlan> {
 pub struct TesterSandbox {
     profile: Option<os::SandboxProfile>,
     command_profiles: Vec<Option<os::SandboxProfile>>,
+    candidate_commit: Option<String>,
+    original_indexes: Vec<usize>,
     settlement_directories: Vec<Option<PathBuf>>,
     commands: Vec<TesterCommand>,
     launch_env: Vec<(String, String)>,
@@ -646,6 +648,15 @@ pub(crate) fn render_sandbox_profile_with_cache(
     let has_permission_request = commands
         .iter()
         .any(|command| !command.permissions.is_empty());
+    let candidate_commit = if has_permission_request {
+        Some(crate::git::run_stdout(
+            candidate_workspace,
+            &["rev-parse", "HEAD"],
+            "resolve Tester candidate",
+        )?)
+    } else {
+        None
+    };
     check_requested_permissions(
         candidate_workspace,
         no_sandbox,
@@ -659,6 +670,8 @@ pub(crate) fn render_sandbox_profile_with_cache(
         return Ok(TesterSandbox {
             profile: None,
             command_profiles: Vec::new(),
+            candidate_commit,
+            original_indexes,
             settlement_directories,
             commands,
             launch_env,
@@ -676,6 +689,8 @@ pub(crate) fn render_sandbox_profile_with_cache(
         return Ok(TesterSandbox {
             profile: None,
             command_profiles: Vec::new(),
+            candidate_commit,
+            original_indexes,
             settlement_directories,
             commands,
             launch_env,
@@ -727,6 +742,8 @@ pub(crate) fn render_sandbox_profile_with_cache(
             Ok(TesterSandbox {
                 profile: Some(profile),
                 command_profiles,
+                candidate_commit,
+                original_indexes,
                 settlement_directories,
                 commands,
                 launch_env,
@@ -807,6 +824,10 @@ pub fn run_with_sandbox_profile(
         artifact_dir,
         sandbox.profile(),
         Some(&sandbox.command_profiles),
+        sandbox
+            .candidate_commit
+            .as_deref()
+            .map(|candidate| (candidate, sandbox.original_indexes.as_slice())),
         &sandbox.commands,
         Some(&sandbox.settlement_directories),
         &sandbox.launch_env,
@@ -819,6 +840,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
     command_profiles: Option<&[Option<os::SandboxProfile>]>,
+    admission: Option<(&str, &[usize])>,
     commands: &[TesterCommand],
     settlement_directories: Option<&[Option<PathBuf>]>,
     launch_env: &[(String, String)],
@@ -837,6 +859,10 @@ fn run_with_prepared_sandbox_profile_and_collector(
                     })
             }),
             "permission-bearing Tester commands lack per-command profiles"
+        );
+        anyhow::ensure!(
+            admission.is_some_and(|(_, indexes)| indexes.len() == commands.len()),
+            "permission-bearing Tester commands lack pinned admission identity"
         );
     }
     let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
@@ -976,6 +1002,11 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 .and_then(|selected| selected.get(index))
                 .and_then(Option::as_ref)
                 .or(sandbox_profile),
+            if cmd.permissions.is_empty() {
+                None
+            } else {
+                admission.map(|(candidate, indexes)| (candidate, indexes[index]))
+            },
             launch_env,
             settlement
                 .as_ref()
@@ -1119,6 +1150,7 @@ fn run_with_sandbox_profile_and_collector(
         candidate_workspace,
         artifact_dir,
         sandbox_profile,
+        None,
         None,
         &plan.commands,
         settlement_directories.or_else(|| {
@@ -1264,6 +1296,7 @@ fn run_command(
     index: usize,
     commands_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    admission: Option<(&str, usize)>,
     launch_env: &[(String, String)],
     settlement_directory: Option<&Path>,
 ) -> Result<CommandResult> {
@@ -1293,8 +1326,18 @@ fn run_command(
         .parent()
         .context("Tester command has no artifact area")?
         .join("transcript.jsonl");
-    let output = crate::execution::output(&mut process, &transcript)
-        .with_context(|| format!("spawning Tester command: {command}"))?;
+    let output = crate::execution::output_with_launch_guard(&mut process, &transcript, || {
+        admission
+            .map(|(candidate, original_index)| {
+                crate::tester_permissions::begin_launch_admission(
+                    working_dir,
+                    candidate,
+                    original_index,
+                )
+            })
+            .transpose()
+    })
+    .with_context(|| format!("spawning Tester command: {command}"))?;
     let duration = start.elapsed();
 
     fs::write(&stdout_path, &output.stdout)?;
@@ -1557,6 +1600,7 @@ mod tests {
             tmp.path(),
             None,
             None,
+            None,
             &commands,
             None,
             &[],
@@ -1564,6 +1608,37 @@ mod tests {
         )
         .expect_err("a requested command needs its own profile");
         assert!(error.to_string().contains("per-command profiles"));
+    }
+
+    #[test]
+    fn requested_command_requires_pinned_admission_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let profile = os::render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.clone()],
+            &[],
+        )
+        .unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let selected = [Some(profile)];
+        let error = run_with_prepared_sandbox_profile_and_collector(
+            &root,
+            &root,
+            None,
+            Some(&selected),
+            None,
+            &commands,
+            None,
+            &[],
+            &HostProcessInventoryCollector,
+        )
+        .expect_err("a requested command needs its pinned request identity");
+        assert!(error.to_string().contains("admission identity"));
     }
 
     #[test]
@@ -2103,6 +2178,10 @@ mod tests {
             artifact_dir.path(),
             sandbox.profile(),
             Some(&sandbox.command_profiles),
+            sandbox
+                .candidate_commit
+                .as_deref()
+                .map(|candidate| (candidate, sandbox.original_indexes.as_slice())),
             &sandbox.commands,
             Some(&sandbox.settlement_directories),
             &[],

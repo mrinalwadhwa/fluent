@@ -370,7 +370,7 @@ fn write_records(root: &Path, request_digest: &str, records: &[ApprovalRecord]) 
     Ok(())
 }
 
-struct PermissionLease {
+pub(crate) struct PermissionLease {
     _file: File,
 }
 
@@ -462,6 +462,17 @@ pub(crate) fn check_current_approval(
     candidate: &str,
     command_index: usize,
 ) -> Result<()> {
+    let _lease = begin_launch_admission(checkout, candidate, command_index)?;
+    Ok(())
+}
+
+/// Keep this lease until the selected command has been spawned. A completed
+/// revocation cannot overtake a launch that has already passed admission.
+pub(crate) fn begin_launch_admission(
+    checkout: &Path,
+    candidate: &str,
+    command_index: usize,
+) -> Result<PermissionLease> {
     let shown = show_request(checkout, candidate, command_index)?;
     ensure!(
         shown.approval_state == "approved",
@@ -469,7 +480,7 @@ pub(crate) fn check_current_approval(
     );
     let root = store_root()?;
     validate_store_directory(&root)?;
-    let _lease = acquire_permission_lease(&root)?;
+    let lease = acquire_permission_lease(&root)?;
     let current = show_request(checkout, candidate, command_index)?;
     ensure!(
         current.request_digest == shown.request_digest && current.approval_state == "approved",
@@ -485,7 +496,7 @@ pub(crate) fn check_current_approval(
             && record.command_index == command_index,
         "unmet prerequisite: process-table-read approval does not match command {command_index}"
     );
-    Ok(())
+    Ok(lease)
 }
 
 /// Revoke one approval while retaining its audit record.
