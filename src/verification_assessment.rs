@@ -1205,6 +1205,11 @@ fn validate_manifest_permissions(
     );
     for (index, (definition, result)) in manifest.commands.iter().zip(&results.commands).enumerate()
     {
+        anyhow::ensure!(
+            definition.command == result.command
+                && definition.test_harness == result.test_harness,
+            "permission-bearing Tester command identity differs from its settled result"
+        );
         let original_index = manifest.original_command_indexes[index];
         anyhow::ensure!(
             !manifest.full_run || original_index == index,
@@ -1292,6 +1297,30 @@ mod tester_permission_tests {
         )
         .expect_err("a requested command without host receipt cannot receive credit");
         assert!(error.to_string().contains("receipt"), "{error:#}");
+    }
+
+    #[test]
+    fn version_two_manifest_rejects_changed_command_result_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest: crate::tester::CanonicalRunManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "permissions":["process-table-read"]}],
+            "full_run": true,
+            "original_command_indexes": [0],
+            "permission_receipts": [null]
+        })).unwrap();
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{"command":"false", "test_harness":"shell-harness", "exit_code":0,
+                "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"}],
+            "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+        })).unwrap();
+        let error = validate_manifest_permissions(
+            root.path(), "artifacts", "candidate", &manifest, &results,
+        ).expect_err("a changed result identity cannot claim the configured command's receipt");
+        assert!(error.to_string().contains("command identity"), "{error:#}");
     }
 
     #[test]

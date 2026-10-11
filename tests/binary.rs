@@ -57444,6 +57444,19 @@ fn tester_permissions_reject_unproven_or_mismatched_evidence() {
         fluent::verification_assessment::assess_current_verification(&project, &item.attempts[0])
             .expect_err("version 1 evidence cannot prove a requested permission");
     assert!(error.to_string().contains("permission"), "{error:#}");
+
+    manifest["schema_version"] = serde_json::json!(2);
+    manifest["original_command_indexes"] = serde_json::json!([0]);
+    manifest["permission_receipts"] = serde_json::json!([null]);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut result: serde_json::Value =
+        serde_json::from_slice(&fs::read(&results).unwrap()).unwrap();
+    result["commands"][0]["command"] = serde_json::json!("false");
+    fs::write(&results, serde_json::to_vec(&result).unwrap()).unwrap();
+    let error =
+        fluent::verification_assessment::assess_current_verification(&project, &item.attempts[0])
+            .expect_err("a changed settled command cannot claim the requested permission");
+    assert!(error.to_string().contains("command identity"), "{error:#}");
 }
 
 #[test]
