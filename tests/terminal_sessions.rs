@@ -393,7 +393,8 @@ fn host_managed_terminal_acceptance() {
         .join(".fluent/work/terminal-sessions/work-2/attempt-1/attempt-1-write-1/resource.json");
     assert!(
         !resource.exists(),
-        "failed setup left a terminal resource receipt"
+        "failed setup left a terminal resource receipt: {:#?}",
+        failure.err()
     );
     eprintln!(
         "terminal host partial setup: resource_present={}",

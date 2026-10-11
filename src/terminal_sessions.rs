@@ -969,6 +969,16 @@ fn settle_panes(socket: &Path, leader_pid: u32) -> Result<()> {
     bail!("managed terminal pane descendants did not settle")
 }
 
+fn descriptor_publishes_resource(
+    stored: &StoredTerminal,
+    resource: &TerminalResource,
+    generation: Option<&str>,
+) -> bool {
+    generation.is_some_and(|generation| stored.descriptor.execution_generation == generation)
+        && stored.execution_record == resource.execution_record
+        && stored.socket.as_ref() == Some(&resource.socket)
+}
+
 /// Settle pane descendants before the existing execution owner signals its
 /// server group. The resource receipt lives outside worker-writable artifacts.
 pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Result<()> {
@@ -1035,8 +1045,55 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
                 .is_some_and(|name| name == "socket"),
         "terminal socket path is outside its private namespace"
     );
-    if !resource.socket.exists() && registry.join(DESCRIPTOR).exists() {
+    // A stopped earlier generation may leave its descriptor in this Task.
+    let published = match std::fs::read(registry.join(DESCRIPTOR)) {
+        Ok(bytes) => {
+            let stored: StoredTerminal = serde_json::from_slice(&bytes)?;
+            descriptor_publishes_resource(&stored, &resource, record.launch_generation.as_deref())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    // A failed setup can leave a socket pathname after its server exits.
+    if !published && !execution::execution_is_live(path)? {
+        return Ok(());
+    }
+    if !resource.socket.exists() && published {
         bail!("managed terminal socket disappeared before pane descendants could be verified");
     }
     settle_panes(&resource.socket, record.leader_pid)
+}
+
+#[cfg(test)]
+mod setup_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn stale_descriptor_does_not_publish_a_new_generation() {
+        let mut descriptor: TerminalDescriptor = serde_json::from_str(include_str!(
+            "../tests/fixtures/terminal-descriptor-v1.json"
+        ))
+        .unwrap();
+        descriptor.execution_generation = "old-generation".into();
+        let stored = StoredTerminal {
+            descriptor,
+            execution_record: PathBuf::from("/tmp/execution.json"),
+            socket: Some(PathBuf::from("/private/tmp/fluent-t-test/socket")),
+            registry_path: PathBuf::from("/tmp/terminal-session.json"),
+        };
+        let resource = TerminalResource {
+            execution_record: stored.execution_record.clone(),
+            socket: stored.socket.clone().unwrap(),
+        };
+        assert!(!descriptor_publishes_resource(
+            &stored,
+            &resource,
+            Some("new-generation")
+        ));
+        assert!(descriptor_publishes_resource(
+            &stored,
+            &resource,
+            Some("old-generation")
+        ));
+    }
 }
