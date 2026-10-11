@@ -121,7 +121,7 @@ fn second_controller_is_observer_until_control_is_released() {
 #[test]
 fn unavailable_terminal_has_specific_reason() {
     use fluent::terminal_sessions::availability;
-    use fluent::work_model::{TaskKind, TaskStatus, WorkItem, WorkModelStore};
+    use fluent::work_model::{TaskKind, TaskOutput, TaskStatus, WorkItem, WorkModelStore};
     let root = tempfile::tempdir().unwrap();
     let store = WorkModelStore::new(root.path());
     for (work, kind, status, has_execution, reason) in [
@@ -142,7 +142,7 @@ fn unavailable_terminal_has_specific_reason() {
         (
             "completed",
             TaskKind::Write,
-            TaskStatus::Failed,
+            TaskStatus::Complete,
             true,
             "completed",
         ),
@@ -159,6 +159,17 @@ fn unavailable_terminal_has_specific_reason() {
         let task = &mut item.attempts[0].tasks[0];
         task.kind = kind;
         task.status = status;
+        if task.status == TaskStatus::Complete {
+            task.output = Some(TaskOutput {
+                workspace_id: "fixture-workspace".into(),
+                workspace_path: "fixture-workspace".into(),
+                source_branch: "fixture-branch".into(),
+                base_commit: None,
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+        }
         store.create_work_item(&item).unwrap();
         let artifact = root.path().join(format!(
             ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1"
