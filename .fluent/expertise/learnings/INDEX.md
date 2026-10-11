@@ -28,6 +28,7 @@
 - [capture-pump-terminate-descendants-before-eof](capture-pump-terminate-descendants-before-eof.md) — When a thread drains a child's piped stdout to EOF, terminate the whole process group before waiting for EOF; a backgrounded descendant can hold the pipe open forever
 - [checkout-selection-revalidates-identity](checkout-selection-revalidates-identity.md) — Revalidate a discovered checkout's canonical Git identity and current authority before every setup, commit, and publication effect
 - [classified-writer-inputs-revalidate-at-delivery](classified-writer-inputs-revalidate-at-delivery.md) — Deliver a classified Writer's current authorization and exact audit through its actual launch context, including resumed provider sessions
+- [cleanup-preserves-unverified-source](cleanup-preserves-unverified-source.md) — Assess all owned Git source before cleanup and retain the whole Work Item when any source cannot be proved safe to remove
 - [cleanup-protects-cross-record-eligibility](cleanup-protects-cross-record-eligibility.md) — Recheck cleanup eligibility under the locks for both the origin and its descendant recovery dependencies, then hold them through removal
 - [commit-body-bullet-point-convention](commit-body-bullet-point-convention.md) — Commit bodies should use "- prefix" bullets for multiple changes when practical
 - [commit-subject-line-fifty-char-limit](commit-subject-line-fifty-char-limit.md) — Commit subject lines should stay within 50 characters when practical
