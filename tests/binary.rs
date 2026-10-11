@@ -32614,36 +32614,36 @@ fn cleanup_terminal_attempt(
 fn cleanup_retains_unmerged_source_across_attempts() {
     let tmp = TempDir::new().unwrap();
     let main = setup_git_project(&tmp);
-    fluent_cmd()
-        .current_dir(&main)
-        .args([
-            "work-item",
-            "create",
-            "work-source",
-            "--title",
-            "Source cleanup",
-        ])
-        .assert()
-        .success();
-    let (first_path, first_branch) =
-        cleanup_terminal_attempt(&main, "work-source", "attempt-1", "complete", Some("main"));
+    let bin = run_plain_attempt(&main, &tmp, "cleanup-landed-first");
+    land_work_1(&main, &bin, true);
+    let store = WorkModelStore::new(&main);
+    let landed = store.read_work_item("work-1").unwrap();
+    assert_eq!(
+        landed.merge_candidates[0].merge_state.status,
+        fluent::work_model::MergeCandidateMergeStatus::Merged
+    );
+    assert!(landed.attempts[0].learning.as_ref().unwrap().is_succeeded());
+    let first_attempt = main.join(".fluent/work/attempts/work-1/attempt-1.json");
+    let first_artifacts = main.join(".fluent/work/artifacts/work-1/attempt-1");
+    let first_candidate =
+        main.join(".fluent/work/merge-candidates/work-1/attempt-1-merge-candidate.json");
+    assert!(first_attempt.exists() && first_artifacts.exists() && first_candidate.exists());
+
     let (second_path, second_branch) =
-        cleanup_terminal_attempt(&main, "work-source", "attempt-2", "failed", Some("main"));
-    for (path, branch) in [(&first_path, &first_branch), (&second_path, &second_branch)] {
-        git::run(
-            &main,
-            &[
-                "worktree",
-                "add",
-                path.to_str().unwrap(),
-                "-b",
-                branch,
-                "HEAD",
-            ],
-            "create cleanup candidate",
-        )
-        .unwrap();
-    }
+        cleanup_terminal_attempt(&main, "work-1", "attempt-2", "failed", Some("main"));
+    git::run(
+        &main,
+        &[
+            "worktree",
+            "add",
+            second_path.to_str().unwrap(),
+            "-b",
+            &second_branch,
+            "HEAD",
+        ],
+        "create second cleanup candidate",
+    )
+    .unwrap();
     fs::write(second_path.join("pending.txt"), "unmerged source").unwrap();
     git::run(
         &second_path,
@@ -32663,18 +32663,20 @@ fn cleanup_retains_unmerged_source_across_attempts() {
             .args(args)
             .assert()
             .success()
-            .stdout(predicate::str::contains("retained Work Item work-source"))
+            .stdout(predicate::str::contains("retained Work Item work-1"))
             .stdout(predicate::str::contains(&second_branch))
             .stdout(predicate::str::contains("not integrated"));
-        assert!(first_path.exists() && second_path.join("pending.txt").exists());
-        assert!(main.join(".fluent/work/items/work-source.json").exists());
+        assert!(first_attempt.exists() && first_artifacts.exists() && first_candidate.exists());
+        assert!(second_path.join("pending.txt").exists());
         assert!(
-            main.join(".fluent/work/attempts/work-source/attempt-1.json")
+            main.join(".fluent/work/attempts/work-1/attempt-2.json")
                 .exists()
         );
-        assert!(
-            main.join(".fluent/work/attempts/work-source/attempt-2.json")
-                .exists()
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().merge_candidates[0]
+                .merge_state
+                .status,
+            fluent::work_model::MergeCandidateMergeStatus::Merged
         );
     }
 }
@@ -32720,13 +32722,18 @@ fn cleanup_retains_pending_file_changes() {
         if mode == "staged" {
             git::run(&path, &["add", "edits.txt"], "stage edit").unwrap();
         }
-        fluent_cmd()
-            .current_dir(&main)
-            .args(["cleanup", "--apply"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("retained Work Item work-edits"))
-            .stdout(predicate::str::contains("pending file changes"));
+        for args in [vec!["cleanup"], vec!["cleanup", "--apply"]] {
+            fluent_cmd()
+                .current_dir(&main)
+                .args(args)
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("retained Work Item work-edits"))
+                .stdout(predicate::str::contains(
+                    path.file_name().unwrap().to_str().unwrap(),
+                ))
+                .stdout(predicate::str::contains("pending file changes"));
+        }
         assert_eq!(
             fs::read_to_string(path.join("edits.txt")).unwrap(),
             "pending"
@@ -32796,12 +32803,26 @@ fn cleanup_retains_unverifiable_source() {
                 fs::write(path.join(".git"), "gitdir: /missing/cleanup/gitdir\n").unwrap();
             }
         }
-        fluent_cmd()
-            .current_dir(&main)
-            .args(["cleanup", "--apply"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("retained Work Item work-unknown"));
+        let reason = match mode {
+            "missing-target" => "missing or conflicting target branch identity",
+            "unresolved-target" => "resolve cleanup target branch",
+            "unregistered" => "not a registered worktree",
+            "detached" => "not integrated",
+            "failed-probe" => "check candidate ownership",
+            _ => unreachable!(),
+        };
+        for args in [vec!["cleanup"], vec!["cleanup", "--apply"]] {
+            fluent_cmd()
+                .current_dir(&main)
+                .args(args)
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("retained Work Item work-unknown"))
+                .stdout(predicate::str::contains(
+                    path.file_name().unwrap().to_str().unwrap(),
+                ))
+                .stdout(predicate::str::contains(reason));
+        }
         assert!(main.join(".fluent/work/items/work-unknown.json").exists());
         assert!(path.exists());
     }
@@ -32965,6 +32986,17 @@ fn cleanup_reports_retained_source_and_cleans_safe_work() {
     )
     .unwrap();
     fs::write(path.join("pending.txt"), "retain").unwrap();
+    fluent_cmd()
+        .current_dir(&main)
+        .arg("cleanup")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("retained Work Item work-retained"))
+        .stdout(predicate::str::contains(
+            path.file_name().unwrap().to_str().unwrap(),
+        ))
+        .stdout(predicate::str::contains("pending file changes"))
+        .stdout(predicate::str::contains("would clean Work Item work-safe"));
     for _ in 0..2 {
         fluent_cmd()
             .current_dir(&main)
@@ -32979,6 +33011,189 @@ fn cleanup_reports_retained_source_and_cleans_safe_work() {
         assert!(path.join("pending.txt").exists());
         assert!(main.join(".fluent/work/items/work-retained.json").exists());
         assert!(!main.join(".fluent/work/items/work-safe.json").exists());
+    }
+}
+
+#[test]
+fn cleanup_reports_changed_source_asset() {
+    let tmp = TempDir::new().unwrap();
+    let main = setup_git_project(&tmp);
+    fs::write(main.join("integrated.txt"), "integrated").unwrap();
+    git::run(&main, &["add", "integrated.txt"], "stage integrated source").unwrap();
+    git::run(
+        &main,
+        &["commit", "-m", "Add integrated source"],
+        "create integrated tip",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main)
+        .args([
+            "work-item",
+            "create",
+            "work-moving",
+            "--title",
+            "Moving source",
+        ])
+        .assert()
+        .success();
+    let (_, branch) =
+        cleanup_terminal_attempt(&main, "work-moving", "attempt-1", "failed", Some("main"));
+    git::run(
+        &main,
+        &["branch", &branch, "HEAD~1"],
+        "create integrated Work branch",
+    )
+    .unwrap();
+    let reached = tmp.path().join("assessed");
+    let release = tmp.path().join("release");
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+    command
+        .current_dir(&main)
+        .args(["cleanup", "--apply"])
+        .env("FLUENT_TEST_CLEANUP_ASSESSED_ITEM", "work-moving")
+        .env("FLUENT_TEST_CLEANUP_ASSESSED_REACHED", &reached)
+        .env("FLUENT_TEST_CLEANUP_ASSESSED_RELEASE", &release)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = OwnedFixtureProcess::spawn(&mut command);
+    wait_for_cleanup_barrier(&reached);
+    git::run(
+        &main,
+        &[
+            "update-ref",
+            &format!("refs/heads/{branch}"),
+            &git_head(&main),
+        ],
+        "advance integrated Work branch",
+    )
+    .unwrap();
+    fs::write(&release, b"continue").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("retained Work Item work-moving"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(&branch), "{stdout}");
+    assert!(stdout.contains("identity changed"), "{stdout}");
+    assert!(main.join(".fluent/work/items/work-moving.json").exists());
+}
+
+fn wait_for_cleanup_barrier(reached: &Path) {
+    for _ in 0..500 {
+        if reached.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("cleanup did not reach {}", reached.display());
+}
+
+#[test]
+fn cleanup_refuses_late_source_changes() {
+    for change in ["head", "dirty", "ref"] {
+        let tmp = TempDir::new().unwrap();
+        let main = setup_git_project(&tmp);
+        fluent_cmd()
+            .current_dir(&main)
+            .args(["work-item", "create", "work-late", "--title", "Late source"])
+            .assert()
+            .success();
+        let (path, branch) =
+            cleanup_terminal_attempt(&main, "work-late", "attempt-1", "failed", Some("main"));
+        if change == "ref" {
+            git::run(&main, &["branch", &branch, "HEAD"], "create Work branch").unwrap();
+        } else {
+            git::run(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    path.to_str().unwrap(),
+                    "-b",
+                    &branch,
+                    "HEAD",
+                ],
+                "create Work candidate",
+            )
+            .unwrap();
+        }
+        let reached = tmp.path().join("before-remove");
+        let release = tmp.path().join("release");
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&main)
+            .args(["cleanup", "--apply"])
+            .env("FLUENT_TEST_CLEANUP_REMOVE_ITEM", "work-late")
+            .env("FLUENT_TEST_CLEANUP_REMOVE_REACHED", &reached)
+            .env("FLUENT_TEST_CLEANUP_REMOVE_RELEASE", &release)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = OwnedFixtureProcess::spawn(&mut command);
+        wait_for_cleanup_barrier(&reached);
+        if change == "ref" {
+            let new_tip = git::run_stdout(
+                &main,
+                &[
+                    "commit-tree",
+                    "HEAD^{tree}",
+                    "-p",
+                    "HEAD",
+                    "-m",
+                    "Advance Work ref",
+                ],
+                "create late Work commit",
+            )
+            .unwrap();
+            git::run(
+                &main,
+                &["update-ref", &format!("refs/heads/{branch}"), &new_tip],
+                "advance Work ref",
+            )
+            .unwrap();
+        } else {
+            fs::write(path.join("late.txt"), "late source").unwrap();
+            if change == "head" {
+                git::run(&path, &["add", "late.txt"], "stage late source").unwrap();
+                git::run(
+                    &path,
+                    &["commit", "-m", "Add late source"],
+                    "advance candidate HEAD",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(&release, b"continue").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{change}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(main.join(".fluent/work/items/work-late.json").exists());
+        assert!(
+            git::run_raw(
+                &main,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}")
+                ]
+            )
+            .unwrap()
+            .status
+            .success()
+        );
+        if change != "ref" {
+            assert!(path.join("late.txt").exists());
+        }
     }
 }
 

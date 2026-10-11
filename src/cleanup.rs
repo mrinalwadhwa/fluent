@@ -194,14 +194,22 @@ pub fn cleanup_work_items(
                 continue;
             }
         };
+        #[cfg(feature = "test-support")]
+        cleanup_source_barrier(
+            &work_item.id,
+            "FLUENT_TEST_CLEANUP_ASSESSED_ITEM",
+            "FLUENT_TEST_CLEANUP_ASSESSED_REACHED",
+            "FLUENT_TEST_CLEANUP_ASSESSED_RELEASE",
+        )?;
         if options.apply {
             let current = registered_worktrees(&source_root)?;
             match assess_owned_source(&source_root, &work_item, &current) {
                 Ok(again) if again == source => {}
-                Ok(_) => {
+                Ok(again) => {
                     results.push(WorkCleanupResult::RetainedSource {
                         work_item_id: work_item.id.clone(),
-                        asset: work_item.id.clone(),
+                        asset: changed_source_asset(&source, &again)
+                            .expect("different source inventories identify a changed asset"),
                         reason: "owned source identity changed before removal".into(),
                     });
                     continue;
@@ -523,6 +531,58 @@ struct OwnedSource {
     branches: Vec<(String, String)>,
 }
 
+fn changed_source_asset(before: &OwnedSource, after: &OwnedSource) -> Option<String> {
+    for (left, right) in before.worktrees.iter().zip(&after.worktrees) {
+        if left != right {
+            return Some(right.0.display().to_string());
+        }
+    }
+    if before.worktrees.len() != after.worktrees.len() {
+        return before
+            .worktrees
+            .get(after.worktrees.len())
+            .or_else(|| after.worktrees.get(before.worktrees.len()))
+            .map(|(path, _)| path.display().to_string());
+    }
+    for (left, right) in before.branches.iter().zip(&after.branches) {
+        if left != right {
+            return Some(right.0.clone());
+        }
+    }
+    if before.branches.len() != after.branches.len() {
+        return before
+            .branches
+            .get(after.branches.len())
+            .or_else(|| after.branches.get(before.branches.len()))
+            .map(|(branch, _)| branch.clone());
+    }
+    None
+}
+
+#[cfg(feature = "test-support")]
+fn cleanup_source_barrier(
+    item: &str,
+    item_var: &str,
+    reached_var: &str,
+    release_var: &str,
+) -> Result<()> {
+    if std::env::var(item_var).ok().as_deref() != Some(item) {
+        return Ok(());
+    }
+    if let (Ok(reached), Ok(release)) = (std::env::var(reached_var), std::env::var(release_var)) {
+        fs::write(&reached, b"source assessed")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !Path::new(&release).exists() {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "cleanup source barrier timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    Ok(())
+}
+
 fn assess_owned_source(
     root: &Path,
     item: &WorkItem,
@@ -620,9 +680,17 @@ fn assess_owned_source(
         if !has_worktree && branch_tips.is_empty() {
             continue;
         }
+        let affected = if has_worktree {
+            path.display().to_string()
+        } else {
+            branch_tips
+                .first()
+                .map(|(branch, _)| branch.clone())
+                .unwrap()
+        };
         let target = target.ok_or_else(|| {
             (
-                attempt.id.clone(),
+                affected.clone(),
                 "missing or conflicting target branch identity".into(),
             )
         })?;
@@ -632,7 +700,7 @@ fn assess_owned_source(
             &["rev-parse", "--verify", &target_ref],
             "resolve cleanup target branch",
         )
-        .map_err(|err| (target_ref.clone(), err.to_string()))?;
+        .map_err(|err| (affected.clone(), err.to_string()))?;
         for (branch, tip) in branch_tips {
             ensure_integrated(root, &branch, &tip, &target_tip)?;
             source.branches.push((branch, tip));
@@ -723,6 +791,13 @@ fn remove_owned_source(
     plan: &mut WorkItemCleanupResult,
     source: &OwnedSource,
 ) -> Result<()> {
+    #[cfg(feature = "test-support")]
+    cleanup_source_barrier(
+        &plan.work_item_id,
+        "FLUENT_TEST_CLEANUP_REMOVE_ITEM",
+        "FLUENT_TEST_CLEANUP_REMOVE_REACHED",
+        "FLUENT_TEST_CLEANUP_REMOVE_RELEASE",
+    )?;
     for (path, head) in &source.worktrees {
         let current = registered_worktrees(root)?;
         anyhow::ensure!(

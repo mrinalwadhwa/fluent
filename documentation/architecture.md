@@ -2842,12 +2842,17 @@ Work Item's pre-review candidate scope.
 
 `fluent cleanup` owns the terminal Work model cleanup lifecycle. It
 defaults to a dry run and only mutates state with `--apply`. A Work Item
-is eligible when every Attempt is terminal, every Task in those Attempts
-is terminal, and every Merge Candidate is terminal. Operators can also
-run `fluent work-item abandon <work-item-id> [--reason <text>]` to mark a
+passes the lifecycle check when every Attempt is terminal, every Task in
+those Attempts is terminal, and every Merge Candidate is terminal. Operators
+can also run `fluent work-item abandon <work-item-id> [--reason <text>]` to mark a
 stale Work Item as intentionally abandoned; cleanup treats that marker as
 terminal only when no Attempt is executing or reviewing, no Task is
-executing, and no Merge Candidate is reviewing or merging. Cleanup removes
+executing, and no Merge Candidate is reviewing or merging. Cleanup also
+requires candidate worktrees to be clean and every existing Work branch and
+candidate HEAD to be provably integrated into its recorded target branch.
+It retains the whole Work Item if any owned source remains unmerged, dirty,
+or unverifiable;
+see [Cleanup](#cleanup) for the source checks. Cleanup removes
 the stored Work Item, referenced managed Work artifacts, managed candidate
 worktrees, Work task branches, and stranded sibling reviewer worktrees
 left behind by killed merges. Managed artifact references must be
@@ -4296,9 +4301,9 @@ The read-only inventory precedes every removal. Apply repeats the source
 assessment while holding the dependency, land, and Work model locks, removes
 clean registered worktrees without force, and deletes Work branches only at
 their assessed tips. It removes artifacts and model records after Git assets.
-Missing worktree registrations can be removed with force after their saved HEAD
-is proved integrated. Unregistered directories are retained without deleting
-arbitrary filesystem paths.
+Registered worktrees whose directories are missing can be removed with force
+after their saved HEAD is proved integrated. Unregistered directories are
+retained without deleting arbitrary filesystem paths.
 After planning stored Work Item cleanup, cleanup scans the top level of
 `.fluent/work/artifacts/` for directories whose names do not match any
 stored Work Item JSON under `.fluent/work/items/`. Dry runs report those
