@@ -896,10 +896,12 @@ fn settle_panes(socket: &Path, leader_pid: u32) -> Result<()> {
         .output()?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        if error.contains("no sessions") {
-            return Ok(());
-        }
-        bail!("reading managed pane owners failed: {error}");
+        let has_sessions = if error.contains("no current target") {
+            Some(tmux_server_has_sessions(socket)?)
+        } else {
+            None
+        };
+        return check_pane_query_failure(&error, has_sessions);
     }
     let panes: Vec<u32> = String::from_utf8(output.stdout)?
         .lines()
@@ -967,6 +969,32 @@ fn settle_panes(socket: &Path, leader_pid: u32) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     bail!("managed terminal pane descendants did not settle")
+}
+
+fn tmux_server_has_sessions(socket: &Path) -> Result<bool> {
+    let output = Command::new(find_tmux()?)
+        .env_remove("TMUX")
+        .arg("-S")
+        .arg(socket)
+        .arg("list-sessions")
+        .output()?;
+    if output.status.success() {
+        return Ok(!output.stdout.is_empty());
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    if error.contains("no sessions") {
+        return Ok(false);
+    }
+    bail!("checking managed terminal sessions failed: {error}")
+}
+
+fn check_pane_query_failure(error: &str, has_sessions: Option<bool>) -> Result<()> {
+    if error.contains("no sessions")
+        || (error.contains("no current target") && has_sessions == Some(false))
+    {
+        return Ok(());
+    }
+    bail!("reading managed pane owners failed: {error}")
 }
 
 fn descriptor_publishes_resource(
@@ -1067,6 +1095,14 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn empty_server_pane_query_allows_partial_setup_cleanup() {
+        assert!(check_pane_query_failure("no current target", Some(false)).is_ok());
+        assert!(check_pane_query_failure("no sessions", None).is_ok());
+        assert!(check_pane_query_failure("no current target", Some(true)).is_err());
+        assert!(check_pane_query_failure("permission denied", None).is_err());
+    }
 
     #[test]
     fn stale_descriptor_does_not_publish_a_new_generation() {
