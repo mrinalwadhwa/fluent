@@ -26255,6 +26255,29 @@ fn tester_permissions_reject_worker_authority_tampering() {
         .assert()
         .failure();
     assert_eq!(fs::read(&foreign_lock).unwrap(), b"foreign");
+
+    use std::os::unix::fs::PermissionsExt;
+    fs::remove_file(authority.join("approval.lock")).unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    let inspection = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !inspection.status.success(),
+        "a writable authority parent must invalidate inspection"
+    );
 }
 
 #[test]

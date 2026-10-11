@@ -194,7 +194,26 @@ fn store_root() -> Result<PathBuf> {
     Ok(home.join(".config/fluent/tester-permissions"))
 }
 
+fn validate_store_parent(root: &Path) -> Result<()> {
+    let parent = root.parent().context("permission store has no parent")?;
+    ensure!(
+        parent == fs::canonicalize(parent)?,
+        "permission store parent is not canonical"
+    );
+    let metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() },
+        "permission store parent has an unsafe owner or type"
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o022 == 0,
+        "permission store parent is writable by others"
+    );
+    Ok(())
+}
+
 fn validate_store_directory(root: &Path) -> Result<()> {
+    validate_store_parent(root)?;
     let metadata = fs::symlink_metadata(root)?;
     ensure!(metadata.is_dir(), "permission store is not a directory");
     ensure!(
@@ -229,19 +248,7 @@ fn prepare_store_directory(root: &Path, checkout: &Path) -> Result<()> {
     );
     let parent = root.parent().context("permission store has no parent")?;
     fs::create_dir_all(parent)?;
-    ensure!(
-        parent == fs::canonicalize(parent)?,
-        "permission store parent is not canonical"
-    );
-    let parent_metadata = fs::symlink_metadata(parent)?;
-    ensure!(
-        parent_metadata.is_dir() && parent_metadata.uid() == unsafe { libc::geteuid() },
-        "permission store parent has an unsafe owner or type"
-    );
-    ensure!(
-        parent_metadata.permissions().mode() & 0o022 == 0,
-        "permission store parent is writable by others"
-    );
+    validate_store_parent(root)?;
     match fs::symlink_metadata(root) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
