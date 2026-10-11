@@ -32737,7 +32737,13 @@ fn cleanup_retains_pending_file_changes() {
 
 #[test]
 fn cleanup_retains_unverifiable_source() {
-    for mode in ["missing-target", "unregistered", "detached", "failed-probe"] {
+    for mode in [
+        "missing-target",
+        "unresolved-target",
+        "unregistered",
+        "detached",
+        "failed-probe",
+    ] {
         let tmp = TempDir::new().unwrap();
         let main = setup_git_project(&tmp);
         fluent_cmd()
@@ -32751,7 +32757,11 @@ fn cleanup_retains_unverifiable_source() {
             ])
             .assert()
             .success();
-        let target = (mode != "missing-target").then_some("main");
+        let target = match mode {
+            "missing-target" => None,
+            "unresolved-target" => Some("absent-target"),
+            _ => Some("main"),
+        };
         let (path, branch) =
             cleanup_terminal_attempt(&main, "work-unknown", "attempt-1", "failed", target);
         if mode == "unregistered" {

@@ -244,7 +244,7 @@ test_cleanup_work_items_remove_orphan_artifact_roots() {
 }
 
 test_cleanup_work_items_ignore_unmanaged_artifacts() {
-  create_project
+  create_project_with_unique_sibling_parent
   "$FLUENT_BIN" work-item create work-1 --title "Cleanup work" >/dev/null
   "$FLUENT_BIN" attempt create work-1 attempt-1 >/dev/null
 
@@ -321,7 +321,7 @@ PY
   fi
 
   rm -f "$PARENT_ESCAPE_FILE"
-  rm -rf "$TEST_DIR" "$OUTSIDE_DIR"
+  rm -rf "$TEST_PARENT_DIR" "$OUTSIDE_DIR"
   return $RESULT
 }
 
@@ -341,7 +341,13 @@ attempt_path.write_text(json.dumps(attempt, indent=2) + "\n")
 
 task_path = Path(".fluent/work/tasks/work-stale/attempt-1/attempt-1-write-1.json")
 task = json.loads(task_path.read_text())
-task["status"] = "needs-user"
+task["status"] = "complete"
+task["output"] = {
+    "workspace_id": "candidate",
+    "workspace_path": "../work-10-work-stale-attempt-1",
+    "source_branch": "main",
+    "commit": "HEAD",
+}
 task_path.write_text(json.dumps(task, indent=2) + "\n")
 PY
 
