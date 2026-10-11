@@ -758,6 +758,17 @@ fn remove_owned_source(
         }
     }
     for (branch, tip) in &source.branches {
+        let registrations = git::run_stdout(
+            root,
+            &["worktree", "list", "--porcelain"],
+            "check Work branch checkouts",
+        )?;
+        anyhow::ensure!(
+            !registrations.split("\n\n").any(|record| record
+                .lines()
+                .any(|line| line == format!("branch refs/heads/{branch}"))),
+            "Work branch is still checked out: {branch}"
+        );
         git::run(
             root,
             &["update-ref", "-d", &format!("refs/heads/{branch}"), tip],

@@ -32876,6 +32876,61 @@ fn cleanup_retains_unmerged_branch_without_worktree() {
 }
 
 #[test]
+fn cleanup_refuses_branch_checked_out_elsewhere() {
+    let tmp = TempDir::new().unwrap();
+    let main = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main)
+        .args([
+            "work-item",
+            "create",
+            "work-elsewhere",
+            "--title",
+            "Branch checkout",
+        ])
+        .assert()
+        .success();
+    let (_, branch) =
+        cleanup_terminal_attempt(&main, "work-elsewhere", "attempt-1", "failed", Some("main"));
+    let other = tmp.path().join("unrelated-worktree");
+    git::run(
+        &main,
+        &[
+            "worktree",
+            "add",
+            other.to_str().unwrap(),
+            "-b",
+            &branch,
+            "HEAD",
+        ],
+        "checkout Work branch elsewhere",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Work branch is still checked out"));
+    assert!(main.join(".fluent/work/items/work-elsewhere.json").exists());
+    assert!(other.exists());
+    assert!(
+        git::run_raw(
+            &main,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}")
+            ]
+        )
+        .unwrap()
+        .status
+        .success()
+    );
+}
+
+#[test]
 fn cleanup_reports_retained_source_and_cleans_safe_work() {
     let tmp = TempDir::new().unwrap();
     let main = setup_git_project(&tmp);
