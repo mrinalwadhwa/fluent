@@ -32682,6 +32682,115 @@ fn cleanup_retains_unmerged_source_across_attempts() {
 }
 
 #[test]
+fn cleanup_preserves_earlier_integrated_source_when_later_source_is_unmerged() {
+    let tmp = TempDir::new().unwrap();
+    let main = setup_git_project(&tmp);
+    fluent_cmd()
+        .current_dir(&main)
+        .args([
+            "work-item",
+            "create",
+            "work-whole",
+            "--title",
+            "Whole cleanup",
+        ])
+        .assert()
+        .success();
+    let (first_path, first_branch) =
+        cleanup_terminal_attempt(&main, "work-whole", "attempt-1", "failed", Some("main"));
+    let (second_path, second_branch) =
+        cleanup_terminal_attempt(&main, "work-whole", "attempt-2", "failed", Some("main"));
+    for (path, branch) in [(&first_path, &first_branch), (&second_path, &second_branch)] {
+        git::run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                path.to_str().unwrap(),
+                "-b",
+                branch,
+                "HEAD",
+            ],
+            "create cleanup candidate",
+        )
+        .unwrap();
+    }
+    fs::write(second_path.join("pending.txt"), "unmerged source").unwrap();
+    git::run(
+        &second_path,
+        &["add", "pending.txt"],
+        "stage pending source",
+    )
+    .unwrap();
+    git::run(
+        &second_path,
+        &["commit", "-m", "Add pending source"],
+        "commit pending source",
+    )
+    .unwrap();
+    let artifact = main.join(".fluent/work/artifacts/work-whole/attempt-1/keep.txt");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::write(&artifact, "keep first Attempt artifacts").unwrap();
+    let first_attempt = main.join(".fluent/work/attempts/work-whole/attempt-1.json");
+    let second_attempt = main.join(".fluent/work/attempts/work-whole/attempt-2.json");
+    let first_task = main.join(".fluent/work/tasks/work-whole/attempt-1/attempt-1-write-1.json");
+    let second_task = main.join(".fluent/work/tasks/work-whole/attempt-2/attempt-2-write-1.json");
+
+    for args in [vec!["cleanup"], vec!["cleanup", "--apply"]] {
+        fluent_cmd()
+            .current_dir(&main)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("retained Work Item work-whole"))
+            .stdout(predicate::str::contains(&second_branch))
+            .stdout(predicate::str::contains("not integrated"));
+        for (path, branch) in [(&first_path, &first_branch), (&second_path, &second_branch)] {
+            assert!(path.exists(), "worktree {} was removed", path.display());
+            assert!(
+                git::run_raw(
+                    &main,
+                    &[
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}")
+                    ],
+                )
+                .unwrap()
+                .status
+                .success(),
+                "branch {branch} was removed"
+            );
+            assert!(
+                git::run_stdout(
+                    &main,
+                    &["worktree", "list", "--porcelain"],
+                    "list worktrees"
+                )
+                .unwrap()
+                .contains(&format!(
+                    "worktree {}",
+                    path.canonicalize().unwrap().display()
+                )),
+                "worktree {} was unregistered",
+                path.display()
+            );
+        }
+        for record in [
+            &first_attempt,
+            &second_attempt,
+            &first_task,
+            &second_task,
+            &artifact,
+        ] {
+            assert!(record.exists(), "record {} was removed", record.display());
+        }
+        assert!(main.join(".fluent/work/items/work-whole.json").exists());
+    }
+}
+
+#[test]
 fn cleanup_retains_pending_file_changes() {
     for mode in ["staged", "unstaged", "untracked"] {
         let tmp = TempDir::new().unwrap();
