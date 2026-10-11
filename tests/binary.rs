@@ -51718,6 +51718,251 @@ fn legacy_round_cap_chain_rejects_altered_history() {
     }
 }
 
+fn saved_round_cap_records(
+    project: &Path,
+) -> std::collections::BTreeMap<PathBuf, serde_json::Value> {
+    snapshot_tree(&project.join(".fluent/work"))
+        .into_iter()
+        .filter(|entry| {
+            entry.kind == "file"
+                && entry
+                    .path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+        })
+        .map(|entry| (entry.path, serde_json::from_slice(&entry.bytes).unwrap()))
+        .collect()
+}
+
+#[test]
+fn legacy_round_cap_observation_preserves_history() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work_id = format!("legacyobserve{}", run_token(&tmp));
+    prepare_legacy_round_cap_chain(&project, &work_id);
+    let before = saved_round_cap_records(&project);
+    let store = WorkModelStore::new(&project);
+    let item = store.read_work_item(&work_id).unwrap();
+    let bound_review = project.join(
+        &item.attempts[0].round_cap_extensions[1].failed_reviews[0]
+            .artifact
+            .path,
+    );
+    // Historical artifacts are not inputs to ordinary model loading.
+    fs::remove_file(bound_review).unwrap();
+    for args in [
+        vec!["status"],
+        vec!["work-item", "list"],
+        vec!["work-item", "show", &work_id],
+        vec!["cleanup"],
+    ] {
+        fluent_cmd()
+            .current_dir(&project)
+            .args(&args)
+            .assert()
+            .success();
+        assert_eq!(
+            saved_round_cap_records(&project),
+            before,
+            "{args:?} changed saved history"
+        );
+        assert_eq!(store.read_work_item(&work_id).unwrap(), item);
+    }
+}
+
+#[test]
+fn legacy_round_cap_readability_does_not_authorize_recovery() {
+    use fluent::work_model::PlanningContext;
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work_id = format!("legacyrecover{}", run_token(&tmp));
+    let workspace = prepare_legacy_round_cap_chain(&project, &work_id);
+    let store = WorkModelStore::new(&project);
+    let mut item = store.read_work_item(&work_id).unwrap();
+    item.planning_context = Some(PlanningContext {
+        approach: Some("# Approach\nKeep the original boundary.\n".to_string()),
+        ..Default::default()
+    });
+    store.write_work_item(&item).unwrap();
+    let replacement = tmp.path().join("replacement.md");
+    fs::write(
+        &replacement,
+        "# Approach\nUse the approved replacement boundary.\n",
+    )
+    .unwrap();
+    let attempt_path = project.join(format!(".fluent/work/attempts/{work_id}/attempt-1.json"));
+    let original_attempt = read_json_path(&attempt_path);
+    for (authorization, expected) in [
+        (false, "requires the recorded human authorization"),
+        (true, "no independently bound pre-extension frontier"),
+    ] {
+        let mut attempt = original_attempt.clone();
+        if !authorization {
+            attempt["round_cap_extensions"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("human_resolution");
+            attempt["round_cap_extensions"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("human_resolution_digest");
+        }
+        write_json_path(&attempt_path, &attempt);
+        let before = saved_round_cap_records(&project);
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "show", &work_id])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "attempt",
+                "revise-approach",
+                &work_id,
+                "attempt-1",
+                "--approach-file",
+                replacement.to_str().unwrap(),
+                "--resolution",
+                "Approve the replacement boundary.",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+        assert_eq!(saved_round_cap_records(&project), before);
+    }
+    write_json_path(&attempt_path, &original_attempt);
+    let review = project.join(
+        &item.attempts[0].round_cap_extensions[1].failed_reviews[0]
+            .artifact
+            .path,
+    );
+    let review_bytes = fs::read(&review).unwrap();
+    for (alter_review, expected) in [
+        (true, "failed-correction bytes no longer match the approval"),
+        (
+            false,
+            "candidate HEAD no longer matches the approved commit",
+        ),
+    ] {
+        if alter_review {
+            fs::write(&review, "Verdict: fail\nChanged after approval.\n").unwrap();
+        } else {
+            fs::write(&review, &review_bytes).unwrap();
+            commit_file(
+                &workspace,
+                "changed.txt",
+                "changed candidate\n",
+                "Change candidate",
+            );
+        }
+        let before = saved_round_cap_records(&project);
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "show", &work_id])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "run", &work_id, "attempt-1", "--no-sandbox"])
+            .env("FLUENT_MAX_TOTAL_WRITE_ROUNDS", "2")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+        assert_eq!(saved_round_cap_records(&project), before);
+    }
+}
+
+#[test]
+fn legacy_round_cap_cleanup_preserves_unfinished_work() {
+    use fluent::work_model::AttemptStatus;
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let paused_id = format!("legacypaused{}", run_token(&tmp));
+    let terminal_id = format!("legacyterminal{}", run_token(&tmp));
+    let unsafe_id = format!("legacyunsafe{}", run_token(&tmp));
+    let paused_workspace = prepare_legacy_round_cap_chain(&project, &paused_id);
+    let terminal_workspace = prepare_legacy_round_cap_chain(&project, &terminal_id);
+    let unsafe_workspace = prepare_legacy_round_cap_chain(&project, &unsafe_id);
+    let store = WorkModelStore::new(&project);
+    let paused = store.read_work_item(&paused_id).unwrap();
+    for work_id in [&terminal_id, &unsafe_id] {
+        let mut item = store.read_work_item(work_id).unwrap();
+        item.attempts[0].status = AttemptStatus::Failed;
+        item.attempts[0].pause_kind = None;
+        store.write_work_item(&item).unwrap();
+    }
+    // An unregistered directory at a managed path must survive cleanup.
+    git::run(
+        &project,
+        &["worktree", "remove", unsafe_workspace.to_str().unwrap()],
+        "unregister historical workspace",
+    )
+    .unwrap();
+    fs::create_dir_all(&unsafe_workspace).unwrap();
+    fs::write(
+        unsafe_workspace.join("user-file.txt"),
+        "preserve this directory",
+    )
+    .unwrap();
+    let before = saved_round_cap_records(&project);
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["cleanup"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&terminal_id));
+    assert_eq!(saved_round_cap_records(&project), before);
+    assert!(terminal_workspace.is_dir());
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["cleanup", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "cleaned Work Item {terminal_id}"
+        )))
+        .stdout(predicate::str::contains("skipped unregistered worktree"));
+    assert_eq!(store.read_work_item(&paused_id).unwrap(), paused);
+    assert!(paused_workspace.is_dir());
+    let after = saved_round_cap_records(&project);
+    for (path, value) in before
+        .iter()
+        .filter(|(path, _)| path.to_string_lossy().contains(&paused_id))
+    {
+        assert_eq!(
+            after.get(path),
+            Some(value),
+            "cleanup changed unfinished record {path:?}"
+        );
+    }
+    assert!(
+        !project
+            .join(format!(".fluent/work/items/{terminal_id}.json"))
+            .exists()
+    );
+    assert!(
+        !project
+            .join(format!(".fluent/work/attempts/{terminal_id}"))
+            .exists()
+    );
+    assert!(
+        !project
+            .join(format!(".fluent/work/tasks/{terminal_id}"))
+            .exists()
+    );
+    assert!(
+        !project
+            .join(format!(".fluent/work/artifacts/{terminal_id}"))
+            .exists()
+    );
+    assert!(!terminal_workspace.exists());
+    assert_eq!(
+        fs::read_to_string(unsafe_workspace.join("user-file.txt")).unwrap(),
+        "preserve this directory"
+    );
+}
+
 #[test]
 fn attempt_extend_after_writer_overrun_round_trips() {
     use fluent::work_model::{
