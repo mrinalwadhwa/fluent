@@ -75,7 +75,9 @@ Test: tests/binary.rs (verification_worker_does_not_block_unrelated_attempt_prog
 
 ## Terminal cancellation ownership
 
-Managed terminals bind attachment to an execution generation and retain their
+The terminal runtime is available for future native worker integration;
+ordinary workers currently remain headless. Managed terminals bind attachment
+to an execution generation and retain their
 worker when a client detaches. Observe is read-only; a single process-held
 Control lease permits input and releases on client death. A changed or ended
 generation rejects attachment. Existing headless workers, completed Tasks,

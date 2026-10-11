@@ -3568,7 +3568,9 @@ The author escalates to `needs-user` only when genuinely stuck.
 
 ### Local
 
-Managed terminal sessions use one foreground tmux server per worker invocation.
+The managed terminal runtime is ready for future native worker integration;
+ordinary worker execution does not yet start these sessions. When integrated,
+managed terminal sessions use one foreground tmux server per worker invocation.
 `terminal_sessions` publishes a versioned descriptor under the source's
 host-owned `.fluent/work/terminal-sessions/` tree only after the server and
 session start. The descriptor names the source, Work Item, Attempt, Task, and
@@ -3581,8 +3583,10 @@ authority to start a worker.
 `fluent terminal attach` observes by default. Control uses a process-held
 lock beside the host-owned descriptor. A second controller may still observe,
 and detaching releases only the client lease. Cancellation inventories tmux
-pane descendants before stopping the server; the inventory includes children
-in other process groups. If it cannot verify settlement, cancellation fails
+pane descendants and the captured pane process sessions before stopping the
+server; the inventory includes reparented children in other process groups.
+After cancellation settles, it retires the generation's socket and resource
+receipt. If it cannot verify settlement, cancellation fails
 without claiming successful cleanup. The separate host acceptance check must
 prove this behavior on a real macOS Seatbelt and tmux runtime.
 

@@ -68,6 +68,10 @@ fn stale_terminal_identity_cannot_attach_or_signal() {
 
 #[test]
 fn terminal_commands_preserve_role_confinement() {
+    if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_some() {
+        host_managed_terminal_acceptance();
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let resolver = fluent::content::ContentResolver::new(Some(root.path()));
     let profile = fluent::os::render_profile_common_only(
@@ -116,16 +120,87 @@ fn second_controller_is_observer_until_control_is_released() {
 
 #[test]
 fn unavailable_terminal_has_specific_reason() {
-    use fluent::terminal_sessions::unavailable_reason;
-    use fluent::work_model::{TaskKind, TaskStatus};
-    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Planned, false).contains("legacy"));
-    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Executing, true).contains("headless"));
-    assert!(unavailable_reason(TaskKind::Write, TaskStatus::Complete, true).contains("completed"));
-    assert!(unavailable_reason(TaskKind::Tester, TaskStatus::Executing, true).contains("Tester"));
+    use fluent::terminal_sessions::availability;
+    use fluent::work_model::{TaskKind, TaskStatus, WorkItem, WorkModelStore};
+    let root = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(root.path());
+    for (work, kind, status, has_execution, reason) in [
+        (
+            "legacy",
+            TaskKind::Write,
+            TaskStatus::Planned,
+            false,
+            "legacy",
+        ),
+        (
+            "headless",
+            TaskKind::Write,
+            TaskStatus::Executing,
+            true,
+            "headless",
+        ),
+        (
+            "completed",
+            TaskKind::Write,
+            TaskStatus::Failed,
+            true,
+            "completed",
+        ),
+        (
+            "tester",
+            TaskKind::Tester,
+            TaskStatus::Executing,
+            true,
+            "Tester",
+        ),
+    ] {
+        let mut item = WorkItem::planned(work, "Terminal availability");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut item.attempts[0].tasks[0];
+        task.kind = kind;
+        task.status = status;
+        store.create_work_item(&item).unwrap();
+        let artifact = root.path().join(format!(
+            ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1"
+        ));
+        if has_execution {
+            std::fs::create_dir_all(&artifact).unwrap();
+            std::fs::write(artifact.join("execution.json"), b"{}").unwrap();
+        }
+        let selected = availability(root.path(), work, "attempt-1", "attempt-1-write-1").unwrap();
+        assert!(selected.descriptor.is_none());
+        assert!(
+            selected.unavailable_reason.unwrap().contains(reason),
+            "{work}"
+        );
+        let output = assert_cmd::Command::cargo_bin("fluent")
+            .unwrap()
+            .args([
+                "terminal",
+                "explain",
+                "--source",
+                root.path().to_str().unwrap(),
+                work,
+                "attempt-1",
+                "attempt-1-write-1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(reason));
+    }
 }
 
 #[test]
 fn settlement_covers_terminal_process_scope() {
+    if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_some() {
+        host_managed_terminal_acceptance();
+        return;
+    }
     let table = "10 1 10\n20 10 20\n21 20 21\n22 21 22\n30 1 30\n";
     let owned = fluent::terminal_sessions::descendants_from_ps(table, &[20]).unwrap();
     assert_eq!(owned, vec![20, 21, 22]);
@@ -151,6 +226,10 @@ fn terminal_descriptor_v1_fixture_round_trips() {
 
 #[test]
 fn partial_terminal_setup_cleans_only_its_resources() {
+    if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_some() {
+        host_managed_terminal_acceptance();
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let first = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
     let second = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-2");
@@ -262,7 +341,7 @@ fn host_managed_terminal_acceptance() {
         ("HOME".into(), home.into()),
         ("TERM".into(), "xterm-256color".into()),
     ];
-    let mut first = TerminalSession::start_managed(
+    let first = TerminalSession::start_managed(
         first_identity,
         &first_profile,
         &worker1,
@@ -352,7 +431,43 @@ fn host_managed_terminal_acceptance() {
         descendant_group, pane_group,
         "fixture descendant did not enter another process group"
     );
-    first.stop().unwrap();
+    let orphan_file = worker1.join("orphan.pid");
+    send(
+        &first_socket,
+        &format!(
+            "/bin/sh -c 'sleep 30 & echo $! > {}'",
+            orphan_file.display()
+        ),
+    );
+    wait_file(&orphan_file);
+    let orphan: u32 = std::fs::read_to_string(&orphan_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let orphan_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let parent = String::from_utf8(
+            Command::new("/bin/ps")
+                .args(["-o", "ppid=", "-p", &orphan.to_string()])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        if parent.trim() == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < orphan_deadline,
+            "orphan parent did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let first_record =
+        source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
+    let canceled = fluent::execution::cancel(&first_record).unwrap();
+    eprintln!("terminal host external cancellation: {canceled:?}");
     let descendant_state = Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &descendant.to_string()])
         .output()
@@ -361,6 +476,36 @@ fn host_managed_terminal_acceptance() {
     assert!(
         state.trim().is_empty() || state.trim().starts_with('Z'),
         "descendant remained live: {state}"
+    );
+    let orphan_state = String::from_utf8(
+        Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &orphan.to_string()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        orphan_state.trim().is_empty() || orphan_state.trim().starts_with('Z'),
+        "orphan descendant remained live: {orphan_state}"
+    );
+    let first_resource = source
+        .join(".fluent/work/terminal-sessions/work-1/attempt-1/attempt-1-write-1/resource.json");
+    assert!(
+        !first_resource.exists(),
+        "external cancellation left its resource receipt"
+    );
+    let mut next = TerminalSession::start_managed(
+        make_identity("work-1"),
+        &first_profile,
+        &worker1,
+        "/bin/sh",
+        &environment,
+    )
+    .unwrap();
+    assert_ne!(
+        next.descriptor().execution_generation,
+        first.descriptor().execution_generation
     );
     eprintln!(
         "terminal host settlement: descendant_state={:?}",
@@ -389,6 +534,14 @@ fn host_managed_terminal_acceptance() {
         failure.is_err(),
         "setup fault unexpectedly produced a terminal"
     );
+    assert!(
+        format!("{:#}", failure.as_ref().err().unwrap())
+            .contains("injected terminal failure after server startup")
+    );
+    assert!(
+        next.is_live().unwrap(),
+        "failed setup disturbed the peer terminal"
+    );
     let resource = source
         .join(".fluent/work/terminal-sessions/work-2/attempt-1/attempt-1-write-1/resource.json");
     assert!(
@@ -400,6 +553,7 @@ fn host_managed_terminal_acceptance() {
         "terminal host partial setup: resource_present={}",
         resource.exists()
     );
+    next.stop().unwrap();
 
     let barrier = source.join("setup-barrier");
     unsafe {

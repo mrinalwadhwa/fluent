@@ -766,6 +766,7 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
         .with_context(|| format!("parsing local execution record {}", path.display()))?;
     check_protocol(&record)?;
     if record.state == ExecutionState::Canceled {
+        crate::terminal_sessions::retire_for_execution(path, &record)?;
         return Ok(CancelOutcome::AlreadyStopped);
     }
 
@@ -776,6 +777,7 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
         record.state = ExecutionState::Canceled;
         record.settled_at = Some(crate::work_model::now_iso8601());
         crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+        crate::terminal_sessions::retire_for_execution(path, &record)?;
         return Ok(CancelOutcome::AlreadyStopped);
     }
     if !recorded_identity_is_signalable(path, &record)? {
@@ -800,6 +802,7 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
     record.state = ExecutionState::Canceled;
     record.settled_at = Some(crate::work_model::now_iso8601());
     crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+    crate::terminal_sessions::retire_for_execution(path, &record)?;
     Ok(CancelOutcome::Canceled)
 }
 
