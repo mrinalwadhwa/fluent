@@ -26021,7 +26021,7 @@ fn tester_permissions_approve_exact_request_without_launch() {
         .args(["tester", "check"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("permission profile is not ready"));
+        .stderr(predicate::str::contains("lack per-command profiles"));
     assert!(!approve("sha256:wrong").status.success());
     let alias = fs::canonicalize(tmp.path())
         .unwrap()
@@ -26202,6 +26202,135 @@ fn tester_permissions_enforce_one_contract_across_routes() {
             .contains("process-table-read requires the macOS sandbox")
     );
     assert!(!sentinel.exists());
+}
+
+#[test]
+fn tester_permissions_record_applied_authority_in_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'printf applied-authority'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let shown = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let request: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let request_digest = request["request_digest"].as_str().unwrap();
+    let approved = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            request_digest,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let approval: serde_json::Value = serde_json::from_slice(&approved.stdout).unwrap();
+    let launcher = tmp.path().join("sandbox-launcher");
+    let profile_copy = tmp.path().join("applied-profile.sb");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\nif [ \"$3\" = sh ]; then cp \"$2\" \"${PROFILE_COPY:?}\"; fi\nshift 2\nexec \"$@\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .env("PROFILE_COPY", &profile_copy)
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipts: Vec<_> = fs::read_dir(&authority)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_name()?
+                .to_str()?
+                .starts_with("receipt-")
+                .then_some(path)
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipts[0]).unwrap()).unwrap();
+    assert_eq!(receipt["candidate_commit"], candidate);
+    assert_eq!(receipt["command_index"], 0);
+    assert_eq!(receipt["approval_id"], approval["approval_id"]);
+    assert_eq!(receipt["request_digest"], request_digest);
+    assert_eq!(receipt["config_digest"], request["config_digest"]);
+    assert_eq!(receipt["extractor_digest"], request["extractor_digest"]);
+    assert_eq!(receipt["policy_digest"], request["policy_digest"]);
+    assert_eq!(receipt["execution_mode"], "synthetic");
+    assert_eq!(receipt["exit_code"], 0);
+    let profile = fs::read(&profile_copy).unwrap();
+    assert!(
+        String::from_utf8_lossy(&profile)
+            .contains("(allow sysctl-read (sysctl-name \"kern.proc.all\"))")
+    );
+    assert_eq!(
+        receipt["profile_digest"],
+        format!("sha256:{:x}", Sha256::digest(profile))
+    );
+    assert_eq!(
+        receipt["stdout_digest"],
+        format!("sha256:{:x}", Sha256::digest(b"applied-authority"))
+    );
+    assert_eq!(
+        receipt["stderr_digest"],
+        format!("sha256:{:x}", Sha256::digest(b""))
+    );
 }
 
 #[test]

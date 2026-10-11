@@ -56,6 +56,10 @@ pub struct CommandResult {
     pub stdout_log: String,
     pub stderr_log: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_receipt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_settlement: Option<ProcessSettlementEvidence>,
 }
 
@@ -811,7 +815,7 @@ fn check_requested_permissions(
             )?;
         }
     }
-    anyhow::bail!("permission profile is not ready; approved commands remain blocked")
+    Ok(())
 }
 
 pub fn run_with_sandbox_profile(
@@ -961,6 +965,8 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 duration_ms: 0,
                 stdout_log,
                 stderr_log,
+                permission_receipt: None,
+                permission_receipt_id: None,
                 process_settlement: None,
             });
             continue;
@@ -1326,14 +1332,17 @@ fn run_command(
         .parent()
         .context("Tester command has no artifact area")?
         .join("transcript.jsonl");
+    let mut applied_authority = None;
     let output = crate::execution::output_with_launch_guard(&mut process, &transcript, || {
         admission
             .map(|(candidate, original_index)| {
-                crate::tester_permissions::begin_launch_admission(
+                let admitted = crate::tester_permissions::begin_launch_admission(
                     working_dir,
                     candidate,
                     original_index,
-                )
+                )?;
+                applied_authority = Some(admitted.authority.clone());
+                Ok(admitted)
             })
             .transpose()
     })
@@ -1344,6 +1353,23 @@ fn run_command(
     fs::write(&stderr_path, &output.stderr)?;
 
     let exit_code = output.status.code().unwrap_or(-1);
+
+    let (permission_receipt, permission_receipt_id) = if let Some(authority) = applied_authority {
+        let profile =
+            sandbox_profile.context("permission-bearing command lacks a sandbox profile")?;
+        let name = format!("commands/{index}-permission-receipt.json");
+        let receipt_id = crate::tester_permissions::record_applied_authority(
+            &authority,
+            &profile.path,
+            exit_code,
+            &output.stdout,
+            &output.stderr,
+            &commands_dir.join(format!("{index}-permission-receipt.json")),
+        )?;
+        (Some(name), Some(receipt_id))
+    } else {
+        (None, None)
+    };
 
     let stdout_log = format!("commands/{index}-stdout.log");
     let stderr_log = format!("commands/{index}-stderr.log");
@@ -1356,6 +1382,8 @@ fn run_command(
         duration_ms: duration.as_millis() as u64,
         stdout_log,
         stderr_log,
+        permission_receipt,
+        permission_receipt_id,
         process_settlement: None,
     })
 }
@@ -2292,6 +2320,8 @@ mod tests {
             duration_ms: 1,
             stdout_log: "stdout.log".to_string(),
             stderr_log: "stderr.log".to_string(),
+            permission_receipt: None,
+            permission_receipt_id: None,
             process_settlement: None,
         }
     }

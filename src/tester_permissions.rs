@@ -374,6 +374,99 @@ pub(crate) struct PermissionLease {
     _file: File,
 }
 
+#[derive(Clone)]
+pub(crate) struct LaunchAuthority {
+    pub approval_id: String,
+    pub request_digest: String,
+    pub candidate_commit: String,
+    pub command_index: usize,
+    pub config_digest: String,
+    pub extractor_digest: String,
+    pub policy_digest: String,
+    pub admitted_at: String,
+}
+
+pub(crate) struct LaunchAdmission {
+    _lease: PermissionLease,
+    pub authority: LaunchAuthority,
+}
+
+#[derive(Serialize)]
+struct AppliedPermissionReceipt<'a> {
+    schema_version: u32,
+    approval_id: &'a str,
+    request_digest: &'a str,
+    candidate_commit: &'a str,
+    command_index: usize,
+    config_digest: &'a str,
+    extractor_digest: &'a str,
+    policy_digest: &'a str,
+    profile_digest: String,
+    execution_mode: &'static str,
+    admitted_at: &'a str,
+    settled_at: String,
+    exit_code: i32,
+    stdout_digest: String,
+    stderr_digest: String,
+}
+
+/// Persist the applied authority outside worker-writable roots, then copy it
+/// into the command artifact for inspection. Synthetic launches remain labeled.
+pub(crate) fn record_applied_authority(
+    authority: &LaunchAuthority,
+    profile: &Path,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    artifact: &Path,
+) -> Result<String> {
+    let profile_bytes = fs::read(profile)?;
+    ensure!(
+        profile_bytes
+            .windows(PROCESS_TABLE_RULE.len())
+            .any(|window| window == PROCESS_TABLE_RULE.as_bytes()),
+        "permission-bearing command lacks the approved process-table rule"
+    );
+    let receipt = AppliedPermissionReceipt {
+        schema_version: 1,
+        approval_id: &authority.approval_id,
+        request_digest: &authority.request_digest,
+        candidate_commit: &authority.candidate_commit,
+        command_index: authority.command_index,
+        config_digest: &authority.config_digest,
+        extractor_digest: &authority.extractor_digest,
+        policy_digest: &authority.policy_digest,
+        profile_digest: digest(&profile_bytes),
+        execution_mode: if cfg!(feature = "test-support") {
+            "synthetic"
+        } else {
+            "macos-seatbelt"
+        },
+        admitted_at: &authority.admitted_at,
+        settled_at: crate::work_model::now_iso8601(),
+        exit_code,
+        stdout_digest: digest(stdout),
+        stderr_digest: digest(stderr),
+    };
+    let bytes = serde_json::to_vec_pretty(&receipt)?;
+    let root = store_root()?;
+    validate_store_directory(&root)?;
+    let mut protected = tempfile::Builder::new()
+        .prefix("receipt-")
+        .suffix(".json")
+        .tempfile_in(&root)?;
+    use std::io::Write;
+    protected.write_all(&bytes)?;
+    protected.as_file().sync_all()?;
+    let (_, protected_path) = protected.keep()?;
+    fs::write(artifact, bytes)?;
+    Ok(protected_path
+        .file_name()
+        .context("protected permission receipt has no name")?
+        .to_string_lossy()
+        .into_owned())
+}
+
 fn acquire_permission_lease(root: &Path) -> Result<PermissionLease> {
     validate_store_directory(root)?;
     let lock = root.join("approval.lock");
@@ -472,7 +565,7 @@ pub(crate) fn begin_launch_admission(
     checkout: &Path,
     candidate: &str,
     command_index: usize,
-) -> Result<PermissionLease> {
+) -> Result<LaunchAdmission> {
     let shown = show_request(checkout, candidate, command_index)?;
     ensure!(
         shown.approval_state == "approved",
@@ -496,7 +589,19 @@ pub(crate) fn begin_launch_admission(
             && record.command_index == command_index,
         "unmet prerequisite: process-table-read approval does not match command {command_index}"
     );
-    Ok(lease)
+    Ok(LaunchAdmission {
+        _lease: lease,
+        authority: LaunchAuthority {
+            approval_id: record.approval_id.clone(),
+            request_digest: current.request_digest,
+            candidate_commit: candidate.to_owned(),
+            command_index,
+            config_digest: current.config_digest,
+            extractor_digest: current.extractor_digest,
+            policy_digest: current.policy_digest,
+            admitted_at: crate::work_model::now_iso8601(),
+        },
+    })
 }
 
 /// Revoke one approval while retaining its audit record.
