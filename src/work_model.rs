@@ -5559,11 +5559,61 @@ impl RoundCapExtension {
         Ok(())
     }
 
+    /// Prove a legacy approval's Writer count without consulting artifact files
+    /// or allowing Tasks created later to explain an earlier cap gap.
+    fn historical_write_rounds(&self, tasks: &[Task]) -> Result<usize, WorkModelError> {
+        let invalid = |reason: &str| WorkModelError::RoundCapExtensionIneligible {
+            reason: format!("cannot establish the historical Writer count: {reason}"),
+        };
+        let parse_time = |value: Option<&str>| {
+            value
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .ok_or_else(|| invalid("missing or invalid timestamp"))
+        };
+        let approval = parse_time(Some(&self.approved_at))?;
+        let mut previous_creation = None;
+        let mut latest_writer = None;
+        let mut count = 0;
+        for writer in tasks.iter().filter(|task| task.kind == TaskKind::Write) {
+            let created = parse_time(writer.created_at.as_deref())?;
+            if previous_creation.is_some_and(|previous| previous >= created) {
+                return Err(invalid(
+                    "Writer creation order is contradictory or ambiguous",
+                ));
+            }
+            previous_creation = Some(created);
+            if created == approval {
+                return Err(invalid("Writer creation coincides with approval"));
+            }
+            if created < approval {
+                count += 1;
+                latest_writer = Some((writer, created));
+            }
+        }
+        let (writer, created) =
+            latest_writer.ok_or_else(|| invalid("no Writer predates approval"))?;
+        let completed = parse_time(writer.completed_at.as_deref())?;
+        if writer.status != TaskStatus::Complete || completed < created || completed > approval {
+            return Err(invalid(
+                "the last pre-approval Writer was not complete at approval",
+            ));
+        }
+        if writer.output.as_ref().map(|output| output.commit.as_str())
+            != Some(self.candidate_commit.as_str())
+        {
+            return Err(invalid(
+                "the completed Writer candidate does not match the approval",
+            ));
+        }
+        Ok(count)
+    }
+
     fn validate_structure(
         &self,
         previous: Option<&RoundCapExtension>,
         current_evidence_write_rounds: usize,
         current_materialized_write_rounds: usize,
+        tasks: &[Task],
         require_bound_frontier: bool,
     ) -> Result<(), WorkModelError> {
         if !(MIN_ADDITIONAL_WRITE_ROUNDS..=MAX_ADDITIONAL_WRITE_ROUNDS)
@@ -5682,17 +5732,25 @@ impl RoundCapExtension {
                 .ok_or_else(|| WorkModelError::RoundCapExtensionIneligible {
                     reason: "evidence Writer rounds moved backward between extensions".to_string(),
                 })?;
-            let expected_old_cap =
+            let mut expected_old_cap =
                 previous
                     .new_cap
                     .checked_add(evidence_delta)
                     .ok_or_else(|| WorkModelError::RoundCapExtensionIneligible {
                         reason: "the extension chain cap arithmetic overflows".to_string(),
                     })?;
+            // Current approvals bind their Writer count explicitly. Only a
+            // legacy gap needs reconstruction; contiguous legacy entries may
+            // predate the Task timestamps required to establish that count.
+            if let Some(writers) = self.pre_extension_write_rounds {
+                expected_old_cap = expected_old_cap.max(writers);
+            } else if self.old_cap > expected_old_cap {
+                expected_old_cap = expected_old_cap.max(self.historical_write_rounds(tasks)?);
+            }
             if self.old_cap != expected_old_cap {
                 return Err(WorkModelError::RoundCapExtensionIneligible {
                     reason: format!(
-                        "old cap {} does not continue the preceding cap {} and evidence delta {}",
+                        "old cap {} does not continue the preceding cap {} and evidence delta {} with its historical Writer count",
                         self.old_cap, previous.new_cap, evidence_delta
                     ),
                 });
@@ -6401,12 +6459,22 @@ impl Attempt {
         let current_materialized_write_rounds = self.materialized_write_rounds();
         let mut previous = None;
         for extension in &self.round_cap_extensions {
-            extension.validate_structure(
-                previous,
-                current_evidence_write_rounds,
-                current_materialized_write_rounds,
-                require_bound_frontier,
-            )?;
+            extension
+                .validate_structure(
+                    previous,
+                    current_evidence_write_rounds,
+                    current_materialized_write_rounds,
+                    &self.tasks,
+                    require_bound_frontier,
+                )
+                .map_err(|error| match error {
+                    WorkModelError::RoundCapExtensionIneligible { reason } => {
+                        WorkModelError::RoundCapExtensionIneligible {
+                            reason: format!("extension {}: {reason}", extension.id),
+                        }
+                    }
+                    error => error,
+                })?;
             previous = Some(extension);
         }
         Ok(())
@@ -22908,6 +22976,225 @@ random banner prose that must be ignored
         attempt
             .validate_round_cap_extensions()
             .expect("later evidence must not rewrite historical extension continuity");
+    }
+
+    fn historical_round_cap_attempt(
+        previous_cap: usize,
+        evidence: usize,
+        writers: usize,
+        new_cap: usize,
+    ) -> Attempt {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").unwrap();
+        let mut attempt = Attempt::default();
+        // Materialize independent Task history, including a later Writer which
+        // must never contribute to the earlier approval's count.
+        for index in 1..=writers + 1 {
+            let mut writer = task(TaskKind::Write, Vec::new());
+            writer.id = format!("attempt-1-write-{index}");
+            writer.created_at =
+                Some((start + chrono::Duration::seconds(index as i64 * 2)).to_rfc3339());
+            writer.completed_at =
+                Some((start + chrono::Duration::seconds(index as i64 * 2 + 1)).to_rfc3339());
+            writer.status = TaskStatus::Complete;
+            writer.output = Some(TaskOutput {
+                workspace_id: "candidate".to_string(),
+                workspace_path: "/workspaces/candidate".to_string(),
+                source_branch: "main".to_string(),
+                base_commit: None,
+                commit: format!("candidate-{index}"),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            if index <= evidence {
+                let review_id = format!("evidence-{index}-tests");
+                let review_path =
+                    format!(".fluent/work/artifacts/work-1/attempt-1/{review_id}/review.md");
+                writer.input_artifacts.push(ArtifactRef {
+                    producer_id: review_id.clone(),
+                    path: review_path.clone(),
+                });
+                attempt.evidence_recoveries.push(EvidenceRecovery {
+                    id: format!("evidence-{index}"),
+                    candidate_commit: format!("candidate-{index}"),
+                    attachment: EvidenceAttachment {
+                        snapshot_path: format!("evidence-{index}.json"),
+                        digest: "sha256:evidence".to_string(),
+                    },
+                    targets: vec![EvidenceReviewTarget {
+                        role: "tests".to_string(),
+                        prior_review_artifact: review_path,
+                        review_task_id: Some(review_id),
+                        review_digest: None,
+                    }],
+                    state: EvidenceRecoveryState::CodeChange,
+                    created_at: writer.created_at.clone().unwrap(),
+                    carried_finding: None,
+                    required_check: None,
+                    code_change_classification: None,
+                });
+            }
+            attempt.tasks.push(writer);
+        }
+        let extension =
+            |old_cap, new_cap, evidence_write_rounds, candidate, approved_at| RoundCapExtension {
+                id: format!("round-cap-{old_cap}-{new_cap}"),
+                old_cap,
+                new_cap,
+                additional_write_rounds: new_cap - old_cap,
+                evidence_write_rounds,
+                authorized_base_cap: None,
+                pre_extension_write_rounds: None,
+                candidate_commit: candidate,
+                failed_reviews: Vec::new(),
+                human_resolution: String::new(),
+                human_resolution_digest: String::new(),
+                approved_at,
+            };
+        attempt.round_cap_extensions = vec![
+            extension(
+                previous_cap - 1,
+                previous_cap,
+                0,
+                "candidate-1".to_string(),
+                (start + chrono::Duration::seconds(3)).to_rfc3339(),
+            ),
+            extension(
+                writers,
+                new_cap,
+                evidence,
+                format!("candidate-{writers}"),
+                (start + chrono::Duration::seconds(writers as i64 * 2 + 1)).to_rfc3339(),
+            ),
+        ];
+        attempt
+    }
+
+    #[test]
+    fn round_cap_chain_uses_historical_writer_count() {
+        for (previous_cap, evidence, writers, new_cap) in [
+            (16, 0, 18, 19),
+            (25, 0, 26, 27),
+            (11, 0, 12, 15),
+            (12, 0, 13, 16),
+            (16, 0, 17, 19),
+            (12, 8, 22, 25),
+            (44, 0, 45, 47),
+            (48, 0, 49, 51),
+            (52, 0, 53, 54),
+            (54, 0, 55, 56),
+            (56, 3, 67, 68),
+            (72, 21, 94, 95),
+            (15, 1, 17, 18),
+            (27, 0, 28, 29),
+            (38, 0, 39, 40),
+            (45, 2, 48, 49),
+            (50, 0, 51, 52),
+            (14, 0, 15, 16),
+        ] {
+            let attempt = historical_round_cap_attempt(previous_cap, evidence, writers, new_cap);
+            attempt
+                .validate_round_cap_extensions()
+                .unwrap_or_else(|error| {
+                    panic!("{previous_cap}/{evidence}/{writers}/{new_cap}: {error}")
+                });
+            // Equivalent offsets describe the same ordering, even when their
+            // textual date or clock time sorts differently.
+            let mut offset = attempt.clone();
+            offset.tasks[writers - 1].created_at = Some(
+                (chrono::DateTime::parse_from_rfc3339(
+                    offset.tasks[writers - 1].created_at.as_ref().unwrap(),
+                )
+                .unwrap())
+                .with_timezone(&chrono::FixedOffset::west_opt(7 * 3600).unwrap())
+                .to_rfc3339(),
+            );
+            offset.validate_round_cap_extensions().unwrap();
+        }
+    }
+
+    #[test]
+    fn round_cap_chain_rejects_unproven_writer_count() {
+        let original = historical_round_cap_attempt(2, 0, 3, 4);
+        for case in [
+            "later",
+            "at-approval",
+            "missing-time",
+            "invalid-time",
+            "invalid-approval",
+            "tied",
+            "reordered",
+            "candidate",
+            "incomplete",
+            "missing-output",
+            "missing-completion",
+            "late-completion",
+            "early-completion",
+            "partial-base",
+            "partial-count",
+            "too-few",
+            "too-many",
+        ] {
+            let mut attempt = original.clone();
+            let approval = attempt.round_cap_extensions[1].approved_at.clone();
+            match case {
+                "later" => attempt.tasks[2].created_at = Some("2026-10-01T00:00:07.5Z".to_string()),
+                "at-approval" => attempt.tasks[2].created_at = Some(approval),
+                "missing-time" => attempt.tasks[0].created_at = None,
+                "invalid-time" => attempt.tasks[0].created_at = Some("yesterday".to_string()),
+                "invalid-approval" => {
+                    attempt.round_cap_extensions[1].approved_at = "yesterday".to_string()
+                }
+                "tied" => attempt.tasks[2].created_at = attempt.tasks[1].created_at.clone(),
+                "reordered" => attempt.tasks.swap(1, 2),
+                "candidate" => {
+                    attempt.tasks[2].output.as_mut().unwrap().commit = "altered".to_string()
+                }
+                "incomplete" => attempt.tasks[2].status = TaskStatus::Planned,
+                "missing-output" => attempt.tasks[2].output = None,
+                "missing-completion" => attempt.tasks[2].completed_at = None,
+                "late-completion" => {
+                    attempt.tasks[2].completed_at = Some("2026-10-01T00:00:08Z".to_string())
+                }
+                "early-completion" => {
+                    attempt.tasks[2].completed_at = Some("2026-10-01T00:00:05Z".to_string())
+                }
+                "partial-base" => attempt.round_cap_extensions[1].authorized_base_cap = Some(1),
+                "partial-count" => {
+                    attempt.round_cap_extensions[1].pre_extension_write_rounds = Some(3)
+                }
+                "too-few" => {
+                    attempt.round_cap_extensions[1].authorized_base_cap = Some(1);
+                    attempt.round_cap_extensions[1].pre_extension_write_rounds = Some(2);
+                }
+                "too-many" => {
+                    attempt.round_cap_extensions[1].authorized_base_cap = Some(1);
+                    attempt.round_cap_extensions[1].pre_extension_write_rounds = Some(5);
+                }
+                _ => unreachable!(),
+            }
+            let error = attempt
+                .validate_round_cap_extensions()
+                .expect_err(case)
+                .to_string();
+            assert!(error.contains("round-cap-3-4"), "{case}: {error}");
+        }
+    }
+
+    #[test]
+    fn round_cap_chain_preserves_contiguous_legacy_entries() {
+        let mut attempt = historical_round_cap_attempt(3, 0, 3, 4);
+        for writer in &mut attempt.tasks {
+            writer.created_at = None;
+            writer.completed_at = None;
+        }
+        attempt.validate_round_cap_extensions().unwrap();
+        assert!(
+            attempt
+                .validate_round_cap_extensions_for_approach_revision()
+                .unwrap_err()
+                .to_string()
+                .contains("no independently bound")
+        );
     }
 
     #[test]

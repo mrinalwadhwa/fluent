@@ -51583,6 +51583,141 @@ fn scheduler_service_installation_is_current_user_scoped() {
     manager.stop().unwrap();
 }
 
+// Save split records as a historical reader would have written them. The
+// approval predates the modern explicit pre-extension frontier fields.
+fn prepare_legacy_round_cap_chain(project: &Path, work_id: &str) -> PathBuf {
+    use fluent::work_model::{
+        AttemptReviewState, AttemptStatus, PauseKind, TaskKind, TaskOutput, TaskStatus,
+    };
+    fluent_cmd()
+        .current_dir(project)
+        .args(["work-item", "create", work_id, "--title", "Historical cap"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(project)
+        .args(["attempt", "create", work_id, "attempt-1"])
+        .assert()
+        .success();
+    let workspace_rel = fluent::work_model::initial_candidate_workspace_path(work_id, "attempt-1");
+    let workspace = project
+        .parent()
+        .unwrap()
+        .join(workspace_rel.trim_start_matches("../"));
+    git::run(
+        project,
+        &["worktree", "add", workspace.to_str().unwrap()],
+        "create historical candidate",
+    )
+    .unwrap();
+    let candidate = git_head(&workspace);
+    let store = WorkModelStore::new(project);
+    let mut item = store.read_work_item(work_id).unwrap();
+    for round in 1..=3 {
+        if round > 1 {
+            item.add_next_write_round("attempt-1", Vec::new()).unwrap();
+        }
+        let writer = item.attempts[0].tasks.last_mut().unwrap();
+        writer.created_at = Some(format!("2026-10-01T00:0{round}:00Z"));
+        writer.completed_at = Some(format!("2026-10-01T00:0{round}:10Z"));
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: "candidate".to_string(),
+            workspace_path: workspace_rel.clone(),
+            source_branch: "main".to_string(),
+            base_commit: None,
+            commit: candidate.clone(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+    }
+    item.add_next_review_tasks("attempt-1", &["architecture", "tests"])
+        .unwrap();
+    let mut failed_reviews = Vec::new();
+    for review in item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind == TaskKind::Review)
+    {
+        review.status = TaskStatus::Complete;
+        review.created_at = Some("2026-10-01T00:03:11Z".to_string());
+        review.completed_at = Some("2026-10-01T00:03:20Z".to_string());
+        let path = format!("{}/review.md", review.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(project.join(&path).parent().unwrap()).unwrap();
+        let bytes = if review.role == "architecture" {
+            "Verdict: pass\n"
+        } else {
+            "Verdict: fail\n"
+        };
+        fs::write(project.join(&path), bytes).unwrap();
+        if review.role == "tests" {
+            use sha2::{Digest, Sha256};
+            failed_reviews.push(serde_json::json!({"artifact": {"producer_id": review.id, "path": path}, "digest": format!("sha256:{:x}", Sha256::digest(bytes.as_bytes()))}));
+        }
+    }
+    item.attempts[0].status = AttemptStatus::NeedsUser;
+    item.attempts[0].pause_kind = Some(PauseKind::RoundCap);
+    item.attempts[0].review_state = Some(AttemptReviewState::Failed);
+    store.write_work_item(&item).unwrap();
+    let path = project.join(format!(".fluent/work/attempts/{work_id}/attempt-1.json"));
+    let mut record = read_json_path(&path);
+    let resolution = "Preserve the public contract.";
+    record["round_cap_extensions"] = serde_json::json!([
+        {"id": "round-cap-1-2", "old_cap": 1, "new_cap": 2, "additional_write_rounds": 1,
+         "candidate_commit": candidate, "failed_reviews": [], "approved_at": "2026-10-01T00:01:30Z"},
+        {"id": "round-cap-3-4", "old_cap": 3, "new_cap": 4, "additional_write_rounds": 1,
+         "candidate_commit": candidate, "failed_reviews": failed_reviews, "approved_at": "2026-10-01T00:03:30Z",
+         "human_resolution": resolution, "human_resolution_digest": fluent::work_model::round_cap_resolution_digest(resolution)}
+    ]);
+    write_json_path(&path, &record);
+    workspace
+}
+
+#[test]
+fn legacy_round_cap_chain_is_readable() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work_id = format!("legacyread{}", run_token(&tmp));
+    prepare_legacy_round_cap_chain(&project, &work_id);
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["work-item", "show", &work_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&work_id));
+    let item = WorkModelStore::new(&project)
+        .read_work_item(&work_id)
+        .unwrap();
+    assert_eq!(item.attempts[0].round_cap_extensions[1].old_cap, 3);
+}
+
+#[test]
+fn legacy_round_cap_chain_rejects_altered_history() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work_id = format!("legacyalter{}", run_token(&tmp));
+    prepare_legacy_round_cap_chain(&project, &work_id);
+    let path = project.join(format!(
+        ".fluent/work/tasks/{work_id}/attempt-1/attempt-1-write-3.json"
+    ));
+    let original = read_json_path(&path);
+    for field in ["created_at", "candidate"] {
+        let mut altered = original.clone();
+        if field == "created_at" {
+            altered[field] = serde_json::json!("2026-10-01T00:04:00Z");
+        } else {
+            altered["output"]["commit"] = serde_json::json!("altered-candidate");
+        }
+        write_json_path(&path, &altered);
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "show", &work_id])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("round-cap-3-4"));
+    }
+}
+
 #[test]
 #[serial]
 fn attempt_extend_binds_candidate_and_failed_review_bytes() {
