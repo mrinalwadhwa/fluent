@@ -73,6 +73,7 @@ pub mod scope_calibration;
 pub mod setup;
 pub mod skill_install;
 pub mod slack_collaboration;
+pub mod terminal_sessions;
 #[cfg(test)]
 pub(crate) mod test_lock_probe;
 pub mod tester;

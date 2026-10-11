@@ -13,7 +13,8 @@ use fluent::cleanup::{
 use fluent::cli::{
     AttemptCommands, AttemptEvidenceCommands, Cli, Commands, FargateCommands, KeepAwakeCommands,
     MergeCandidateCommands, ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands,
-    SkillsCommands, SlackCommands, TaskCommands, TesterCommands, WorkItemCommands,
+    SkillsCommands, SlackCommands, TaskCommands, TerminalCommands, TesterCommands,
+    WorkItemCommands,
 };
 use fluent::coder::CoderKind;
 use fluent::content::ContentResolver;
@@ -93,6 +94,31 @@ fn main() -> Result<()> {
     let is_update_command = matches!(cli.command, Some(Commands::Update));
 
     match cli.command {
+        Some(Commands::Terminal { command }) => match command {
+            TerminalCommands::List { source } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fluent::terminal_sessions::list(&source)?)?
+                );
+            }
+            TerminalCommands::Attach {
+                session_id,
+                source,
+                control,
+            } => {
+                let mut attachment = fluent::terminal_sessions::resolve(&source, &session_id)?;
+                if control
+                    && attachment.acquire_control()?
+                        == fluent::terminal_sessions::ControlOutcome::Occupied
+                {
+                    eprintln!("Control is occupied; attaching in Observe mode");
+                }
+                let code = attachment.run()?;
+                if code != 0 {
+                    bail!("terminal attachment exited with {code}");
+                }
+            }
+        },
         Some(Commands::Status { path }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
             cmd_status(&search_root)?;

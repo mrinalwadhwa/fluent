@@ -42,6 +42,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// List or attach to a managed worker terminal
+    Terminal {
+        #[command(subcommand)]
+        command: TerminalCommands,
+    },
     // -- WORK MODEL entities --
     /// Manage stored Work Items
     WorkItem {
@@ -219,6 +224,23 @@ pub enum Commands {
     Fargate {
         #[command(subcommand)]
         command: FargateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TerminalCommands {
+    /// List terminals owned by a source checkout
+    List {
+        #[arg(long)]
+        source: PathBuf,
+    },
+    /// Attach to an exact worker invocation (Observe by default)
+    Attach {
+        session_id: String,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        control: bool,
     },
 }
 
