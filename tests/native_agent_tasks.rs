@@ -10,6 +10,24 @@ fn native_input_event(record: &serde_json::Value) -> bool {
         || record["event"]["type"] == "input"
 }
 
+fn race_generation_closed_after_attempt(
+    attempt: &std::path::Path,
+    descriptors: &[fluent::terminal_sessions::TerminalDescriptor],
+    session: &str,
+    generation: &str,
+) -> bool {
+    // A PTY send can succeed after its native input owner has closed. In that
+    // ordering no provider callback exists to record admission or rejection.
+    let attempted = std::fs::read_to_string(attempt)
+        .is_ok_and(|result| result.starts_with("0 ") || result.starts_with("1 "));
+    attempted
+        && descriptors.iter().any(|descriptor| {
+            descriptor.session_id == session
+                && descriptor.execution_generation == generation
+                && descriptor.lifecycle == fluent::terminal_sessions::TerminalLifecycle::Ended
+        })
+}
+
 #[test]
 fn native_input_evidence_excludes_quoted_output() {
     let input = json!({"event":{"method":"turn/steer","params":{"input":[{"text":"probe"}]}},"input_sequence":2});
@@ -17,6 +35,80 @@ fn native_input_evidence_excludes_quoted_output() {
         json!({"event":{"method":"item/updated","params":{"text":"probe"}},"input_sequence":2});
     assert!(native_input_event(&input));
     assert!(!native_input_event(&quote));
+}
+
+#[test]
+fn completion_race_accepts_closure_after_send_attempt() {
+    use fluent::terminal_sessions::{TerminalDescriptor, TerminalLifecycle};
+
+    let root = tempfile::tempdir().unwrap();
+    let attempt = root.path().join("race.attempt");
+    let descriptor: TerminalDescriptor = serde_json::from_value(json!({
+        "schema_version": 1,
+        "source_id": "source",
+        "project_identity": "project",
+        "work_item_id": "work",
+        "attempt_id": "attempt-1",
+        "task_id": "attempt-1-write-1",
+        "execution_generation": "writer-generation",
+        "session_id": "writer-session",
+        "role": "Writer",
+        "provider": "pi",
+        "lifecycle": "running",
+        "can_observe": true,
+        "can_control": true
+    }))
+    .unwrap();
+    let mut descriptors = vec![descriptor];
+
+    // Control was occupied while Running; completion wins before Expect sends.
+    assert!(!race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    descriptors[0].lifecycle = TerminalLifecycle::Ended;
+    assert!(!race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    std::fs::write(&attempt, "0 ").unwrap();
+    assert!(race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    assert!(!race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "reviewer-generation"
+    ));
+    assert!(!race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "reviewer-session",
+        "writer-generation"
+    ));
+    descriptors[0].lifecycle = TerminalLifecycle::Running;
+    assert!(!race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    descriptors[0].lifecycle = TerminalLifecycle::Ended;
+    std::fs::write(&attempt, "1 attachment closed").unwrap();
+    assert!(race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
 }
 
 #[test]
@@ -2216,13 +2308,13 @@ exit [lindex $outcome 3]
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        let closed_before_release = fluent::terminal_sessions::list(&project)
+        let race_generation = fluent::terminal_sessions::list(&project)
             .unwrap()
             .iter()
-            .any(|entry| {
-                entry.session_id == session
-                    && entry.lifecycle == fluent::terminal_sessions::TerminalLifecycle::Ended
-            });
+            .find(|entry| entry.session_id == session)
+            .expect("race attachment has no terminal generation")
+            .execution_generation
+            .clone();
         fs::write(&race_release, b"send").unwrap();
         let race_deadline = Instant::now() + Duration::from_secs(20);
         while race.try_wait().unwrap().is_none() {
@@ -2236,6 +2328,14 @@ exit [lindex $outcome 3]
         assert!(
             race_attempt.is_file(),
             "{provider} settlement input was never attempted"
+        );
+        // Sample before waiting for Task completion, so an input that vanishes
+        // while this generation is still open still needs a native receipt.
+        let closed_after_attempt = race_generation_closed_after_attempt(
+            &race_attempt,
+            &fluent::terminal_sessions::list(&project).unwrap(),
+            &session,
+            &race_generation,
         );
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -2276,6 +2376,10 @@ exit [lindex $outcome 3]
             .iter()
             .find_map(|record| record["execution_generation"].as_str())
             .expect("native Writer has no execution generation");
+        assert_eq!(
+            race_generation, writer_generation,
+            "{provider} race attachment targeted another Writer generation"
+        );
         let raced_inputs: Vec<_> = records
             .iter()
             .filter(|record| {
@@ -2334,8 +2438,8 @@ exit [lindex $outcome 3]
                             && record["text"] == race_marker
                     });
             assert!(
-                rejected_by_owner || rejected_by_pi || closed_before_release,
-                "{provider} raced input has no admission, native rejection, or prior generation closure"
+                rejected_by_owner || rejected_by_pi || closed_after_attempt,
+                "{provider} raced input has no admission, native rejection, or observed closure of its generation after the send attempt"
             );
         }
         if let Some(input) = raced_inputs.first() {
