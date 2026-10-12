@@ -46,8 +46,9 @@ repos, Task logs, candidate, and provider versions under a host evidence
 directory. Review the candidate-bound host results through the targeted Tests
 Review and remaining domain reviews. The final Tester then runs the complete
 declared suite, followed by the normal Learner and landing gates.
-The host check first exercises the installed Pi runtime's idle compaction,
-queued continuation, and settlement callbacks against Fluent's event gate.
+The host check first exercises installed Pi session compaction and its queued
+follow-up lifecycle against Fluent's event gate, with model responses supplied
+by the fixture. This component check runs without a provider connection.
 Its real-provider fixture uses a disposable local proxy to return one
 retryable Pi response before forwarding to the selected server. It separately
 checks that `/compact` during active work aborts that activity, and that
@@ -58,4 +59,5 @@ detachment, evidence inspection, and cancellation. A disposable Codex Attempt
 also holds an observer through automatic Review progression, then checks its
 native Learner and a conflict-driven native Rebase. The real-provider check
 must pass on the exact candidate before its targeted Tests Review can accept
-host evidence; the installed-runtime check alone is insufficient.
+host evidence. The provider-backed host cases and the final Tester are separate
+acceptance gates.

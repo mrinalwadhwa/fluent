@@ -416,7 +416,7 @@ pub fn relay_codex_streams_with_admission<W, F>(
     generation: &str,
     thread_id: &str,
     admission: Arc<NativeAdmission>,
-    mut evidence: W,
+    evidence: W,
     mut on_completion: F,
 ) -> Result<()>
 where
@@ -426,6 +426,7 @@ where
     let gate = Arc::new(Mutex::new(CodexRelayGate::with_admission(
         generation, thread_id, admission,
     )));
+    let evidence = Arc::new(Mutex::new(evidence));
     let client_reader = client.try_clone()?;
     let server_reader = server.try_clone()?;
     let upstream_abort_client = client.try_clone()?;
@@ -445,6 +446,7 @@ where
             }
         });
         let request_gate = Arc::clone(&gate);
+        let request_evidence = Arc::clone(&evidence);
         let upstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 let mut reader = BufReader::new(client_reader);
@@ -457,10 +459,29 @@ where
                         return Ok(());
                     }
                     let request: Value = serde_json::from_str(&line)?;
-                    request_gate
+                    let input_sequence = request_gate
                         .lock()
                         .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
                         .admit_request(&request)?;
+                    if let Some(input_sequence) = input_sequence {
+                        let record = CodexEvidenceRecord {
+                            format: "fluent-native-agent-event",
+                            schema_version: 1,
+                            provider: "codex",
+                            execution_generation: generation,
+                            assigned_conversation_id: thread_id,
+                            conversation_id: thread_id,
+                            turn_id: None,
+                            input_sequence,
+                            event: &request,
+                        };
+                        let mut evidence = request_evidence
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
+                        serde_json::to_writer(&mut *evidence, &record)?;
+                        evidence.write_all(b"\n")?;
+                        evidence.flush()?;
+                    }
                     writer.write_all(line.as_bytes())?;
                     writer.flush()?;
                 }
@@ -509,9 +530,14 @@ where
                         input_sequence,
                         event: &event,
                     };
-                    serde_json::to_writer(&mut evidence, &record)?;
-                    evidence.write_all(b"\n")?;
-                    evidence.flush()?;
+                    {
+                        let mut evidence = evidence
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
+                        serde_json::to_writer(&mut *evidence, &record)?;
+                        evidence.write_all(b"\n")?;
+                        evidence.flush()?;
+                    }
                     if completion != Completion::Ignored {
                         on_completion(completion)?;
                     }

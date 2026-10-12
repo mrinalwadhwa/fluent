@@ -2,6 +2,23 @@ use fluent::native_agent::{CodexRelayGate, Completion, NativeAdmission, PiSettle
 use fluent::work_model::{Attempt, CoderMapping, TerminalMode, WorkItem, reopen_attempt};
 use serde_json::json;
 
+fn native_input_event(record: &serde_json::Value) -> bool {
+    matches!(
+        record["event"]["method"].as_str(),
+        Some("turn/start" | "turn/steer")
+    ) || record["event"]["hook_event_name"] == "UserPromptSubmit"
+        || record["event"]["type"] == "input"
+}
+
+#[test]
+fn native_input_evidence_excludes_quoted_output() {
+    let input = json!({"event":{"method":"turn/steer","params":{"input":[{"text":"probe"}]}},"input_sequence":2});
+    let quote =
+        json!({"event":{"method":"item/updated","params":{"text":"probe"}},"input_sequence":2});
+    assert!(native_input_event(&input));
+    assert!(!native_input_event(&quote));
+}
+
 #[test]
 fn codex_relay_keeps_assigned_thread() {
     let mut gate = CodexRelayGate::new("generation-2", "assigned-thread");
@@ -395,7 +412,7 @@ fn pi_installed_runner_compacts_before_queued_continuation() {
         if let Completion::Accepted { input_sequence, .. } =
             gate.observe(&event).unwrap().completion
         {
-            assert_eq!(input_sequence, 1);
+            assert_eq!(input_sequence, 2);
             completed = true;
         }
     }
@@ -1154,13 +1171,15 @@ fn codex_jsonl_relay_controls_assigned_invocation() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence.len(), 3);
+    assert_eq!(evidence[0]["event"]["method"], "turn/start");
+    assert_eq!(evidence[0]["input_sequence"], 1);
     assert_eq!(
-        evidence[0]["event"],
+        evidence[1]["event"],
         serde_json::from_str::<serde_json::Value>(started).unwrap()
     );
     assert_eq!(
-        evidence[1]["event"],
+        evidence[2]["event"],
         serde_json::from_str::<serde_json::Value>(finished).unwrap()
     );
 
@@ -1380,8 +1399,9 @@ fn slow_display_cannot_block_evidence_or_supervision() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(captured.len(), 66);
-    assert_eq!(captured[0]["event"]["method"], "turn/started");
+    assert_eq!(captured.len(), 67);
+    assert_eq!(captured[0]["event"]["method"], "turn/start");
+    assert_eq!(captured[1]["event"]["method"], "turn/started");
     assert_eq!(
         captured.last().unwrap()["event"]["method"],
         "turn/completed"
@@ -1436,7 +1456,7 @@ fn native_capability_or_evidence_failure_blocks_false_success() {
     }
 
     let (mut tui, relay_client) = UnixStream::pair().unwrap();
-    let (relay_server, mut provider) = UnixStream::pair().unwrap();
+    let (relay_server, provider) = UnixStream::pair().unwrap();
     let (completed, received) = mpsc::channel();
     let relay = std::thread::spawn(move || {
         relay_codex_streams(
@@ -1453,8 +1473,10 @@ fn native_capability_or_evidence_failure_blocks_false_success() {
     BufReader::new(provider.try_clone().unwrap())
         .read_line(&mut request)
         .unwrap();
-    assert!(request.contains("turn/start"));
-    provider.write_all(b"{\"method\":\"turn/started\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\"}}}\n").unwrap();
+    assert!(
+        request.is_empty(),
+        "input crossed the relay without durable evidence"
+    );
     let error = relay.join().unwrap().unwrap_err();
     assert!(error.to_string().contains("evidence volume unavailable"));
     assert!(received.try_recv().is_err());
@@ -1542,7 +1564,7 @@ fn native_evidence_reaches_existing_consumers() {
         .lines()
         .map(str::to_owned)
         .collect();
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines.len(), 6);
     let first: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(first["format"], "fluent-native-agent-event");
     assert_eq!(first["schema_version"], 1);
@@ -1550,7 +1572,11 @@ fn native_evidence_reaches_existing_consumers() {
     assert_eq!(first["execution_generation"], "generation-1");
     assert_eq!(first["assigned_conversation_id"], "assigned-thread");
     assert_eq!(first["conversation_id"], "assigned-thread");
-    assert_eq!(first["event"]["method"], "thread/started");
+    assert_eq!(first["event"]["method"], "turn/start");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&lines[1]).unwrap()["event"]["method"],
+        "thread/started"
+    );
     assert_eq!(first["input_sequence"], 1);
     let completed: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
     assert_eq!(completed["turn_id"], "turn-1");
@@ -2020,14 +2046,16 @@ exit [lindex $outcome 3]
         const RACE_CONTROL: &str = r#"
 set timeout 60
 spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
-after 250
+expect -timeout 1 { eof { exit 1 } timeout {} }
 set ready [open $env(FLUENT_NATIVE_RACE_READY) w]
 puts $ready "attached"
 close $ready
 while {![file exists $env(FLUENT_NATIVE_RACE_RELEASE)]} { after 25 }
-send -- "$env(FLUENT_NATIVE_RACE_TEXT)\r"
-after 250
-send -- "\002d"
+set result [catch {send -- "$env(FLUENT_NATIVE_RACE_TEXT)\r"} error]
+set attempt [open $env(FLUENT_NATIVE_RACE_ATTEMPT) w]
+puts $attempt "$result $error"
+close $attempt
+if {!$result} { after 250; catch {send -- "\002d"} }
 expect eof
 set outcome [wait]
 exit [lindex $outcome 3]
@@ -2035,6 +2063,7 @@ exit [lindex $outcome 3]
         let race_marker = format!("native-{provider}-settlement-probe");
         let race_ready = project.join("race.ready");
         let race_release = project.join("race.release");
+        let race_attempt = project.join("race.attempt");
         let mut race = Command::new("expect")
             .args(["-c", RACE_CONTROL])
             .env("FLUENT_NATIVE_BINARY", binary)
@@ -2042,6 +2071,7 @@ exit [lindex $outcome 3]
             .env("FLUENT_NATIVE_SESSION", &session)
             .env("FLUENT_NATIVE_RACE_READY", &race_ready)
             .env("FLUENT_NATIVE_RACE_RELEASE", &race_release)
+            .env("FLUENT_NATIVE_RACE_ATTEMPT", &race_attempt)
             .env("FLUENT_NATIVE_RACE_TEXT", &race_marker)
             .stdout(Stdio::from(
                 File::create(project.join("race.attach.log")).unwrap(),
@@ -2075,18 +2105,14 @@ exit [lindex $outcome 3]
                 Instant::now() < deadline,
                 "{provider} emitted no settling boundary"
             );
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "{provider} completed before the settlement race was injected"
-            );
             let transcript =
                 fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
-            if transcript
+            let boundary_seen = transcript
                 .lines()
                 .filter(|line| line.contains(boundary))
                 .count()
-                > previous_boundaries
-            {
+                > previous_boundaries;
+            if boundary_seen || child.try_wait().unwrap().is_some() {
                 let last = transcript
                     .lines()
                     .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -2107,6 +2133,10 @@ exit [lindex $outcome 3]
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+        assert!(
+            race_attempt.is_file(),
+            "{provider} settlement input was never attempted"
+        );
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
@@ -2142,15 +2172,69 @@ exit [lindex $outcome 3]
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        if transcript.contains(&race_marker) {
-            let last = records
-                .iter()
-                .filter_map(|record| record["input_sequence"].as_u64())
-                .max()
-                .unwrap_or(0);
+        let writer_generation = records
+            .iter()
+            .find_map(|record| record["execution_generation"].as_str())
+            .expect("native Writer has no execution generation");
+        let raced_inputs: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                native_input_event(record)
+                    && record["execution_generation"] == writer_generation
+                    && record["input_sequence"]
+                        .as_u64()
+                        .is_some_and(|sequence| sequence > before_race_sequence)
+                    && record["event"].to_string().contains(&race_marker)
+            })
+            .collect();
+        let other_late_inputs = records.iter().any(|record| {
+            native_input_event(record)
+                && record["execution_generation"] == writer_generation
+                && record["input_sequence"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence > before_race_sequence)
+                && !record["event"].to_string().contains(&race_marker)
+        });
+        assert!(
+            !other_late_inputs,
+            "{provider} admitted an unidentified raced input"
+        );
+        assert!(
+            raced_inputs.len() <= 1,
+            "{provider} admitted raced input more than once"
+        );
+        let send_result = fs::read_to_string(&race_attempt).unwrap();
+        assert!(
+            send_result.starts_with("0 ") || send_result.starts_with("1 "),
+            "{provider} did not record the settlement send result"
+        );
+        if send_result.starts_with("1 ") {
             assert!(
-                last > before_race_sequence,
-                "{provider} raced input appeared without a new admitted sequence"
+                raced_inputs.is_empty(),
+                "{provider} admitted rejected input"
+            );
+        }
+        if let Some(input) = raced_inputs.first() {
+            let sequence = input["input_sequence"].as_u64().unwrap();
+            let consumed = records.iter().any(|record| {
+                record["execution_generation"] == writer_generation
+                    && record["input_sequence"] == sequence
+                    && match provider {
+                        "codex" => {
+                            record["event"]["method"] == "turn/completed"
+                                && record["event"]["params"]["turn"]["status"] == "completed"
+                        }
+                        "claude" => {
+                            record["event"]["hook_event_name"] == "Stop"
+                                && record["turn_id"] == input["turn_id"]
+                        }
+                        "pi" => record["event"]["type"] == "input_entry",
+                        _ => false,
+                    }
+            });
+            assert!(
+                consumed,
+                "{provider} admitted raced input without completing its turn"
             );
         }
         assert!(
@@ -2269,8 +2353,14 @@ exit [lindex $outcome 3]
             assert!(review_artifact.join("review.md").is_file());
             let transcript = fs::read_to_string(review_artifact.join("transcript.jsonl")).unwrap();
             assert!(
-                !transcript.contains(&race_marker),
-                "{provider} late Writer input reached the Reviewer"
+                !transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|record| native_input_event(&record)
+                        && record["input_sequence"]
+                            .as_u64()
+                            .is_some_and(|sequence| sequence > 1)),
+                "{provider} late Writer input became live Reviewer input"
             );
             assert!(
                 transcript
@@ -2480,38 +2570,79 @@ exit [lindex $outcome 3]
                 .parent()
                 .unwrap()
                 .join("pi.sock");
-            fs::remove_file(&socket).unwrap();
             let late_marker = "pi-input-after-receiver-loss";
             const LOST_RECEIVER_INPUT: &str = r#"
 set timeout 10
 spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
-after 100
-send -- "$env(FLUENT_NATIVE_LATE_TEXT)\r"
-after 100
-send -- "\002d"
+expect -timeout 1 { eof { exit 1 } timeout {} }
+set ready [open $env(FLUENT_NATIVE_LATE_READY) w]
+puts $ready "attached"
+close $ready
+while {![file exists $env(FLUENT_NATIVE_LATE_RELEASE)]} { after 25 }
+set result [catch {send -- "$env(FLUENT_NATIVE_LATE_TEXT)\r"} error]
+set attempt [open $env(FLUENT_NATIVE_LATE_ATTEMPT) w]
+puts $attempt "$result $error"
+close $attempt
+if {!$result} { after 100; catch {send -- "\002d"} }
 expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
 "#;
             let listed = Command::new(binary)
                 .args(["terminal", "list", "--source", project.to_str().unwrap()])
                 .output()
                 .unwrap();
             let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-            if let Some(session) = listed
+            let session = listed
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|entry| entry["work_item_id"] == failure_work && entry["can_control"] == true)
                 .and_then(|entry| entry["session_id"].as_str())
-            {
-                let _ = Command::new("expect")
-                    .args(["-c", LOST_RECEIVER_INPUT])
-                    .env("FLUENT_NATIVE_BINARY", binary)
-                    .env("FLUENT_NATIVE_SOURCE", &project)
-                    .env("FLUENT_NATIVE_SESSION", session)
-                    .env("FLUENT_NATIVE_LATE_TEXT", late_marker)
-                    .output()
-                    .unwrap();
+                .expect("Pi receiver-loss fixture had no live controllable terminal");
+            let late_ready = project.join("receiver-attach.ready");
+            let late_release = project.join("receiver-attach.release");
+            let late_attempt = project.join("receiver-attach.attempt");
+            let mut attachment = Command::new("expect")
+                .args(["-c", LOST_RECEIVER_INPUT])
+                .env("FLUENT_NATIVE_BINARY", binary)
+                .env("FLUENT_NATIVE_SOURCE", &project)
+                .env("FLUENT_NATIVE_SESSION", session)
+                .env("FLUENT_NATIVE_LATE_TEXT", late_marker)
+                .env("FLUENT_NATIVE_LATE_READY", &late_ready)
+                .env("FLUENT_NATIVE_LATE_RELEASE", &late_release)
+                .env("FLUENT_NATIVE_LATE_ATTEMPT", &late_attempt)
+                .stdout(Stdio::from(
+                    File::create(project.join("receiver-attach.log")).unwrap(),
+                ))
+                .spawn()
+                .unwrap();
+            while !late_ready.exists() {
+                assert!(
+                    Instant::now() < failure_deadline,
+                    "Pi control did not attach"
+                );
+                assert!(
+                    attachment.try_wait().unwrap().is_none(),
+                    "Pi control closed before receiver loss"
+                );
+                std::thread::sleep(Duration::from_millis(25));
             }
+            fs::remove_file(&socket).unwrap();
+            fs::write(&late_release, b"send").unwrap();
+            while attachment.try_wait().unwrap().is_none() {
+                assert!(
+                    Instant::now() < failure_deadline,
+                    "Pi late control did not close"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(late_attempt.is_file(), "Pi late input was never attempted");
+            let send_result = fs::read_to_string(&late_attempt).unwrap();
+            assert!(
+                send_result.starts_with("0 ") || send_result.starts_with("1 "),
+                "Pi did not record the late input send result"
+            );
             let failure_deadline = Instant::now() + Duration::from_secs(20);
             let status = loop {
                 if let Some(status) = failed.try_wait().unwrap() {
@@ -2685,6 +2816,45 @@ exit [lindex $outcome 3]
     }
 }
 
+fn install_native_fixture_tester(root: &std::path::Path) {
+    use std::fs;
+
+    fs::create_dir_all(root.join(".fluent")).unwrap();
+    fs::write(
+        root.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    let extractor = root.join(".fluent/extract-tester-results");
+    fs::write(&extractor, "#!/bin/sh\nprintf '[]\\n'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&extractor, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(fs::metadata(&extractor).unwrap().permissions().mode() & 0o111 != 0);
+    }
+    assert!(
+        serde_yaml::from_str::<serde_yaml::Value>(
+            &fs::read_to_string(root.join(".fluent/tester.yaml")).unwrap()
+        )
+        .unwrap()["commands"]
+            .as_sequence()
+            .is_some_and(|commands| !commands.is_empty()),
+        "attached fixture requires a declared Tester command"
+    );
+}
+
+#[test]
+fn native_progression_fixture_declares_tester() {
+    let root = tempfile::tempdir().unwrap();
+    install_native_fixture_tester(root.path());
+    let output = std::process::Command::new(root.path().join(".fluent/extract-tester-results"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"[]\n");
+}
+
 /// Keep an observer connected while the Attempt owner moves from its Writer
 /// into Review. The attachment itself never sends a detach request.
 #[test]
@@ -2722,7 +2892,17 @@ fn host_native_attached_attempt_progression() {
     );
     run("git", &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("README.md"), "Native progression fixture.\n").unwrap();
+    install_native_fixture_tester(&root);
     run("git", &["add", "README.md"]);
+    run(
+        "git",
+        &[
+            "add",
+            "-f",
+            ".fluent/tester.yaml",
+            ".fluent/extract-tester-results",
+        ],
+    );
     run("git", &["commit", "-m", "Add fixture"]);
     let work = "native-attached-progression";
     run(
