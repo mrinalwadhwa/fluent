@@ -401,6 +401,8 @@ fn host_managed_terminal_acceptance() {
     let attach_and_disconnect = || {
         // script gives the CLI a real controlling PTY, as a dashboard or
         // terminal client would. Keep its input pipe open until tmux detaches.
+        let output = tempfile::NamedTempFile::new_in(&source).unwrap();
+        let errors = tempfile::NamedTempFile::new_in(&source).unwrap();
         let mut client = Command::new("/usr/bin/script")
             .arg("-q")
             .arg("/dev/null")
@@ -412,11 +414,20 @@ fn host_managed_terminal_acceptance() {
                 source.to_str().unwrap(),
                 &first.descriptor().session_id,
             ])
+            .env("TERM", "xterm-256color")
+            .env_remove("TMUX")
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(output.reopen().unwrap()))
+            .stderr(Stdio::from(errors.reopen().unwrap()))
             .spawn()
             .unwrap();
+        let diagnostics = |status| {
+            format!(
+                "status={status:?}, output={}, errors={}",
+                String::from_utf8_lossy(&std::fs::read(output.path()).unwrap()),
+                String::from_utf8_lossy(&std::fs::read(errors.path()).unwrap())
+            )
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let clients = Command::new("tmux")
@@ -428,11 +439,17 @@ fn host_managed_terminal_acceptance() {
             if clients.status.success() && !clients.stdout.is_empty() {
                 break;
             }
-            assert!(
-                client.try_wait().unwrap().is_none(),
-                "attachment exited before connecting"
-            );
-            assert!(Instant::now() < deadline, "attachment did not connect");
+            if let Some(status) = client.try_wait().unwrap() {
+                panic!(
+                    "attachment exited before connecting: {}",
+                    diagnostics(Some(status))
+                );
+            }
+            if Instant::now() >= deadline {
+                client.kill().unwrap();
+                let status = client.wait().unwrap();
+                panic!("attachment did not connect: {}", diagnostics(Some(status)));
+            }
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(
@@ -448,10 +465,14 @@ fn host_managed_terminal_acceptance() {
         while client.try_wait().unwrap().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(
-            client.try_wait().unwrap().is_some(),
-            "attachment did not disconnect"
-        );
+        if client.try_wait().unwrap().is_none() {
+            client.kill().unwrap();
+            let status = client.wait().unwrap();
+            panic!(
+                "attachment did not disconnect: {}",
+                diagnostics(Some(status))
+            );
+        }
         assert!(first.is_live().unwrap(), "attachment canceled its worker");
         let current: fluent::execution::ExecutionRecord =
             serde_json::from_slice(&std::fs::read(&first_record).unwrap()).unwrap();
