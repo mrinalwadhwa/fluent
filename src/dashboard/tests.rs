@@ -799,6 +799,71 @@ fn work_filters_count_items_from_authoritative_state() {
             .category,
         C::Planned
     );
+
+    fn candidate_with_learning(
+        learning: Option<crate::work_model::AttemptLearning>,
+    ) -> crate::work_model::WorkItem {
+        use crate::work_model::{
+            AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus, WorkspaceAccess,
+            WorkspaceRef,
+        };
+        let mut item = crate::work_model::WorkItem::planned("candidate", "Candidate");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        let task = &mut attempt.tasks[0];
+        task.status = TaskStatus::Complete;
+        task.workspace_access = WorkspaceAccess {
+            reads: vec![WorkspaceRef {
+                id: "target".into(),
+                path: ".".into(),
+            }],
+            writes: vec![WorkspaceRef {
+                id: "candidate".into(),
+                path: "../candidate".into(),
+            }],
+        };
+        task.output = Some(TaskOutput {
+            workspace_id: "candidate".into(),
+            workspace_path: "../candidate".into(),
+            source_branch: "main".into(),
+            base_commit: None,
+            commit: "abc123".into(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        attempt.status = AttemptStatus::Complete;
+        attempt.review_state = Some(AttemptReviewState::Passed);
+        attempt.learning = learning;
+        item.create_or_get_merge_candidate("attempt-1").unwrap();
+        item
+    }
+    let learning_root = tempfile::tempdir().unwrap();
+    let store = crate::work_model::WorkModelStore::new(learning_root.path());
+    store
+        .create_work_item(&candidate_with_learning(None))
+        .unwrap();
+    let before = project::SourceSnapshot::load(learning_root.path()).unwrap();
+    assert_eq!(before.work[0].category, C::Ready);
+    let mut before_app = project_app(vec![before]);
+    before_app.filter = project::Filter::Category(C::ReadyToLand);
+    assert!(before_app.project_keys().is_empty());
+    assert!(text(&before_app, 140, 24).contains("Ready to land 0"));
+    let learning = crate::work_model::AttemptLearning::succeeded(
+        1,
+        crate::follow_up::ArtifactRef {
+            path: "handoff.json".into(),
+            digest: "sha256:x".into(),
+        },
+    );
+    let mut updated = store.read_work_item("candidate").unwrap();
+    updated.attempts[0].learning = Some(learning);
+    store.write_work_item(&updated).unwrap();
+    let after = project::SourceSnapshot::load(learning_root.path()).unwrap();
+    assert_eq!(after.work[0].category, C::ReadyToLand);
+    let mut after_app = project_app(vec![after]);
+    after_app.filter = project::Filter::Category(C::ReadyToLand);
+    assert_eq!(after_app.project_keys().len(), 1);
+    assert!(text(&after_app, 140, 24).contains("Ready to land 1"));
 }
 
 #[test]
@@ -816,15 +881,36 @@ fn expanded_work_shows_parallel_worker_roles() {
     crate::work_model::WorkModelStore::new(root.path())
         .create_work_item(&item)
         .unwrap();
-    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    let mut source = project::SourceSnapshot::load(root.path()).unwrap();
     assert_eq!(source.work[0].workers.len(), 2);
     assert_eq!(source.work[0].workers[0].role, "architecture");
     assert_eq!(source.work[0].workers[1].role, "tests");
     assert!(source.work[0].workers[0].terminal.is_none());
+    source.work[0].workers[0].terminal = Some(crate::terminal_sessions::TerminalDescriptor {
+        schema_version: 1,
+        source_id: source.id.clone(),
+        project_identity: source.id.clone(),
+        work_item_id: "work".into(),
+        attempt_id: "attempt-1".into(),
+        task_id: source.work[0].workers[0].key.task_id.clone().unwrap(),
+        execution_generation: "generation-1".into(),
+        session_id: "session-1".into(),
+        role: "architecture".into(),
+        provider: "Codex".into(),
+        lifecycle: crate::terminal_sessions::TerminalLifecycle::Running,
+        can_observe: true,
+        can_control: true,
+        unavailable_reason: None,
+    });
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.project_keys().len(), 3);
-    assert!(text(&app, 100, 24).contains("Current 1"));
+    let rendered = text(&app, 140, 24);
+    assert!(rendered.contains("Current 1"));
+    assert!(rendered.contains("architecture"));
+    assert!(rendered.contains("tests"));
+    assert!(rendered.contains("architecture") && rendered.contains("term:on"));
+    assert!(rendered.contains("tests") && rendered.contains("term:off"));
 }
 
 #[test]
@@ -851,7 +937,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
-    let details = layout::project_detail_values(&app, app.selected_key.as_ref().unwrap());
+    let details = project::detail_values(&app.snapshot.sources, app.selected_key.as_ref().unwrap());
     assert!(details.contains(&"Provider: Codex".into()));
     assert!(details.contains(&"Model: unavailable".into()));
     assert!(details.contains(&"Elapsed: unavailable".into()));
@@ -860,13 +946,51 @@ fn details_distinguish_recorded_values_from_unknowns() {
             .iter()
             .any(|value| value.contains("headless execution"))
     );
+    let worker = &mut app.snapshot.sources[0].work[0].workers[0];
+    worker.model = Some("test-model".into());
+    worker.effort = Some("high".into());
+    worker.elapsed_ms = Some(12_000);
+    worker.key.execution_generation = Some("generation-1".into());
+    worker.terminal = Some(crate::terminal_sessions::TerminalDescriptor {
+        schema_version: 1,
+        source_id: "/one".into(),
+        project_identity: "/one".into(),
+        work_item_id: "work".into(),
+        attempt_id: "attempt-1".into(),
+        task_id: "write".into(),
+        execution_generation: "generation-1".into(),
+        session_id: "session-1".into(),
+        role: "Writer".into(),
+        provider: "Codex".into(),
+        lifecycle: crate::terminal_sessions::TerminalLifecycle::Running,
+        can_observe: true,
+        can_control: true,
+        unavailable_reason: None,
+    });
+    let selected = worker.key.clone();
+    app.snapshot.sources[0].work[0]
+        .status
+        .metrics
+        .provider_wait_ms = 4_000;
+    app.select_key(selected);
+    let rendered = text(&app, 140, 30);
+    assert!(rendered.contains("term:on"));
+    assert!(rendered.contains("Provider: Codex"));
+    assert!(rendered.contains("Model: test-model"));
+    assert!(rendered.contains("Effort: high"));
+    assert!(rendered.contains("Elapsed: 12s"));
+    assert!(rendered.contains("Work provider wait: 4s"));
+    assert!(rendered.contains("Agent terminal: Observe available"));
     let ready = project_app(vec![project_source(
         "/one",
         vec![row("work", "task-ready")],
     )]);
     assert!(
-        layout::project_detail_values(&ready, ready.selected_key.as_ref().unwrap())
-            .contains(&"Next action: fluent attempt run work".into())
+        project::detail_values(
+            &ready.snapshot.sources,
+            ready.selected_key.as_ref().unwrap()
+        )
+        .contains(&"Next action: fluent attempt run work".into())
     );
 }
 
@@ -915,6 +1039,33 @@ fn selection_preserves_composite_worker_identity() {
     );
     app.resize(80, 20);
     assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE);
+    assert_eq!(app.selected_key.as_ref().unwrap().task_id, None);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+    assert_eq!(
+        app.selected_key.as_ref().unwrap().task_id.as_deref(),
+        Some("write")
+    );
+    app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE);
+    assert!(app.selected_key.is_none());
+    app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE);
+    assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
+    let worker_key = app.snapshot.sources[0].work[0].workers[0].key.clone();
+    app.select_key(worker_key);
+    let mut changed = app.snapshot.clone();
+    changed.sources[0].work[0].workers[0]
+        .key
+        .execution_generation = Some("generation-3".into());
+    app.refresh(changed);
+    assert_eq!(
+        app.selected_key
+            .as_ref()
+            .unwrap()
+            .execution_generation
+            .as_deref(),
+        Some("generation-3")
+    );
+    assert!(text(&app, 80, 20).contains("Writer"));
 }
 
 #[test]
@@ -933,6 +1084,10 @@ fn failed_source_does_not_hide_healthy_projects() {
     crate::work_model::WorkModelStore::new(&two)
         .create_work_item(&healthy)
         .unwrap();
+    let healthy_store = crate::work_model::WorkModelStore::new(&two);
+    let mut newer = healthy_store.read_work_item("two").unwrap();
+    newer.title = "Healthy now".into();
+    healthy_store.write_work_item(&newer).unwrap();
     let old = project::SourceSnapshot::load(&one).unwrap();
     assert_eq!(old.work.len(), 1, "{:?}", old.diagnostics);
     let items = one.join(".fluent/work/items");
@@ -943,6 +1098,11 @@ fn failed_source_does_not_hide_healthy_projects() {
     assert!(refreshed[0].stale.is_some());
     assert_eq!(refreshed[0].work[0].status.title, "Retain me");
     assert!(refreshed[1].stale.is_none());
+    let rendered = text(&project_app(refreshed), 140, 24);
+    assert!(rendered.contains("STALE"));
+    assert_eq!(rendered.matches("STALE").count(), 1);
+    assert!(rendered.contains("Retain me"));
+    assert!(rendered.contains("Healthy now"));
 }
 
 #[test]
@@ -953,6 +1113,8 @@ fn project_layout_keeps_selected_content_visible() {
             .map(|n| row(&format!("work-{n}"), "planned"))
             .collect(),
     )]);
+    app.snapshot.sources[0].work[29].status.title =
+        "work-29 漢字 e\u{301} and a long title that must stay inside its pane".into();
     for (width, height) in [(59, 14), (60, 15), (99, 18), (100, 18), (140, 24)] {
         app.resize(width, height);
         for _ in 0..29 {
@@ -963,6 +1125,16 @@ fn project_layout_keeps_selected_content_visible() {
             assert!(rendered.contains("Resize terminal"));
         } else {
             assert!(rendered.contains("work-29"));
+            assert!(rendered.contains("q quit"));
+            assert!(rendered.contains("? help"));
+            if width >= 100 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+                let boundary = width * 43 / 100 - 1;
+                for y in 6..height - 2 {
+                    assert_eq!(terminal.backend().buffer()[(boundary, y)].symbol(), "│");
+                }
+            }
         }
     }
     let mut compact = project_app(vec![project_source(

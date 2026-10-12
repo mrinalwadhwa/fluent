@@ -141,7 +141,7 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else if app.pane == Pane::Detail && area.width < 100 {
         "Esc/Tab list  j/k scroll  ? help  q quit"
     } else if area.width < 100 {
-        "j/k select  Enter expand  Tab detail  f filter  ? help  q quit"
+        "j/k select Enter expand Tab detail f filter ? help q quit"
     } else {
         "j/k select  Enter expand  f filter  a history  e errors  r refresh  ? help  q quit"
     };
@@ -203,10 +203,14 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
                         " "
                     };
                     lines.push(Line::from(format!(
-                        "{marker}   {} · {} [{}]",
+                        "{marker} {} [{}] term:{}",
                         worker.role,
-                        worker.provider.as_deref().unwrap_or("unavailable"),
-                        worker.state
+                        worker.state,
+                        if worker.terminal.as_ref().is_some_and(|t| t.can_observe) {
+                            "on"
+                        } else {
+                            "off"
+                        }
                     )));
                 }
             }
@@ -229,7 +233,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
     let values = app
         .selected_key
         .as_ref()
-        .map(|key| layout::project_detail_values(app, key))
+        .map(|key| super::project::detail_values(&app.snapshot.sources, key))
         .unwrap_or_else(|| vec!["No Work Item selected".into()]);
     frame.render_widget(
         Paragraph::new(values.into_iter().map(Line::from).collect::<Vec<_>>())

@@ -288,6 +288,102 @@ impl SourceSnapshot {
     }
 }
 
+pub fn detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
+    let Some((source, work)) = find_work(sources, key) else {
+        return vec!["Selection unavailable".into()];
+    };
+    let next_action = match work.category {
+        Category::Queued => "Awaiting queue dispatch".into(),
+        Category::Running => "Workflow running".into(),
+        Category::History => "No operator action".into(),
+        _ => crate::guidance::next_action_for_status_row(&work.status)
+            .map(|action| {
+                action
+                    .trim()
+                    .trim_start_matches("→ Next:")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unavailable".into()),
+    };
+    let mut values = vec![
+        work.status.title.clone(),
+        format!("Source: {} · {}", source.host, source.path.display()),
+        format!("Work Item: {}", work.status.id),
+        format!("Status: {}", work.category.label()),
+        format!("Phase: {}", work.phase.as_deref().unwrap_or("unavailable")),
+        format!("Attempt: {}", work.status.attempt),
+        format!("Next action: {next_action}"),
+    ];
+    if let Some(worker) = find_worker(sources, key) {
+        values.extend([
+            format!("Worker: {}", worker.role),
+            format!(
+                "Task: {}",
+                worker.key.task_id.as_deref().unwrap_or("unavailable")
+            ),
+            format!("State: {}", worker.state),
+            format!(
+                "Invocation: {}",
+                worker
+                    .key
+                    .execution_generation
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            ),
+            format!(
+                "Provider: {}",
+                worker.provider.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Model: {}",
+                worker.model.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Effort: {}",
+                worker.effort.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Elapsed: {}",
+                worker
+                    .elapsed_ms
+                    .map(|ms| format!("{}s", ms / 1000))
+                    .unwrap_or_else(|| "unavailable".into())
+            ),
+            format!(
+                "Work provider wait: {}",
+                if work.status.metrics.provider_wait_ms > 0 {
+                    format!("{}s", work.status.metrics.provider_wait_ms / 1000)
+                } else {
+                    "unavailable".into()
+                }
+            ),
+            format!(
+                "Agent terminal: {}",
+                worker
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| if terminal.can_observe {
+                        "Observe available".into()
+                    } else {
+                        worker.unavailable_reason.clone()
+                    })
+                    .unwrap_or_else(|| worker.unavailable_reason.clone())
+            ),
+        ]);
+    }
+    if let Some(stale) = &source.stale {
+        values.push(format!("Stale source: {stale}"));
+    }
+    values.extend(
+        source
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("Source diagnostic: {diagnostic}")),
+    );
+    values
+}
+
 pub fn discover_paths(
     current: &Path,
     explicit: &[PathBuf],

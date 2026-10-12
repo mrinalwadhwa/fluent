@@ -4,6 +4,17 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Keep the old dashboard snapshot as an internal compatibility path
+
+The CLI opens the project grouped dashboard. The older status group snapshot
+remains inside `dashboard::snapshot` and its app and render branches so existing
+dashboard tests and internal snapshot callers continue to work while the project
+view is adopted. New operator behavior and terminal integration belong to the
+project view. Retire the old branch after its remaining tests and callers move
+to project snapshots.
+
+---
+
 ## Inventory terminal descendants by owned handle and Seatbelt grant
 
 Terminal cancellation inventories pane descendants and process sessions, then

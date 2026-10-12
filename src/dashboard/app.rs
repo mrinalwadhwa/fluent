@@ -385,7 +385,13 @@ impl App {
 
     pub fn scroll_bounds(&self) -> layout::ScrollBounds {
         if self.project_mode() {
-            layout::project_scroll_bounds(self)
+            layout::project_scroll_bounds(
+                &self.snapshot.sources,
+                self.filter,
+                &self.expanded,
+                self.selected_key.as_ref(),
+                self.size,
+            )
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
         }
