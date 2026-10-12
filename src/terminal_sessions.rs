@@ -552,11 +552,18 @@ impl TerminalSession {
                 let settled = read_record(&record_path)
                     .map(|record| record.state == ExecutionState::Canceled)
                     .unwrap_or(false);
-                let no_server = !execution::execution_is_live(&record_path).unwrap_or(false)
-                    && !socket.exists();
-                if settled || no_server {
+                // Spawn may fail before an execution owner exists. In that
+                // case, inspect the receipt's handle and sandbox grant before
+                // discarding it; server exit alone proves nothing about panes.
+                let fully_settled = settled
+                    || (!execution::execution_is_live(&record_path).unwrap_or(false)
+                        && settle_panes(&socket, 0, &[], &resource.owner_marker).is_ok());
+                if fully_settled {
                     let _ = std::fs::remove_file(resource_path);
                 } else {
+                    // The server may exit while a pane descendant still owns
+                    // this generation. Keep its receipt and owner handle so
+                    // a later cancellation can complete the inventory.
                     let _ = socket_guard.keep();
                 }
                 return Err(error);
@@ -1265,20 +1272,12 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
                 .is_some_and(|name| name == resource.owner_marker.as_str()),
         "terminal owner marker changed"
     );
-    // A stopped earlier generation may leave its descriptor in this Task.
-    let published = match std::fs::read(registry.join(DESCRIPTOR)) {
-        Ok(bytes) => {
-            let stored: StoredTerminal = serde_json::from_slice(&bytes)?;
-            descriptor_publishes_resource(&stored, &resource, record.launch_generation.as_deref())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    // A failed setup can leave a socket pathname after its server exits.
-    if !published && !execution::execution_is_live(path)? {
-        return Ok(());
-    }
-    if !resource.socket.exists() && published && resource.pane_sessions.is_empty() {
+    // The resource receipt exists before descriptor publication. It remains
+    // authoritative when setup fails or the server exits first.
+    if !resource.socket.exists()
+        && resource.pane_sessions.is_empty()
+        && resource.owner_marker.is_empty()
+    {
         bail!("managed terminal socket disappeared before pane descendants could be verified");
     }
     settle_panes(
@@ -1373,6 +1372,97 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn unpublished_exited_server_still_settles_owner_handle_descendant() {
+        let source = tempfile::tempdir().unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fluent-t-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let owner_handle = socket_dir.path().join("owner");
+        std::fs::write(&owner_handle, b"").unwrap();
+        let registry = source
+            .path()
+            .join(".fluent/work/terminal-sessions/work-1/attempt-1/task-1");
+        std::fs::create_dir_all(&registry).unwrap();
+        let record_path = source
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/task-1/execution.json");
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        let resource = TerminalResource {
+            execution_record: record_path.clone(),
+            socket: socket_dir.path().join("socket"),
+            pane_sessions: vec![],
+            owner_marker: socket_dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        std::fs::write(
+            registry.join("resource.json"),
+            serde_json::to_vec(&resource).unwrap(),
+        )
+        .unwrap();
+        let record = ExecutionRecord {
+            schema_version: 2,
+            state: ExecutionState::Settled,
+            owner_pid: 0,
+            leader_pid: 0,
+            process_group_id: 0,
+            started_at: String::new(),
+            heartbeat_at: String::new(),
+            settled_at: None,
+            attempt_owner: Some(execution::AttemptExecutionOwner {
+                project_root: source.path().into(),
+                work_item_id: "work-1".into(),
+                attempt_id: "attempt-1".into(),
+            }),
+            launch_generation: Some("generation-1".into()),
+        };
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "exec 9< '{}'; exec /bin/sleep 30",
+                owner_handle.display()
+            ))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !owner_members(&owner_handle).unwrap().contains(&child.id())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(owner_members(&owner_handle).unwrap().contains(&child.id()));
+        let outcome = execution::cancel(&record_path);
+        let still_running = child.try_wait().unwrap().is_none();
+        if still_running {
+            child.kill().unwrap();
+        }
+        child.wait().unwrap();
+        match outcome {
+            Ok(_) => {
+                assert!(
+                    !still_running,
+                    "unpublished terminal descendant survived cancellation"
+                );
+                assert!(!registry.join("resource.json").exists());
+            }
+            Err(error) => {
+                // Some Writer sandboxes deny even a child-process signal.
+                // Cancellation must retain the receipt and report that denial.
+                assert!(
+                    error.to_string().contains("Operation not permitted"),
+                    "unexpected settlement error: {error:#}"
+                );
+                assert!(registry.join("resource.json").exists());
+            }
+        }
+    }
 
     #[test]
     fn open_owner_handle_survives_environment_clear_without_adopting_arguments() {

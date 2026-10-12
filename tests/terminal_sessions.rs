@@ -51,6 +51,10 @@ fn terminal_is_bound_before_attachment() {
 
 #[test]
 fn detach_does_not_cancel_owned_worker() {
+    if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_some() {
+        host_managed_terminal_acceptance();
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
     let mut session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
@@ -277,7 +281,7 @@ fn host_managed_terminal_acceptance() {
     }
     use fluent::work_model::{WorkItem, WorkModelStore};
     use std::path::Path;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     fn wait_file(path: &Path) {
@@ -390,6 +394,72 @@ fn host_managed_terminal_acceptance() {
     .unwrap();
     let first_socket = first.socket_path().unwrap().to_path_buf();
     let second_socket = second.socket_path().unwrap().to_path_buf();
+    let first_record =
+        source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
+    let original: fluent::execution::ExecutionRecord =
+        serde_json::from_slice(&std::fs::read(&first_record).unwrap()).unwrap();
+    let attach_and_disconnect = || {
+        // script gives the CLI a real controlling PTY, as a dashboard or
+        // terminal client would. Keep its input pipe open until tmux detaches.
+        let mut client = Command::new("/usr/bin/script")
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(assert_cmd::cargo::cargo_bin("fluent"))
+            .args([
+                "terminal",
+                "attach",
+                "--source",
+                source.to_str().unwrap(),
+                &first.descriptor().session_id,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let clients = Command::new("tmux")
+                .arg("-S")
+                .arg(&first_socket)
+                .args(["list-clients", "-F", "#{client_pid}"])
+                .output()
+                .unwrap();
+            if clients.status.success() && !clients.stdout.is_empty() {
+                break;
+            }
+            assert!(
+                client.try_wait().unwrap().is_none(),
+                "attachment exited before connecting"
+            );
+            assert!(Instant::now() < deadline, "attachment did not connect");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&first_socket)
+                .args(["detach-client", "-s", "fluent"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while client.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            client.try_wait().unwrap().is_some(),
+            "attachment did not disconnect"
+        );
+        assert!(first.is_live().unwrap(), "attachment canceled its worker");
+        let current: fluent::execution::ExecutionRecord =
+            serde_json::from_slice(&std::fs::read(&first_record).unwrap()).unwrap();
+        assert_eq!(current.launch_generation, original.launch_generation);
+        assert_eq!(current.leader_pid, original.leader_pid);
+    };
+    attach_and_disconnect();
+    attach_and_disconnect();
     let marker = first_socket
         .parent()
         .unwrap()
@@ -623,8 +693,6 @@ fn host_managed_terminal_acceptance() {
             "another invocation was adopted"
         );
     }
-    let first_record =
-        source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/execution.json");
     let canceled = fluent::execution::cancel(&first_record).unwrap();
     eprintln!("terminal host external cancellation: {canceled:?}");
     let descendant_state = Command::new("/bin/ps")
