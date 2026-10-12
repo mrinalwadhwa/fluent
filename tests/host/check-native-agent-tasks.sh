@@ -66,7 +66,16 @@ printf '%s\n' "$candidate" > "$host_output/candidate.txt"
 unset FLUENT_TEST_HOST_SANDBOX_PREFLIGHT
 unset FLUENT_TEST_HERMETIC_PROVIDERS
 unset FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC
+set +e
 cargo nextest run --offline --features test-support --test native_agent_tasks \
   --no-tests fail --run-ignored all --test-threads 1 --success-output immediate \
-  -E 'test(host_native_agent_acceptance)'
+  -E 'test(host_native_agent_acceptance)' > "$host_output/host-test.log" 2>&1
+host_status=$?
+set -e
+printf 'host-test-status=%s\n' "$host_status" | tee "$host_output/status.txt"
+tail -n 30 "$host_output/host-test.log"
+if [ -f target/debug/fluent ]; then
+  shasum -a 256 target/debug/fluent > "$host_output/fluent-binary.sha256"
+fi
 test "$(git rev-parse HEAD)" = "$candidate"
+exit "$host_status"
