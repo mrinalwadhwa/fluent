@@ -205,6 +205,7 @@ export FLUENT_FIXTURE_SHA="$fixture_head"
 export FLUENT_FIXTURE_REQUEST="$request_digest"
 export FLUENT_FIXTURE_APPROVAL_ID="$approval_id"
 profile_path_file="$fixture/selected-profile-path.txt"
+profile_watcher_ready="$fixture/profile-watcher-ready"
 export FLUENT_FIXTURE_PROFILE_PATH_FILE="$profile_path_file"
 authority_dir=$(python3 - <<'PY'
 import os, pwd
@@ -214,45 +215,20 @@ PY
 )
 python3 "$candidate_root/tests/fixtures/watch-tester-process-table-profile.py" \
     "$authority_dir" "$profile_path_file" "$evidence_dir/selected-profile.sb" \
+    "$profile_watcher_ready" \
     > "$evidence_dir/profile-watcher.log" 2>&1 &
 watcher_pid=$!
+for ((i=0; i<300; i++)); do
+    [[ -s "$profile_watcher_ready" ]] && break
+    sleep 0.1
+done
+[[ -s "$profile_watcher_ready" ]] || fail 'profile watcher did not establish its starting snapshot'
 
 (cd "$fixture" && "$binary" tester check) \
     > "$evidence_dir/approved-run.log" 2>&1 || fail 'approved production Tester run failed'
 wait "$watcher_pid" || fail 'selected production profile was not captured'
 watcher_pid=
-python3 - "$evidence_dir" "$fixture_head" "$approval_id" "$request_digest" <<'PY'
-import json, os, pwd, shutil, sys
-from pathlib import Path
-
-evidence = Path(sys.argv[1])
-candidate, approval, request = sys.argv[2:]
-authority = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve() / '.config/fluent/tester-permissions'
-matches = []
-for path in authority.glob('receipt-*.json'):
-    receipt = json.loads(path.read_text())
-    if receipt.get('candidate_commit') == candidate and receipt.get('approval_id') == approval:
-        matches.append((path, receipt))
-if len(matches) != 1:
-    raise SystemExit(f'expected one protected receipt for fixture, found {len(matches)}')
-path, receipt = matches[0]
-if (receipt.get('request_digest') != request or
-        receipt.get('execution_mode') != 'macos-seatbelt' or
-        receipt.get('host_platform') != 'macos' or
-        receipt.get('command_index') != 0 or
-        receipt.get('exit_code') != 0):
-    raise SystemExit('protected receipt does not prove the approved production command')
-shutil.copy2(path, evidence / 'protected-receipt.json')
-print(json.dumps({
-    'candidate': candidate,
-    'approval_id': approval,
-    'request_digest': request,
-    'receipt_id': path.name,
-    'profile_digest': receipt['profile_digest'],
-    'execution_mode': receipt['execution_mode'],
-    'admitted_at': receipt['admitted_at'],
-    'settled_at': receipt['settled_at'],
-}, indent=2), file=(evidence / 'observed-permission.json').open('w'))
-PY
+python3 "$candidate_root/tests/fixtures/verify-tester-process-table-receipt.py" \
+    "$evidence_dir" "$authority_dir" "$fixture_head" "$approval_id" "$request_digest"
 printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$evidence_dir/identity.txt"
 printf 'production Tester process-table acceptance passed\n' > "$evidence_dir/result.txt"

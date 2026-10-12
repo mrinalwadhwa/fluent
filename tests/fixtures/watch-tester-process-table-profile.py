@@ -6,13 +6,18 @@ from pathlib import Path
 import sys
 import time
 
-store, path_file, evidence = map(Path, sys.argv[1:])
+store, path_file, evidence, ready = map(Path, sys.argv[1:])
 rule = b'(allow sysctl-read (sysctl-name "kern.proc.all"))'
+existing = {path.name for path in store.iterdir()}
+ready_temporary = ready.with_name(f"{ready.name}.{os.getpid()}.tmp")
+ready_temporary.write_text("ready\n")
+os.replace(ready_temporary, ready)
 deadline = time.monotonic() + 30
 
 while time.monotonic() < deadline:
     for path in store.iterdir():
-        if path.suffix == ".json" or path.is_symlink() or not path.is_file():
+        if (path.name in existing or path.suffix == ".json"
+                or path.is_symlink() or not path.is_file()):
             continue
         try:
             content = path.read_bytes()

@@ -26338,22 +26338,37 @@ fn tester_permissions_profile_watcher_selects_process_table_profile() {
     let store = tmp.path().join("authority");
     fs::create_dir(&store).unwrap();
     fs::write(store.join("baseline"), b"(version 1)\n(deny default)\n").unwrap();
-    let selected = store.join("selected");
     let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all\"))\n";
-    fs::write(&selected, profile).unwrap();
+    fs::write(store.join("unrelated-profile"), profile).unwrap();
+    let selected = store.join("selected");
     let path_file = tmp.path().join("profile-path.txt");
     let evidence = tmp.path().join("selected-profile.sb");
+    let ready = tmp.path().join("watcher-ready");
     let watcher = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/watch-tester-process-table-profile.py");
-    let output = Command::new("python3")
+    let mut child = Command::new("python3")
         .args([
             watcher.as_os_str(),
             store.as_os_str(),
             path_file.as_os_str(),
             evidence.as_os_str(),
+            ready.as_os_str(),
         ])
-        .output()
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !ready.exists() {
+        let _ = child.kill();
+        panic!("profile watcher did not establish its starting snapshot");
+    }
+    fs::write(&selected, profile).unwrap();
+    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -26364,6 +26379,60 @@ fn tester_permissions_profile_watcher_selects_process_table_profile() {
         selected.to_str().unwrap()
     );
     assert_eq!(fs::read(evidence).unwrap(), profile);
+}
+
+#[test]
+fn tester_permissions_host_receipt_matches_captured_profile() {
+    let tmp = TempDir::new().unwrap();
+    let authority = tmp.path().join("authority");
+    let evidence = tmp.path().join("evidence");
+    fs::create_dir(&authority).unwrap();
+    fs::create_dir(&evidence).unwrap();
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all\"))\n";
+    fs::write(evidence.join("selected-profile.sb"), b"other profile").unwrap();
+    let receipt = serde_json::json!({
+        "candidate_commit": "fixture-candidate",
+        "approval_id": "fixture-approval",
+        "request_digest": "fixture-request",
+        "execution_mode": "macos-seatbelt",
+        "host_platform": "macos",
+        "command_index": 0,
+        "exit_code": 0,
+        "profile_digest": format!("sha256:{:x}", Sha256::digest(profile)),
+        "admitted_at": "2026-10-11T00:00:00Z",
+        "settled_at": "2026-10-11T00:00:01Z"
+    });
+    write_json_path(&authority.join("receipt-fixture.json"), &receipt);
+    let verifier = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/verify-tester-process-table-receipt.py");
+    let check = || {
+        Command::new("python3")
+            .args([
+                verifier.as_os_str(),
+                evidence.as_os_str(),
+                authority.as_os_str(),
+                std::ffi::OsStr::new("fixture-candidate"),
+                std::ffi::OsStr::new("fixture-approval"),
+                std::ffi::OsStr::new("fixture-request"),
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !check().status.success(),
+        "unrelated profile must not match receipt"
+    );
+    fs::write(evidence.join("selected-profile.sb"), profile).unwrap();
+    let matched = check();
+    assert!(
+        matched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matched.stderr)
+    );
+    assert_eq!(
+        fs::read(evidence.join("protected-receipt.json")).unwrap(),
+        fs::read(authority.join("receipt-fixture.json")).unwrap()
+    );
 }
 
 #[test]
