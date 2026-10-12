@@ -207,11 +207,58 @@ pub fn extract_codex_usage(
 
     let mut legacy_rows = Vec::new();
     let mut completed_rows = Vec::new();
+    let mut native_rows: Vec<(String, UsageRow)> = Vec::new();
+    let mut native_model = "unknown".to_string();
+    let mut native_seen = false;
     for line in content.lines() {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        if val["format"] == "fluent-native-agent-event"
+            && val["schema_version"] == 1
+            && val["provider"] == "codex"
+        {
+            native_seen = true;
+            let event = &val["event"];
+            if event["method"] == "thread/started" {
+                if let Some(model) = event["params"]["thread"]["model"].as_str() {
+                    native_model = model.to_string();
+                }
+            } else if event["method"] == "thread/tokenUsage/updated" {
+                let params = &event["params"];
+                let usage = &params["tokenUsage"]["last"];
+                let Some(turn_id) = params["turnId"].as_str() else {
+                    continue;
+                };
+                let (Some(input_tokens), Some(output_tokens)) = (
+                    usage["inputTokens"].as_u64(),
+                    usage["outputTokens"].as_u64(),
+                ) else {
+                    continue;
+                };
+                let row = UsageRow {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    coder: "codex".to_string(),
+                    work_item_id: work_item_id.to_string(),
+                    attempt_id: attempt_id.to_string(),
+                    task_id: task_id.to_string(),
+                    model: native_model.clone(),
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens: usage["cachedInputTokens"].as_u64().unwrap_or(0),
+                    reasoning_output_tokens: usage["reasoningOutputTokens"].as_u64(),
+                    duration_ms: None,
+                };
+                if let Some((_, previous)) = native_rows.iter_mut().find(|(id, _)| id == turn_id) {
+                    *previous = row;
+                } else {
+                    native_rows.push((turn_id.to_string(), row));
+                }
+            }
+            continue;
+        }
 
         let (usage, model, duration_ms, completed) = if val["type"].as_str() == Some("event_msg")
             && val["payload"]["type"].as_str() == Some("token_count")
@@ -263,7 +310,9 @@ pub fn extract_codex_usage(
     // Some Codex versions may emit both the public turn completion and legacy
     // internal token-count events. Prefer the public record so one turn never
     // contributes two usage rows.
-    if completed_rows.is_empty() {
+    if native_seen {
+        native_rows.into_iter().map(|(_, row)| row).collect()
+    } else if completed_rows.is_empty() {
         legacy_rows
     } else {
         completed_rows

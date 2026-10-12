@@ -125,6 +125,14 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         return vec![];
     };
 
+    if val["format"] == "fluent-native-agent-event" {
+        return if val["schema_version"] == 1 && val["provider"] == "codex" {
+            parse_native_codex_event(&val["event"])
+        } else {
+            vec![]
+        };
+    }
+
     let event_type = val["type"].as_str().unwrap_or("");
 
     match event_type {
@@ -209,6 +217,65 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         _ => vec![Event::Unknown {
             event_type: event_type.to_string(),
         }],
+    }
+}
+
+fn parse_native_codex_event(event: &serde_json::Value) -> Vec<Event> {
+    let params = &event["params"];
+    match event["method"].as_str() {
+        Some("thread/started") => vec![Event::SessionInit {
+            session_id: params["thread"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            model: params["thread"]["model"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+        }],
+        Some("item/completed") => {
+            let item = &params["item"];
+            match item["type"].as_str() {
+                Some("agentMessage") => item["text"]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| vec![Event::Text { text: text.into() }])
+                    .unwrap_or_default(),
+                Some("commandExecution") => item["aggregatedOutput"]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| {
+                        vec![Event::ToolResult {
+                            tool_use_id: item["id"].as_str().unwrap_or_default().into(),
+                            content: text.into(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                _ => vec![],
+            }
+        }
+        Some("item/started") if params["item"]["type"] == "commandExecution" => {
+            let item = &params["item"];
+            vec![Event::ToolUse {
+                id: item["id"].as_str().unwrap_or_default().into(),
+                name: "Bash".into(),
+                summary: item["command"]
+                    .as_str()
+                    .map(|command| format!("$ {command}"))
+                    .unwrap_or_default(),
+            }]
+        }
+        Some("turn/completed") if params["turn"]["status"] == "completed" => {
+            vec![Event::Result {
+                duration_ms: None,
+                cost_usd: None,
+            }]
+        }
+        Some("turn/started" | "thread/tokenUsage/updated") => vec![],
+        Some(method) => vec![Event::Unknown {
+            event_type: method.into(),
+        }],
+        None => vec![],
     }
 }
 

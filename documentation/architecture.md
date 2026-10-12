@@ -166,6 +166,10 @@ resolved mode on the Attempt so a retry or continuation cannot pick up a later
 configuration change. Missing legacy fields mean `headless`. Until a native
 provider adapter is available, agent Tasks on a native Attempt stop before
 launch and report the missing adapter.
+The Codex relay records original app-server notifications in JSONL records
+marked `fluent-native-agent-event` with schema version 1, execution generation,
+conversation and turn IDs, and admitted input sequence. The transcript feed and
+usage reader recognize these records alongside existing headless transcripts.
 The Task declares role `author`, copies explicit Work Item instructions
 or derives instructions from Work Item planning context into optional
 `Task.instructions`, and declares one writable workspace reference at

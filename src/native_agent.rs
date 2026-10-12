@@ -1,6 +1,7 @@
 //! Validate Codex conversation identities before relaying native input and events.
 
 use anyhow::{Result, bail, ensure};
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
@@ -73,6 +74,21 @@ pub enum Completion {
         turn_id: String,
         input_sequence: u64,
     },
+}
+
+/// Retain the provider notification with the Task execution identity. Readers
+/// use the schema marker to distinguish app-server events from headless CLI
+/// JSONL without changing the original provider event.
+#[derive(Serialize)]
+struct CodexEvidenceRecord<'a> {
+    format: &'static str,
+    schema_version: u32,
+    provider: &'static str,
+    execution_generation: &'a str,
+    conversation_id: &'a str,
+    turn_id: Option<&'a str>,
+    input_sequence: u64,
+    event: &'a Value,
 }
 
 /// Keep one loaded Codex thread and its latest turn bound to a Task generation.
@@ -267,11 +283,32 @@ where
                         return Ok(());
                     }
                     let event: Value = serde_json::from_str(&line)?;
-                    let completion = gate
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
-                        .observe_event_for_generation(generation, &event)?;
-                    evidence.write_all(line.as_bytes())?;
+                    let (completion, input_sequence) = {
+                        let mut gate = gate
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?;
+                        let completion = gate.observe_event_for_generation(generation, &event)?;
+                        (completion, gate.input_sequence)
+                    };
+                    let params = &event["params"];
+                    let conversation_id = params["threadId"]
+                        .as_str()
+                        .or_else(|| params["thread"]["id"].as_str())
+                        .unwrap_or(thread_id);
+                    let record = CodexEvidenceRecord {
+                        format: "fluent-native-agent-event",
+                        schema_version: 1,
+                        provider: "codex",
+                        execution_generation: generation,
+                        conversation_id,
+                        turn_id: params["turn"]["id"]
+                            .as_str()
+                            .or_else(|| params["turnId"].as_str()),
+                        input_sequence,
+                        event: &event,
+                    };
+                    serde_json::to_writer(&mut evidence, &record)?;
+                    evidence.write_all(b"\n")?;
                     evidence.flush()?;
                     if completion != Completion::Ignored {
                         on_completion(completion)?;
