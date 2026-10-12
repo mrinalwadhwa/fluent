@@ -441,8 +441,8 @@ where
                         ) {
                             // Detach a stalled display; canonical evidence and
                             // completion still flow from the provider stream.
+                            // Keep the client's input half open for later turns.
                             display = None;
-                            let _ = downstream_abort_client.shutdown(Shutdown::Both);
                         }
                     }
                 }

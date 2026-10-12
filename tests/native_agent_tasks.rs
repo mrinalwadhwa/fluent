@@ -626,6 +626,18 @@ fn slow_display_cannot_block_evidence_or_supervision() {
             .count(),
         64
     );
+    // Display backpressure must not close the TUI's input half. A later
+    // provider turn still belongs to this invocation.
+    provider
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    tui.write_all(b"{\"id\":2,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n")
+        .unwrap();
+    let mut next_request = String::new();
+    BufReader::new(provider.try_clone().unwrap())
+        .read_line(&mut next_request)
+        .unwrap();
+    assert!(next_request.contains("turn/start"));
     let _ = tui.shutdown(Shutdown::Both);
     drop(provider);
     relay.join().unwrap().unwrap();
