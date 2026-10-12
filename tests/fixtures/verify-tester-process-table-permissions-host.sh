@@ -64,6 +64,8 @@ shasum -a 256 "$binary" > "$evidence_dir/binary-sha256.txt"
 
 mkdir -p "$fixture/.fluent"
 cp "$binary" "$fixture/fluent"
+cp "$candidate_root/tests/fixtures/assert-denied-file-update.sh" "$fixture/assert-denied-file-update.sh"
+chmod 755 "$fixture/assert-denied-file-update.sh"
 git -C "$fixture" init -q -b main
 git -C "$fixture" config user.name 'Fluent host fixture'
 git -C "$fixture" config user.email 'host-fixture@example.invalid'
@@ -153,15 +155,17 @@ root = Path(sys.argv[1])
 pid = sys.argv[2]
 probe = shlex.quote(str(root / 'probe'))
 fluent = shlex.quote(str(root / 'fluent'))
+write_probe = shlex.quote(str(root / 'assert-denied-file-update.sh'))
 operator_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
 authority = shlex.quote(str(operator_home / '.config/fluent/tester-permissions'))
 unrelated = shlex.quote(str(operator_home / '.fluent-process-table-unrelated-write'))
 allowed = (f'{probe} allowed && {probe} control-denied {pid}'
            f' && ! touch {authority}/forged-by-tester && ! touch {unrelated}'
+           f' && {write_probe} "$FLUENT_FIXTURE_PROTECTED_TARGET"'
            ' && (i=0; until test -s "$FLUENT_FIXTURE_PROFILE_PATH_FILE"; do'
            ' i=$((i+1)); test "$i" -lt 300 || exit 17; sleep 0.1; done;'
            ' profile=$(cat "$FLUENT_FIXTURE_PROFILE_PATH_FILE");'
-           ' test -f "$profile" && ! touch "$profile")'
+           f' {write_probe} "$profile")'
            f' && ! {fluent} tester permissions approve --candidate "$FLUENT_FIXTURE_SHA"'
            ' --command-index 0 --capability process-table-read'
            ' --request-digest "$FLUENT_FIXTURE_REQUEST"'
@@ -175,7 +179,7 @@ config = {'commands': [
     '#!/bin/sh\n' + probe + ' denied || exit $?\nprintf "[]\\n"\n')
 PY
 chmod 755 "$fixture/.fluent/extract-tester-results"
-git -C "$fixture" add .fluent/tester.yaml .fluent/extract-tester-results probe.c
+git -C "$fixture" add .fluent/tester.yaml .fluent/extract-tester-results probe.c assert-denied-file-update.sh
 git -C "$fixture" commit -q -m 'Add process-table host fixture'
 fixture_head=$(git -C "$fixture" rev-parse HEAD)
 printf '%s\n' "$fixture_head" > "$evidence_dir/fixture-head.txt"
@@ -213,16 +217,26 @@ from pathlib import Path
 print(Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve() / '.config/fluent/tester-permissions')
 PY
 )
-python3 "$candidate_root/tests/fixtures/watch-tester-process-table-profile.py" \
-    "$authority_dir" "$profile_path_file" "$evidence_dir/selected-profile.sb" \
-    "$profile_watcher_ready" \
-    > "$evidence_dir/profile-watcher.log" 2>&1 &
-watcher_pid=$!
-for ((i=0; i<300; i++)); do
-    [[ -s "$profile_watcher_ready" ]] && break
-    sleep 0.1
-done
-[[ -s "$profile_watcher_ready" ]] || fail 'profile watcher did not establish its starting snapshot'
+approval_record="$authority_dir/${request_digest#sha256:}.json"
+[[ -f "$approval_record" ]] || fail 'protected approval record is missing'
+export FLUENT_FIXTURE_PROTECTED_TARGET="$approval_record"
+start_profile_watcher() {
+    local label=$1
+    local profile_evidence="$evidence_dir/selected-profile.sb"
+    [[ "$label" == first ]] || profile_evidence="$evidence_dir/selected-profile-$label.sb"
+    rm -f "$profile_path_file" "$profile_watcher_ready"
+    python3 "$candidate_root/tests/fixtures/watch-tester-process-table-profile.py" \
+        "$authority_dir" "$profile_path_file" "$profile_evidence" \
+        "$profile_watcher_ready" \
+        > "$evidence_dir/profile-watcher-$label.log" 2>&1 &
+    watcher_pid=$!
+    for ((i=0; i<300; i++)); do
+        [[ -s "$profile_watcher_ready" ]] && break
+        sleep 0.1
+    done
+    [[ -s "$profile_watcher_ready" ]] || fail 'profile watcher did not establish its starting snapshot'
+}
+start_profile_watcher first
 
 (cd "$fixture" && "$binary" tester check) \
     > "$evidence_dir/approved-run.log" 2>&1 || fail 'approved production Tester run failed'
@@ -230,5 +244,19 @@ wait "$watcher_pid" || fail 'selected production profile was not captured'
 watcher_pid=
 python3 "$candidate_root/tests/fixtures/verify-tester-process-table-receipt.py" \
     "$evidence_dir" "$authority_dir" "$fixture_head" "$approval_id" "$request_digest"
+receipt_id=$(python3 - "$evidence_dir/observed-permission.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['receipt_id'])
+PY
+)
+receipt_target="$authority_dir/$receipt_id"
+receipt_before=$(shasum -a 256 "$receipt_target")
+export FLUENT_FIXTURE_PROTECTED_TARGET="$receipt_target"
+start_profile_watcher second
+(cd "$fixture" && "$binary" tester check) \
+    > "$evidence_dir/receipt-denial-run.log" 2>&1 || fail 'receipt denial production Tester run failed'
+wait "$watcher_pid" || fail 'second production profile was not captured'
+watcher_pid=
+[[ "$(shasum -a 256 "$receipt_target")" == "$receipt_before" ]] || fail 'protected receipt changed'
 printf 'finished_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$evidence_dir/identity.txt"
 printf 'production Tester process-table acceptance passed\n' > "$evidence_dir/result.txt"

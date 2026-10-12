@@ -26436,6 +26436,33 @@ fn tester_permissions_host_receipt_matches_captured_profile() {
 }
 
 #[test]
+fn tester_permissions_denied_update_probe_requires_an_existing_denied_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let probe =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-denied-file-update.sh");
+    let target = tmp.path().join("target");
+    let call = |path: &Path, touch_program: Option<&Path>| {
+        let mut command = Command::new("/bin/sh");
+        command.arg(&probe).arg(path);
+        if let Some(touch_program) = touch_program {
+            command.arg(touch_program);
+        }
+        command.output().unwrap()
+    };
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_touch = fake_bin.join("touch");
+    fs::write(&fake_touch, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&fake_touch, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!call(&target, Some(&fake_touch)).status.success());
+    fs::write(&target, "fixture").unwrap();
+    assert!(!call(&target, None).status.success());
+    assert!(call(&target, Some(&fake_touch)).status.success());
+}
+
+#[test]
 fn tester_permissions_record_applied_authority_in_evidence() {
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);
