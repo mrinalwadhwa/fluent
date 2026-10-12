@@ -793,7 +793,10 @@ fn work_filters_count_items_from_authoritative_state() {
         .create_work_item(&proposed)
         .unwrap();
     assert_eq!(
-        project::SourceSnapshot::load(proposed_root.path()).unwrap().work[0].category,
+        project::SourceSnapshot::load(proposed_root.path())
+            .unwrap()
+            .work[0]
+            .category,
         C::Planned
     );
 }
