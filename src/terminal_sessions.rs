@@ -382,6 +382,35 @@ impl TerminalSession {
     }
 
     #[cfg(feature = "test-support")]
+    pub fn start_tmux_fixture(identity: TerminalIdentity) -> Result<Self> {
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fluent-t-")
+            .tempdir_in("/private/tmp")?
+            .keep();
+        let socket = socket_dir.join("socket");
+        let mut command = Command::new(find_tmux()?);
+        command.args(["-S", socket.to_str().unwrap(), "-f", "/dev/null", "-D"]);
+        Self::start_command(identity, command, Some(socket_dir), false, |_| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !socket.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            ensure!(socket.exists(), "fixture tmux server did not start");
+            let output = Command::new(find_tmux()?)
+                .arg("-S")
+                .arg(&socket)
+                .args(["new-session", "-d", "-s", "fluent", "/bin/sh"])
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "fixture tmux session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "test-support")]
     pub fn start_fixture_failed_setup(identity: TerminalIdentity) -> Result<Self> {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg("sleep 30");
@@ -702,32 +731,10 @@ fn spawn_attachment_client(command: &mut Command, control: Option<&TaskLease>) -
         return command.spawn().context("starting observation client");
     };
     let fd = control.raw_fd();
-    // The shell keeps the lease while it waits for the writable client. Close
-    // the descriptor in tmux itself so its server cannot extend that lifetime.
-    let mut wrapper = Command::new("/bin/sh");
-    wrapper
-        .arg("-c")
-        .arg(format!("\"$@\" {fd}>&-; exit $?"))
-        .arg("fluent-terminal-control")
-        .arg(command.get_program())
-        .args(command.get_args());
-    for (key, value) in command.get_envs() {
-        match value {
-            Some(value) => {
-                wrapper.env(key, value);
-            }
-            None => {
-                wrapper.env_remove(key);
-            }
-        }
-    }
-    if let Some(dir) = command.get_current_dir() {
-        wrapper.current_dir(dir);
-    }
-    // Rust opens File descriptors close-on-exec. Pass the acquired lease to the
-    // wrapper so a dead Fluent parent cannot release Control before tmux exits.
+    // The tmux client keeps the lease across Fluent's exit. A shell wrapper
+    // cannot own it: the shell can die while the writable tmux client lives.
     unsafe {
-        wrapper.pre_exec(move || {
+        command.pre_exec(move || {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                 return Err(std::io::Error::last_os_error());
@@ -735,7 +742,7 @@ fn spawn_attachment_client(command: &mut Command, control: Option<&TaskLease>) -
             Ok(())
         });
     }
-    wrapper
+    command
         .spawn()
         .context("starting writable attachment client")
 }
@@ -1420,7 +1427,7 @@ mod control_client_tests {
     use super::*;
 
     #[test]
-    fn writable_client_keeps_control_after_parent_releases_lease() {
+    fn writable_client_itself_holds_control_after_parent_releases_lease() {
         let root = tempfile::tempdir().unwrap();
         let occupied_descriptors: Vec<_> = (0..16)
             .map(|index| std::fs::File::create(root.path().join(format!("open-{index}"))).unwrap())
@@ -1430,14 +1437,31 @@ mod control_client_tests {
             LeaseAttempt::Acquired(lease) => lease,
             LeaseAttempt::Contended => panic!("new control lock was occupied"),
         };
+        let pid_file = root.path().join("client.pid");
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 2"]);
+        command
+            .arg("-c")
+            .arg(format!("echo $$ > '{}'; exec sleep 30", pid_file.display()));
         let mut client = spawn_attachment_client(&mut command, Some(&lease)).unwrap();
         drop(lease);
         assert!(matches!(
             lease::try_acquire(&path).unwrap(),
             LeaseAttempt::Contended
         ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            client.id() as i32,
+            pid,
+            "the lease holder must be the writable client"
+        );
         client.kill().unwrap();
         client.wait().unwrap();
         assert!(matches!(

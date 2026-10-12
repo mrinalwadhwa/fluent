@@ -133,6 +133,133 @@ fn second_controller_is_observer_until_control_is_released() {
     session.stop().unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn attached_clients_keep_control_occupied_until_writable_client_detaches() {
+    if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_none() {
+        return;
+    }
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+    let mut session = TerminalSession::start_tmux_fixture(identity).unwrap();
+    let socket = session.socket_path().unwrap().to_path_buf();
+    let descriptor = session.descriptor().clone();
+    let attach = || {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let errors = tempfile::NamedTempFile::new().unwrap();
+        let child = Command::new("/usr/bin/script")
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(assert_cmd::cargo::cargo_bin("fluent"))
+            .args(["terminal", "attach", &descriptor.session_id, "--source"])
+            .arg(root.path())
+            .arg("--control")
+            .env("TERM", "xterm-256color")
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(output.reopen().unwrap()))
+            .stderr(Stdio::from(errors.reopen().unwrap()))
+            .spawn()
+            .unwrap();
+        (child, output, errors)
+    };
+    let clients = || -> Vec<String> {
+        let output = Command::new("tmux")
+            .arg("-S")
+            .arg(&socket)
+            .args(["list-clients", "-F", "#{client_tty}"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    fn wait_for(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            condition(),
+            "timed out waiting for terminal attachment state"
+        );
+    }
+    let send = |child: &mut Child, marker: &Path| {
+        writeln!(
+            child.stdin.as_mut().unwrap(),
+            "echo reached > {}",
+            marker.display()
+        )
+        .unwrap();
+        child.stdin.as_mut().unwrap().flush().unwrap();
+    };
+
+    let (mut first, _first_output, _first_errors) = attach();
+    wait_for(|| clients().len() == 1);
+    let first_tty = clients().pop().unwrap();
+    let first_marker = root.path().join("first-marker");
+    send(&mut first, &first_marker);
+    wait_for(|| first_marker.exists());
+
+    let (mut second, second_output, _second_errors) = attach();
+    wait_for(|| clients().len() == 2);
+    wait_for(|| {
+        std::fs::read(second_output.path())
+            .unwrap()
+            .windows(b"Control is occupied".len())
+            .any(|part| part == b"Control is occupied")
+    });
+    let ignored_marker = root.path().join("observer-marker");
+    send(&mut second, &ignored_marker);
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        !ignored_marker.exists(),
+        "observer input reached the worker"
+    );
+
+    assert!(
+        Command::new("tmux")
+            .arg("-S")
+            .arg(&socket)
+            .args(["detach-client", "-t", &first_tty])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_for(|| first.try_wait().unwrap().is_some());
+    let (mut third, third_output, _third_errors) = attach();
+    wait_for(|| clients().len() == 2);
+    assert!(
+        !std::fs::read(third_output.path())
+            .unwrap()
+            .windows(b"Control is occupied".len())
+            .any(|part| part == b"Control is occupied")
+    );
+    let third_marker = root.path().join("third-marker");
+    send(&mut third, &third_marker);
+    wait_for(|| third_marker.exists());
+    assert!(!ignored_marker.exists());
+    assert!(session.is_live().unwrap());
+    Command::new("tmux")
+        .arg("-S")
+        .arg(&socket)
+        .args(["detach-client", "-s", "fluent"])
+        .status()
+        .unwrap();
+    let _ = second.wait();
+    let _ = third.wait();
+    session.stop().unwrap();
+    std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn unavailable_terminal_has_specific_reason() {
     use fluent::terminal_sessions::availability;
