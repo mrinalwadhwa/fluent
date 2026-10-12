@@ -311,14 +311,16 @@ fn native_launch_blocker(
             task_kind,
             TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
         )
-        && !(task_kind == TaskKind::Write
+        && !(matches!(task_kind, TaskKind::Write)
             && matches!(
                 attempt.coder_mapping.for_task_kind(task_kind).coder,
                 CoderKind::Codex | CoderKind::Claude | CoderKind::Pi
-            )))
-    .then_some(
-        "native terminal mode cannot launch this Task: the provider adapter is not available",
-    )
+            ))
+        && !(task_kind == TaskKind::Review
+            && attempt.coder_mapping.for_task_kind(task_kind).coder == CoderKind::Codex))
+        .then_some(
+            "native terminal mode cannot launch this Task: the provider adapter is not available",
+        )
 }
 
 pub(crate) fn ensure_agent_launch_supported(
@@ -1859,6 +1861,34 @@ fn run_review_task_with_coder(
             return Err(error);
         }
     };
+
+    if planned_item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+    {
+        let capability = provider_readiness
+            .codex_worker()
+            .context("native Codex Reviewer has no private worker home")
+            .and_then(|worker| {
+                crate::native_agent::codex::check_capability(
+                    worker.launcher().execution_executable(),
+                )
+            });
+        if let Err(error) = capability {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_reviewer_launch_failure(&error, &review_path),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
+    }
 
     let sandbox_profile = match preflight_review_sandbox_profile(
         config.project_root,
@@ -8380,10 +8410,6 @@ fn run_review_coder_with_coder(
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let coder = make_coder(
-        sandbox,
-        codex_worker.map(|worker| worker.launcher().execution_executable()),
-    );
     let launch_env = codex_worker
         .map(|worker| vec![worker.launch_env()])
         .unwrap_or_default();
@@ -8423,6 +8449,65 @@ fn run_review_coder_with_coder(
         );
         crate::recovery_contracts::review_evidence::validate(project_root, attempt, task)?;
     }
+    if item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+    {
+        anyhow::ensure!(
+            coder_kind == CoderKind::Codex,
+            "native Reviewer requires Codex"
+        );
+        anyhow::ensure!(
+            extra_args.is_empty(),
+            "native Reviewer does not accept extra provider arguments"
+        );
+        let worker = codex_worker.context("native Codex Reviewer has no private worker home")?;
+        let profile = sandbox_profile.context("native Reviewer has no worker sandbox profile")?;
+        let task = item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+            .context("native Reviewer Task disappeared")?;
+        let prompt = format!(
+            "{}\n\n---\n\n{}",
+            prompts.system_prompt, prompts.review_prompt
+        );
+        crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+            identity: crate::terminal_sessions::TerminalIdentity {
+                source_root: project_root.to_path_buf(),
+                work_item_id: item.id.clone(),
+                attempt_id: attempt_id.to_owned(),
+                task_id: task_id.to_owned(),
+                role: task.role.clone(),
+                provider: "codex".into(),
+                artifact_dir: artifact_dir.to_path_buf(),
+            },
+            worker_profile: profile,
+            workspace: artifact_dir,
+            private_home: worker.home(),
+            executable: worker.launcher().execution_executable(),
+            model: &effective_model,
+            effort,
+            prompt: &prompt,
+            session: crate::coder::CoderSession::Ephemeral,
+            launch_env: &launch_env,
+        })?;
+        crate::usage::log_usage_from_transcript(
+            &transcript_path,
+            coder_kind.as_str(),
+            &item.id,
+            attempt_id,
+            task_id,
+        );
+        return Ok(());
+    }
+    let coder = make_coder(
+        sandbox,
+        codex_worker.map(|worker| worker.launcher().execution_executable()),
+    );
     let completion = coder.run_captured_reported(
         &prompts.review_prompt,
         &prompts.system_prompt,
@@ -10452,7 +10537,10 @@ mod tests {
             plan_coder_kind(&pi_item, "attempt-1", TaskKind::Write).unwrap(),
             CoderKind::Pi
         );
-        for task_kind in [TaskKind::Review, TaskKind::Rebase, TaskKind::Learn] {
+        let mut review_item = item.clone();
+        review_item.attempts[0].coder_mapping.review.coder = CoderKind::Codex;
+        assert!(ensure_agent_launch_supported(&review_item, "attempt-1", TaskKind::Review).is_ok());
+        for task_kind in [TaskKind::Rebase, TaskKind::Learn] {
             assert!(
                 ensure_agent_launch_supported(&item, "attempt-1", task_kind).is_err(),
                 "{task_kind:?} must wait for its native adapter"

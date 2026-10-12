@@ -704,6 +704,40 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_starts_ephemeral_reviewer_thread() {
+        let (owner, provider) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut socket = tungstenite::accept(provider).unwrap();
+            let _: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            socket
+                .send(Message::Text("{\"id\":1,\"result\":{}}".into()))
+                .unwrap();
+            let _: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            let start: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(start["method"], "thread/start");
+            assert_eq!(start["params"]["ephemeral"], true);
+            socket
+                .send(Message::Text(
+                    "{\"id\":2,\"result\":{\"thread\":{\"id\":\"review-thread\"}}}".into(),
+                ))
+                .unwrap();
+        });
+        let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
+        let (thread, _) = bootstrap_protocol(
+            &mut owner,
+            Path::new("/private/review"),
+            "gpt-review",
+            CoderSession::Ephemeral,
+        )
+        .unwrap();
+        assert_eq!(thread, "review-thread");
+        fake.join().unwrap();
+    }
+
+    #[test]
     fn bootstrap_rejects_a_different_resumed_thread() {
         let (owner, provider) = UnixStream::pair().unwrap();
         let fake = std::thread::spawn(move || {
