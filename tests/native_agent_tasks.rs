@@ -379,7 +379,7 @@ fn attempt_retains_native_mode_across_resume() {
 
 #[test]
 fn native_task_preserves_private_provider_boundary() {
-    use fluent::coder::{CoderSession, CodexCode, SandboxedClaudeCode};
+    use fluent::coder::{CoderSession, CodexCode, PiCode, SandboxedClaudeCode};
     use std::ffi::OsStr;
 
     let project = tempfile::tempdir().unwrap();
@@ -537,6 +537,58 @@ fn native_task_preserves_private_provider_boundary() {
         native
             .get_envs()
             .any(|(key, value)| key == OsStr::new("CLAUDE_CONFIG_DIR")
+                && value == Some(private_home.path().as_os_str()))
+    );
+
+    let extension = private_home.path().join("fluent-pi-extension.mjs");
+    std::fs::write(&extension, "export default () => {};").unwrap();
+    let session_file = private_home.path().join("assigned-session.jsonl");
+    let pi = PiCode {
+        sandbox_profile: None,
+        trusted_sandbox: false,
+        model_override: Some("assigned-local-model".into()),
+    };
+    let pi_command = pi
+        .native_task_command_in_terminal(
+            project.path(),
+            private_home.path(),
+            &extension,
+            &session_file,
+            "high",
+            "role instructions",
+            "Task prompt",
+        )
+        .unwrap();
+    let pi_args: Vec<_> = pi_command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(pi_command.get_program(), OsStr::new("pi"));
+    for pair in [
+        ["--provider", "local-openai"],
+        ["--model", "assigned-local-model"],
+        ["--thinking", "high"],
+        ["--append-system-prompt", "role instructions"],
+    ] {
+        assert!(pi_args.windows(2).any(|window| window == pair));
+    }
+    assert!(pi_args.contains(&"--no-extensions".to_string()));
+    assert!(
+        pi_args.windows(2).any(
+            |window| window[0] == "--extension" && window[1] == extension.display().to_string()
+        )
+    );
+    assert!(
+        pi_args
+            .windows(2)
+            .any(|window| window[0] == "--session"
+                && window[1] == session_file.display().to_string())
+    );
+    assert_eq!(pi_args.last().unwrap(), "Task prompt");
+    assert!(
+        pi_command
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("PI_CODING_AGENT_DIR")
                 && value == Some(private_home.path().as_os_str()))
     );
 }

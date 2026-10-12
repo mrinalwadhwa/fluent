@@ -1500,6 +1500,51 @@ pub struct PiCode {
 }
 
 impl PiCode {
+    /// Build Pi's foreground interface inside an already confined Task terminal.
+    /// Explicit extension and session paths keep the input and evidence bridge
+    /// bound to this invocation.
+    pub fn native_task_command_in_terminal(
+        &self,
+        working_dir: &Path,
+        private_home: &Path,
+        extension: &Path,
+        session_file: &Path,
+        thinking: &str,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<Command> {
+        if !private_home.is_absolute() || !private_home.is_dir() {
+            bail!("native Pi Task requires an existing private home");
+        }
+        if self.model_override.as_deref().is_none_or(str::is_empty) || thinking.is_empty() {
+            bail!("native Pi Task requires its resolved model and thinking level");
+        }
+        if !extension.is_file()
+            || !extension
+                .canonicalize()?
+                .starts_with(private_home.canonicalize()?)
+        {
+            bail!("native Pi Task requires its owned extension inside the private home");
+        }
+        if !session_file.is_absolute() || !session_file.starts_with(private_home) {
+            bail!("native Pi Task requires a session in its private home");
+        }
+        let mut command = Command::new("pi");
+        command.current_dir(working_dir);
+        command.env("HOME", private_home);
+        command.env("PI_CODING_AGENT_DIR", private_home);
+        command.args(["--provider", "local-openai"]);
+        command.args(["--model", self.model_override.as_deref().unwrap()]);
+        command.args(["--thinking", thinking]);
+        command.arg("--no-extensions");
+        command.arg("--extension").arg(extension);
+        command.arg("--session").arg(session_file);
+        command.arg("--no-approve");
+        command.args(["--append-system-prompt", system_prompt]);
+        command.arg(prompt);
+        Ok(command)
+    }
+
     fn effective_model(&self) -> String {
         self.model_override.clone().unwrap_or_else(pi_model)
     }
