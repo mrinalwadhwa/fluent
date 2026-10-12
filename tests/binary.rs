@@ -26460,6 +26460,10 @@ fn tester_permissions_denied_update_probe_requires_an_existing_denied_target() {
     fs::write(&target, "fixture").unwrap();
     assert!(!call(&target, None).status.success());
     assert!(call(&target, Some(&fake_touch)).status.success());
+    let alias = tmp.path().join("target-alias");
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    assert!(!call(&alias, None).status.success());
+    assert!(call(&alias, Some(&fake_touch)).status.success());
 }
 
 #[test]

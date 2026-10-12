@@ -156,16 +156,24 @@ pid = sys.argv[2]
 probe = shlex.quote(str(root / 'probe'))
 fluent = shlex.quote(str(root / 'fluent'))
 write_probe = shlex.quote(str(root / 'assert-denied-file-update.sh'))
+approval_alias = shlex.quote(str(root / 'protected-target-alias'))
+profile_alias = shlex.quote(str(root / 'selected-profile-alias'))
+alternate_home = shlex.quote(str(root / 'alternate-home'))
 operator_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
 authority = shlex.quote(str(operator_home / '.config/fluent/tester-permissions'))
 unrelated = shlex.quote(str(operator_home / '.fluent-process-table-unrelated-write'))
 allowed = (f'{probe} allowed && {probe} control-denied {pid}'
            f' && ! touch {authority}/forged-by-tester && ! touch {unrelated}'
            f' && {write_probe} "$FLUENT_FIXTURE_PROTECTED_TARGET"'
+           f' && HOME={alternate_home} {write_probe} "$FLUENT_FIXTURE_PROTECTED_TARGET"'
+           f' && ln -s "$FLUENT_FIXTURE_PROTECTED_TARGET" {approval_alias}'
+           f' && {write_probe} {approval_alias} && rm {approval_alias}'
            ' && (i=0; until test -s "$FLUENT_FIXTURE_PROFILE_PATH_FILE"; do'
            ' i=$((i+1)); test "$i" -lt 300 || exit 17; sleep 0.1; done;'
            ' profile=$(cat "$FLUENT_FIXTURE_PROFILE_PATH_FILE");'
-           f' {write_probe} "$profile")'
+           f' {write_probe} "$profile"'
+           f' && ln -s "$profile" {profile_alias}'
+           f' && {write_probe} {profile_alias} && rm {profile_alias})'
            f' && ! {fluent} tester permissions approve --candidate "$FLUENT_FIXTURE_SHA"'
            ' --command-index 0 --capability process-table-read'
            ' --request-digest "$FLUENT_FIXTURE_REQUEST"'
