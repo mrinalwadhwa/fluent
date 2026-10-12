@@ -1,3 +1,4 @@
+use super::project::SourceSnapshot;
 use crate::{
     dashboard::transitions::DashboardTransition,
     guidance,
@@ -34,6 +35,8 @@ pub struct DashboardRow {
 pub struct DashboardSnapshot {
     pub rows: Vec<DashboardRow>,
     pub errors: Vec<String>,
+    pub sources: Vec<SourceSnapshot>,
+    pub project_view: bool,
 }
 
 impl DashboardSnapshot {
@@ -61,6 +64,8 @@ impl DashboardSnapshot {
                 })
                 .collect(),
             errors: status.errors,
+            sources: Vec::new(),
+            project_view: false,
         }
     }
     pub fn visible_rows(&self, all: bool) -> Vec<&DashboardRow> {

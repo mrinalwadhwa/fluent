@@ -529,7 +529,10 @@ pub fn work_item_show_value(
 /// Select the Attempt owned by the latest dispatch when queue history carries
 /// an exact binding. This keeps status aligned with an older Attempt resumed by
 /// an audited recovery while preserving later superseded Attempts in history.
-fn display_attempt<'a>(item: &'a WorkItem, project_root: Option<&Path>) -> Option<&'a Attempt> {
+pub(crate) fn display_attempt<'a>(
+    item: &'a WorkItem,
+    project_root: Option<&Path>,
+) -> Option<&'a Attempt> {
     let bound_attempt = project_root
         .and_then(|root| crate::queue::read_ledger(root, &item.id).ok().flatten())
         .and_then(|ledger| {
@@ -882,7 +885,7 @@ fn format_task_with_liveness(task: &Task, item: &WorkItem, project_root: Option<
     )
 }
 
-fn effective_task_status_label(
+pub(crate) fn effective_task_status_label(
     task: &Task,
     item: &WorkItem,
     project_root: Option<&Path>,

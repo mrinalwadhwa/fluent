@@ -426,6 +426,20 @@ pub fn read_registry(home_dir: &Path) -> Result<HashMap<PathBuf, CheckoutIdentit
         .collect())
 }
 
+/// Read the registry for observation without masking a corrupt or unreadable file.
+pub fn read_registry_for_dashboard(home_dir: &Path) -> Result<HashMap<PathBuf, CheckoutIdentity>> {
+    match fs::metadata(registry_path(home_dir)) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error).context("read scheduler registry metadata"),
+    }
+    Ok(read_registry_raw(home_dir)?
+        .checkouts
+        .into_iter()
+        .map(|(path, id)| (PathBuf::from(path), CheckoutIdentity(id)))
+        .collect())
+}
+
 fn read_registry_raw(home_dir: &Path) -> Result<RegistryFile> {
     let path = registry_path(home_dir);
     let bytes = fs::read(&path).with_context(|| format!("read registry {}", path.display()))?;

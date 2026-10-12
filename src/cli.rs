@@ -188,6 +188,9 @@ pub enum Commands {
     Dashboard {
         /// Path to project (default: current directory)
         path: Option<String>,
+        /// Include another local project checkout (repeatable)
+        #[arg(long = "project")]
+        projects: Vec<String>,
     },
 
     /// Adopt, install, or refresh bundled agent skills

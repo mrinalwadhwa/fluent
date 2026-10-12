@@ -1,3 +1,5 @@
+use super::app::App;
+use super::project::{self, RowKey};
 use super::snapshot::{DashboardRow, DashboardSnapshot};
 use unicode_width::UnicodeWidthStr;
 
@@ -6,6 +8,160 @@ pub struct ScrollBounds {
     pub list_height: u16,
     pub list_max_scroll: u16,
     pub detail_max_scroll: u16,
+}
+
+pub fn project_detail_values(app: &App, key: &RowKey) -> Vec<String> {
+    let Some((source, work)) = project::find_work(&app.snapshot.sources, key) else {
+        return vec!["Selection unavailable".into()];
+    };
+    let next_action = match work.category {
+        project::Category::Queued => "Awaiting queue dispatch".into(),
+        project::Category::Running => "Workflow running".into(),
+        project::Category::History => "No operator action".into(),
+        _ => crate::guidance::next_action_for_status_row(&work.status)
+            .map(|action| {
+                action
+                    .trim()
+                    .trim_start_matches("→ Next:")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unavailable".into()),
+    };
+    let mut values = vec![
+        work.status.title.clone(),
+        format!("Source: {} · {}", source.host, source.path.display()),
+        format!("Work Item: {}", work.status.id),
+        format!("Status: {}", work.category.label()),
+        format!("Phase: {}", work.phase.as_deref().unwrap_or("unavailable")),
+        format!("Attempt: {}", work.status.attempt),
+        format!("Next action: {next_action}"),
+    ];
+    if let Some(worker) = project::find_worker(&app.snapshot.sources, key) {
+        values.extend([
+            format!("Worker: {}", worker.role),
+            format!(
+                "Task: {}",
+                worker.key.task_id.as_deref().unwrap_or("unavailable")
+            ),
+            format!("State: {}", worker.state),
+            format!(
+                "Invocation: {}",
+                worker
+                    .key
+                    .execution_generation
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            ),
+            format!(
+                "Provider: {}",
+                worker.provider.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Model: {}",
+                worker.model.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Effort: {}",
+                worker.effort.as_deref().unwrap_or("unavailable")
+            ),
+            format!(
+                "Elapsed: {}",
+                worker
+                    .elapsed_ms
+                    .map(|ms| format!("{}s", ms / 1000))
+                    .unwrap_or_else(|| "unavailable".into())
+            ),
+            format!(
+                "Work provider wait: {}",
+                if work.status.metrics.provider_wait_ms > 0 {
+                    format!("{}s", work.status.metrics.provider_wait_ms / 1000)
+                } else {
+                    "unavailable".into()
+                }
+            ),
+            format!(
+                "Agent terminal: {}",
+                worker
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| if terminal.can_observe {
+                        "Observe available".into()
+                    } else {
+                        worker.unavailable_reason.clone()
+                    })
+                    .unwrap_or_else(|| worker.unavailable_reason.clone())
+            ),
+        ]);
+    }
+    if let Some(stale) = &source.stale {
+        values.push(format!("Stale source: {stale}"));
+    }
+    values.extend(
+        source
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("Source diagnostic: {diagnostic}")),
+    );
+    values
+}
+
+pub fn project_scroll_bounds(app: &App) -> ScrollBounds {
+    let size = app.size;
+    if size.0 < 60 || size.1 < 15 {
+        return ScrollBounds::default();
+    }
+    let inner_height = size.1.saturating_sub(8);
+    let groups = app
+        .snapshot
+        .sources
+        .iter()
+        .filter(|source| {
+            source
+                .work
+                .iter()
+                .any(|work| app.filter.matches(work.category))
+        })
+        .count();
+    let work = app
+        .snapshot
+        .sources
+        .iter()
+        .flat_map(|source| &source.work)
+        .filter(|work| app.filter.matches(work.category))
+        .count();
+    let workers = app
+        .snapshot
+        .sources
+        .iter()
+        .flat_map(|source| &source.work)
+        .filter(|work| app.filter.matches(work.category) && app.expanded.contains(&work.key))
+        .map(|work| work.workers.len())
+        .sum::<usize>();
+    let lines = groups + work + workers + usize::from(groups == 0);
+    let detail_width = detail_width(size).max(1) as usize;
+    let details = app
+        .selected_key
+        .as_ref()
+        .map(|key| project_detail_values(app, key))
+        .unwrap_or_default();
+    let detail_lines = details
+        .iter()
+        .map(|line| {
+            UnicodeWidthStr::width(line.as_str())
+                .max(1)
+                .div_ceil(detail_width)
+        })
+        .sum::<usize>();
+    ScrollBounds {
+        list_height: inner_height,
+        list_max_scroll: lines
+            .saturating_sub(inner_height as usize)
+            .min(u16::MAX as usize) as u16,
+        detail_max_scroll: detail_lines
+            .saturating_sub(inner_height as usize)
+            .min(u16::MAX as usize) as u16,
+    }
 }
 
 pub fn scroll_bounds(
@@ -159,5 +315,12 @@ pub fn error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
     error_lines(snapshot, size.0)
         .len()
         .saturating_sub(size.1.saturating_sub(6) as usize)
+        .min(u16::MAX as usize) as u16
+}
+
+pub fn project_error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
+    error_lines(snapshot, size.0)
+        .len()
+        .saturating_sub(size.1.saturating_sub(8) as usize)
         .min(u16::MAX as usize) as u16
 }

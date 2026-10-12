@@ -1,5 +1,6 @@
 mod app;
 mod layout;
+pub mod project;
 mod render;
 mod snapshot;
 mod transitions;
@@ -12,7 +13,7 @@ use crossterm::terminal::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::work_status;
@@ -104,7 +105,14 @@ impl Drop for TerminalSession {
 
 /// Launch the read-only Work operator console.
 pub fn run_dashboard(search_root: &Path) -> Result<()> {
-    let snapshot = load_snapshot(search_root)?;
+    run_dashboard_with_projects(search_root, &[])
+}
+
+/// Launch the project Work view with additional local checkouts.
+pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> Result<()> {
+    let home = crate::scheduler_service::runtime_home(search_root)?;
+    let (paths, discovery_errors) = project::discover_paths(search_root, explicit, &home);
+    let snapshot = load_project_snapshot(&paths, discovery_errors);
     let mut session = TerminalSession::open()?;
     let mut app = App::new(snapshot);
     let size = session.terminal.size()?;
@@ -124,7 +132,7 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
                         session.set_mouse_enabled(enabled)?;
                     }
                     if matches!(effect, Effect::Refresh) {
-                        refresh(search_root, &mut app);
+                        refresh_projects(search_root, explicit, &home, &mut app);
                         next_poll = Instant::now() + DATA_POLL_INTERVAL;
                     }
                 }
@@ -133,7 +141,7 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
             }
         }
         if poll_due(Instant::now(), next_poll) {
-            refresh(search_root, &mut app);
+            refresh_projects(search_root, explicit, &home, &mut app);
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
         if app.should_quit() {
@@ -141,6 +149,62 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn load_project_snapshot(
+    paths: &[PathBuf],
+    mut errors: Vec<String>,
+) -> snapshot::DashboardSnapshot {
+    let mut sources = Vec::new();
+    for path in paths {
+        match project::SourceSnapshot::load(path) {
+            Ok(source) => sources.push(source),
+            Err(error) => errors.push(format!("{}: {error:#}", path.display())),
+        }
+    }
+    errors.extend(project_diagnostics(&sources));
+    snapshot::DashboardSnapshot {
+        rows: Vec::new(),
+        errors,
+        sources,
+        project_view: true,
+    }
+}
+
+fn project_diagnostics(sources: &[project::SourceSnapshot]) -> Vec<String> {
+    sources
+        .iter()
+        .flat_map(|source| {
+            let prefix = format!("{}: ", source.path.display());
+            source
+                .diagnostics
+                .iter()
+                .map(move |diagnostic| format!("{prefix}{diagnostic}"))
+                .chain(
+                    source
+                        .stale
+                        .iter()
+                        .map(move |reason| format!("{}: STALE: {reason}", source.path.display())),
+                )
+        })
+        .collect()
+}
+
+fn refresh_projects(root: &Path, explicit: &[PathBuf], home: &Path, app: &mut App) {
+    let (mut paths, errors) = project::discover_paths(root, explicit, home);
+    paths.extend(
+        app.snapshot
+            .sources
+            .iter()
+            .map(|source| source.path.clone()),
+    );
+    paths.sort();
+    paths.dedup();
+    let mut next = app.snapshot.clone();
+    next.sources = project::refresh_sources(&next.sources, &paths);
+    next.errors = errors;
+    next.errors.extend(project_diagnostics(&next.sources));
+    app.refresh(next);
 }
 
 fn poll_due(now: Instant, deadline: Instant) -> bool {

@@ -239,9 +239,12 @@ fn main() -> Result<()> {
                 },
             )?;
         }
-        Some(Commands::Dashboard { path }) => {
+        Some(Commands::Dashboard { path, projects }) => {
             let search_root = path.map(PathBuf::from).unwrap_or(cwd);
-            dashboard::run_dashboard(&search_root)?;
+            dashboard::run_dashboard_with_projects(
+                &search_root,
+                &projects.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
+            )?;
         }
         Some(Commands::Fargate { command }) => match command {
             FargateCommands::EnsureSetup { force_rebuild } => {

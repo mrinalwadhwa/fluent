@@ -1,6 +1,8 @@
 use super::layout;
+use super::project::{self, Filter, RowKey};
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
@@ -17,6 +19,9 @@ pub struct App {
     pub snapshot: DashboardSnapshot,
     all_work: bool,
     selected: Option<String>,
+    pub selected_key: Option<RowKey>,
+    pub filter: Filter,
+    pub expanded: BTreeSet<RowKey>,
     selected_index: usize,
     pub pane: Pane,
     pub help: bool,
@@ -36,6 +41,9 @@ impl App {
             snapshot,
             all_work: false,
             selected: None,
+            selected_key: None,
+            filter: Filter::Current,
+            expanded: BTreeSet::new(),
             selected_index: 0,
             pane: Pane::List,
             help: false,
@@ -49,11 +57,30 @@ impl App {
             quit: false,
             stale_error: None,
         };
-        app.reconcile_selection(None);
+        if app.project_mode() {
+            app.selected_key = project::initial_key(&app.snapshot.sources, app.filter);
+        } else {
+            app.reconcile_selection(None);
+        }
         app
     }
     pub fn selected_id(&self) -> Option<&str> {
-        self.selected.as_deref()
+        self.selected_key
+            .as_ref()
+            .map(|key| key.work_item_id.as_str())
+            .or(self.selected.as_deref())
+    }
+    pub fn project_mode(&self) -> bool {
+        self.snapshot.project_view
+    }
+    pub fn project_keys(&self) -> Vec<RowKey> {
+        project::visible_keys(&self.snapshot.sources, self.filter, &self.expanded)
+    }
+    pub fn select_key(&mut self, key: RowKey) {
+        self.selected_key = Some(key);
+        self.reconcile_project_selection();
+        self.keep_selection_visible();
+        self.dirty = true;
     }
     pub fn all_work(&self) -> bool {
         self.all_work
@@ -77,7 +104,11 @@ impl App {
         let prior = self.selected.clone();
         self.snapshot = snapshot;
         self.stale_error = None;
-        self.reconcile_selection(prior);
+        if self.project_mode() {
+            self.reconcile_project_selection();
+        } else {
+            self.reconcile_selection(prior);
+        }
         self.clamp_scrolls();
         self.dirty = true;
     }
@@ -102,7 +133,33 @@ impl App {
                 .map(|row| row.status.id.clone());
         }
     }
+    fn reconcile_project_selection(&mut self) {
+        let keys = self.project_keys();
+        if let Some(index) = self
+            .selected_key
+            .as_ref()
+            .and_then(|key| keys.iter().position(|candidate| candidate == key))
+        {
+            self.selected_index = index;
+        } else {
+            self.selected_index = self.selected_index.min(keys.len().saturating_sub(1));
+            self.selected_key = keys.get(self.selected_index).cloned();
+        }
+    }
     fn move_selection(&mut self, delta: isize) {
+        if self.project_mode() {
+            let keys = self.project_keys();
+            if keys.is_empty() {
+                return;
+            }
+            self.selected_index =
+                (self.selected_index as isize + delta).clamp(0, keys.len() as isize - 1) as usize;
+            self.selected_key = keys.get(self.selected_index).cloned();
+            self.keep_selection_visible();
+            self.detail_scroll = 0;
+            self.dirty = true;
+            return;
+        }
         let rows = self.snapshot.ordered_rows(self.all_work);
         if rows.is_empty() {
             return;
@@ -136,8 +193,16 @@ impl App {
             return Effect::None;
         }
         if self.errors {
-            let page = self.size.1.saturating_sub(6).max(1);
-            let max = layout::error_max_scroll(&self.snapshot, self.size);
+            let page = self
+                .size
+                .1
+                .saturating_sub(if self.project_mode() { 8 } else { 6 })
+                .max(1);
+            let max = if self.project_mode() {
+                layout::project_error_max_scroll(&self.snapshot, self.size)
+            } else {
+                layout::error_max_scroll(&self.snapshot, self.size)
+            };
             self.error_scroll = match key {
                 KeyCode::Up | KeyCode::Char('k') => self.error_scroll.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => self.error_scroll.saturating_add(1).min(max),
@@ -150,6 +215,44 @@ impl App {
             return Effect::None;
         }
         match key {
+            KeyCode::Tab if self.project_mode() && self.size.0 >= 60 && self.size.0 < 100 => {
+                self.pane = if self.pane == Pane::List {
+                    Pane::Detail
+                } else {
+                    Pane::List
+                };
+                self.dirty = true;
+            }
+            KeyCode::Char('f') if self.project_mode() => {
+                self.filter = self.filter.next();
+                self.reconcile_project_selection();
+                self.clamp_scrolls();
+                self.dirty = true;
+            }
+            KeyCode::Enter if self.project_mode() && self.pane == Pane::List => {
+                if let Some(selected) = self.selected_key.clone() {
+                    if selected.task_id.is_none() {
+                        if !self.expanded.remove(&selected) {
+                            self.expanded.insert(selected);
+                        }
+                        self.reconcile_project_selection();
+                        self.clamp_scrolls();
+                    } else if self.size.0 < 100 {
+                        self.pane = Pane::Detail;
+                    }
+                }
+                self.dirty = true;
+            }
+            KeyCode::Char('a') if self.project_mode() => {
+                self.filter = if self.filter == Filter::Category(project::Category::History) {
+                    Filter::Current
+                } else {
+                    Filter::Category(project::Category::History)
+                };
+                self.reconcile_project_selection();
+                self.clamp_scrolls();
+                self.dirty = true;
+            }
             KeyCode::Char('a') => {
                 self.all_work = !self.all_work;
                 self.reconcile_selection(self.selected.clone());
@@ -206,6 +309,51 @@ impl App {
     }
 
     fn keep_selection_visible(&mut self) {
+        if self.project_mode() {
+            let bounds = self.scroll_bounds();
+            let Some(selected) = &self.selected_key else {
+                return;
+            };
+            let mut line = 0u16;
+            for source in &self.snapshot.sources {
+                let matching = source
+                    .work
+                    .iter()
+                    .filter(|work| self.filter.matches(work.category))
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    continue;
+                }
+                line += 1;
+                for work in matching {
+                    if &work.key == selected {
+                        break;
+                    }
+                    line += 1;
+                    if self.expanded.contains(&work.key) {
+                        if let Some(index) = work
+                            .workers
+                            .iter()
+                            .position(|worker| &worker.key == selected)
+                        {
+                            line += index as u16;
+                            break;
+                        }
+                        line += work.workers.len() as u16;
+                    }
+                }
+                if selected.source_id == source.id {
+                    break;
+                }
+            }
+            if line < self.list_scroll {
+                self.list_scroll = line;
+            } else if bounds.list_height > 0 && line >= self.list_scroll + bounds.list_height {
+                self.list_scroll = line + 1 - bounds.list_height;
+            }
+            self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
+            return;
+        }
         let bounds = self.scroll_bounds();
         let Some(line) = self
             .selected
@@ -224,9 +372,11 @@ impl App {
     }
 
     fn clamp_scrolls(&mut self) {
-        self.error_scroll = self
-            .error_scroll
-            .min(layout::error_max_scroll(&self.snapshot, self.size));
+        self.error_scroll = self.error_scroll.min(if self.project_mode() {
+            layout::project_error_max_scroll(&self.snapshot, self.size)
+        } else {
+            layout::error_max_scroll(&self.snapshot, self.size)
+        });
         let bounds = self.scroll_bounds();
         self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
         self.detail_scroll = self.detail_scroll.min(bounds.detail_max_scroll);
@@ -234,6 +384,10 @@ impl App {
     }
 
     pub fn scroll_bounds(&self) -> layout::ScrollBounds {
-        layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
+        if self.project_mode() {
+            layout::project_scroll_bounds(self)
+        } else {
+            layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
+        }
     }
 }

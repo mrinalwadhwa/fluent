@@ -652,3 +652,400 @@ fn error_view_exposes_overflow_and_returns_to_selection() {
     assert!(text(&app, 80, 15).contains("Work Items"));
     assert_eq!(app.selected_id(), selected.as_deref());
 }
+
+fn project_source(id: &str, rows: Vec<WorkItemStatus>) -> project::SourceSnapshot {
+    project::SourceSnapshot {
+        schema_version: 1,
+        id: id.into(),
+        host: "local".into(),
+        path: std::path::PathBuf::from(id),
+        project: "same-name".into(),
+        work: rows
+            .into_iter()
+            .map(|status| project::ProjectWork {
+                key: project::RowKey::work(id, &status.id),
+                category: project::Category::from_published_action(&status.action, false),
+                status,
+                phase: None,
+                workers: Vec::new(),
+            })
+            .collect(),
+        queued_work_item_ids: Vec::new(),
+        diagnostics: Vec::new(),
+        stale: None,
+    }
+}
+fn project_app(sources: Vec<project::SourceSnapshot>) -> App {
+    App::new(snapshot::DashboardSnapshot {
+        rows: Vec::new(),
+        errors: Vec::new(),
+        sources,
+        project_view: true,
+    })
+}
+
+#[test]
+fn project_groups_disambiguate_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first/same-name");
+    let second = root.path().join("second/same-name");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let home = root.path().join("home");
+    let registry = home.join(".config/fluent/scheduler/registry.json");
+    std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    std::fs::write(
+        &registry,
+        serde_json::json!({"checkouts": {second.to_str().unwrap(): "identity"}}).to_string(),
+    )
+    .unwrap();
+    let (paths, errors) = project::discover_paths(&first, &[first.clone(), second.clone()], &home);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(paths.len(), 2);
+    std::fs::write(&registry, "malformed").unwrap();
+    let (_, malformed) = project::discover_paths(&first, &[], &home);
+    assert!(
+        malformed
+            .iter()
+            .any(|error| error.contains("Scheduler registry"))
+    );
+    let app = project_app(vec![
+        project_source(first.to_str().unwrap(), vec![row("same", "failed")]),
+        project_source(second.to_str().unwrap(), vec![row("same", "planned")]),
+    ]);
+    assert_eq!(
+        app.selected_key.as_ref().unwrap().source_id,
+        first.to_str().unwrap()
+    );
+    let rendered = text(&app, 100, 24);
+    assert!(rendered.contains("first/same-name") && rendered.contains("second/same-name"));
+}
+
+#[test]
+fn project_view_prioritizes_initial_attention() {
+    let app = project_app(vec![
+        project_source(
+            "/one",
+            vec![row("planned", "planned"), row("running", "executing")],
+        ),
+        project_source("/two", vec![row("needs", "needs-user")]),
+    ]);
+    assert_eq!(app.selected_key.as_ref().unwrap().work_item_id, "needs");
+    let fallback = project_app(vec![project_source(
+        "/one",
+        vec![row("planned", "planned")],
+    )]);
+    assert_eq!(fallback.selected_id(), Some("planned"));
+}
+
+#[test]
+fn work_filters_count_items_from_authoritative_state() {
+    use project::Category as C;
+    let cases = [
+        ("needs-user", false, C::NeedsYou),
+        ("executing", false, C::Running),
+        ("task-ready", true, C::Queued),
+        ("task-ready", false, C::Ready),
+        ("learner-not-ready", false, C::Ready),
+        ("merge-ready", false, C::ReadyToLand),
+        ("planned", false, C::Planned),
+        ("merged", false, C::History),
+        ("future", false, C::Unknown),
+    ];
+    for (action, queued, expected) in cases {
+        assert_eq!(C::from_published_action(action, queued), expected);
+    }
+    let mut app = project_app(vec![project_source(
+        "/one",
+        vec![row("one", "planned"), row("two", "needs-user")],
+    )]);
+    app.filter = project::Filter::Category(C::NeedsYou);
+    assert_eq!(app.project_keys().len(), 1);
+    assert_eq!(app.project_keys()[0].work_item_id, "two");
+    assert!(text(&app, 100, 24).contains("Needs you 1"));
+    let root = tempfile::tempdir().unwrap();
+    let mut queued = crate::work_model::WorkItem::planned("queued", "Queued work");
+    queued.add_initial_attempt("attempt-1").unwrap();
+    crate::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&queued)
+        .unwrap();
+    crate::queue::add(root.path(), "queued", None).unwrap();
+    let snapshot = project::SourceSnapshot::load(root.path()).unwrap();
+    assert_eq!(snapshot.work[0].category, C::Queued);
+    assert_eq!(snapshot.queued_work_item_ids, vec!["queued"]);
+    std::fs::write(
+        root.path().join(".fluent/work/queue/queued.json"),
+        "broken ledger",
+    )
+    .unwrap();
+    let uncertain = project::SourceSnapshot::load(root.path()).unwrap();
+    assert_eq!(uncertain.work[0].category, C::Unknown);
+    assert!(
+        uncertain
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("Queue state for queued unavailable"))
+    );
+    let proposed_root = tempfile::tempdir().unwrap();
+    let mut proposed = crate::work_model::WorkItem::planned("proposed", "Awaiting approval");
+    proposed.authorization = crate::work_model::ExecutionAuthorization::Proposed;
+    crate::work_model::WorkModelStore::new(proposed_root.path())
+        .create_work_item(&proposed)
+        .unwrap();
+    assert_eq!(
+        project::SourceSnapshot::load(proposed_root.path()).unwrap().work[0].category,
+        C::Planned
+    );
+}
+
+#[test]
+fn expanded_work_shows_parallel_worker_roles() {
+    let root = tempfile::tempdir().unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Parallel review");
+    item.add_review_only_attempt(
+        "attempt-1",
+        &["architecture", "tests"],
+        "main",
+        "abcdef",
+        true,
+    )
+    .unwrap();
+    crate::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&item)
+        .unwrap();
+    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    assert_eq!(source.work[0].workers.len(), 2);
+    assert_eq!(source.work[0].workers[0].role, "architecture");
+    assert_eq!(source.work[0].workers[1].role, "tests");
+    assert!(source.work[0].workers[0].terminal.is_none());
+    let mut app = project_app(vec![source]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.project_keys().len(), 3);
+    assert!(text(&app, 100, 24).contains("Current 1"));
+}
+
+#[test]
+fn details_distinguish_recorded_values_from_unknowns() {
+    let mut source = project_source("/one", vec![row("work", "executing")]);
+    let work = &mut source.work[0];
+    work.workers.push(project::Worker {
+        key: project::RowKey {
+            source_id: "/one".into(),
+            work_item_id: "work".into(),
+            attempt_id: Some("attempt-1".into()),
+            task_id: Some("write".into()),
+            execution_generation: None,
+        },
+        role: "Writer".into(),
+        state: "executing".into(),
+        provider: Some("Codex".into()),
+        model: None,
+        effort: None,
+        elapsed_ms: None,
+        terminal: None,
+        unavailable_reason: "headless execution".into(),
+    });
+    let mut app = project_app(vec![source]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let details = layout::project_detail_values(&app, app.selected_key.as_ref().unwrap());
+    assert!(details.contains(&"Provider: Codex".into()));
+    assert!(details.contains(&"Model: unavailable".into()));
+    assert!(details.contains(&"Elapsed: unavailable".into()));
+    assert!(
+        details
+            .iter()
+            .any(|value| value.contains("headless execution"))
+    );
+    let ready = project_app(vec![project_source(
+        "/one",
+        vec![row("work", "task-ready")],
+    )]);
+    assert!(
+        layout::project_detail_values(&ready, ready.selected_key.as_ref().unwrap())
+            .contains(&"Next action: fluent attempt run work".into())
+    );
+}
+
+#[test]
+fn selection_preserves_composite_worker_identity() {
+    let mut first = project_source("/one", vec![row("same", "executing")]);
+    let mut second = project_source("/two", vec![row("same", "executing")]);
+    for source in [&mut first, &mut second] {
+        let key = project::RowKey {
+            source_id: source.id.clone(),
+            work_item_id: "same".into(),
+            attempt_id: Some("attempt-1".into()),
+            task_id: Some("write".into()),
+            execution_generation: Some("generation-2".into()),
+        };
+        source.work[0].workers.push(project::Worker {
+            key,
+            role: "Writer".into(),
+            state: "executing".into(),
+            provider: None,
+            model: None,
+            effort: None,
+            elapsed_ms: None,
+            terminal: None,
+            unavailable_reason: "unavailable".into(),
+        });
+    }
+    let mut app = project_app(vec![first.clone(), second.clone()]);
+    app.select_key(second.work[0].key.clone());
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.select_key(second.work[0].workers[0].key.clone());
+    app.refresh(snapshot::DashboardSnapshot {
+        rows: vec![],
+        errors: vec![],
+        sources: vec![second, first],
+        project_view: true,
+    });
+    assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
+    assert_eq!(
+        app.selected_key
+            .as_ref()
+            .unwrap()
+            .execution_generation
+            .as_deref(),
+        Some("generation-2")
+    );
+    app.resize(80, 20);
+    assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
+}
+
+#[test]
+fn failed_source_does_not_hide_healthy_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let one = root.path().join("one");
+    let two = root.path().join("two");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    let store = crate::work_model::WorkModelStore::new(&one);
+    let mut retained = crate::work_model::WorkItem::planned("one", "Retain me");
+    retained.add_initial_attempt("attempt-1").unwrap();
+    store.create_work_item(&retained).unwrap();
+    let mut healthy = crate::work_model::WorkItem::planned("two", "Healthy");
+    healthy.add_initial_attempt("attempt-1").unwrap();
+    crate::work_model::WorkModelStore::new(&two)
+        .create_work_item(&healthy)
+        .unwrap();
+    let old = project::SourceSnapshot::load(&one).unwrap();
+    assert_eq!(old.work.len(), 1, "{:?}", old.diagnostics);
+    let items = one.join(".fluent/work/items");
+    std::fs::remove_dir_all(&items).unwrap();
+    std::fs::write(&items, "broken").unwrap();
+    let refreshed = project::refresh_sources(&[old], &[one.clone(), two]);
+    assert_eq!(refreshed.len(), 2);
+    assert!(refreshed[0].stale.is_some());
+    assert_eq!(refreshed[0].work[0].status.title, "Retain me");
+    assert!(refreshed[1].stale.is_none());
+}
+
+#[test]
+fn project_layout_keeps_selected_content_visible() {
+    let mut app = project_app(vec![project_source(
+        "/one",
+        (0..30)
+            .map(|n| row(&format!("work-{n}"), "planned"))
+            .collect(),
+    )]);
+    for (width, height) in [(59, 14), (60, 15), (99, 18), (100, 18), (140, 24)] {
+        app.resize(width, height);
+        for _ in 0..29 {
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        let rendered = text(&app, width, height);
+        if width < 60 {
+            assert!(rendered.contains("Resize terminal"));
+        } else {
+            assert!(rendered.contains("work-29"));
+        }
+    }
+    let mut compact = project_app(vec![project_source(
+        "/one",
+        vec![row("長い", "needs-user")],
+    )]);
+    compact.snapshot.sources[0].work[0].status.title =
+        "漢字 e\u{301} and a very long Work title that wraps safely".into();
+    compact.resize(60, 15);
+    compact.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    let rendered = text(&compact, 60, 15);
+    assert!(rendered.contains("Selected details"));
+    assert!(rendered.contains('漢') && rendered.contains('字'));
+    compact.resize(100, 18);
+    let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &compact))
+        .unwrap();
+    for y in 6..16 {
+        assert_eq!(terminal.backend().buffer()[(42, y)].symbol(), "│");
+    }
+}
+
+#[test]
+fn project_sources_observe_without_mutating_work_or_registry() {
+    fn files(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+        ) {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), out);
+                }
+            } else {
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Read only");
+    item.add_initial_attempt("attempt-1").unwrap();
+    crate::work_model::WorkModelStore::new(&project)
+        .create_work_item(&item)
+        .unwrap();
+    let before = files(root.path());
+    let (paths, errors) = project::discover_paths(&project, &[], root.path());
+    assert!(errors.is_empty());
+    let source = project::SourceSnapshot::load(&paths[0]).unwrap();
+    assert_eq!(source.work.len(), 1);
+    assert_eq!(files(root.path()), before);
+    assert!(
+        !root
+            .path()
+            .join(".config/fluent/scheduler/registry.json")
+            .exists()
+    );
+}
+
+#[test]
+fn dashboard_accepts_repeatable_project_paths() {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from([
+        "fluent",
+        "dashboard",
+        "./current",
+        "--project",
+        "./one",
+        "--project",
+        "./two",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        crate::cli::Commands::Dashboard { path, projects } => {
+            assert_eq!(path.as_deref(), Some("./current"));
+            assert_eq!(projects, ["./one", "./two"]);
+        }
+        _ => panic!("expected dashboard command"),
+    }
+}
