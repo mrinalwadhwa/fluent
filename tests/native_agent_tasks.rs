@@ -2000,7 +2000,11 @@ exit [lindex $outcome 3]
         let model = std::env::var(model_var).unwrap();
         let effort = std::env::var(effort_var).unwrap();
         let project = output_root.join(provider);
+        // Keep logs and coordination files outside the source checkout so
+        // every native Task starts with a clean Git worktree.
+        let runtime = output_root.join(format!("{provider}-runtime"));
         fs::create_dir(&project).unwrap();
+        fs::create_dir(&runtime).unwrap();
         let run = |program: &str, args: &[&str]| {
             let output = Command::new(program)
                 .args(args)
@@ -2071,7 +2075,7 @@ exit [lindex $outcome 3]
         let mut pi_proxy = None;
         let mut pi_endpoint = std::env::var("FLUENT_NATIVE_PI_ENDPOINT").unwrap_or_default();
         if provider == "pi" {
-            let proxy_output = project.join("retry-proxy");
+            let proxy_output = runtime.join("retry-proxy");
             fs::create_dir(&proxy_output).unwrap();
             let proxy_log = File::create(proxy_output.join("proxy.log")).unwrap();
             let proxy = Command::new("python3")
@@ -2101,8 +2105,8 @@ exit [lindex $outcome 3]
                 output: proxy_output,
             });
         }
-        let log = File::create(project.join("task.stdout.log")).unwrap();
-        let error_log = File::create(project.join("task.stderr.log")).unwrap();
+        let log = File::create(runtime.join("task.stdout.log")).unwrap();
+        let error_log = File::create(runtime.join("task.stderr.log")).unwrap();
         let mut child = Command::new(binary)
             .args(["task", "run", &work, "attempt-1", "attempt-1-write-1"])
             .current_dir(&project)
@@ -2118,8 +2122,9 @@ exit [lindex $outcome 3]
         let session = loop {
             assert!(
                 child.try_wait().unwrap().is_none(),
-                "{provider} native Task ended before attachment; see {}",
-                project.display()
+                "{provider} native Task ended before attachment; inspect {} and {}",
+                project.display(),
+                runtime.display()
             );
             assert!(
                 Instant::now() < deadline,
@@ -2193,7 +2198,7 @@ exit [lindex $outcome 3]
             ("control", true),
             ("observer-after", false),
         ] {
-            let log = File::create(project.join(format!("{label}.log"))).unwrap();
+            let log = File::create(runtime.join(format!("{label}.log"))).unwrap();
             let status = Command::new("expect")
                 .args(["-c", ATTACH])
                 .env("FLUENT_NATIVE_BINARY", binary)
@@ -2206,8 +2211,9 @@ exit [lindex $outcome 3]
                 .unwrap();
             assert!(
                 status.success(),
-                "{provider} {label} attachment failed; see {}",
-                project.display()
+                "{provider} {label} attachment failed; inspect {} and {}",
+                project.display(),
+                runtime.display()
             );
         }
         // Start a second control attachment before the Writer settles, then
@@ -2232,9 +2238,9 @@ set outcome [wait]
 exit [lindex $outcome 3]
 "#;
         let race_marker = format!("native-{provider}-settlement-probe");
-        let race_ready = project.join("race.ready");
-        let race_release = project.join("race.release");
-        let race_attempt = project.join("race.attempt");
+        let race_ready = runtime.join("race.ready");
+        let race_release = runtime.join("race.release");
+        let race_attempt = runtime.join("race.attempt");
         let mut race = Command::new("expect")
             .args(["-c", RACE_CONTROL])
             .env("FLUENT_NATIVE_BINARY", binary)
@@ -2245,7 +2251,7 @@ exit [lindex $outcome 3]
             .env("FLUENT_NATIVE_RACE_ATTEMPT", &race_attempt)
             .env("FLUENT_NATIVE_RACE_TEXT", &race_marker)
             .stdout(Stdio::from(
-                File::create(project.join("race.attach.log")).unwrap(),
+                File::create(runtime.join("race.attach.log")).unwrap(),
             ))
             .spawn()
             .unwrap();
@@ -2345,16 +2351,18 @@ exit [lindex $outcome 3]
                 child.kill().unwrap();
                 let _ = child.wait();
                 panic!(
-                    "{provider} native Task exceeded the host deadline; see {}",
-                    project.display()
+                    "{provider} native Task exceeded the host deadline; inspect {} and {}",
+                    project.display(),
+                    runtime.display()
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
         };
         assert!(
             status.success(),
-            "{provider} native Task failed; see {}",
-            project.display()
+            "{provider} native Task failed; inspect {} and {}",
+            project.display(),
+            runtime.display()
         );
         if let Some(proxy) = &pi_proxy {
             assert!(
@@ -2549,8 +2557,8 @@ exit [lindex $outcome 3]
         );
         {
             run(binary, &["review", &work, "attempt-1"]);
-            let review_log = File::create(project.join("review.stdout.log")).unwrap();
-            let review_error = File::create(project.join("review.stderr.log")).unwrap();
+            let review_log = File::create(runtime.join("review.stdout.log")).unwrap();
+            let review_error = File::create(runtime.join("review.stderr.log")).unwrap();
             let mut review = Command::new(binary)
                 .args(["task", "run", &work, "attempt-1", "attempt-1-review-tests"])
                 .current_dir(&project)
@@ -2563,8 +2571,9 @@ exit [lindex $outcome 3]
                 if let Some(status) = review.try_wait().unwrap() {
                     assert!(
                         status.success(),
-                        "ephemeral native {provider} Reviewer failed; see {}",
-                        project.display()
+                        "ephemeral native {provider} Reviewer failed; inspect {} and {}",
+                        project.display(),
+                        runtime.display()
                     );
                     break;
                 }
@@ -2649,8 +2658,8 @@ exit [lindex $outcome 3]
                 &effort,
             ],
         );
-        let cancel_log = File::create(project.join("cancel.stdout.log")).unwrap();
-        let cancel_error = File::create(project.join("cancel.stderr.log")).unwrap();
+        let cancel_log = File::create(runtime.join("cancel.stdout.log")).unwrap();
+        let cancel_error = File::create(runtime.join("cancel.stderr.log")).unwrap();
         let mut cancelled = Command::new(binary)
             .args([
                 "task",
@@ -2748,8 +2757,8 @@ exit [lindex $outcome 3]
                     &effort,
                 ],
             );
-            let failure_log = File::create(project.join("receiver.stdout.log")).unwrap();
-            let failure_error = File::create(project.join("receiver.stderr.log")).unwrap();
+            let failure_log = File::create(runtime.join("receiver.stdout.log")).unwrap();
+            let failure_error = File::create(runtime.join("receiver.stderr.log")).unwrap();
             let mut failed = Command::new(binary)
                 .args([
                     "task",
@@ -2828,9 +2837,9 @@ exit [lindex $outcome 3]
                 .find(|entry| entry["work_item_id"] == failure_work && entry["can_control"] == true)
                 .and_then(|entry| entry["session_id"].as_str())
                 .expect("Pi receiver-loss fixture had no live controllable terminal");
-            let late_ready = project.join("receiver-attach.ready");
-            let late_release = project.join("receiver-attach.release");
-            let late_attempt = project.join("receiver-attach.attempt");
+            let late_ready = runtime.join("receiver-attach.ready");
+            let late_release = runtime.join("receiver-attach.release");
+            let late_attempt = runtime.join("receiver-attach.attempt");
             let mut attachment = Command::new("expect")
                 .args(["-c", LOST_RECEIVER_INPUT])
                 .env("FLUENT_NATIVE_BINARY", binary)
@@ -2841,7 +2850,7 @@ exit [lindex $outcome 3]
                 .env("FLUENT_NATIVE_LATE_RELEASE", &late_release)
                 .env("FLUENT_NATIVE_LATE_ATTEMPT", &late_attempt)
                 .stdout(Stdio::from(
-                    File::create(project.join("receiver-attach.log")).unwrap(),
+                    File::create(runtime.join("receiver-attach.log")).unwrap(),
                 ))
                 .spawn()
                 .unwrap();
@@ -2973,9 +2982,9 @@ exit [lindex $outcome 3]
                     ],
                 );
                 let abort_log =
-                    File::create(project.join(format!("{scenario}.stdout.log"))).unwrap();
+                    File::create(runtime.join(format!("{scenario}.stdout.log"))).unwrap();
                 let abort_error =
-                    File::create(project.join(format!("{scenario}.stderr.log"))).unwrap();
+                    File::create(runtime.join(format!("{scenario}.stderr.log"))).unwrap();
                 let mut aborted = Command::new(binary)
                     .args(["task", "run", &abort_work, "attempt-1", "attempt-1-write-1"])
                     .current_dir(&project)
@@ -3039,7 +3048,7 @@ exit [lindex $outcome 3]
                     .output()
                     .unwrap();
                 fs::write(
-                    project.join(format!("{scenario}.attach.log")),
+                    runtime.join(format!("{scenario}.attach.log")),
                     &attach.stdout,
                 )
                 .unwrap();
@@ -3125,7 +3134,10 @@ fn host_native_attached_attempt_progression() {
     );
     let root = std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap())
         .join("attached-progression");
+    // Review, Learning, and landing also require a clean source checkout.
+    let runtime = root.with_file_name("attached-progression-runtime");
     fs::create_dir(&root).unwrap();
+    fs::create_dir(&runtime).unwrap();
     let binary = env!("CARGO_BIN_EXE_fluent");
     let run = |program: &str, args: &[&str]| {
         let output = Command::new(program)
@@ -3201,10 +3213,10 @@ fn host_native_attached_attempt_progression() {
         .args(["attempt", "run", work, "attempt-1"])
         .current_dir(&root)
         .stdout(Stdio::from(
-            File::create(root.join("attempt.stdout.log")).unwrap(),
+            File::create(runtime.join("attempt.stdout.log")).unwrap(),
         ))
         .stderr(Stdio::from(
-            File::create(root.join("attempt.stderr.log")).unwrap(),
+            File::create(runtime.join("attempt.stderr.log")).unwrap(),
         ))
         .spawn()
         .unwrap();
@@ -3248,7 +3260,7 @@ expect eof
 set outcome [wait]
 exit [lindex $outcome 3]
 "#;
-    let marker = root.join("observer.ready");
+    let marker = runtime.join("observer.ready");
     let mut observer = Command::new("expect")
         .args(["-c", HOLD_ATTACHMENT])
         .env("FLUENT_NATIVE_BINARY", binary)
@@ -3256,7 +3268,7 @@ exit [lindex $outcome 3]
         .env("FLUENT_NATIVE_SESSION", &session)
         .env("FLUENT_NATIVE_READY", &marker)
         .stdout(Stdio::from(
-            File::create(root.join("observer.log")).unwrap(),
+            File::create(runtime.join("observer.log")).unwrap(),
         ))
         .spawn()
         .unwrap();
@@ -3332,8 +3344,9 @@ exit [lindex $outcome 3]
     };
     assert!(
         status.success(),
-        "attached Attempt failed; inspect {}",
-        root.display()
+        "attached Attempt failed; inspect {} and {}",
+        root.display(),
+        runtime.display()
     );
     let shown = Command::new(binary)
         .args(["work-item", "show", work])
@@ -3380,10 +3393,10 @@ exit [lindex $outcome 3]
         ])
         .current_dir(&root)
         .stdout(Stdio::from(
-            File::create(root.join("land.stdout.log")).unwrap(),
+            File::create(runtime.join("land.stdout.log")).unwrap(),
         ))
         .stderr(Stdio::from(
-            File::create(root.join("land.stderr.log")).unwrap(),
+            File::create(runtime.join("land.stderr.log")).unwrap(),
         ))
         .spawn()
         .unwrap();
@@ -3401,8 +3414,9 @@ exit [lindex $outcome 3]
     };
     assert!(
         land_status.success(),
-        "native Rebase failed; inspect {}",
-        root.display()
+        "native Rebase failed; inspect {} and {}",
+        root.display(),
+        runtime.display()
     );
     let shown = Command::new(binary)
         .args(["work-item", "show", work])
