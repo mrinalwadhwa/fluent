@@ -7095,7 +7095,7 @@ impl Attempt {
             if self.status == AttemptStatus::Complete
                 && task.status != TaskStatus::Complete
                 && task.status != TaskStatus::Superseded
-                && task.kind != TaskKind::Rebase
+                && !matches!(task.kind, TaskKind::Rebase | TaskKind::Learn)
                 && !self.is_superseded_tester_harness_followup(&task.id)
                 && !self.has_tester_harness_repair_for(&task.id)
                 && !self.is_approach_revision_superseded_task(&task.id)
@@ -17333,6 +17333,49 @@ random banner prose that must be ignored
             .unwrap();
 
         assert_eq!(task_ids, vec!["attempt-1-review-2-tests"]);
+    }
+
+    #[test]
+    fn complete_attempt_can_run_a_native_learner_task() {
+        let learner = Task {
+            id: "attempt-1-learn-run-1".into(),
+            kind: TaskKind::Learn,
+            status: TaskStatus::Executing,
+            role: "learner".into(),
+            instructions: None,
+            work_item_id: "work-1".into(),
+            attempt_id: Some("attempt-1".into()),
+            workspace_access: WorkspaceAccess {
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            artifact_area: Some(TaskArtifactArea {
+                path: work_artifact_path("work-1", "attempt-1", "attempt-1-learn-run-1"),
+            }),
+            review_context: None,
+            evidence_review_context: None,
+            verification_context: None,
+            writer_correction_assignment: None,
+            input_artifacts: Vec::new(),
+            depends_on: None,
+            output: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        let attempt = Attempt {
+            id: "attempt-1".into(),
+            work_item_id: "work-1".into(),
+            kind: AttemptKind::Write,
+            status: AttemptStatus::Complete,
+            tasks: vec![
+                completed_write_task("attempt-1-write-1", "initial"),
+                learner,
+            ],
+            review_state: Some(AttemptReviewState::Passed),
+            ..Default::default()
+        };
+        assert!(attempt.validate("work-1").is_ok());
     }
 
     #[test]

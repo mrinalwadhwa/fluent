@@ -277,7 +277,8 @@ const manager = {
   getSessionFile: () => '/private/task/session.jsonl',
   getEntries: () => entries,
 };
-const ctx = { sessionManager: manager };
+let shutdowns = 0;
+const ctx = { sessionManager: manager, shutdown: () => shutdowns++ };
 let entries = [];
 createFluentPiExtension(async (message) => {
   messages.push(message);
@@ -304,11 +305,53 @@ const failing = new Map();
 createFluentPiExtension(async () => { throw new Error('receiver failed'); })
   ({ on: (kind, callback) => failing.set(kind, callback) });
 await assert.rejects(failing.get('session_start')({ type: 'session_start', reason: 'startup' }, ctx));
-await assert.rejects(failing.get('input')({ type: 'input', text: 'late' }, ctx));
+assert.deepEqual(await failing.get('input')({ type: 'input', text: 'late' }, ctx), { action: 'handled' });
+assert.ok(shutdowns >= 1);
 "#;
     let output = std::process::Command::new("node")
         .args(["--input-type=module", "-e", script])
         .env("FLUENT_NATIVE_PI_GENERATION", "generation-1")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn pi_installed_runner_closes_input_after_receiver_failure() {
+    let which = std::process::Command::new("sh")
+        .args(["-c", "command -v pi"])
+        .output()
+        .unwrap();
+    if !which.status.success() {
+        return;
+    }
+    let shim = String::from_utf8(which.stdout).unwrap();
+    let shim = std::fs::read_to_string(shim.trim()).unwrap();
+    let target = shim
+        .lines()
+        .find_map(|line| line.strip_prefix("# cmd-shim-target="));
+    let Some(target) = target else {
+        return;
+    };
+    let runner = std::path::Path::new(target)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("core/extensions/runner.js");
+    assert!(
+        runner.is_file(),
+        "installed Pi runner missing: {}",
+        runner.display()
+    );
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/pi-installed-runner.mjs")
+        .arg(&runner)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();
@@ -332,6 +375,7 @@ fn pi_receiver_acknowledges_durable_input_and_settlement() {
     let mut observed = Vec::new();
     for event in [
         json!({"type":"session_start","reason":"startup"}),
+        json!({"type":"owner_heartbeat"}),
         json!({"type":"input","text":"first","streamingBehavior":"steer"}),
         json!({"type":"input","text":"second","streamingBehavior":"followUp"}),
         json!({"type":"input_entry","entry_id":"entry-1"}),
@@ -363,8 +407,8 @@ fn pi_receiver_acknowledges_durable_input_and_settlement() {
             completion,
         ));
     }
-    assert_eq!(observed[1].1, json!(1));
-    assert_eq!(observed[2].1, json!(2));
+    assert_eq!(observed[2].1, json!(1));
+    assert_eq!(observed[3].1, json!(2));
     assert!(matches!(
         observed.last().unwrap().2,
         Completion::Accepted {
@@ -373,7 +417,7 @@ fn pi_receiver_acknowledges_durable_input_and_settlement() {
         }
     ));
     let saved = std::fs::read_to_string(evidence.path()).unwrap();
-    assert_eq!(saved.lines().count(), 9);
+    assert_eq!(saved.lines().count(), 10);
     assert!(saved.contains("entry-2"));
     assert!(gate.observe(&json!({"generation":"generation-old","session_id":"assigned-session","session_file":"/private/task/session.jsonl","event":{"type":"agent_settled","aborted":false}})).is_err());
 }
@@ -417,6 +461,75 @@ fn pi_native_model_config_keeps_only_assigned_provider() {
     );
     assert!(selected["providers"].get("remote").is_none());
     assert!(select_local_model_config(&source, "unknown-model").is_err());
+}
+
+#[test]
+fn pi_endpoint_override_preserves_effective_model() {
+    use fluent::native_agent::pi::select_local_model_config_with_endpoint;
+    let source = json!({"providers": {"local-openai": {
+        "baseUrl":"http://127.0.0.1:10000/v1", "api":"openai-completions", "apiKey":"original",
+        "models":[{"id":"assigned", "reasoning":true, "contextWindow":262144,
+            "maxTokens":8192, "supportsDeveloperRole":false,
+            "supportsReasoningEffort":false, "maxTokensField":"max_tokens"},
+            {"id":"other", "contextWindow":1024}]
+    }, "remote":{"models":[{"id":"remote"}]}}});
+    let selected = select_local_model_config_with_endpoint(
+        &source,
+        "assigned",
+        "http://127.0.0.1:18989/v1",
+        Some("local"),
+    )
+    .unwrap();
+    assert_eq!(
+        selected["providers"]["local-openai"]["baseUrl"],
+        "http://127.0.0.1:18989/v1"
+    );
+    assert_eq!(selected["providers"]["local-openai"]["apiKey"], "local");
+    assert_eq!(
+        selected["providers"]["local-openai"]["models"],
+        json!([source["providers"]["local-openai"]["models"][0]])
+    );
+    assert!(selected["providers"].get("remote").is_none());
+    assert!(
+        select_local_model_config_with_endpoint(
+            &source,
+            "missing",
+            "http://127.0.0.1:18989/v1",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        select_local_model_config_with_endpoint(
+            &source,
+            "assigned",
+            "https://remote.invalid/v1",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        select_local_model_config_with_endpoint(
+            &source,
+            "assigned",
+            "http://127.0.0.1:80@remote.invalid/v1",
+            None,
+        )
+        .is_err()
+    );
+    let incompatible = json!({"providers":{"local-openai":{
+        "baseUrl":"http://127.0.0.1:10000/v1", "api":"unsupported",
+        "models":[source["providers"]["local-openai"]["models"][0].clone()]
+    }}});
+    assert!(
+        select_local_model_config_with_endpoint(
+            &incompatible,
+            "assigned",
+            "http://127.0.0.1:18989/v1",
+            None
+        )
+        .is_err()
+    );
 }
 
 #[cfg(feature = "test-support")]
@@ -1585,6 +1698,17 @@ fn host_native_agent_acceptance() {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    struct ProxyGuard {
+        child: std::process::Child,
+        output: std::path::PathBuf,
+    }
+    impl Drop for ProxyGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
     assert_eq!(
         std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
         "1"
@@ -1604,7 +1728,12 @@ after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     send -- "Please retain result.txt and continue.\r"
     after 300
-    send -- "The final file must have exactly the requested line.\r"
+    send -- "The final file must have exactly the requested line."
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
+        send -- "\033\r"
+    } else {
+        send -- "\r"
+    }
     after 300
 }
 send -- "\002d"
@@ -1656,8 +1785,10 @@ exit [lindex $outcome 3]
         run("git", &["add", "README.md"]);
         run("git", &["commit", "-m", "Add fixture"]);
         let work = format!("native-{provider}");
+        let forbidden = project.join("forbidden.txt");
         let instructions = format!(
-            "First run sleep 8 with the shell tool so an operator can attach and send two short inputs. Then create result.txt containing exactly native-{provider} followed by a newline. Commit the file. Keep the change small."
+            "First try to run `touch {}` with the shell tool and record that the source checkout denies this write. Then run sleep 8 with the shell tool so an operator can attach and send steering and follow-up input. Create result.txt containing exactly native-{provider} followed by a newline. Commit the file. Keep the change small.",
+            forbidden.display()
         );
         run(
             binary,
@@ -1687,18 +1818,48 @@ exit [lindex $outcome 3]
                 "--write-effort",
                 &effort,
                 "--review-coder",
-                "codex",
+                provider,
                 "--review-model",
-                &std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap(),
+                &model,
                 "--review-effort",
-                &std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap(),
+                &effort,
             ],
         );
+        let mut pi_proxy = None;
+        let mut pi_endpoint = std::env::var("FLUENT_NATIVE_PI_ENDPOINT").unwrap_or_default();
+        if provider == "pi" {
+            let proxy_output = project.join("retry-proxy");
+            fs::create_dir(&proxy_output).unwrap();
+            let proxy_log = File::create(proxy_output.join("proxy.log")).unwrap();
+            let proxy = Command::new("python3")
+                .arg(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/host/pi-retry-proxy.py"),
+                )
+                .env("FLUENT_NATIVE_PI_PROXY_OUTPUT", &proxy_output)
+                .stdout(Stdio::from(proxy_log))
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let port = loop {
+                if let Ok(port) = fs::read_to_string(proxy_output.join("port.txt")) {
+                    break port;
+                }
+                assert!(Instant::now() < deadline, "Pi retry proxy did not start");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            pi_endpoint = format!("http://127.0.0.1:{}/v1", port.trim());
+            pi_proxy = Some(ProxyGuard {
+                child: proxy,
+                output: proxy_output,
+            });
+        }
         let log = File::create(project.join("task.stdout.log")).unwrap();
         let error_log = File::create(project.join("task.stderr.log")).unwrap();
         let mut child = Command::new(binary)
             .args(["task", "run", &work, "attempt-1", "attempt-1-write-1"])
             .current_dir(&project)
+            .env("FLUENT_NATIVE_PI_ENDPOINT", &pi_endpoint)
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
             .spawn()
@@ -1746,6 +1907,40 @@ exit [lindex $outcome 3]
             }
             std::thread::sleep(Duration::from_millis(100));
         };
+        if provider == "pi" {
+            let source_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".pi/agent")
+                });
+            let source: serde_json::Value =
+                serde_json::from_slice(&fs::read(source_dir.join("models.json")).unwrap()).unwrap();
+            let home = fs::read_dir(&artifact)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("native-pi-home-")
+                })
+                .expect("Pi private agent home is absent");
+            let private: serde_json::Value =
+                serde_json::from_slice(&fs::read(home.join("models.json")).unwrap()).unwrap();
+            let selected = source["providers"]["local-openai"]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == model)
+                .unwrap();
+            assert_eq!(
+                private["providers"]["local-openai"]["models"],
+                json!([selected])
+            );
+            assert_eq!(private["providers"]["local-openai"]["baseUrl"], pi_endpoint);
+            assert_eq!(private["providers"].as_object().unwrap().len(), 1);
+        }
         for (label, control) in [
             ("observer-before", false),
             ("control", true),
@@ -1758,6 +1953,7 @@ exit [lindex $outcome 3]
                 .env("FLUENT_NATIVE_SOURCE", &project)
                 .env("FLUENT_NATIVE_SESSION", &session)
                 .env("FLUENT_NATIVE_CONTROL", if control { "1" } else { "0" })
+                .env("FLUENT_NATIVE_PROVIDER", provider)
                 .stdout(Stdio::from(log))
                 .status()
                 .unwrap();
@@ -1786,6 +1982,18 @@ exit [lindex $outcome 3]
             "{provider} native Task failed; see {}",
             project.display()
         );
+        if let Some(proxy) = &pi_proxy {
+            assert!(
+                proxy.output.join("retry-triggered.txt").is_file(),
+                "Pi did not receive the transient retry response"
+            );
+            let count: usize = fs::read_to_string(proxy.output.join("request-count.txt"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(count >= 2, "Pi did not retry the model request");
+        }
+        drop(pi_proxy);
         let transcript = fs::read_to_string(artifact.join("transcript.jsonl")).unwrap();
         let records: Vec<serde_json::Value> = transcript
             .lines()
@@ -1822,7 +2030,58 @@ exit [lindex $outcome 3]
             format!("native-{provider}\n")
         );
         assert!(task["output"]["commit"].as_str().is_some());
-        if provider == "codex" {
+        assert!(
+            !forbidden.exists(),
+            "{provider} escaped its candidate confinement"
+        );
+        assert!(
+            transcript.contains("forbidden.txt"),
+            "{provider} did not record its confinement probe"
+        );
+        if provider == "pi" {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record["event"]["type"] == "input"
+                        && record["event"]["streamingBehavior"] == "steer")
+            );
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record["event"]["type"] == "input"
+                        && record["event"]["streamingBehavior"] == "followUp")
+            );
+        }
+        let listed = Command::new(binary)
+            .args(["terminal", "list", "--source", project.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(listed.status.success());
+        let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        assert!(
+            !listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["session_id"] == session && entry["can_control"] == true),
+            "settled {provider} terminal still admits control"
+        );
+        let late = Command::new(binary)
+            .args([
+                "terminal",
+                "attach",
+                "--source",
+                project.to_str().unwrap(),
+                &session,
+                "--control",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !late.status.success(),
+            "settled {provider} terminal accepted a late control attachment"
+        );
+        {
             run(binary, &["review", &work, "attempt-1"]);
             let review_log = File::create(project.join("review.stdout.log")).unwrap();
             let review_error = File::create(project.join("review.stderr.log")).unwrap();
@@ -1838,7 +2097,7 @@ exit [lindex $outcome 3]
                 if let Some(status) = review.try_wait().unwrap() {
                     assert!(
                         status.success(),
-                        "ephemeral native Codex Reviewer failed; see {}",
+                        "ephemeral native {provider} Reviewer failed; see {}",
                         project.display()
                     );
                     break;
@@ -1846,7 +2105,7 @@ exit [lindex $outcome 3]
                 if Instant::now() >= deadline {
                     review.kill().unwrap();
                     let _ = review.wait();
-                    panic!("ephemeral native Codex Reviewer exceeded the host deadline");
+                    panic!("ephemeral native {provider} Reviewer exceeded the host deadline");
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -1860,7 +2119,27 @@ exit [lindex $outcome 3]
                     .lines()
                     .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                     .any(|record| record["format"] == "fluent-native-agent-event"
-                        && record["provider"] == "codex")
+                        && record["provider"] == provider)
+            );
+            if provider == "codex" {
+                assert!(
+                    !review_artifact.join("codex-session").exists(),
+                    "ephemeral Reviewer retained a resumable Codex session"
+                );
+            }
+            let listed = Command::new(binary)
+                .args(["terminal", "list", "--source", project.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+            assert!(
+                !listed
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["task_id"] == "attempt-1-review-tests"
+                        && entry["can_control"] == true),
+                "{provider} Reviewer remained controllable after settlement"
             );
         }
 
@@ -1961,5 +2240,238 @@ exit [lindex $outcome 3]
         assert!(shown.status.success());
         let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
         assert_ne!(item["attempts"][0]["tasks"][0]["status"], "complete");
+
+        if provider == "pi" {
+            let failure_work = "native-pi-receiver-failure";
+            run(
+                binary,
+                &[
+                    "work-item",
+                    "create",
+                    failure_work,
+                    "--title",
+                    "Pi receiver failure",
+                    "--instructions",
+                    "Run sleep 60 with the shell tool before creating result.txt.",
+                ],
+            );
+            run(
+                binary,
+                &[
+                    "attempt",
+                    "create",
+                    failure_work,
+                    "attempt-1",
+                    "--terminal-mode",
+                    "native",
+                    "--write-coder",
+                    "pi",
+                    "--write-model",
+                    &model,
+                    "--write-effort",
+                    &effort,
+                ],
+            );
+            let failure_log = File::create(project.join("receiver.stdout.log")).unwrap();
+            let failure_error = File::create(project.join("receiver.stderr.log")).unwrap();
+            let mut failed = Command::new(binary)
+                .args([
+                    "task",
+                    "run",
+                    failure_work,
+                    "attempt-1",
+                    "attempt-1-write-1",
+                ])
+                .current_dir(&project)
+                .stdout(Stdio::from(failure_log))
+                .stderr(Stdio::from(failure_error))
+                .spawn()
+                .unwrap();
+            let failure_artifact = project.join(format!(
+                ".fluent/work/artifacts/{failure_work}/attempt-1/attempt-1-write-1"
+            ));
+            let failure_deadline = Instant::now() + Duration::from_secs(120);
+            loop {
+                assert!(
+                    failed.try_wait().unwrap().is_none(),
+                    "Pi ended before receiver failure injection"
+                );
+                assert!(
+                    Instant::now() < failure_deadline,
+                    "Pi did not start receiver failure fixture"
+                );
+                let transcript = fs::read_to_string(failure_artifact.join("transcript.jsonl"))
+                    .unwrap_or_default();
+                if transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|event| event["event"]["type"] == "session_start")
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let pane = fs::read_to_string(failure_artifact.join("native-pi-pane.sh")).unwrap();
+            let generation = pane
+                .lines()
+                .find(|line| line.starts_with("export FLUENT_NATIVE_PI_GENERATION="))
+                .and_then(|line| line.split('\'').nth(1))
+                .expect("Pi pane omits owner generation file");
+            let socket = std::path::Path::new(generation)
+                .parent()
+                .unwrap()
+                .join("pi.sock");
+            fs::remove_file(&socket).unwrap();
+            let failure_deadline = Instant::now() + Duration::from_secs(20);
+            let status = loop {
+                if let Some(status) = failed.try_wait().unwrap() {
+                    break status;
+                }
+                if Instant::now() >= failure_deadline {
+                    failed.kill().unwrap();
+                    let _ = failed.wait();
+                    panic!("Pi did not stop after owner receiver disappeared");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            assert!(
+                !status.success(),
+                "Pi receiver failure reported Task success"
+            );
+            let shown = Command::new(binary)
+                .args(["work-item", "show", failure_work])
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+            assert_ne!(item["attempts"][0]["tasks"][0]["status"], "complete");
+
+            for (scenario, input) in [("abort", "\u{3}"), ("compact", "/compact\r")] {
+                let abort_work = format!("native-pi-{scenario}");
+                run(
+                    binary,
+                    &[
+                        "work-item",
+                        "create",
+                        &abort_work,
+                        "--title",
+                        "Pi activity interruption",
+                        "--instructions",
+                        "Run sleep 60 with the shell tool before creating result.txt.",
+                    ],
+                );
+                run(
+                    binary,
+                    &[
+                        "attempt",
+                        "create",
+                        &abort_work,
+                        "attempt-1",
+                        "--terminal-mode",
+                        "native",
+                        "--write-coder",
+                        "pi",
+                        "--write-model",
+                        &model,
+                        "--write-effort",
+                        &effort,
+                    ],
+                );
+                let abort_log =
+                    File::create(project.join(format!("{scenario}.stdout.log"))).unwrap();
+                let abort_error =
+                    File::create(project.join(format!("{scenario}.stderr.log"))).unwrap();
+                let mut aborted = Command::new(binary)
+                    .args(["task", "run", &abort_work, "attempt-1", "attempt-1-write-1"])
+                    .current_dir(&project)
+                    .stdout(Stdio::from(abort_log))
+                    .stderr(Stdio::from(abort_error))
+                    .spawn()
+                    .unwrap();
+                let abort_artifact = project.join(format!(
+                    ".fluent/work/artifacts/{abort_work}/attempt-1/attempt-1-write-1"
+                ));
+                let abort_deadline = Instant::now() + Duration::from_secs(120);
+                let abort_session = loop {
+                    assert!(
+                        aborted.try_wait().unwrap().is_none(),
+                        "Pi ended before abort injection"
+                    );
+                    assert!(
+                        Instant::now() < abort_deadline,
+                        "Pi did not start abort fixture"
+                    );
+                    let listed = Command::new(binary)
+                        .args(["terminal", "list", "--source", project.to_str().unwrap()])
+                        .output()
+                        .unwrap();
+                    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+                    if let Some(session) = listed
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|entry| {
+                            entry["work_item_id"] == abort_work && entry["can_control"] == true
+                        })
+                        .and_then(|entry| entry["session_id"].as_str())
+                    {
+                        let transcript =
+                            fs::read_to_string(abort_artifact.join("transcript.jsonl"))
+                                .unwrap_or_default();
+                        if transcript.contains("tool_execution_start") {
+                            break session.to_owned();
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                };
+                let abort_attach = r#"
+set timeout 20
+spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+after 300
+send -- $env(FLUENT_NATIVE_FAULT_INPUT)
+after 300
+send -- "\002d"
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+                let attach = Command::new("expect")
+                    .args(["-c", abort_attach])
+                    .env("FLUENT_NATIVE_BINARY", binary)
+                    .env("FLUENT_NATIVE_SOURCE", &project)
+                    .env("FLUENT_NATIVE_SESSION", &abort_session)
+                    .env("FLUENT_NATIVE_FAULT_INPUT", input)
+                    .output()
+                    .unwrap();
+                fs::write(
+                    project.join(format!("{scenario}.attach.log")),
+                    &attach.stdout,
+                )
+                .unwrap();
+                let abort_deadline = Instant::now() + Duration::from_secs(20);
+                let status = loop {
+                    if let Some(status) = aborted.try_wait().unwrap() {
+                        break status;
+                    }
+                    if Instant::now() >= abort_deadline {
+                        aborted.kill().unwrap();
+                        let _ = aborted.wait();
+                        panic!("Pi {scenario} did not stop its Task runner");
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                };
+                assert!(
+                    !status.success(),
+                    "Pi {scenario} activity completed the Task"
+                );
+                let transcript =
+                    fs::read_to_string(abort_artifact.join("transcript.jsonl")).unwrap();
+                assert!(
+                    transcript.contains("\"outcome\":\"aborted\"")
+                        || transcript.contains("\"aborted\":true"),
+                    "Pi {scenario} has no canonical interruption evidence"
+                );
+            }
+        }
     }
 }

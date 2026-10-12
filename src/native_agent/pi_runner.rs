@@ -1,7 +1,7 @@
 //! Run Pi's foreground interface with one owned extension and session file.
 
 use anyhow::{Result, ensure};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader};
@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use crate::coder::{CoderSession, PiCode};
 use crate::native_agent::Completion;
-use crate::native_agent::pi::{PiEventGate, receive_event, select_local_model_config};
+use crate::native_agent::pi::{
+    PiEventGate, receive_event, select_local_model_config, select_local_model_config_with_endpoint,
+};
 use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
 
 pub struct PiNativeTask<'a> {
@@ -25,6 +27,8 @@ pub struct PiNativeTask<'a> {
     pub system_prompt: &'a str,
     pub session: CoderSession<'a>,
     pub previous_session: Option<&'a Path>,
+    /// Place Pi's writable private files in an already confined staging root.
+    pub private_root: Option<&'a Path>,
     pub launch_env: &'a [(String, String)],
 }
 
@@ -36,33 +40,19 @@ fn source_model_config() -> Option<PathBuf> {
 }
 
 fn selected_model_config(model: &str) -> Result<Value> {
-    if let Ok(endpoint) = std::env::var("FLUENT_NATIVE_PI_ENDPOINT") {
-        ensure!(
-            [
-                "http://localhost:",
-                "http://localhost/",
-                "http://127.0.0.1:",
-                "http://127.0.0.1/"
-            ]
-            .iter()
-            .any(|prefix| endpoint.starts_with(prefix)),
-            "native Pi endpoint must be a local HTTP server"
-        );
-        return Ok(json!({"providers":{"local-openai":{
-            "baseUrl":endpoint,"api":"openai-completions",
-            "apiKey":std::env::var("FLUENT_NATIVE_PI_API_KEY").unwrap_or_else(|_| "local".into()),
-            "models":[{"id":model}]
-        }}}));
+    let source = source_model_config()
+        .filter(|path| path.is_file())
+        .ok_or_else(|| anyhow::anyhow!("native Pi requires readable local-openai models.json"))?;
+    let config: Value = serde_json::from_slice(&fs::read(source)?)?;
+    match std::env::var("FLUENT_NATIVE_PI_ENDPOINT") {
+        Ok(endpoint) => select_local_model_config_with_endpoint(
+            &config,
+            model,
+            &endpoint,
+            std::env::var("FLUENT_NATIVE_PI_API_KEY").ok().as_deref(),
+        ),
+        Err(_) => select_local_model_config(&config, model),
     }
-    if let Some(source) = source_model_config()
-        && source.is_file()
-    {
-        let config: Value = serde_json::from_slice(&fs::read(source)?)?;
-        return select_local_model_config(&config, model);
-    }
-    anyhow::bail!(
-        "native Pi requires readable local-openai configuration or FLUENT_NATIVE_PI_ENDPOINT"
-    )
 }
 
 pub fn check_capability(model: &str, thinking: Option<&str>) -> Result<()> {
@@ -163,7 +153,7 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
     fs::create_dir_all(artifact)?;
     let private_home_guard = tempfile::Builder::new()
         .prefix("native-pi-home-")
-        .tempdir_in(artifact)?;
+        .tempdir_in(task.private_root.unwrap_or(artifact))?;
     let private_home = private_home_guard.path().to_path_buf();
     let extension = private_home.join("fluent-pi-extension.mjs");
     fs::write(&extension, include_str!("pi_extension.mjs"))?;

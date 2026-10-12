@@ -7,9 +7,10 @@ git diff --quiet
 git diff --cached --quiet
 test -z "$(git ls-files --others --exclude-standard)"
 printf 'candidate=%s\n' "$candidate"
-printf '%s\n' 'plan: disposable native Codex, Claude, and Pi Writers with two attached inputs each'
+printf '%s\n' 'plan: disposable native Codex, Claude, and Pi Writers with attached steering and follow-up input'
 printf '%s\n' 'plan: observe, detach, reconnect, inspect canonical evidence, then cancel one Task per provider'
-printf '%s\n' 'plan: run one ephemeral native Codex Reviewer after a completed Writer'
+printf '%s\n' 'plan: run ephemeral native Reviews and inspect workflow advancement and session retention'
+printf '%s\n' 'plan: Pi transient-response retry, compaction, abort, and receiver loss in disposable fixtures'
 
 : "${FLUENT_TEST_REAL_NATIVE_AGENT_HOST:?host provider-run authorization is required}"
 : "${FLUENT_NATIVE_CODEX_MODEL:?resolved Codex model is required}"
@@ -23,6 +24,8 @@ test "$FLUENT_TEST_REAL_NATIVE_AGENT_HOST" = 1
 python3 - <<'PY'
 import os
 import socket
+import json
+from pathlib import Path
 from urllib.parse import urlparse
 
 endpoint = urlparse(os.environ["FLUENT_NATIVE_PI_ENDPOINT"])
@@ -30,6 +33,16 @@ if endpoint.scheme != "http" or endpoint.hostname not in {"localhost", "127.0.0.
     raise SystemExit("Pi endpoint must be a local HTTP server with an explicit port")
 with socket.create_connection((endpoint.hostname, endpoint.port), timeout=3):
     pass
+source = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent"))) / "models.json"
+config = json.loads(source.read_text())
+provider = config["providers"]["local-openai"]
+if provider.get("api") != "openai-completions":
+    raise SystemExit("selected Pi provider must use openai-completions")
+selected = [entry for entry in provider["models"] if entry.get("id") == os.environ["FLUENT_NATIVE_PI_MODEL"]]
+if len(selected) != 1:
+    raise SystemExit("selected Pi model must appear exactly once in local-openai models.json")
+print("pi-selected-model=" + selected[0]["id"])
+print("pi-selected-fields=" + ",".join(sorted(selected[0].keys())))
 PY
 claude_version="$(claude --version)"
 python3 - "$claude_version" <<'PY'

@@ -52,6 +52,7 @@ fn learner_run_inputs_handoff_only_surface_remains_source_compatible() {
     let workspace = PathBuf::from("/tmp/ws");
     let handoff = PathBuf::from("/tmp/handoff");
     let make = |handoff_only: bool| LearnerRunInputs {
+        native_identity: None,
         workspace_path: &workspace,
         resolver: &resolver,
         extra_args: &[],

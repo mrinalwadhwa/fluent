@@ -3143,6 +3143,11 @@ fn rebase_candidate_with_coder(
         &candidate.attempt_id,
         TaskKind::Rebase,
     )?;
+    let native = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == candidate.attempt_id)
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native);
     // A provider readiness failure must not create an executing Rebase Task.
     // Keep a prepared Codex home alive through the eventual sandboxed launch.
     let provider_readiness = if cfg!(test) {
@@ -3156,14 +3161,51 @@ fn rebase_candidate_with_coder(
             .map_err(anyhow::Error::new)?,
         )
     };
+    if native {
+        anyhow::ensure!(
+            config.extra_args.is_empty(),
+            "native Rebase does not accept extra provider arguments"
+        );
+        let pair = item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == candidate.attempt_id)
+            .expect("Rebase Attempt exists")
+            .coder_mapping
+            .for_task_kind(TaskKind::Rebase);
+        match config.coder_kind {
+            CoderKind::Codex => crate::native_agent::codex::check_capability(
+                provider_readiness
+                    .as_ref()
+                    .and_then(|ready| ready.codex_worker())
+                    .ok_or_else(|| anyhow::anyhow!("native Codex Rebase has no private worker"))?
+                    .launcher()
+                    .execution_executable(),
+            )?,
+            CoderKind::Claude => crate::native_agent::claude::check_capability()?,
+            CoderKind::Pi => crate::native_agent::pi_runner::check_capability(
+                config.model.unwrap_or(&pair.model),
+                config.effort.or(pair.effort.as_deref()),
+            )?,
+        }
+    }
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);
-    let rebase_artifact_dir = artifact_dir.join(&rebase_task_id);
+    let rebase_artifact_dir = if native {
+        config.project_root.join(work_artifact_path(
+            config.work_item_id,
+            &candidate.attempt_id,
+            &rebase_task_id,
+        ))
+    } else {
+        artifact_dir.join(&rebase_task_id)
+    };
 
     // Render and probe the exact production boundary before creating the rebase
     // artifact area or recording an executing Task. The deterministic artifact path
     // may be granted before it exists; Seatbelt only needs its rendered pathname.
     let (sandbox, sandbox_profile) = match preflight_rebase_sandbox(
         config,
+        native,
         source_workspace,
         &rebase_artifact_dir,
         provider_readiness
@@ -3219,6 +3261,7 @@ fn rebase_candidate_with_coder(
         provider_readiness
             .as_ref()
             .and_then(|readiness| readiness.codex_worker()),
+        native,
         sandbox,
         sandbox_profile,
         make_coder,
@@ -3275,8 +3318,9 @@ fn run_reserved_rebase(
     rebase_artifact_dir: &Path,
     rebase_task_id: &str,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
+    native: bool,
     sandbox: CoderSandbox,
-    _sandbox_profile: Option<os::SandboxProfile>,
+    sandbox_profile: Option<os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
     let workspace_resolver = ContentResolver::new(Some(source_workspace));
@@ -3299,7 +3343,7 @@ fn run_reserved_rebase(
 
     let transcript_path = rebase_artifact_dir.join("transcript.jsonl");
 
-    if !config.no_sandbox || codex_worker.is_some() {
+    if !config.no_sandbox || codex_worker.is_some() || native {
         if codex_worker.is_some() {
             os::check_sandbox_prerequisite()?;
         } else {
@@ -3321,25 +3365,96 @@ fn run_reserved_rebase(
     let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
-    let coder = make_coder(
-        sandbox,
-        codex_worker.map(|worker| worker.launcher().execution_executable()),
-    );
-    // Persist the coder's supervision report in the rebase artifact directory, then
-    // take its terminal outcome, so a group-sweep diagnostic is durable rather than
-    // dropped with the ManagedChild.
-    let completion = coder.run_captured_reported(
-        &prompt,
-        &system_prompt,
-        source_workspace,
-        config.extra_args,
-        &codex_worker
-            .map(|worker| vec![worker.launch_env()])
-            .unwrap_or_default(),
-        Some(&capture),
-    );
-    let exit_code = match crate::coder::finish_supervised_coder_run(completion, rebase_artifact_dir)
-    {
+    let launch_env = codex_worker
+        .map(|worker| vec![worker.launch_env()])
+        .unwrap_or_default();
+    let execution = if native {
+        let profile = sandbox_profile
+            .as_ref()
+            .context("native Rebase has no worker sandbox profile")?;
+        let model = config
+            .model
+            .map(str::to_owned)
+            .unwrap_or_else(|| config.coder_kind.default_model());
+        let identity = crate::terminal_sessions::TerminalIdentity {
+            source_root: config.project_root.to_path_buf(),
+            work_item_id: config.work_item_id.into(),
+            attempt_id: candidate.attempt_id.clone(),
+            task_id: rebase_task_id.into(),
+            role: "rebase".into(),
+            provider: config.coder_kind.as_str().into(),
+            artifact_dir: rebase_artifact_dir.to_path_buf(),
+        };
+        match config.coder_kind {
+            CoderKind::Codex => {
+                let worker = codex_worker.context("native Codex Rebase has no private worker")?;
+                let combined = format!("{system_prompt}\n\n---\n\n{prompt}");
+                crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: source_workspace,
+                    private_home: worker.home(),
+                    executable: worker.launcher().execution_executable(),
+                    model: &model,
+                    effort: config.effort,
+                    prompt: &combined,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &launch_env,
+                })
+            }
+            CoderKind::Claude => {
+                let home = rebase_artifact_dir.join("native-claude-home");
+                fs::create_dir_all(&home)?;
+                crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: source_workspace,
+                    private_home: &home,
+                    model: &model,
+                    effort: config
+                        .effort
+                        .context("native Claude Rebase has no effort")?,
+                    prompt: &prompt,
+                    system_prompt: &system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &launch_env,
+                })
+            }
+            CoderKind::Pi => {
+                crate::native_agent::pi_runner::run(crate::native_agent::pi_runner::PiNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: source_workspace,
+                    model: &model,
+                    thinking: config
+                        .effort
+                        .context("native Pi Rebase has no thinking level")?,
+                    prompt: &prompt,
+                    system_prompt: &system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    previous_session: None,
+                    private_root: None,
+                    launch_env: &launch_env,
+                })
+            }
+        }
+        .map(|()| 0)
+    } else {
+        let coder = make_coder(
+            sandbox,
+            codex_worker.map(|worker| worker.launcher().execution_executable()),
+        );
+        let completion = coder.run_captured_reported(
+            &prompt,
+            &system_prompt,
+            source_workspace,
+            config.extra_args,
+            &launch_env,
+            Some(&capture),
+        );
+        crate::coder::finish_supervised_coder_run(completion, rebase_artifact_dir)
+    };
+    let exit_code = match execution {
         Ok(code) => code,
         Err(err) => {
             // A typed pump/coder failure returns to the terminal finalizer, which
@@ -3467,11 +3582,12 @@ fn new_rebase_task(
 /// Render and probe the rebase boundary while all rebase state is still read-only.
 fn preflight_rebase_sandbox(
     config: &WorkMergeConfig<'_>,
+    native: bool,
     source_workspace: &Path,
     rebase_artifact_dir: &Path,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
 ) -> Result<(CoderSandbox, Option<os::SandboxProfile>)> {
-    if config.no_sandbox && codex_worker.is_none() {
+    if config.no_sandbox && codex_worker.is_none() && !native {
         return Ok((CoderSandbox::None, None));
     }
 

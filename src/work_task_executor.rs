@@ -311,16 +311,13 @@ fn native_launch_blocker(
             task_kind,
             TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
         )
-        && !(matches!(task_kind, TaskKind::Write)
-            && matches!(
-                attempt.coder_mapping.for_task_kind(task_kind).coder,
-                CoderKind::Codex | CoderKind::Claude | CoderKind::Pi
-            ))
-        && !(task_kind == TaskKind::Review
-            && attempt.coder_mapping.for_task_kind(task_kind).coder == CoderKind::Codex))
-        .then_some(
-            "native terminal mode cannot launch this Task: the provider adapter is not available",
-        )
+        && !matches!(
+            attempt.coder_mapping.for_task_kind(task_kind).coder,
+            CoderKind::Codex | CoderKind::Claude | CoderKind::Pi
+        ))
+    .then_some(
+        "native terminal mode cannot launch this Task: the provider adapter is not available",
+    )
 }
 
 pub(crate) fn ensure_agent_launch_supported(
@@ -1862,20 +1859,38 @@ fn run_review_task_with_coder(
         }
     };
 
-    if planned_item
+    let native_review = planned_item
         .attempts
         .iter()
         .find(|attempt| attempt.id == config.attempt_id)
-        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
-    {
-        let capability = provider_readiness
-            .codex_worker()
-            .context("native Codex Reviewer has no private worker home")
-            .and_then(|worker| {
-                crate::native_agent::codex::check_capability(
-                    worker.launcher().execution_executable(),
-                )
-            });
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native);
+    if native_review {
+        anyhow::ensure!(
+            config.extra_args.is_empty(),
+            "native Reviewer does not accept extra provider arguments"
+        );
+        let pair = planned_item
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == config.attempt_id)
+            .expect("planned Review Attempt exists")
+            .coder_mapping
+            .for_task_kind(TaskKind::Review);
+        let capability = match pair.coder {
+            CoderKind::Codex => provider_readiness
+                .codex_worker()
+                .context("native Codex Reviewer has no private worker home")
+                .and_then(|worker| {
+                    crate::native_agent::codex::check_capability(
+                        worker.launcher().execution_executable(),
+                    )
+                }),
+            CoderKind::Claude => crate::native_agent::claude::check_capability(),
+            CoderKind::Pi => crate::native_agent::pi_runner::check_capability(
+                &pair.model,
+                pair.effort.as_deref(),
+            ),
+        };
         if let Err(error) = capability {
             mark_task_failed_attempt_needs_user(
                 config.store,
@@ -1900,7 +1915,7 @@ fn run_review_task_with_coder(
         &artifact_dir,
         reviewer_cache_dir.as_deref(),
         config.resolver,
-        config.no_sandbox,
+        config.no_sandbox && !native_review,
         plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
         provider_readiness.codex_worker(),
     ) {
@@ -2047,7 +2062,7 @@ fn run_review_task_with_coder(
             config.resolver,
             config.extra_args,
             reservation.coder,
-            config.no_sandbox,
+            config.no_sandbox && !native_review,
             reservation.model.as_deref(),
             reservation.effort.as_deref(),
             &pump_config,
@@ -2080,7 +2095,7 @@ fn run_review_task_with_coder(
                 config.resolver,
                 config.extra_args,
                 reservation.coder,
-                config.no_sandbox,
+                config.no_sandbox && !native_review,
                 reservation.model.as_deref(),
                 reservation.effort.as_deref(),
                 &pump_config,
@@ -5319,6 +5334,7 @@ fn run_task_coder_with_coder_with_feedback(
                 system_prompt: &system_prompt,
                 session,
                 previous_session: previous_session.as_deref(),
+                private_root: None,
                 launch_env: &launch_env,
             })?;
         }
@@ -6876,6 +6892,8 @@ pub fn materialize_skill(skill_name: &str, dest_dir: &Path) -> Result<PathBuf> {
 /// Inputs the Learner coder needs to refine expertise and write its handoff
 /// draft.
 pub struct LearnerRunInputs<'a> {
+    /// The owned terminal identity for a native Learner invocation.
+    pub native_identity: Option<crate::terminal_sessions::TerminalIdentity>,
     /// The candidate worktree the Attempt produced.
     pub workspace_path: &'a Path,
     pub resolver: &'a ContentResolver,
@@ -7338,34 +7356,38 @@ fn run_learner_with_coder_with_provider_readiness(
     // merged branch mutated even when the caller requested no sandbox.
     // `--no-sandbox` remains available to other coders, but autonomous Codex
     // must keep the source-home denial that protects its staged credentials.
-    let effectively_sandboxed =
-        mode.effectively_sandboxed(inputs.no_sandbox) || codex_worker.is_some();
+    let effectively_sandboxed = mode.effectively_sandboxed(inputs.no_sandbox)
+        || codex_worker.is_some()
+        || inputs.native_identity.is_some();
 
     // Render and apply the exact production boundary while every launch path is
     // still read-only. The granted expertise, handoff, and artifact paths may not
     // exist yet; Seatbelt profiles deliberately support such deterministic future
     // paths. Keep this profile alive and reuse it below for the actual launch.
-    let (sandbox, _sandbox_profile, effectively_sandboxed) = if let Some(prepared) =
-        prepared_sandbox
-    {
-        (
-            prepared.sandbox.clone(),
-            None,
-            prepared.effectively_sandboxed,
-        )
-    } else {
-        let provider_artifact_dir = capture.as_ref().and_then(|capture| capture.path().parent());
-        let (sandbox, profile) = plan_learner_sandbox(
-            &inputs,
-            mode,
-            effectively_sandboxed,
-            codex_worker,
-            &expertise_dir,
-            &mut readable_roots,
-            provider_artifact_dir,
-        )?;
-        (sandbox, profile, effectively_sandboxed)
-    };
+    let (sandbox, _sandbox_profile, effectively_sandboxed) =
+        if let Some(prepared) = prepared_sandbox {
+            (
+                prepared.sandbox.clone(),
+                None,
+                prepared.effectively_sandboxed,
+            )
+        } else {
+            let provider_artifact_dir = inputs
+                .native_identity
+                .as_ref()
+                .map(|identity| identity.artifact_dir.as_path())
+                .or_else(|| capture.as_ref().and_then(|capture| capture.path().parent()));
+            let (sandbox, profile) = plan_learner_sandbox(
+                &inputs,
+                mode,
+                effectively_sandboxed,
+                codex_worker,
+                &expertise_dir,
+                &mut readable_roots,
+                provider_artifact_dir,
+            )?;
+            (sandbox, profile, effectively_sandboxed)
+        };
 
     fs::create_dir_all(&expertise_dir)?;
     fs::create_dir_all(inputs.handoff_dir)?;
@@ -7421,24 +7443,91 @@ fn run_learner_with_coder_with_provider_readiness(
             .with_context(|| format!("create Learner transcript dir at {}", parent.display()))?;
     }
 
-    let coder = make_coder(
-        sandbox,
-        codex_worker.map(|worker| worker.launcher().execution_executable()),
-    );
-    // Persist the coder's supervision report at the Learner artifact boundary, then
-    // take its terminal outcome, so a group-sweep diagnostic is durable rather than
-    // dropped with the ManagedChild.
-    let completion = coder.run_captured_reported(
-        &prompt,
-        &system_prompt,
-        workspace_path,
-        inputs.extra_args,
-        &extra_env,
-        capture.as_ref(),
-    );
-    let exit_code = match capture.as_ref().and_then(|c| c.path().parent()) {
-        Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
-        None => completion.into_result()?,
+    let exit_code = if let Some(identity) = &inputs.native_identity {
+        anyhow::ensure!(
+            inputs.extra_args.is_empty(),
+            "native Learner does not accept extra provider arguments"
+        );
+        let profile = prepared_sandbox
+            .map(|plan| &plan._profile)
+            .or(_sandbox_profile.as_ref())
+            .context("native Learner has no worker sandbox profile")?;
+        let model = inputs
+            .model
+            .context("native Learner has no selected model")?;
+        match inputs.coder_kind {
+            CoderKind::Codex => {
+                let worker = codex_worker.context("native Codex Learner has no private worker")?;
+                let combined = format!("{system_prompt}\n\n---\n\n{prompt}");
+                crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+                    identity: identity.clone(),
+                    worker_profile: profile,
+                    workspace: workspace_path,
+                    private_home: worker.home(),
+                    executable: worker.launcher().execution_executable(),
+                    model,
+                    effort: inputs.effort,
+                    prompt: &combined,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &extra_env,
+                })?;
+            }
+            CoderKind::Claude => {
+                let home = inputs.handoff_dir.join("native-claude-home");
+                fs::create_dir_all(&home)?;
+                crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
+                    identity: identity.clone(),
+                    worker_profile: profile,
+                    workspace: workspace_path,
+                    private_home: &home,
+                    model,
+                    effort: inputs
+                        .effort
+                        .context("native Claude Learner has no effort")?,
+                    prompt: &prompt,
+                    system_prompt: &system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &extra_env,
+                })?;
+            }
+            CoderKind::Pi => {
+                crate::native_agent::pi_runner::run(crate::native_agent::pi_runner::PiNativeTask {
+                    identity: identity.clone(),
+                    worker_profile: profile,
+                    workspace: workspace_path,
+                    model,
+                    thinking: inputs
+                        .effort
+                        .context("native Pi Learner has no thinking level")?,
+                    prompt: &prompt,
+                    system_prompt: &system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    previous_session: None,
+                    private_root: Some(inputs.handoff_dir),
+                    launch_env: &extra_env,
+                })?
+            }
+        }
+        0
+    } else {
+        let coder = make_coder(
+            sandbox,
+            codex_worker.map(|worker| worker.launcher().execution_executable()),
+        );
+        let completion = coder.run_captured_reported(
+            &prompt,
+            &system_prompt,
+            workspace_path,
+            inputs.extra_args,
+            &extra_env,
+            capture.as_ref(),
+        );
+        match capture.as_ref().and_then(|c| c.path().parent()) {
+            Some(artifact_dir) => {
+                crate::coder::finish_supervised_coder_run(completion, artifact_dir)?
+            }
+            None => completion.into_result()?,
+        }
     };
     if exit_code != 0 {
         bail!("Learner coder exited with code {exit_code}");
@@ -7539,8 +7628,9 @@ pub(crate) fn prepare_learner_host_sandbox(
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     provider_artifact_dir: &Path,
 ) -> Result<Option<PreparedLearnerSandbox>> {
-    let effectively_sandboxed =
-        mode.effectively_sandboxed(inputs.no_sandbox) || codex_worker.is_some();
+    let effectively_sandboxed = mode.effectively_sandboxed(inputs.no_sandbox)
+        || codex_worker.is_some()
+        || inputs.native_identity.is_some();
     let mut readable_roots = inputs
         .review_artifact_paths
         .iter()
@@ -7550,6 +7640,10 @@ pub(crate) fn prepare_learner_host_sandbox(
     readable_roots.sort();
     readable_roots.dedup();
     let expertise_dir = inputs.workspace_path.join(".fluent/expertise");
+    let native_artifact = inputs
+        .native_identity
+        .as_ref()
+        .map(|identity| identity.artifact_dir.as_path());
     let (sandbox, profile) = plan_learner_sandbox(
         &inputs,
         mode,
@@ -7557,7 +7651,7 @@ pub(crate) fn prepare_learner_host_sandbox(
         codex_worker,
         &expertise_dir,
         &mut readable_roots,
-        Some(provider_artifact_dir),
+        Some(native_artifact.unwrap_or(provider_artifact_dir)),
     )?;
     Ok(profile.map(|profile| PreparedLearnerSandbox {
         sandbox,
@@ -8456,14 +8550,9 @@ fn run_review_coder_with_coder(
         .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
     {
         anyhow::ensure!(
-            coder_kind == CoderKind::Codex,
-            "native Reviewer requires Codex"
-        );
-        anyhow::ensure!(
             extra_args.is_empty(),
             "native Reviewer does not accept extra provider arguments"
         );
-        let worker = codex_worker.context("native Codex Reviewer has no private worker home")?;
         let profile = sandbox_profile.context("native Reviewer has no worker sandbox profile")?;
         let task = item
             .attempts
@@ -8475,26 +8564,64 @@ fn run_review_coder_with_coder(
             "{}\n\n---\n\n{}",
             prompts.system_prompt, prompts.review_prompt
         );
-        crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
-            identity: crate::terminal_sessions::TerminalIdentity {
-                source_root: project_root.to_path_buf(),
-                work_item_id: item.id.clone(),
-                attempt_id: attempt_id.to_owned(),
-                task_id: task_id.to_owned(),
-                role: task.role.clone(),
-                provider: "codex".into(),
-                artifact_dir: artifact_dir.to_path_buf(),
-            },
-            worker_profile: profile,
-            workspace: artifact_dir,
-            private_home: worker.home(),
-            executable: worker.launcher().execution_executable(),
-            model: &effective_model,
-            effort,
-            prompt: &prompt,
-            session: crate::coder::CoderSession::Ephemeral,
-            launch_env: &launch_env,
-        })?;
+        let identity = crate::terminal_sessions::TerminalIdentity {
+            source_root: project_root.to_path_buf(),
+            work_item_id: item.id.clone(),
+            attempt_id: attempt_id.to_owned(),
+            task_id: task_id.to_owned(),
+            role: task.role.clone(),
+            provider: coder_kind.as_str().into(),
+            artifact_dir: artifact_dir.to_path_buf(),
+        };
+        match coder_kind {
+            CoderKind::Codex => {
+                let worker =
+                    codex_worker.context("native Codex Reviewer has no private worker home")?;
+                crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: artifact_dir,
+                    private_home: worker.home(),
+                    executable: worker.launcher().execution_executable(),
+                    model: &effective_model,
+                    effort,
+                    prompt: &prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &launch_env,
+                })?;
+            }
+            CoderKind::Claude => {
+                let home = artifact_dir.join("native-claude-home");
+                fs::create_dir_all(&home)?;
+                crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: artifact_dir,
+                    private_home: &home,
+                    model: &effective_model,
+                    effort: effort.context("native Claude Reviewer has no effort")?,
+                    prompt: &prompts.review_prompt,
+                    system_prompt: &prompts.system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    launch_env: &launch_env,
+                })?;
+            }
+            CoderKind::Pi => {
+                crate::native_agent::pi_runner::run(crate::native_agent::pi_runner::PiNativeTask {
+                    identity,
+                    worker_profile: profile,
+                    workspace: artifact_dir,
+                    model: &effective_model,
+                    thinking: effort.context("native Pi Reviewer has no thinking level")?,
+                    prompt: &prompts.review_prompt,
+                    system_prompt: &prompts.system_prompt,
+                    session: crate::coder::CoderSession::Ephemeral,
+                    previous_session: None,
+                    private_root: None,
+                    launch_env: &launch_env,
+                })?
+            }
+        }
         crate::usage::log_usage_from_transcript(
             &transcript_path,
             coder_kind.as_str(),
@@ -10540,11 +10667,26 @@ mod tests {
         let mut review_item = item.clone();
         review_item.attempts[0].coder_mapping.review.coder = CoderKind::Codex;
         assert!(ensure_agent_launch_supported(&review_item, "attempt-1", TaskKind::Review).is_ok());
-        for task_kind in [TaskKind::Rebase, TaskKind::Learn] {
-            assert!(
-                ensure_agent_launch_supported(&item, "attempt-1", task_kind).is_err(),
-                "{task_kind:?} must wait for its native adapter"
-            );
+        for coder in [CoderKind::Codex, CoderKind::Claude, CoderKind::Pi] {
+            for task_kind in [
+                TaskKind::Write,
+                TaskKind::Review,
+                TaskKind::Rebase,
+                TaskKind::Learn,
+            ] {
+                let mut assigned = item.clone();
+                let mapping = &mut assigned.attempts[0].coder_mapping;
+                match task_kind {
+                    TaskKind::Write => mapping.write.coder = coder,
+                    TaskKind::Review => mapping.review.coder = coder,
+                    TaskKind::Rebase | TaskKind::Learn => mapping.write.coder = coder,
+                    _ => unreachable!(),
+                }
+                assert!(
+                    ensure_agent_launch_supported(&assigned, "attempt-1", task_kind).is_ok(),
+                    "{coder:?} {task_kind:?} must have a native route"
+                );
+            }
         }
         assert!(plan_coder_kind(&item, "attempt-1", TaskKind::Tester).is_ok());
     }
@@ -12008,6 +12150,7 @@ mod tests {
         let capture = crate::coder::TranscriptCapture::new(&transcript_path, project_root);
         run_learner_with_coder(
             LearnerRunInputs {
+                native_identity: None,
                 workspace_path: &workspace,
                 resolver: &resolver,
                 extra_args: &[],
@@ -12308,6 +12451,7 @@ mod tests {
         let capture = crate::coder::TranscriptCapture::new(&transcript_path, project_root);
         run_learner_with_coder(
             LearnerRunInputs {
+                native_identity: None,
                 workspace_path: &workspace,
                 resolver: &resolver,
                 extra_args: &[],
@@ -23472,6 +23616,7 @@ while time.monotonic() < deadline:
 
         let resolver = ContentResolver::new(None);
         let inputs = LearnerRunInputs {
+            native_identity: None,
             workspace_path: &workspace,
             resolver: &resolver,
             extra_args: &[],
@@ -23713,7 +23858,8 @@ while time.monotonic() < deadline:
 
                 run_learner_with_coder(
                     LearnerRunInputs {
-                        workspace_path: &workspace,
+                        native_identity: None,
+workspace_path: &workspace,
                         resolver: &resolver,
                         extra_args: &[],
                         coder_kind: CoderKind::Codex,
@@ -23861,6 +24007,7 @@ while time.monotonic() < deadline:
 
             let result = run_learner_with_coder(
                 LearnerRunInputs {
+                    native_identity: None,
                     workspace_path: workspace,
                     resolver: user_resolver,
                     extra_args: &[],
@@ -23988,6 +24135,7 @@ while time.monotonic() < deadline:
 
         let result = run_learner_with_coder(
             LearnerRunInputs {
+                native_identity: None,
                 workspace_path: &workspace,
                 resolver: &resolver,
                 extra_args: &[],

@@ -46,34 +46,45 @@ export function createFluentPiExtension(send) {
     let knownUserEntries = new Set();
     let pendingInputs = [];
     let broken = false;
+    let heartbeat;
+
+    function fail(ctx, error) {
+      broken = true;
+      if (heartbeat) clearInterval(heartbeat);
+      // Pi's installed ExtensionRunner swallows callback exceptions. Its
+      // input handler does honor "handled", and shutdown ends the owned pane.
+      try { ctx.shutdown(); } catch { /* Input still returns handled. */ }
+      return error;
+    }
 
     async function report(event, ctx, extra = {}) {
       if (broken) throw new Error("Fluent native Pi receiver has failed");
       const sessionId = ctx.sessionManager.getSessionId();
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (!sessionId || (assignedSession && sessionId !== assignedSession)) {
-        broken = true;
-        throw new Error("Pi switched Fluent's assigned Task conversation");
+        throw fail(ctx, new Error("Pi switched Fluent's assigned Task conversation"));
       }
       try {
         return await send({ generation, session_id: sessionId, session_file: sessionFile,
           model: ctx.model?.id, event, ...extra });
       } catch (error) {
-        broken = true;
-        throw error;
+        throw fail(ctx, error);
       }
     }
 
     pi.on("session_start", async (event, ctx) => {
       if (assignedSession || !["startup", "resume"].includes(event.reason)) {
-        broken = true;
-        throw new Error(`Pi changed Fluent's Task session through ${event.reason}`);
+        throw fail(ctx, new Error(`Pi changed Fluent's Task session through ${event.reason}`));
       }
       assignedSession = ctx.sessionManager.getSessionId();
       knownUserEntries = new Set(ctx.sessionManager.getEntries()
         .filter((entry) => entry.type === "message" && entry.message.role === "user")
         .map((entry) => entry.id));
       await report(event, ctx);
+      heartbeat = setInterval(() => {
+        report({ type: "owner_heartbeat" }, ctx).catch(() => {});
+      }, 1000);
+      heartbeat.unref?.();
     });
 
     pi.on("session_before_switch", () => ({ cancel: true }));
@@ -85,13 +96,18 @@ export function createFluentPiExtension(send) {
     } }));
 
     pi.on("input", async (event, ctx) => {
-      const response = await report(event, ctx);
-      if (!Number.isSafeInteger(response.input_sequence) || response.input_sequence < 1) {
-        broken = true;
-        throw new Error("Fluent did not acknowledge Pi input admission");
+      try {
+        const response = await report(event, ctx);
+        if (!Number.isSafeInteger(response.input_sequence) || response.input_sequence < 1) {
+          fail(ctx, new Error("Fluent did not acknowledge Pi input admission"));
+          return { action: "handled" };
+        }
+        pendingInputs.push(response.input_sequence);
+        return { action: "continue" };
+      } catch (error) {
+        fail(ctx, error);
+        return { action: "handled" };
       }
-      pendingInputs.push(response.input_sequence);
-      return { action: "continue" };
     });
 
     for (const kind of ["message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end", "agent_start", "agent_end", "agent_before_settle", "session_compact", "session_compact_failed"]) {
@@ -102,8 +118,7 @@ export function createFluentPiExtension(send) {
       const fresh = ctx.sessionManager.getEntries().filter((entry) =>
         entry.type === "message" && entry.message.role === "user" && !knownUserEntries.has(entry.id));
       if (fresh.length !== pendingInputs.length) {
-        broken = true;
-        throw new Error("Pi admitted input has no matching durable session entries");
+        throw fail(ctx, new Error("Pi admitted input has no matching durable session entries"));
       }
       for (const [index, entry] of fresh.entries()) {
         await report({ type: "input_entry", entry_id: entry.id }, ctx,
@@ -112,6 +127,10 @@ export function createFluentPiExtension(send) {
       }
       pendingInputs = [];
       await report(event, ctx);
+    });
+    pi.on("session_shutdown", async (event, ctx) => {
+      if (heartbeat) clearInterval(heartbeat);
+      if (!broken) await report(event, ctx);
     });
   };
 }

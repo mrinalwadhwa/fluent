@@ -2042,6 +2042,23 @@ fn default_learner_run_coder(
 ) -> Result<()> {
     let item = config.store.read_work_item(config.work_item_id)?;
     work_task_executor::ensure_agent_launch_supported(&item, config.attempt_id, TaskKind::Learn)?;
+    let native_identity = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .filter(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+        .map(|_| {
+            native_learner_identity(
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                request
+                    .transcript_path
+                    .parent()
+                    .unwrap_or(request.handoff_dir),
+                request.coder_kind,
+            )
+        });
     #[cfg(test)]
     if let Some(run_coder) = config.learner_run_coder {
         return run_coder(request);
@@ -2059,8 +2076,58 @@ fn default_learner_run_coder(
     // The public `handoff_only` Boolean only distinguishes capture from post-land;
     // the internal mode is passed explicitly so a pre-land no-expertise run selects
     // its confinement without a contradictory Boolean.
-    work_task_executor::run_learner_captured_in_mode_with_provider_readiness(
+    if let Some(identity) = &native_identity {
+        let now = crate::work_model::now_iso8601();
+        mutate_attempt_work_item(config.store, config.work_item_id, |fresh| {
+            let attempt = fresh
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == config.attempt_id)
+                .ok_or_else(|| WorkModelError::AttemptNotFound {
+                    id: config.attempt_id.into(),
+                })?;
+            if attempt.tasks.iter().any(|task| task.id == identity.task_id) {
+                return Err(WorkModelError::AttemptResumeIneligible {
+                    attempt_id: config.attempt_id.into(),
+                    reason: "native Learner Task identity is already reserved".into(),
+                });
+            }
+            attempt.tasks.push(Task {
+                id: identity.task_id.clone(),
+                kind: TaskKind::Learn,
+                status: TaskStatus::Executing,
+                role: "learner".into(),
+                instructions: None,
+                work_item_id: config.work_item_id.into(),
+                attempt_id: Some(config.attempt_id.into()),
+                workspace_access: crate::work_model::WorkspaceAccess {
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                artifact_area: Some(crate::work_model::TaskArtifactArea {
+                    path: work_artifact_path(
+                        config.work_item_id,
+                        config.attempt_id,
+                        &identity.task_id,
+                    ),
+                }),
+                review_context: None,
+                evidence_review_context: None,
+                verification_context: None,
+                writer_correction_assignment: None,
+                input_artifacts: Vec::new(),
+                depends_on: None,
+                output: None,
+                created_at: Some(now.clone()),
+                started_at: Some(now),
+                completed_at: None,
+            });
+            Ok(())
+        })?;
+    }
+    let mut run = work_task_executor::run_learner_captured_in_mode_with_provider_readiness(
         work_task_executor::LearnerRunInputs {
+            native_identity: native_identity.clone(),
             workspace_path: request.workspace_path,
             resolver: config.resolver,
             extra_args: config.extra_args,
@@ -2081,7 +2148,64 @@ fn default_learner_run_coder(
         request.codex_worker,
         prepared_provider_readiness,
         request.prepared_sandbox,
-    )
+    );
+    if let Some(identity) = &native_identity {
+        let transcript = identity.artifact_dir.join("transcript.jsonl");
+        if transcript.is_file() {
+            if let Err(error) = fs::copy(&transcript, request.transcript_path) {
+                if run.is_ok() {
+                    run = Err(error.into());
+                }
+            }
+        }
+        mutate_attempt_work_item(config.store, config.work_item_id, |fresh| {
+            let task = fresh
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == config.attempt_id)
+                .and_then(|attempt| {
+                    attempt
+                        .tasks
+                        .iter_mut()
+                        .find(|task| task.id == identity.task_id)
+                })
+                .ok_or_else(|| WorkModelError::AttemptResumeIneligible {
+                    attempt_id: config.attempt_id.into(),
+                    reason: "native Learner Task disappeared before settlement".into(),
+                })?;
+            task.status = if run.is_ok() {
+                TaskStatus::Complete
+            } else {
+                TaskStatus::Failed
+            };
+            task.completed_at = Some(crate::work_model::now_iso8601());
+            Ok(())
+        })?;
+    }
+    run
+}
+
+fn native_learner_identity(
+    project_root: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    run_dir: &Path,
+    coder: CoderKind,
+) -> crate::terminal_sessions::TerminalIdentity {
+    let name = run_dir
+        .file_name()
+        .expect("Learner run directory has a name")
+        .to_string_lossy();
+    let task_id = format!("{attempt_id}-learn-{name}");
+    crate::terminal_sessions::TerminalIdentity {
+        source_root: project_root.to_path_buf(),
+        work_item_id: work_item_id.into(),
+        attempt_id: attempt_id.into(),
+        task_id: task_id.clone(),
+        role: "learner".into(),
+        provider: coder.as_str().into(),
+        artifact_dir: project_root.join(work_artifact_path(work_item_id, attempt_id, &task_id)),
+    }
 }
 
 struct SlotGuard {
@@ -3993,6 +4117,25 @@ fn run_learner_step(
         project_root,
     )
     .map_err(anyhow::Error::new)?;
+    if item.attempts[attempt_index].terminal_mode == crate::work_model::TerminalMode::Native {
+        let pair = item.attempts[attempt_index]
+            .coder_mapping
+            .for_task_kind(TaskKind::Write);
+        match learner_coder {
+            CoderKind::Codex => crate::native_agent::codex::check_capability(
+                provider_readiness
+                    .codex_worker()
+                    .ok_or_else(|| anyhow::anyhow!("native Codex Learner has no private worker"))?
+                    .launcher()
+                    .execution_executable(),
+            )?,
+            CoderKind::Claude => crate::native_agent::claude::check_capability()?,
+            CoderKind::Pi => crate::native_agent::pi_runner::check_capability(
+                &pair.model,
+                pair.effort.as_deref(),
+            )?,
+        }
+    }
 
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain
@@ -4334,6 +4477,16 @@ fn prepare_learner_run(
     };
     let sandbox = work_task_executor::prepare_learner_host_sandbox(
         work_task_executor::LearnerRunInputs {
+            native_identity: (attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+                .then(|| {
+                    native_learner_identity(
+                        project_root,
+                        &item.id,
+                        &attempt.id,
+                        &run_dir,
+                        mapping.coder,
+                    )
+                }),
             workspace_path: &launch_workspace_path,
             resolver: &ContentResolver::new(Some(project_root)),
             extra_args: &[],
@@ -4364,6 +4517,16 @@ fn prepare_learner_run(
             .unwrap_or_else(|| run_dir.join("staging"));
         let sandbox = work_task_executor::prepare_learner_host_sandbox(
             work_task_executor::LearnerRunInputs {
+                native_identity: (attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+                    .then(|| {
+                        native_learner_identity(
+                            project_root,
+                            &item.id,
+                            &attempt.id,
+                            &run_dir,
+                            mapping.coder,
+                        )
+                    }),
                 workspace_path: &launch_workspace_path,
                 resolver: &ContentResolver::new(Some(project_root)),
                 extra_args: &[],
@@ -11387,6 +11550,23 @@ fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_learner_uses_a_managed_task_artifact() {
+        let identity = native_learner_identity(
+            Path::new("/tmp/source"),
+            "work",
+            "attempt-1",
+            Path::new("/tmp/source/.fluent/learner/runs/run-2"),
+            CoderKind::Codex,
+        );
+        assert_eq!(identity.task_id, "attempt-1-learn-run-2");
+        assert_eq!(
+            identity.artifact_dir,
+            Path::new("/tmp/source/.fluent/work/artifacts/work/attempt-1/attempt-1-learn-run-2")
+        );
+        assert_eq!(identity.role, "learner");
+    }
     use crate::candidate_gate::{
         CandidateCheckEvidence, CandidateCheckStatus, CandidateGateDisposition,
         CandidateGateEvidence, CandidateGatePhase,

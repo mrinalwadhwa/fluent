@@ -30,6 +30,36 @@ pub fn select_local_model_config(source: &Value, model: &str) -> Result<Value> {
     Ok(json!({"providers":{"local-openai":provider}}))
 }
 
+pub fn select_local_model_config_with_endpoint(
+    source: &Value,
+    model: &str,
+    endpoint: &str,
+    api_key: Option<&str>,
+) -> Result<Value> {
+    let mut selected = select_local_model_config(source, model)?;
+    let local = endpoint.strip_prefix("http://").and_then(|rest| {
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let (host, port) = authority.rsplit_once(':')?;
+        (matches!(host, "localhost" | "127.0.0.1")
+            && port.parse::<u16>().is_ok_and(|port| port > 0)
+            && !rest.contains('@'))
+        .then_some(())
+    });
+    ensure!(
+        local.is_some(),
+        "native Pi endpoint must be a local HTTP server"
+    );
+    ensure!(
+        selected["providers"]["local-openai"]["api"] == "openai-completions",
+        "native Pi selected provider is not openai-completions"
+    );
+    selected["providers"]["local-openai"]["baseUrl"] = json!(endpoint);
+    if let Some(key) = api_key {
+        selected["providers"]["local-openai"]["apiKey"] = json!(key);
+    }
+    Ok(selected)
+}
+
 pub struct PiEventGate {
     generation: String,
     expected_session_file: PathBuf,
@@ -148,6 +178,7 @@ impl PiEventGate {
                 completion
             }
             "session_shutdown" => bail!("Pi session ended before Task settlement"),
+            "owner_heartbeat" => Completion::Ignored,
             "message_end"
             | "tool_execution_start"
             | "tool_execution_end"
