@@ -26274,54 +26274,51 @@ fn tester_permissions_enforce_one_contract_across_routes() {
     assert!(!sentinel.exists());
 
     let candidate = git_head(&project);
-    let work = "process-table-route-contract";
     let store = WorkModelStore::new(&project);
-    let mut item = WorkItem::planned(work, "Verify Tester permission routes");
-    item.add_initial_attempt("attempt-1").unwrap();
-    let writer = &mut item.attempts[0].tasks[0];
-    let workspace = writer.workspace_access.writes[0].clone();
-    git::run(
-        &project,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "route-candidate",
-            &workspace.path,
-            &candidate,
-        ],
-        "create route candidate",
-    )
-    .unwrap();
-    writer.status = TaskStatus::Complete;
-    writer.output = Some(TaskOutput {
-        workspace_id: workspace.id,
-        workspace_path: workspace.path,
-        source_branch: "route-candidate".into(),
-        base_commit: Some(candidate.clone()),
-        commit: candidate,
-        no_change: None,
-        learner_canonicalization: None,
-    });
-    let writer_area = project.join(&writer.artifact_area.as_ref().unwrap().path);
-    fs::create_dir_all(&writer_area).unwrap();
-    fs::write(writer_area.join("transcript.jsonl"), "{}\n").unwrap();
-    item.add_next_review_tasks("attempt-1", fluent::review::REVIEWERS)
+    let prepare_final_tester = |work: &str, branch: &str| {
+        let mut item = WorkItem::planned(work, "Verify Tester permission routes");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let writer = &mut item.attempts[0].tasks[0];
+        let workspace = writer.workspace_access.writes[0].clone();
+        git::run(
+            &project,
+            &["worktree", "add", "-b", branch, &workspace.path, &candidate],
+            "create route candidate",
+        )
         .unwrap();
-    for review in item.attempts[0]
-        .tasks
-        .iter_mut()
-        .filter(|task| task.kind == TaskKind::Review)
-    {
-        review.status = TaskStatus::Complete;
-        let path = project
-            .join(&review.artifact_area.as_ref().unwrap().path)
-            .join("review.md");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "Verdict: pass\n\n## Findings\n").unwrap();
-    }
-    let tester = item.add_final_tester_task("attempt-1").unwrap();
-    store.create_work_item(&item).unwrap();
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: branch.into(),
+            base_commit: Some(candidate.clone()),
+            commit: candidate.clone(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let writer_area = project.join(&writer.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(&writer_area).unwrap();
+        fs::write(writer_area.join("transcript.jsonl"), "{}\n").unwrap();
+        item.add_next_review_tasks("attempt-1", fluent::review::REVIEWERS)
+            .unwrap();
+        for review in item.attempts[0]
+            .tasks
+            .iter_mut()
+            .filter(|task| task.kind == TaskKind::Review)
+        {
+            review.status = TaskStatus::Complete;
+            let path = project
+                .join(&review.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "Verdict: pass\n\n## Findings\n").unwrap();
+        }
+        let tester = item.add_final_tester_task("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        tester
+    };
+    let work = "process-table-direct-route";
+    let tester = prepare_final_tester(work, "direct-route-candidate");
     fluent_cmd()
         .current_dir(&project)
         .args(["task", "run", work, "attempt-1", &tester, "--no-sandbox"])
@@ -26337,6 +26334,34 @@ fn tester_permissions_enforce_one_contract_across_routes() {
             .tasks
             .iter()
             .find(|task| task.id == tester)
+            .unwrap()
+            .status,
+        TaskStatus::NeedsUser
+    );
+
+    let scheduled_work = "process-table-scheduled-route";
+    let scheduled_tester = prepare_final_tester(scheduled_work, "scheduled-route-candidate");
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "run",
+            scheduled_work,
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process-table-read requires the macOS sandbox",
+        ));
+    assert!(!sentinel.exists());
+    let scheduled = store.read_work_item(scheduled_work).unwrap();
+    assert_eq!(
+        scheduled.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == scheduled_tester)
             .unwrap()
             .status,
         TaskStatus::NeedsUser
