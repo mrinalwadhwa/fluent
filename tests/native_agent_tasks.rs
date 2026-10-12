@@ -430,6 +430,102 @@ fn native_task_preserves_private_provider_boundary() {
     );
 }
 
+#[test]
+fn native_claude_task_uses_owned_settings_and_role() {
+    use fluent::coder::{CoderSession, SandboxedClaudeCode};
+    use std::ffi::OsStr;
+
+    let project = tempfile::tempdir().unwrap();
+    let private_home = tempfile::tempdir().unwrap();
+    let settings = private_home.path().join("native-settings.json");
+    std::fs::write(&settings, r#"{"hooks":{"SessionStart":[]}}"#).unwrap();
+    let coder = SandboxedClaudeCode {
+        sandbox_profile: Some("(version 1) (allow default)".into()),
+        trusted_sandbox: false,
+        model_override: Some("claude-assigned".into()),
+        effort: Some("high".into()),
+    };
+    let command = coder
+        .native_task_command(
+            project.path(),
+            private_home.path(),
+            &settings,
+            CoderSession::Resume("assigned-session"),
+            "assigned role instructions",
+            "assigned Task prompt",
+        )
+        .unwrap();
+    assert_eq!(command.get_program(), OsStr::new("sandbox-exec"));
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["-f", "(version 1) (allow default)"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--model", "claude-assigned"])
+    );
+    assert!(args.windows(2).any(|args| args == ["--effort", "high"]));
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--setting-sources", ""])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--settings", settings.to_str().unwrap()])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--resume", "assigned-session"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--append-system-prompt", "assigned role instructions"])
+    );
+    assert!(args.contains(&"--strict-mcp-config".to_string()));
+    assert!(!args.contains(&"--safe-mode".to_string()));
+    assert!(!args.contains(&"-p".to_string()));
+    assert_eq!(args.last().unwrap(), "assigned Task prompt");
+    for name in ["HOME", "CLAUDE_CONFIG_DIR"] {
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new(name) && value == Some(private_home.path().as_os_str())
+        }));
+    }
+
+    let outside_settings = tempfile::NamedTempFile::new().unwrap();
+    assert!(
+        coder
+            .native_task_command(
+                project.path(),
+                private_home.path(),
+                outside_settings.path(),
+                CoderSession::Ephemeral,
+                "role",
+                "prompt"
+            )
+            .is_err()
+    );
+    let missing_model = SandboxedClaudeCode {
+        model_override: None,
+        ..coder
+    };
+    assert!(
+        missing_model
+            .native_task_command(
+                project.path(),
+                private_home.path(),
+                &settings,
+                CoderSession::Ephemeral,
+                "role",
+                "prompt"
+            )
+            .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn native_terminal_controls_assigned_invocation() {

@@ -653,6 +653,53 @@ impl Coder for SandboxedClaudeCode {
 }
 
 impl SandboxedClaudeCode {
+    /// Build an interactive Claude command inside the assigned Task boundary.
+    /// The owned settings file supplies lifecycle hooks without loading user,
+    /// project, or local settings from the operator's environment.
+    pub fn native_task_command(
+        &self,
+        working_dir: &Path,
+        private_home: &Path,
+        owned_settings: &Path,
+        session: CoderSession<'_>,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<Command> {
+        if self.sandbox_profile.is_none() {
+            bail!("native Claude Task requires a worker sandbox profile");
+        }
+        if self.model_override.as_deref().is_none_or(str::is_empty)
+            || self.effort.as_deref().is_none_or(str::is_empty)
+        {
+            bail!("native Claude Task requires its resolved model and effort");
+        }
+        if !private_home.is_absolute() || !private_home.is_dir() {
+            bail!("native Claude Task requires an existing private home");
+        }
+        if !owned_settings.is_file()
+            || !owned_settings
+                .canonicalize()?
+                .starts_with(private_home.canonicalize()?)
+        {
+            bail!("native Claude Task requires settings inside its private home");
+        }
+        let mut command = self.build_command(working_dir, false);
+        command.env("HOME", private_home);
+        command.env("CLAUDE_CONFIG_DIR", private_home);
+        command.args(["--setting-sources", ""]);
+        command.arg("--settings").arg(owned_settings);
+        command.arg("--strict-mcp-config");
+        if let CoderSession::Resume(session_id) = session {
+            if session_id.is_empty() {
+                bail!("native Claude Task cannot resume without a session identity");
+            }
+            command.args(["--resume", session_id]);
+        }
+        command.args(["--append-system-prompt", system_prompt]);
+        command.arg(prompt);
+        Ok(command)
+    }
+
     fn effective_model(&self) -> Option<String> {
         self.model_override.clone().or_else(claude_model)
     }
