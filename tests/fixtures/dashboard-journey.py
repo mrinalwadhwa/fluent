@@ -89,6 +89,7 @@ def journey(binary, project, mode):
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         os.chdir(project)
         os.environ["TERM"] = "xterm-256color"
+        os.environ["HOME"] = str(project.parent)
         os.environ["FLUENT_NO_UPDATE_CHECK"] = "1"
         os.execv(binary, [binary, "dashboard", str(project)])
     screen = Screen(width, height)
@@ -116,20 +117,20 @@ def journey(binary, project, mode):
         wait_for("Work Items", "work-visible")
         if mode == "help":
             os.write(master, b"?")
-            wait_for("Help", "j/k", "select", "PgUp/PgDn", "Esc close help", absent=("Work Items",))
+            wait_for("Help", "j/k", "select", "f next filter", "Esc close help", absent=("Projects / Work / Workers",))
             os.write(master, b"\x1b")
             wait_for("Work Items", "work-visible", absent=("Esc close help",))
         else:
             assert "broken-29" not in screen.text()
             os.write(master, b"e")
             wait_for("Work Item read errors", "Esc return", "broken-00")
-            for _ in range(30):
+            for _ in range(100):
                 os.write(master, b"\x1b[6~")
             wait_for("broken-29")
             os.write(master, b"\x1b")
             wait_for("Work Items", "work-visible", absent=("Esc return",))
-            os.write(master, b"\r")
-            wait_for("ID: work-visible", "Esc list")
+            os.write(master, b"\t")
+            wait_for("Work Item: work-visible", "Esc/Tab list")
             os.write(master, b"\x1b")
             wait_for("Work Items", "work-visible", absent=("Esc list",))
         os.write(master, b"q")

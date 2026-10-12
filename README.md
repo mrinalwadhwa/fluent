@@ -381,3 +381,13 @@ Each completed change improves the project and shapes how Fluent approaches futu
 ---
 
 👉 [Join our conversation on building software factories, on Discord.](https://discord.gg/dygEVzG3gf)
+
+## Watch Work across projects
+
+Run `fluent dashboard` from a checkout to see its Work alongside checkouts already registered with the scheduler. Add an unregistered checkout with `--project /path/to/checkout`; repeat the option for more projects. The dashboard reads the existing registry and Work snapshots without registering or changing any project.
+
+The list groups Work by checkout. Each group shows project name, local host, and path context; the detail pane shows the full checkout path. Press `f` to cycle through Current, Needs you, Running, Queued, Ready, Ready to land, Planned, and History. Counts in the header count Work Items, including only the published lifecycle and queue state; expanded workers do not change them. Press Enter on a Work Item to show its Attempt's worker Tasks. In compact mode, press Tab to switch between list and details; Enter on a worker also opens details. Press Esc to return to the list. Press `e` for read errors, `r` to refresh, and `?` for help.
+
+A source that fails a later refresh keeps its last snapshot with a `STALE` label while other projects continue updating. Worker details use `unavailable` where Fluent has no recorded model, elapsed time, or provider wait. Agent-terminal availability comes from managed terminal descriptors; a headless worker has no interactive terminal.
+
+The dashboard's source snapshot contract is version 1. A source identity is its canonical local checkout path; a Work row adds the Work Item ID, and a worker row adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records and does not scan transcripts or change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.

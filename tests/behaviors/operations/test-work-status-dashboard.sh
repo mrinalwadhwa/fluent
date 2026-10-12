@@ -90,7 +90,7 @@ capture_dashboard_default() {
       sleep 1
     fi
     printf 'q'
-  ) | FLUENT_DASH_BIN="$FLUENT_BIN" \
+  ) | HOME="$TEST_DIR" FLUENT_DASH_BIN="$FLUENT_BIN" \
       FLUENT_DASH_PROJECT="$PROJECT_PATH" \
       TERM=xterm \
       script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
@@ -112,7 +112,7 @@ capture_dashboard_after_poll_mutation() {
       wait_for_dashboard_capture "$OUTPUT_FILE" "$POLLED_NEEDLE" 120 || true
     fi
     printf 'q'
-  ) | FLUENT_DASH_BIN="$FLUENT_BIN" \
+  ) | HOME="$TEST_DIR" FLUENT_DASH_BIN="$FLUENT_BIN" \
       FLUENT_DASH_PROJECT="$PROJECT_PATH" \
       TERM=xterm \
       script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
@@ -295,15 +295,12 @@ test_dashboard_lists_work_items() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current Work(1)" || RESULT=1
-  assert_contains "$OUTPUT" "Ready (1)" || RESULT=1
+  assert_contains "$OUTPUT" "Current1" || RESULT=1
+  assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$OUTPUT" "Visible Work" || RESULT=1
+  assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-visible[planned]" || RESULT=1
-  assert_contains "$OUTPUT" "Task:write:attempt-visible-write-1[planned]" || RESULT=1
-  assert_contains "$OUTPUT" "Review:-" || RESULT=1
-  assert_contains "$OUTPUT" "MergeCandidate:-" || RESULT=1
-  assert_contains "$OUTPUT" "Merge:-" || RESULT=1
+  assert_contains "$OUTPUT" "Nextaction:fluentattemptrunwork-visible" || RESULT=1
   return $RESULT
 }
 
@@ -315,9 +312,9 @@ test_dashboard_refreshes_work_items_on_poll() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current Work(2)" || RESULT=1
+  assert_contains "$OUTPUT" "Current2" || RESULT=1
   assert_contains "$OUTPUT" "work-polled" || RESULT=1
-  assert_contains "$OUTPUT" "Polled Work" || RESULT=1
+  assert_contains "$OUTPUT" "PolledWork" || RESULT=1
   return $RESULT
 }
 
@@ -328,12 +325,11 @@ test_dashboard_surfaces_actionable_work() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Ready (1)" || RESULT=1
+  assert_contains "$OUTPUT" "Readytoland1" || RESULT=1
   assert_contains "$OUTPUT" "work-action" || RESULT=1
-  assert_contains "$OUTPUT" "Actionable Work" || RESULT=1
-  assert_contains "$OUTPUT" "merge-ready" || RESULT=1
-  assert_contains "$OUTPUT" "MergeCandidate:attempt-action-merge-candidate" || RESULT=1
-  assert_contains "$OUTPUT" "Merge:pendingreview:pending" || RESULT=1
+  assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
+  assert_contains "$OUTPUT" "Status:Readytoland" || RESULT=1
+  assert_contains "$OUTPUT" "attempt-action-merge-candidate" || RESULT=1
   return $RESULT
 }
 
@@ -344,11 +340,11 @@ test_dashboard_surfaces_needs_user_work() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Needs you (1)" || RESULT=1
+  assert_contains "$OUTPUT" "Needsyou1" || RESULT=1
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
-  assert_contains "$OUTPUT" "Needs User Work" || RESULT=1
+  assert_contains "$OUTPUT" "NeedsUserWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-needs-user" || RESULT=1
-  assert_contains "$OUTPUT" "needs-user;pause:uncertain" || RESULT=1
+  assert_contains "$OUTPUT" "Status:Needsyou" || RESULT=1
   return $RESULT
 }
 
@@ -359,10 +355,10 @@ test_dashboard_reports_work_read_errors() {
   printf '{ invalid json\n' > .fluent/work/items/broken-work.json
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current Work(1)" || RESULT=1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "e" | clean_dashboard_output)"
+  assert_contains "$OUTPUT" "Current1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$OUTPUT" "WorkItemreaderrors" || RESULT=1
+  assert_contains "$OUTPUT" "Sourcediagnostic:failedtoparse" || RESULT=1
   assert_contains "$OUTPUT" "failedtoparse" || RESULT=1
   return $RESULT
 }
@@ -373,8 +369,8 @@ test_dashboard_shows_empty_work_view() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current Work(0)" || RESULT=1
-  assert_contains "$OUTPUT" "NoWorkItemsfound" || RESULT=1
+  assert_contains "$OUTPUT" "Current0" || RESULT=1
+  assert_contains "$OUTPUT" "NoWorkItemsinthisfilter" || RESULT=1
   return $RESULT
 }
 
