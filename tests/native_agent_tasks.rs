@@ -321,23 +321,20 @@ assert.ok(shutdowns >= 1);
     );
 }
 
-#[test]
-fn pi_installed_runner_closes_input_after_receiver_failure() {
+fn installed_pi_runner() -> Option<std::path::PathBuf> {
     let which = std::process::Command::new("sh")
         .args(["-c", "command -v pi"])
         .output()
         .unwrap();
     if !which.status.success() {
-        return;
+        return None;
     }
     let shim = String::from_utf8(which.stdout).unwrap();
     let shim = std::fs::read_to_string(shim.trim()).unwrap();
     let target = shim
         .lines()
         .find_map(|line| line.strip_prefix("# cmd-shim-target="));
-    let Some(target) = target else {
-        return;
-    };
+    let target = target?;
     let runner = std::path::Path::new(target)
         .parent()
         .unwrap()
@@ -349,6 +346,14 @@ fn pi_installed_runner_closes_input_after_receiver_failure() {
         "installed Pi runner missing: {}",
         runner.display()
     );
+    Some(runner)
+}
+
+#[test]
+fn pi_installed_runner_closes_input_after_receiver_failure() {
+    let Some(runner) = installed_pi_runner() else {
+        return;
+    };
     let output = std::process::Command::new("node")
         .arg("tests/fixtures/pi-installed-runner.mjs")
         .arg(&runner)
@@ -359,6 +364,45 @@ fn pi_installed_runner_closes_input_after_receiver_failure() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn pi_installed_runner_compacts_before_queued_continuation() {
+    let Some(runner) = installed_pi_runner() else {
+        return;
+    };
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/pi-installed-compaction.mjs")
+        .arg(&runner)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut gate = fluent::native_agent::pi::PiEventGate::new(
+        "compact-generation",
+        "/private/task/session.jsonl",
+    );
+    let mut compacted = false;
+    let mut completed = false;
+    for line in String::from_utf8(output.stdout).unwrap().lines() {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        compacted |= event["event"]["type"] == "session_compact";
+        if let Completion::Accepted { input_sequence, .. } =
+            gate.observe(&event).unwrap().completion
+        {
+            assert_eq!(input_sequence, 1);
+            completed = true;
+        }
+    }
+    assert!(compacted, "installed Pi did not compact an idle session");
+    assert!(
+        completed,
+        "queued input did not reach durable successful settlement"
     );
 }
 
@@ -1724,6 +1768,8 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
 } else {
     spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION)
 }
+
+
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     send -- "Please retain result.txt and continue.\r"
@@ -1837,6 +1883,10 @@ exit [lindex $outcome 3]
                         .join("tests/host/pi-retry-proxy.py"),
                 )
                 .env("FLUENT_NATIVE_PI_PROXY_OUTPUT", &proxy_output)
+                .env(
+                    "FLUENT_NATIVE_PI_REJECTED_TEXT",
+                    "pi-input-after-receiver-loss",
+                )
                 .stdout(Stdio::from(proxy_log))
                 .spawn()
                 .unwrap();
@@ -1963,6 +2013,100 @@ exit [lindex $outcome 3]
                 project.display()
             );
         }
+        // Start a second control attachment before the Writer settles, then
+        // release one input when its provider reports the settling boundary.
+        // The input may be admitted to this generation or rejected; it must
+        // never become input for the following Reviewer.
+        const RACE_CONTROL: &str = r#"
+set timeout 60
+spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+after 250
+set ready [open $env(FLUENT_NATIVE_RACE_READY) w]
+puts $ready "attached"
+close $ready
+while {![file exists $env(FLUENT_NATIVE_RACE_RELEASE)]} { after 25 }
+send -- "$env(FLUENT_NATIVE_RACE_TEXT)\r"
+after 250
+send -- "\002d"
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+        let race_marker = format!("native-{provider}-settlement-probe");
+        let race_ready = project.join("race.ready");
+        let race_release = project.join("race.release");
+        let mut race = Command::new("expect")
+            .args(["-c", RACE_CONTROL])
+            .env("FLUENT_NATIVE_BINARY", binary)
+            .env("FLUENT_NATIVE_SOURCE", &project)
+            .env("FLUENT_NATIVE_SESSION", &session)
+            .env("FLUENT_NATIVE_RACE_READY", &race_ready)
+            .env("FLUENT_NATIVE_RACE_RELEASE", &race_release)
+            .env("FLUENT_NATIVE_RACE_TEXT", &race_marker)
+            .stdout(Stdio::from(
+                File::create(project.join("race.attach.log")).unwrap(),
+            ))
+            .spawn()
+            .unwrap();
+        while !race_ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{provider} race attachment did not start"
+            );
+            assert!(
+                race.try_wait().unwrap().is_none(),
+                "{provider} race attachment closed early"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let boundary = match provider {
+            "codex" => "turn/completed",
+            "claude" => "\"Stop\"",
+            "pi" => "agent_before_settle",
+            _ => unreachable!(),
+        };
+        let previous_boundaries = fs::read_to_string(artifact.join("transcript.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(boundary))
+            .count();
+        let before_race_sequence = loop {
+            assert!(
+                Instant::now() < deadline,
+                "{provider} emitted no settling boundary"
+            );
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{provider} completed before the settlement race was injected"
+            );
+            let transcript =
+                fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+            if transcript
+                .lines()
+                .filter(|line| line.contains(boundary))
+                .count()
+                > previous_boundaries
+            {
+                let last = transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter_map(|record| record["input_sequence"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                break last;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        fs::write(&race_release, b"send").unwrap();
+        let race_deadline = Instant::now() + Duration::from_secs(20);
+        while race.try_wait().unwrap().is_none() {
+            if Instant::now() >= race_deadline {
+                race.kill().unwrap();
+                let _ = race.wait();
+                panic!("{provider} race attachment did not close");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
@@ -1993,12 +2137,22 @@ exit [lindex $outcome 3]
                 .unwrap();
             assert!(count >= 2, "Pi did not retry the model request");
         }
-        drop(pi_proxy);
         let transcript = fs::read_to_string(artifact.join("transcript.jsonl")).unwrap();
         let records: Vec<serde_json::Value> = transcript
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
+        if transcript.contains(&race_marker) {
+            let last = records
+                .iter()
+                .filter_map(|record| record["input_sequence"].as_u64())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                last > before_race_sequence,
+                "{provider} raced input appeared without a new admitted sequence"
+            );
+        }
         assert!(
             records
                 .iter()
@@ -2114,6 +2268,10 @@ exit [lindex $outcome 3]
             ));
             assert!(review_artifact.join("review.md").is_file());
             let transcript = fs::read_to_string(review_artifact.join("transcript.jsonl")).unwrap();
+            assert!(
+                !transcript.contains(&race_marker),
+                "{provider} late Writer input reached the Reviewer"
+            );
             assert!(
                 transcript
                     .lines()
@@ -2283,6 +2441,7 @@ exit [lindex $outcome 3]
                     "attempt-1-write-1",
                 ])
                 .current_dir(&project)
+                .env("FLUENT_NATIVE_PI_ENDPOINT", &pi_endpoint)
                 .stdout(Stdio::from(failure_log))
                 .stderr(Stdio::from(failure_error))
                 .spawn()
@@ -2322,6 +2481,37 @@ exit [lindex $outcome 3]
                 .unwrap()
                 .join("pi.sock");
             fs::remove_file(&socket).unwrap();
+            let late_marker = "pi-input-after-receiver-loss";
+            const LOST_RECEIVER_INPUT: &str = r#"
+set timeout 10
+spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+after 100
+send -- "$env(FLUENT_NATIVE_LATE_TEXT)\r"
+after 100
+send -- "\002d"
+expect eof
+"#;
+            let listed = Command::new(binary)
+                .args(["terminal", "list", "--source", project.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+            if let Some(session) = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["work_item_id"] == failure_work && entry["can_control"] == true)
+                .and_then(|entry| entry["session_id"].as_str())
+            {
+                let _ = Command::new("expect")
+                    .args(["-c", LOST_RECEIVER_INPUT])
+                    .env("FLUENT_NATIVE_BINARY", binary)
+                    .env("FLUENT_NATIVE_SOURCE", &project)
+                    .env("FLUENT_NATIVE_SESSION", session)
+                    .env("FLUENT_NATIVE_LATE_TEXT", late_marker)
+                    .output()
+                    .unwrap();
+            }
             let failure_deadline = Instant::now() + Duration::from_secs(20);
             let status = loop {
                 if let Some(status) = failed.try_wait().unwrap() {
@@ -2345,6 +2535,25 @@ exit [lindex $outcome 3]
                 .unwrap();
             let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
             assert_ne!(item["attempts"][0]["tasks"][0]["status"], "complete");
+            let failed_transcript =
+                fs::read_to_string(failure_artifact.join("transcript.jsonl")).unwrap_or_default();
+            assert!(
+                !failed_transcript.contains(late_marker),
+                "Pi accepted input after its owner receiver disappeared"
+            );
+            assert!(
+                !failure_artifact.join("pi-session.jsonl").exists(),
+                "Pi copied a successful session after receiver failure"
+            );
+            assert!(
+                !pi_proxy
+                    .as_ref()
+                    .unwrap()
+                    .output
+                    .join("rejected-seen.txt")
+                    .exists(),
+                "Pi modeled input that its owner receiver could not admit"
+            );
 
             for (scenario, input) in [("abort", "\u{3}"), ("compact", "/compact\r")] {
                 let abort_work = format!("native-pi-{scenario}");
@@ -2474,4 +2683,312 @@ exit [lindex $outcome 3]
             }
         }
     }
+}
+
+/// Keep an observer connected while the Attempt owner moves from its Writer
+/// into Review. The attachment itself never sends a detach request.
+#[test]
+#[ignore]
+fn host_native_attached_attempt_progression() {
+    use std::fs::{self, File};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    assert_eq!(
+        std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
+        "1"
+    );
+    let root = std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap())
+        .join("attached-progression");
+    fs::create_dir(&root).unwrap();
+    let binary = env!("CARGO_BIN_EXE_fluent");
+    let run = |program: &str, args: &[&str]| {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run("git", &["init", "-b", "main"]);
+    run("git", &["config", "user.name", "Native Fixture"]);
+    run(
+        "git",
+        &["config", "user.email", "native-fixture@example.invalid"],
+    );
+    run("git", &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("README.md"), "Native progression fixture.\n").unwrap();
+    run("git", &["add", "README.md"]);
+    run("git", &["commit", "-m", "Add fixture"]);
+    let work = "native-attached-progression";
+    run(
+        binary,
+        &[
+            "work-item",
+            "create",
+            work,
+            "--title",
+            "Attached progression",
+            "--instructions",
+            "Run sleep 8 with the shell tool, then replace README.md with exactly `Native progression candidate.` followed by a newline. Commit the change. Keep it small.",
+        ],
+    );
+    let model = std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap();
+    let effort = std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap();
+    run(
+        binary,
+        &[
+            "attempt",
+            "create",
+            work,
+            "attempt-1",
+            "--terminal-mode",
+            "native",
+            "--write-coder",
+            "codex",
+            "--write-model",
+            &model,
+            "--write-effort",
+            &effort,
+            "--review-coder",
+            "codex",
+            "--review-model",
+            &model,
+            "--review-effort",
+            &effort,
+        ],
+    );
+    let mut owner = Command::new(binary)
+        .args(["attempt", "run", work, "attempt-1"])
+        .current_dir(&root)
+        .stdout(Stdio::from(
+            File::create(root.join("attempt.stdout.log")).unwrap(),
+        ))
+        .stderr(Stdio::from(
+            File::create(root.join("attempt.stderr.log")).unwrap(),
+        ))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let session = loop {
+        assert!(
+            owner.try_wait().unwrap().is_none(),
+            "Attempt ended before native attachment"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "Writer did not expose its terminal"
+        );
+        let listed = Command::new(binary)
+            .args(["terminal", "list", "--source", root.to_str().unwrap()])
+            .output()
+            .unwrap();
+        if listed.status.success()
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&listed.stdout)
+            && let Some(id) = value
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|entry| {
+                        entry["task_id"] == "attempt-1-write-1" && entry["can_observe"] == true
+                    })
+                })
+                .and_then(|entry| entry["session_id"].as_str())
+        {
+            break id.to_owned();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    const HOLD_ATTACHMENT: &str = r#"
+set timeout 600
+spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION)
+after 500
+set marker [open $env(FLUENT_NATIVE_READY) w]
+puts $marker "attached"
+close $marker
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+    let marker = root.join("observer.ready");
+    let mut observer = Command::new("expect")
+        .args(["-c", HOLD_ATTACHMENT])
+        .env("FLUENT_NATIVE_BINARY", binary)
+        .env("FLUENT_NATIVE_SOURCE", &root)
+        .env("FLUENT_NATIVE_SESSION", &session)
+        .env("FLUENT_NATIVE_READY", &marker)
+        .stdout(Stdio::from(
+            File::create(root.join("observer.log")).unwrap(),
+        ))
+        .spawn()
+        .unwrap();
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "observer did not attach");
+        assert!(
+            observer.try_wait().unwrap().is_none(),
+            "observer exited before attachment"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut saw_writer_complete = false;
+    let mut saw_review = false;
+    while Instant::now() < deadline {
+        let shown = Command::new(binary)
+            .args(["work-item", "show", work])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        if shown.status.success()
+            && let Ok(item) = serde_json::from_slice::<serde_json::Value>(&shown.stdout)
+            && let Some(tasks) = item["attempts"][0]["tasks"].as_array()
+        {
+            saw_writer_complete |= tasks
+                .iter()
+                .any(|task| task["id"] == "attempt-1-write-1" && task["status"] == "complete");
+            saw_review |= saw_writer_complete
+                && tasks.iter().any(|task| {
+                    task["kind"] == "review"
+                        && matches!(task["status"].as_str(), Some("executing" | "complete"))
+                });
+            if saw_review {
+                break;
+            }
+        }
+        if owner.try_wait().unwrap().is_some() && !saw_review {
+            panic!("Attempt stopped before automatic Review progression");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(saw_writer_complete, "attached Writer did not complete");
+    assert!(
+        saw_review,
+        "Attempt did not start Review after attached Writer settled"
+    );
+    let observer_deadline = Instant::now() + Duration::from_secs(20);
+    while observer.try_wait().unwrap().is_none() {
+        if Instant::now() >= observer_deadline {
+            observer.kill().unwrap();
+            let _ = observer.wait();
+            panic!("attached observer did not close with the settled Writer");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let transcript = root.join(format!(
+        ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1/transcript.jsonl"
+    ));
+    assert!(
+        fs::read_to_string(transcript)
+            .unwrap()
+            .contains("fluent-native-agent-event")
+    );
+    let status = loop {
+        if let Some(status) = owner.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            owner.kill().unwrap();
+            let _ = owner.wait();
+            panic!("attached Attempt did not finish its normal gates");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "attached Attempt failed; inspect {}",
+        root.display()
+    );
+    let shown = Command::new(binary)
+        .args(["work-item", "show", work])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(
+        item["attempts"][0]["learning"]["status"], "succeeded",
+        "native Learner did not pass candidate validation"
+    );
+    let tasks = item["attempts"][0]["tasks"].as_array().unwrap();
+    let learner = tasks
+        .iter()
+        .find(|task| task["kind"] == "learn" && task["status"] == "complete")
+        .expect("native Learner Task did not complete");
+    let learner_area = root.join(learner["artifact_area"]["path"].as_str().unwrap());
+    assert!(
+        fs::read_to_string(learner_area.join("transcript.jsonl"))
+            .unwrap()
+            .contains("fluent-native-agent-event")
+    );
+    assert!(
+        !learner_area.join("codex-session").exists(),
+        "non-Writer Codex Learner retained a resumable session"
+    );
+
+    // Diverge main after the candidate is ready so landing must execute the
+    // assigned native Rebase Task in this disposable fixture.
+    fs::write(root.join("README.md"), "Native progression source.\n").unwrap();
+    run("git", &["add", "README.md"]);
+    run("git", &["commit", "-m", "Update source fixture"]);
+    let mut land = Command::new(binary)
+        .args([
+            "merge-candidate",
+            "land",
+            work,
+            "--coder",
+            "codex",
+            "--model",
+            &model,
+            "--effort",
+            &effort,
+        ])
+        .current_dir(&root)
+        .stdout(Stdio::from(
+            File::create(root.join("land.stdout.log")).unwrap(),
+        ))
+        .stderr(Stdio::from(
+            File::create(root.join("land.stderr.log")).unwrap(),
+        ))
+        .spawn()
+        .unwrap();
+    let land_deadline = Instant::now() + Duration::from_secs(600);
+    let land_status = loop {
+        if let Some(status) = land.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= land_deadline {
+            land.kill().unwrap();
+            let _ = land.wait();
+            panic!("native Rebase did not finish in the disposable fixture");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        land_status.success(),
+        "native Rebase failed; inspect {}",
+        root.display()
+    );
+    let shown = Command::new(binary)
+        .args(["work-item", "show", work])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let rebase = item["attempts"][0]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["kind"] == "rebase" && task["status"] == "complete")
+        .expect("native Rebase Task did not complete");
+    let rebase_area = root.join(rebase["artifact_area"]["path"].as_str().unwrap());
+    assert!(
+        fs::read_to_string(rebase_area.join("transcript.jsonl"))
+            .unwrap()
+            .contains("fluent-native-agent-event")
+    );
+    assert!(
+        !rebase_area.join("codex-session").exists(),
+        "non-Writer Codex Rebase retained a resumable session"
+    );
 }

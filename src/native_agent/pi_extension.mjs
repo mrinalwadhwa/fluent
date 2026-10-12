@@ -59,12 +59,12 @@ export function createFluentPiExtension(send) {
 
     async function report(event, ctx, extra = {}) {
       if (broken) throw new Error("Fluent native Pi receiver has failed");
-      const sessionId = ctx.sessionManager.getSessionId();
-      const sessionFile = ctx.sessionManager.getSessionFile();
-      if (!sessionId || (assignedSession && sessionId !== assignedSession)) {
-        throw fail(ctx, new Error("Pi switched Fluent's assigned Task conversation"));
-      }
       try {
+        const sessionId = ctx.sessionManager.getSessionId();
+        const sessionFile = ctx.sessionManager.getSessionFile();
+        if (!sessionId || (assignedSession && sessionId !== assignedSession)) {
+          throw new Error("Pi switched Fluent's assigned Task conversation");
+        }
         return await send({ generation, session_id: sessionId, session_file: sessionFile,
           model: ctx.model?.id, event, ...extra });
       } catch (error) {
@@ -73,18 +73,22 @@ export function createFluentPiExtension(send) {
     }
 
     pi.on("session_start", async (event, ctx) => {
-      if (assignedSession || !["startup", "resume"].includes(event.reason)) {
-        throw fail(ctx, new Error(`Pi changed Fluent's Task session through ${event.reason}`));
+      try {
+        if (assignedSession || !["startup", "resume"].includes(event.reason)) {
+          throw new Error(`Pi changed Fluent's Task session through ${event.reason}`);
+        }
+        assignedSession = ctx.sessionManager.getSessionId();
+        knownUserEntries = new Set(ctx.sessionManager.getEntries()
+          .filter((entry) => entry.type === "message" && entry.message.role === "user")
+          .map((entry) => entry.id));
+        await report(event, ctx);
+        heartbeat = setInterval(() => {
+          report({ type: "owner_heartbeat" }, ctx).catch(() => {});
+        }, 1000);
+        heartbeat.unref?.();
+      } catch (error) {
+        throw fail(ctx, error);
       }
-      assignedSession = ctx.sessionManager.getSessionId();
-      knownUserEntries = new Set(ctx.sessionManager.getEntries()
-        .filter((entry) => entry.type === "message" && entry.message.role === "user")
-        .map((entry) => entry.id));
-      await report(event, ctx);
-      heartbeat = setInterval(() => {
-        report({ type: "owner_heartbeat" }, ctx).catch(() => {});
-      }, 1000);
-      heartbeat.unref?.();
     });
 
     pi.on("session_before_switch", () => ({ cancel: true }));

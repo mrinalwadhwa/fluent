@@ -39,6 +39,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global requests
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        rejected = os.environ.get("FLUENT_NATIVE_PI_REJECTED_TEXT", "").encode()
+        if rejected and rejected in body:
+            (output / "rejected-seen.txt").write_text(self.path)
         with lock:
             requests += 1
             number = requests

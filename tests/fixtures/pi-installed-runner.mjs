@@ -96,3 +96,17 @@ const ended = runner(async (event) => {
 await ended.instance.emit({ type: "session_start", reason: "startup" });
 await ended.instance.emit({ type: "session_shutdown" });
 assert.ok(ended.shutdowns > 0);
+
+// The installed runner swallows errors from ordinary callbacks. A local
+// failure before the socket send must still close input admission, even when
+// the shutdown handler itself fails.
+const failedManager = runner(async () => ({ ok: true, input_sequence: 1 }));
+await failedManager.instance.emit({ type: "session_start", reason: "startup" });
+manager.getSessionFile = () => { throw new Error("session file disappeared"); };
+let failedShutdowns = 0;
+failedManager.instance.shutdownHandler = () => { failedShutdowns++; throw new Error("shutdown failed"); };
+await failedManager.instance.emit({ type: "turn_start" });
+assert.equal(failedShutdowns, 1, "a pre-send callback failure must stop the owned pane");
+assert.deepEqual(await failedManager.instance.emitInput("never model this", [], "interactive", "steer"),
+  { action: "handled" });
+manager.getSessionFile = () => "/private/task/session.jsonl";

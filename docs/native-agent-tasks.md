@@ -46,7 +46,16 @@ repos, Task logs, candidate, and provider versions under a host evidence
 directory. Review the candidate-bound host results through the targeted Tests
 Review and remaining domain reviews. The final Tester then runs the complete
 declared suite, followed by the normal Learner and landing gates.
-The host fixture uses a disposable local proxy to return one retryable Pi
-response before forwarding to the selected server. It also exercises Pi
-compaction, abort, and receiver loss, while checking each provider's terminal
-detachment, confinement, evidence, cancellation, and native Review route.
+The host check first exercises the installed Pi runtime's idle compaction,
+queued continuation, and settlement callbacks against Fluent's event gate.
+Its real-provider fixture uses a disposable local proxy to return one
+retryable Pi response before forwarding to the selected server. It separately
+checks that `/compact` during active work aborts that activity, and that
+receiver loss fails the Task without sending rejected input to the model.
+Codex, Claude, and Pi each run a confined Writer
+and native Review with attached input, a settling-boundary input attempt,
+detachment, evidence inspection, and cancellation. A disposable Codex Attempt
+also holds an observer through automatic Review progression, then checks its
+native Learner and a conflict-driven native Rebase. The real-provider check
+must pass on the exact candidate before its targeted Tests Review can accept
+host evidence; the installed-runtime check alone is insufficient.

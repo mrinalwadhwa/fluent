@@ -4959,6 +4959,39 @@ mod tests {
             "any other fault settles the Candidate to a hard Failed in step"
         );
 
+        // The same paired finalizer owns a Native Rebase after its terminal
+        // has been reserved. A failed native invocation cannot leave a
+        // completed Candidate or an executing Task behind.
+        let (native_candidate, native_task_id) = reserve("work-native");
+        store
+            .mutate_work_item("work-native", |item| {
+                item.attempts[0].terminal_mode = crate::work_model::TerminalMode::Native;
+                Ok(())
+            })
+            .unwrap();
+        let native_failure = settle_reserved_rebase_failure(
+            &config("work-native"),
+            "attempt-1",
+            &native_task_id,
+            &native_candidate.id,
+            anyhow::anyhow!("native terminal ended without completion"),
+        );
+        assert!(native_failure.to_string().contains("without completion"));
+        let native_stored = store.read_work_item("work-native").unwrap();
+        assert_eq!(
+            native_stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == native_task_id)
+                .unwrap()
+                .status,
+            TaskStatus::Failed
+        );
+        assert_eq!(
+            native_stored.merge_candidates[0].merge_state.status,
+            MergeCandidateMergeStatus::Failed
+        );
+
         // A missing Rebase Task is a model-integrity failure, surfaced as context on
         // the primary rather than a silent no-op.
         let missing = settle_reserved_rebase_failure(

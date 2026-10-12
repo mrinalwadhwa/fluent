@@ -148,6 +148,92 @@ fn session_id(path: &Path) -> Result<String> {
         .into())
 }
 
+// The extension reports once per second while its callback path is healthy.
+// Pi's installed runner swallows callback exceptions, and a failed shutdown
+// request may leave its pane alive, so terminal liveness alone is insufficient.
+const OWNER_HEARTBEAT_DEADLINE: Duration = Duration::from_secs(12);
+
+struct PiOwnerLiveness {
+    last_event: Instant,
+    deadline: Duration,
+}
+
+impl PiOwnerLiveness {
+    fn new(now: Instant, deadline: Duration) -> Self {
+        Self {
+            last_event: now,
+            deadline,
+        }
+    }
+
+    fn observe(&mut self, now: Instant) {
+        self.last_event = now;
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.last_event) > self.deadline
+    }
+}
+
+fn receive_until_settled(
+    listener: &UnixListener,
+    gate: &mut PiEventGate,
+    evidence: &mut File,
+    is_live: impl FnMut() -> Result<bool>,
+    startup_timeout: Duration,
+    owner_timeout: Duration,
+) -> Result<()> {
+    wait_for_pi_completion(
+        || match listener.accept() {
+            Ok((stream, _)) => {
+                let completion = receive_event(stream, gate, evidence)?;
+                Ok(Some((completion, gate.session_id().is_some())))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error.into()),
+        },
+        is_live,
+        startup_timeout,
+        owner_timeout,
+    )
+}
+
+fn wait_for_pi_completion(
+    mut poll_event: impl FnMut() -> Result<Option<(Completion, bool)>>,
+    mut is_live: impl FnMut() -> Result<bool>,
+    startup_timeout: Duration,
+    owner_timeout: Duration,
+) -> Result<()> {
+    let startup_deadline = Instant::now() + startup_timeout;
+    let mut owner_liveness = PiOwnerLiveness::new(Instant::now(), owner_timeout);
+    let mut session_started = false;
+    loop {
+        match poll_event()? {
+            Some((Completion::Accepted { .. }, _)) => return Ok(()),
+            Some((Completion::Ignored, started)) => {
+                session_started |= started;
+                owner_liveness.observe(Instant::now());
+            }
+            None => {
+                if !is_live()? {
+                    return Err(anyhow::anyhow!(
+                        "native Pi terminal ended without completion"
+                    ));
+                }
+                if !session_started && Instant::now() > startup_deadline {
+                    return Err(anyhow::anyhow!("native Pi emitted no session_start event"));
+                }
+                if session_started && owner_liveness.expired(Instant::now()) {
+                    return Err(anyhow::anyhow!(
+                        "native Pi extension stopped reporting to its Task owner"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
 pub fn run(task: PiNativeTask<'_>) -> Result<()> {
     let artifact = &task.identity.artifact_dir;
     fs::create_dir_all(artifact)?;
@@ -222,28 +308,14 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
             .create(true)
             .open(&transcript)?;
         fs::write(&generation_file, &generation)?;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let result = loop {
-            match listener.accept() {
-                Ok((stream, _)) => match receive_event(stream, &mut gate, &mut evidence) {
-                    Ok(Completion::Accepted { .. }) => break Ok(()),
-                    Ok(Completion::Ignored) => {}
-                    Err(error) => break Err(error),
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if !terminal.is_live()? {
-                        break Err(anyhow::anyhow!(
-                            "native Pi terminal ended without completion"
-                        ));
-                    }
-                    if gate.session_id().is_none() && Instant::now() > deadline {
-                        break Err(anyhow::anyhow!("native Pi emitted no session_start event"));
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => break Err(error.into()),
-            }
-        };
+        let result = receive_until_settled(
+            &listener,
+            &mut gate,
+            &mut evidence,
+            || terminal.is_live(),
+            Duration::from_secs(60),
+            OWNER_HEARTBEAT_DEADLINE,
+        );
         let stop = if result.is_ok() {
             terminal.finish()
         } else {
@@ -265,4 +337,40 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
     }
     outcome?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_expires_after_extension_stops_reporting() {
+        let start = Instant::now();
+        let mut owner = PiOwnerLiveness::new(start, OWNER_HEARTBEAT_DEADLINE);
+        owner.observe(start + Duration::from_secs(1));
+        assert!(!owner.expired(start + Duration::from_secs(12)));
+        assert!(owner.expired(start + Duration::from_secs(14)));
+        owner.observe(start + Duration::from_secs(14));
+        assert!(!owner.expired(start + Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn owner_fails_a_live_pane_after_callback_silence() {
+        let mut startup = true;
+        let error = wait_for_pi_completion(
+            || {
+                if startup {
+                    startup = false;
+                    Ok(Some((Completion::Ignored, true)))
+                } else {
+                    Ok(None)
+                }
+            },
+            || Ok(true),
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("extension stopped reporting"));
+    }
 }

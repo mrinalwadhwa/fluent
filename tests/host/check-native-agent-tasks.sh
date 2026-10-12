@@ -9,8 +9,8 @@ test -z "$(git ls-files --others --exclude-standard)"
 printf 'candidate=%s\n' "$candidate"
 printf '%s\n' 'plan: disposable native Codex, Claude, and Pi Writers with attached steering and follow-up input'
 printf '%s\n' 'plan: observe, detach, reconnect, inspect canonical evidence, then cancel one Task per provider'
-printf '%s\n' 'plan: run ephemeral native Reviews and inspect workflow advancement and session retention'
-printf '%s\n' 'plan: Pi transient-response retry, compaction, abort, and receiver loss in disposable fixtures'
+printf '%s\n' 'plan: hold a Codex observer through automatic Review, then inspect native Learner and disposable conflict Rebase'
+printf '%s\n' 'plan: Pi transient-response retry, idle compaction with queued continuation, abort, and receiver loss'
 
 : "${FLUENT_TEST_REAL_NATIVE_AGENT_HOST:?host provider-run authorization is required}"
 : "${FLUENT_NATIVE_CODEX_MODEL:?resolved Codex model is required}"
@@ -76,13 +76,19 @@ printf '%s\n' "$candidate" > "$host_output/candidate.txt"
   tmux -V
 } > "$host_output/provider-versions.txt" 2>&1
 
+cargo nextest run --offline --features test-support --test native_agent_tasks \
+  --no-tests fail --success-output immediate \
+  -E 'test(pi_installed_runner_compacts_before_queued_continuation) | test(pi_installed_runner_closes_input_after_receiver_failure)' \
+  > "$host_output/pi-installed-runtime.log" 2>&1
+
 unset FLUENT_TEST_HOST_SANDBOX_PREFLIGHT
 unset FLUENT_TEST_HERMETIC_PROVIDERS
 unset FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC
 set +e
 cargo nextest run --offline --features test-support --test native_agent_tasks \
   --no-tests fail --run-ignored all --test-threads 1 --success-output immediate \
-  -E 'test(host_native_agent_acceptance)' > "$host_output/host-test.log" 2>&1
+  -E 'test(host_native_agent_acceptance) | test(host_native_attached_attempt_progression)' \
+  > "$host_output/host-test.log" 2>&1
 host_status=$?
 set -e
 printf 'host-test-status=%s\n' "$host_status" | tee "$host_output/status.txt"

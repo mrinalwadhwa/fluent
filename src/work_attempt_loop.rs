@@ -2059,11 +2059,6 @@ fn default_learner_run_coder(
                 request.coder_kind,
             )
         });
-    #[cfg(test)]
-    if let Some(run_coder) = config.learner_run_coder {
-        return run_coder(request);
-    }
-
     // Resolve the immutable transcript capture here so no transient capture state
     // (project root or transcript path for late resolution) rides on the public
     // LearnerRunInputs; the public constructor never names the private pump config.
@@ -2125,30 +2120,38 @@ fn default_learner_run_coder(
             Ok(())
         })?;
     }
-    let mut run = work_task_executor::run_learner_captured_in_mode_with_provider_readiness(
-        work_task_executor::LearnerRunInputs {
-            native_identity: native_identity.clone(),
-            workspace_path: request.workspace_path,
-            resolver: config.resolver,
-            extra_args: config.extra_args,
-            coder_kind: request.coder_kind,
-            no_sandbox: config.no_sandbox,
-            model: request.model,
-            effort: request.effort,
-            review_artifact_paths: request.review_artifact_paths,
-            tester_artifact_paths: request.tester_artifact_paths,
-            diff_command: request.diff_command,
-            handoff_dir: request.handoff_dir,
-            handoff_only: request.mode.is_post_land(),
-            denied_write_roots: request.denied_write_roots,
-            repair: request.repair,
-        },
-        request.mode,
-        Some(capture),
-        request.codex_worker,
-        prepared_provider_readiness,
-        request.prepared_sandbox,
-    );
+    let launch = || {
+        work_task_executor::run_learner_captured_in_mode_with_provider_readiness(
+            work_task_executor::LearnerRunInputs {
+                native_identity: native_identity.clone(),
+                workspace_path: request.workspace_path,
+                resolver: config.resolver,
+                extra_args: config.extra_args,
+                coder_kind: request.coder_kind,
+                no_sandbox: config.no_sandbox,
+                model: request.model,
+                effort: request.effort,
+                review_artifact_paths: request.review_artifact_paths,
+                tester_artifact_paths: request.tester_artifact_paths,
+                diff_command: request.diff_command,
+                handoff_dir: request.handoff_dir,
+                handoff_only: request.mode.is_post_land(),
+                denied_write_roots: request.denied_write_roots,
+                repair: request.repair,
+            },
+            request.mode,
+            Some(capture),
+            request.codex_worker,
+            prepared_provider_readiness,
+            request.prepared_sandbox,
+        )
+    };
+    #[cfg(test)]
+    let mut run = config
+        .learner_run_coder
+        .map_or_else(launch, |coder| coder(request));
+    #[cfg(not(test))]
+    let mut run = launch();
     if let Some(identity) = &native_identity {
         let transcript = identity.artifact_dir.join("transcript.jsonl");
         if transcript.is_file() {
@@ -2173,16 +2176,109 @@ fn default_learner_run_coder(
                     attempt_id: config.attempt_id.into(),
                     reason: "native Learner Task disappeared before settlement".into(),
                 })?;
-            task.status = if run.is_ok() {
-                TaskStatus::Complete
-            } else {
-                TaskStatus::Failed
-            };
-            task.completed_at = Some(crate::work_model::now_iso8601());
+            // A coder return is only provisional. The caller must publish and
+            // validate its draft before this managed invocation can complete.
+            if run.is_err() {
+                task.status = TaskStatus::Failed;
+                task.completed_at = Some(crate::work_model::now_iso8601());
+            }
             Ok(())
         })?;
     }
     run
+}
+
+/// Settle only Learner invocations this transaction actually launched. A
+/// rejected draft keeps its own failed Task even if a later repair succeeds.
+/// Keep the in-memory aggregate in sync because capture finalization writes it.
+fn settle_native_learner_invocations<'a>(
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    run_dirs: impl IntoIterator<Item = &'a PathBuf>,
+    accepted: bool,
+    before_learn: Option<&WorkItem>,
+) -> Result<()> {
+    if item.attempts[attempt_index].terminal_mode != crate::work_model::TerminalMode::Native {
+        return Ok(());
+    }
+    let attempt_id = item.attempts[attempt_index].id.clone();
+    let work_item_id = item.id.clone();
+    let outcomes: Vec<_> = run_dirs
+        .into_iter()
+        .map(|dir| {
+            let name = dir.file_name().expect("Learner run directory has a name");
+            let id = format!("{attempt_id}-learn-{}", name.to_string_lossy());
+            let status = if accepted && !dir.join("error.txt").is_file() {
+                TaskStatus::Complete
+            } else {
+                TaskStatus::Failed
+            };
+            (id, status)
+        })
+        .collect();
+    mutate_attempt_work_item(store, &work_item_id, |fresh| {
+        let attempt = fresh
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| WorkModelError::AttemptNotFound {
+                id: attempt_id.clone(),
+            })?;
+        for (id, status) in &outcomes {
+            if let Some(task) = attempt.tasks.iter_mut().find(|task| task.id == *id)
+                && task.status == TaskStatus::Executing
+            {
+                task.status = status.clone();
+                task.completed_at = Some(crate::work_model::now_iso8601());
+            }
+        }
+        Ok(())
+    })?;
+    let mut fresh = store.read_work_item(&work_item_id)?;
+    // Capture may have staged a canonical expertise commit in memory. Merge
+    // only those intended pointer changes over the fresh model revision that
+    // now contains the managed Learn Tasks; do not write a stale aggregate.
+    if let Some(before) = before_learn {
+        let pending = &item.attempts[attempt_index];
+        let original = &before.attempts[attempt_index];
+        let persisted = fresh
+            .attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .expect("Learner Attempt remains persisted");
+        for task in pending
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+        {
+            if let Some(prior) = original.tasks.iter().find(|prior| prior.id == task.id)
+                && task.output != prior.output
+                && let Some(current) = persisted
+                    .tasks
+                    .iter_mut()
+                    .find(|current| current.id == task.id)
+            {
+                current.output = task.output.clone();
+            }
+        }
+        for candidate in &item.merge_candidates {
+            if let Some(prior) = before
+                .merge_candidates
+                .iter()
+                .find(|prior| prior.id == candidate.id)
+                && candidate.candidate_commit != prior.candidate_commit
+                && let Some(current) = fresh
+                    .merge_candidates
+                    .iter_mut()
+                    .find(|current| current.id == candidate.id)
+            {
+                current.candidate_commit = candidate.candidate_commit.clone();
+            }
+        }
+    }
+    *item = fresh;
+    Ok(())
 }
 
 fn native_learner_identity(
@@ -4274,6 +4370,7 @@ fn run_learner_step(
     // producing the handoff to write. The handoff is written LAST, by
     // `finalize_learning`, after the terminal learning outcome is persisted or
     // composed from a write failure.
+    let before_learn = item.clone();
     let learned = try_learn(
         project_root,
         item,
@@ -4283,6 +4380,19 @@ fn run_learner_step(
         &config,
         &prepared_run,
     );
+    let settled = settle_native_learner_invocations(
+        store,
+        item,
+        attempt_index,
+        std::iter::once(&prepared_run.run_dir)
+            .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+        learned.is_ok(),
+        Some(&before_learn),
+    );
+    let learned = match settled {
+        Ok(()) => learned,
+        Err(error) => Err(error),
+    };
     store
         .read_work_item(&work_item_id)?
         .attempts
@@ -4640,6 +4750,15 @@ fn settle_no_expertise_learner(
     ) {
         Ok(handoff) => handoff,
         Err(run) => {
+            settle_native_learner_invocations(
+                store,
+                item,
+                attempt_index,
+                std::iter::once(&prepared_run.run_dir)
+                    .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+                false,
+                None,
+            )?;
             settle_no_expertise_failure(store, &work_item_id, &attempt_id, runs, run)?;
             *item = store.read_work_item(&work_item_id)?;
             return Ok(());
@@ -4664,6 +4783,15 @@ fn settle_no_expertise_learner(
         &write_output.commit,
         &prepared_run.run_dir,
     ) {
+        settle_native_learner_invocations(
+            store,
+            item,
+            attempt_index,
+            std::iter::once(&prepared_run.run_dir)
+                .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+            false,
+            None,
+        )?;
         settle_no_expertise_failure(store, &work_item_id, &attempt_id, runs, gate)?;
         *item = store.read_work_item(&work_item_id)?;
         return Ok(());
@@ -4689,6 +4817,15 @@ fn settle_no_expertise_learner(
     )? {
         NoExpertisePreparation::Prepared => {}
         NoExpertisePreparation::Failed | NoExpertisePreparation::Superseded => {
+            settle_native_learner_invocations(
+                store,
+                item,
+                attempt_index,
+                std::iter::once(&prepared_run.run_dir)
+                    .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+                false,
+                None,
+            )?;
             *item = store.read_work_item(&work_item_id)?;
             return Ok(());
         }
@@ -4699,7 +4836,7 @@ fn settle_no_expertise_learner(
     // model lock is held, and settle `Succeeded` or the publisher's typed `Failed` —
     // all in ONE lock-held final transaction so no supported Work-model transition can
     // interleave and stale the settled handoff. (B4n, B4o, B4p)
-    publish_no_expertise_handoff(
+    let published = publish_no_expertise_handoff(
         store,
         project_root,
         &work_item_id,
@@ -4709,7 +4846,25 @@ fn settle_no_expertise_learner(
         &handoff,
         &check_identity,
         |handoff| crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff),
+    );
+    let accepted = published.is_ok()
+        && store
+            .read_work_item(&work_item_id)?
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .and_then(|attempt| attempt.learning.as_ref())
+            .is_some_and(|learning| learning.is_succeeded());
+    settle_native_learner_invocations(
+        store,
+        item,
+        attempt_index,
+        std::iter::once(&prepared_run.run_dir)
+            .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+        accepted,
+        None,
     )?;
+    published?;
     *item = store.read_work_item(&work_item_id)?;
     Ok(())
 }
@@ -11567,6 +11722,306 @@ mod tests {
         );
         assert_eq!(identity.role, "learner");
     }
+
+    #[test]
+    fn native_learner_repair_retains_rejected_invocation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (store, _project_root, _workspace, _commit) =
+            make_learner_passing_fixture(temp.path(), 1);
+        let first = temp.path().join("run-1");
+        let repair = temp.path().join("run-2");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&repair).unwrap();
+        fs::write(first.join("error.txt"), "invalid draft\n").unwrap();
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                attempt.terminal_mode = crate::work_model::TerminalMode::Native;
+                for (name, directory) in [("run-1", &first), ("run-2", &repair)] {
+                    let mut task = attempt.tasks[0].clone();
+                    task.id = format!("attempt-1-learn-{name}");
+                    task.kind = TaskKind::Learn;
+                    task.role = "learner".into();
+                    task.status = TaskStatus::Executing;
+                    task.output = None;
+                    task.completed_at = None;
+                    task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+                        path: directory.display().to_string(),
+                    });
+                    attempt.tasks.push(task);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        settle_native_learner_invocations(&store, &mut item, 0, [&first, &repair], true, None)
+            .unwrap();
+        let stored = store.read_work_item("work-1").unwrap();
+        for snapshot in [&stored, &item] {
+            let tasks = &snapshot.attempts[0].tasks;
+            assert_eq!(
+                tasks
+                    .iter()
+                    .find(|task| task.id == "attempt-1-learn-run-1")
+                    .unwrap()
+                    .status,
+                TaskStatus::Failed
+            );
+            assert_eq!(
+                tasks
+                    .iter()
+                    .find(|task| task.id == "attempt-1-learn-run-2")
+                    .unwrap()
+                    .status,
+                TaskStatus::Complete
+            );
+        }
+        // A later failed invocation must not rewrite either earlier outcome.
+        let third = temp.path().join("run-3");
+        fs::create_dir_all(&third).unwrap();
+        store
+            .mutate_work_item("work-1", |fresh| {
+                let attempt = &mut fresh.attempts[0];
+                let mut retry = attempt
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == "attempt-1-learn-run-2")
+                    .unwrap()
+                    .clone();
+                retry.id = "attempt-1-learn-run-3".into();
+                retry.status = TaskStatus::Executing;
+                retry.completed_at = None;
+                attempt.tasks.push(retry);
+                Ok(())
+            })
+            .unwrap();
+        settle_native_learner_invocations(&store, &mut item, 0, [&third], false, None).unwrap();
+        let stored = store.read_work_item("work-1").unwrap();
+        let tasks = &stored.attempts[0].tasks;
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-learn-run-1")
+                .unwrap()
+                .status,
+            TaskStatus::Failed
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-learn-run-2")
+                .unwrap()
+                .status,
+            TaskStatus::Complete
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-learn-run-3")
+                .unwrap()
+                .status,
+            TaskStatus::Failed
+        );
+    }
+
+    #[test]
+    fn native_learner_invalid_draft_fails_before_successful_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        let temp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, _commit) =
+            make_learner_passing_fixture(temp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].terminal_mode = crate::work_model::TerminalMode::Native;
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        crate::work_model::set_attempt_terminal(&mut item.attempts[0], AttemptStatus::Complete);
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.write_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(&project_root));
+        let calls = AtomicUsize::new(0);
+        let mock = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let draft = if calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                r#"{"learning_summary":"invalid","follow_ups":[{"id":"","summary":"needs id"}]}"#
+            } else {
+                r#"{"learning_summary":"accepted","follow_ups":[]}"#
+            };
+            fs::create_dir_all(request.handoff_dir).unwrap();
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                draft,
+            )
+            .unwrap();
+            Ok(())
+        };
+        let run_config = WorkAttemptRunConfig {
+            project_root: &project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: false,
+            tester_no_sandbox: false,
+            resume_cancellation_requested_at: None,
+            coder_mapping_inputs: None,
+            learner_run_coder: Some(&mock),
+        };
+        let coder =
+            |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&run_config, request);
+        let learner = LearnerConfig {
+            run_coder: &coder,
+            codex_worker: None,
+            no_sandbox: false,
+        };
+        for (run_number, expected_success) in [(1, false), (2, true)] {
+            let run_dir = project_root.join(format!(".fluent/learner/runs/run-{run_number}"));
+            fs::create_dir_all(&run_dir).unwrap();
+            let prepared = PreparedLearnerRun {
+                sandbox: None,
+                workspace_path: workspace.clone(),
+                launch_workspace_path: workspace.clone(),
+                review_artifact_paths: Vec::new(),
+                tester_artifact_paths: Vec::new(),
+                handoff_dir: run_dir.join("staging"),
+                denied_write_roots: Vec::new(),
+                run_dir: run_dir.clone(),
+                repairs: Vec::new(),
+                isolated_workspace: None,
+            };
+            let before_learn = item.clone();
+            let learned = try_learn(
+                &project_root,
+                &mut item,
+                0,
+                &candidate_id,
+                work_task_executor::LearnerExecutionMode::Capture,
+                &learner,
+                &prepared,
+            );
+            assert_eq!(learned.is_ok(), expected_success);
+            settle_native_learner_invocations(
+                &store,
+                &mut item,
+                0,
+                [&run_dir],
+                learned.is_ok(),
+                Some(&before_learn),
+            )
+            .unwrap();
+            finalize_learning(&store, &mut item, 0, run_number, learned, |handoff| {
+                crate::learner::write_handoff(&project_root, "work-1", "attempt-1", handoff)
+            })
+            .unwrap();
+            let stored = store.read_work_item("work-1").unwrap();
+            let task_id = format!("attempt-1-learn-run-{run_number}");
+            let task = stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .unwrap();
+            assert_eq!(task.status == TaskStatus::Complete, expected_success);
+            assert_eq!(
+                stored.attempts[0].learning.as_ref().unwrap().is_succeeded(),
+                expected_success
+            );
+        }
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-learn-run-1")
+                .unwrap()
+                .status,
+            TaskStatus::Failed
+        );
+    }
+    #[test]
+    fn native_learner_missing_draft_accepts_empty_handoff() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, _commit) =
+            make_learner_passing_fixture(temp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].terminal_mode = crate::work_model::TerminalMode::Native;
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        crate::work_model::set_attempt_terminal(&mut item.attempts[0], AttemptStatus::Complete);
+        let candidate_id = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.write_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(&project_root));
+        let no_draft = |_request: &LearnerCoderRequest<'_>| -> Result<()> { Ok(()) };
+        let run_config = WorkAttemptRunConfig {
+            project_root: &project_root,
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: false,
+            tester_no_sandbox: false,
+            resume_cancellation_requested_at: None,
+            coder_mapping_inputs: None,
+            learner_run_coder: Some(&no_draft),
+        };
+        let coder =
+            |request: &LearnerCoderRequest<'_>| default_learner_run_coder(&run_config, request);
+        let learner = LearnerConfig {
+            run_coder: &coder,
+            codex_worker: None,
+            no_sandbox: false,
+        };
+        let run_dir = project_root.join(".fluent/learner/runs/run-1");
+        fs::create_dir_all(&run_dir).unwrap();
+        let prepared = PreparedLearnerRun {
+            sandbox: None,
+            workspace_path: workspace.clone(),
+            launch_workspace_path: workspace,
+            review_artifact_paths: Vec::new(),
+            tester_artifact_paths: Vec::new(),
+            handoff_dir: run_dir.join("staging"),
+            denied_write_roots: Vec::new(),
+            run_dir: run_dir.clone(),
+            repairs: Vec::new(),
+            isolated_workspace: None,
+        };
+        let before_learn = item.clone();
+        let handoff = try_learn(
+            &project_root,
+            &mut item,
+            0,
+            &candidate_id,
+            work_task_executor::LearnerExecutionMode::Capture,
+            &learner,
+            &prepared,
+        )
+        .unwrap();
+        assert!(handoff.learning.summary.is_empty());
+        assert!(handoff.follow_ups.is_empty());
+        settle_native_learner_invocations(
+            &store,
+            &mut item,
+            0,
+            [&run_dir],
+            true,
+            Some(&before_learn),
+        )
+        .unwrap();
+        finalize_learning(&store, &mut item, 0, 1, Ok(handoff), |handoff| {
+            crate::learner::write_handoff(&project_root, "work-1", "attempt-1", handoff)
+        })
+        .unwrap();
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.attempts[0].learning.as_ref().unwrap().is_succeeded());
+        assert_eq!(
+            stored.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == "attempt-1-learn-run-1")
+                .unwrap()
+                .status,
+            TaskStatus::Complete
+        );
+        assert!(!run_dir.join("submitted-draft.json").exists());
+    }
+
     use crate::candidate_gate::{
         CandidateCheckEvidence, CandidateCheckStatus, CandidateGateDisposition,
         CandidateGateEvidence, CandidateGatePhase,
