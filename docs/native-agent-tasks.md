@@ -46,13 +46,17 @@ repos, Task logs, candidate, and provider versions under a host evidence
 directory. Review the candidate-bound host results through the targeted Tests
 Review and remaining domain reviews. The final Tester then runs the complete
 declared suite, followed by the normal Learner and landing gates.
-The host check first exercises installed Pi session compaction and its queued
-follow-up lifecycle against Fluent's event gate, with model responses supplied
-by the fixture. This component check runs without a provider connection.
+The host check first compacts an idle session through Pi's installed SDK, then
+queues a follow-up while its installed Agent is running. Pi's own queue,
+next-turn hooks, and settlement callbacks run against deterministic model
+responses; Fluent checks their events with its Pi gate. This component check
+runs without a provider connection.
 Its real-provider fixture uses a disposable local proxy to return one
 retryable Pi response before forwarding to the selected server. It separately
 checks that `/compact` during active work aborts that activity, and that
 receiver loss fails the Task without sending rejected input to the model.
+Pi records a generation-bound input-handler rejection in the Task artifact
+when its owner cannot acknowledge an attempted input.
 Codex, Claude, and Pi each run a confined Writer
 and native Review with attached input, a settling-boundary input attempt,
 detachment, evidence inspection, and cancellation. A disposable Codex Attempt

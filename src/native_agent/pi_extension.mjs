@@ -1,5 +1,6 @@
 // Keep Pi's native UI connected to one Fluent Task execution generation.
 import { createConnection } from "node:net";
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
 
 function sendToOwner(payload) {
   return new Promise((resolve, reject) => {
@@ -47,6 +48,24 @@ export function createFluentPiExtension(send) {
     let pendingInputs = [];
     let broken = false;
     let heartbeat;
+    const recordedRejections = new WeakSet();
+
+    function recordRejectedInput(event, ctx, error) {
+      if (recordedRejections.has(event)) return;
+      const path = process.env.FLUENT_NATIVE_PI_REJECTION_LOG;
+      if (!path) return;
+      const record = { generation, session_id: ctx.sessionManager.getSessionId(),
+        text: event.text, result: "rejected", boundary: "pi-input",
+        reason: String(error) };
+      const fd = openSync(path, "a", 0o600);
+      try {
+        writeSync(fd, JSON.stringify(record) + "\n");
+        fsyncSync(fd);
+        recordedRejections.add(event);
+      } finally {
+        closeSync(fd);
+      }
+    }
 
     function fail(ctx, error) {
       broken = true;
@@ -68,6 +87,9 @@ export function createFluentPiExtension(send) {
         return await send({ generation, session_id: sessionId, session_file: sessionFile,
           model: ctx.model?.id, event, ...extra });
       } catch (error) {
+        if (event.type === "input") {
+          try { recordRejectedInput(event, ctx, error); } catch { /* Still close input. */ }
+        }
         throw fail(ctx, error);
       }
     }
@@ -103,12 +125,15 @@ export function createFluentPiExtension(send) {
       try {
         const response = await report(event, ctx);
         if (!Number.isSafeInteger(response.input_sequence) || response.input_sequence < 1) {
-          fail(ctx, new Error("Fluent did not acknowledge Pi input admission"));
+          const error = new Error("Fluent did not acknowledge Pi input admission");
+          recordRejectedInput(event, ctx, error);
+          fail(ctx, error);
           return { action: "handled" };
         }
         pendingInputs.push(response.input_sequence);
         return { action: "continue" };
       } catch (error) {
+        try { recordRejectedInput(event, ctx, error); } catch { /* Input still fails closed. */ }
         fail(ctx, error);
         return { action: "handled" };
       }

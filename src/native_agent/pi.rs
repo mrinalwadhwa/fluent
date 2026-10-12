@@ -215,7 +215,27 @@ pub fn receive_event(
         "Pi event is empty or oversized"
     );
     let envelope: Value = serde_json::from_str(&line)?;
-    let observation = gate.observe(&envelope)?;
+    let observation = match gate.observe(&envelope) {
+        Ok(observation) => observation,
+        Err(error) => {
+            if envelope["event"]["type"] == "input" {
+                serde_json::to_writer(
+                    &mut *evidence,
+                    &serde_json::json!({
+                        "format":"fluent-native-agent-event", "schema_version":1,
+                        "provider":"pi", "execution_generation":envelope["generation"],
+                        "assigned_conversation_id":gate.session_id(),
+                        "conversation_id":envelope["session_id"], "input_sequence":0,
+                        "event":{"type":"input_rejected", "request":envelope["event"],
+                            "reason":error.to_string()},
+                    }),
+                )?;
+                evidence.write_all(b"\n")?;
+                evidence.sync_all()?;
+            }
+            return Err(error);
+        }
+    };
     serde_json::to_writer(
         &mut *evidence,
         &serde_json::json!({

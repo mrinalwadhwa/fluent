@@ -501,6 +501,50 @@ fn pi_receiver_failure_does_not_acknowledge_input() {
     assert!(reply.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn pi_receiver_records_rejected_input_at_owned_boundary() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    for event in [
+        json!({"type":"session_start","reason":"startup"}),
+        json!({"type":"input","text":"wrong-session-probe"}),
+    ] {
+        let (mut extension, receiver) = UnixStream::pair().unwrap();
+        extension
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"generation":"generation-1","session_id":
+                        if event["type"] == "input" { "other" } else { "assigned" },
+                        "session_file":"/private/task/session.jsonl","event":event})
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        if event["type"] == "input" {
+            assert!(receive_event(receiver, &mut gate, &mut writer).is_err());
+        } else {
+            receive_event(receiver, &mut gate, &mut writer).unwrap();
+        }
+    }
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(evidence.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|record| {
+        record["execution_generation"] == "generation-1"
+            && record["event"]["type"] == "input_rejected"
+            && record["event"]["request"]["text"] == "wrong-session-probe"
+    }));
+}
+
 #[test]
 fn pi_native_model_config_keeps_only_assigned_provider() {
     use fluent::native_agent::pi::select_local_model_config;
@@ -1106,6 +1150,7 @@ fn codex_jsonl_relay_controls_assigned_invocation() {
         .unwrap();
     let evidence = tempfile::NamedTempFile::new().unwrap();
     let evidence_path = evidence.path().to_path_buf();
+    let evidence_writer = evidence.reopen().unwrap();
     let (completed, received) = mpsc::channel();
     let admission = Arc::new(NativeAdmission::new());
     let relay = std::thread::spawn(move || {
@@ -1116,7 +1161,7 @@ fn codex_jsonl_relay_controls_assigned_invocation() {
             "generation-1",
             "assigned-thread",
             admission,
-            evidence.reopen().unwrap(),
+            evidence_writer,
             move |completion| {
                 if let Completion::Accepted { input_sequence, .. } = &completion {
                     assert!(settlement.settle_if_current(*input_sequence)?);
@@ -1166,7 +1211,7 @@ fn codex_jsonl_relay_controls_assigned_invocation() {
             input_sequence: 1,
         }
     );
-    let evidence: Vec<serde_json::Value> = std::fs::read_to_string(evidence_path)
+    let evidence: Vec<serde_json::Value> = std::fs::read_to_string(&evidence_path)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -1185,11 +1230,23 @@ fn codex_jsonl_relay_controls_assigned_invocation() {
 
     // Completion closes this invocation. A later turn addressed to the same
     // conversation must not cross the relay into the provider.
-    tui.write_all(b"{\"id\":3,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n").unwrap();
+    tui.write_all(b"{\"id\":3,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[{\"text\":\"closed-probe\"}]}}\n").unwrap();
     line.clear();
     assert_eq!(provider_lines.read_line(&mut line).unwrap(), 0);
     let error = relay.join().unwrap().unwrap_err();
     assert!(error.to_string().contains("input is closed"));
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(evidence_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|record| {
+        record["execution_generation"] == "generation-1"
+            && record["event"]["type"] == "input_rejected"
+            && record["event"]["request"]
+                .to_string()
+                .contains("closed-probe")
+    }));
     let _ = tui.shutdown(Shutdown::Both);
     let _ = provider.shutdown(Shutdown::Both);
 }
@@ -1515,6 +1572,28 @@ fn native_capability_or_evidence_failure_blocks_false_success() {
             .count(),
         3
     );
+    let (mut hook, receiver) = UnixStream::pair().unwrap();
+    hook.write_all(
+        format!(
+            "{}\n",
+            json!({"generation":"generation-1","event":{
+        "hook_event_name":"UserPromptSubmit","session_id":"assigned-session",
+        "prompt_id":"prompt-2","prompt":"closed-probe"}})
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    assert!(receive_hook(receiver, &mut gate, "generation-1", &mut writer).is_err());
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(evidence.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|record| {
+        record["execution_generation"] == "generation-1"
+            && record["event"]["type"] == "input_rejected"
+            && record["event"]["request"]["prompt"] == "closed-probe"
+    }));
 }
 
 #[cfg(unix)]
@@ -2089,6 +2168,20 @@ exit [lindex $outcome 3]
             );
             std::thread::sleep(Duration::from_millis(25));
         }
+        let control_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(mut control_probe) = fluent::terminal_sessions::resolve(&project, &session)
+                && control_probe.acquire_control().unwrap()
+                    == fluent::terminal_sessions::ControlOutcome::Occupied
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < control_deadline && race.try_wait().unwrap().is_none(),
+                "{provider} race attachment did not acquire Control"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
         let boundary = match provider {
             "codex" => "turn/completed",
             "claude" => "\"Stop\"",
@@ -2123,6 +2216,13 @@ exit [lindex $outcome 3]
             }
             std::thread::sleep(Duration::from_millis(25));
         };
+        let closed_before_release = fluent::terminal_sessions::list(&project)
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry.session_id == session
+                    && entry.lifecycle == fluent::terminal_sessions::TerminalLifecycle::Ended
+            });
         fs::write(&race_release, b"send").unwrap();
         let race_deadline = Instant::now() + Duration::from_secs(20);
         while race.try_wait().unwrap().is_none() {
@@ -2212,6 +2312,30 @@ exit [lindex $outcome 3]
             assert!(
                 raced_inputs.is_empty(),
                 "{provider} admitted rejected input"
+            );
+        }
+        if raced_inputs.is_empty() {
+            let rejected_by_owner = records.iter().any(|record| {
+                record["execution_generation"] == writer_generation
+                    && record["event"]["type"] == "input_rejected"
+                    && record["event"]["request"]
+                        .to_string()
+                        .contains(&race_marker)
+            });
+            let rejected_by_pi = provider == "pi"
+                && fs::read_to_string(artifact.join("native-pi-rejected-input.jsonl"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|record| {
+                        record["generation"] == writer_generation
+                            && record["boundary"] == "pi-input"
+                            && record["result"] == "rejected"
+                            && record["text"] == race_marker
+                    });
+            assert!(
+                rejected_by_owner || rejected_by_pi || closed_before_release,
+                "{provider} raced input has no admission, native rejection, or prior generation closure"
             );
         }
         if let Some(input) = raced_inputs.first() {
@@ -2628,6 +2752,20 @@ exit [lindex $outcome 3]
                 );
                 std::thread::sleep(Duration::from_millis(25));
             }
+            let control_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(mut control_probe) = fluent::terminal_sessions::resolve(&project, session)
+                    && control_probe.acquire_control().unwrap()
+                        == fluent::terminal_sessions::ControlOutcome::Occupied
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < control_deadline && attachment.try_wait().unwrap().is_none(),
+                    "Pi receiver-loss attachment did not acquire Control"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
             fs::remove_file(&socket).unwrap();
             fs::write(&late_release, b"send").unwrap();
             while attachment.try_wait().unwrap().is_none() {
@@ -2658,6 +2796,19 @@ exit [lindex $outcome 3]
             assert!(
                 !status.success(),
                 "Pi receiver failure reported Task success"
+            );
+            let rejection =
+                fs::read_to_string(failure_artifact.join("native-pi-rejected-input.jsonl"))
+                    .expect("Pi did not record rejection at its input handler");
+            assert!(
+                rejection.lines().any(|line| {
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    record["generation"] == generation
+                        && record["boundary"] == "pi-input"
+                        && record["result"] == "rejected"
+                        && record["text"] == late_marker
+                }),
+                "Pi receiver-loss marker has no generation-bound input rejection"
             );
             let shown = Command::new(binary)
                 .args(["work-item", "show", failure_work])

@@ -357,7 +357,27 @@ pub fn receive_hook(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Claude hook has no generation"))?;
     let event = &envelope["event"];
-    let completion = gate.observe(owned, event)?;
+    let completion = match gate.observe(owned, event) {
+        Ok(completion) => completion,
+        Err(error) => {
+            if event["hook_event_name"] == "UserPromptSubmit" {
+                serde_json::to_writer(
+                    &mut *evidence,
+                    &serde_json::json!({
+                        "format":"fluent-native-agent-event", "schema_version":1,
+                        "provider":"claude", "execution_generation":generation,
+                        "assigned_conversation_id":gate.session_id(),
+                        "conversation_id":event["session_id"], "input_sequence":0,
+                        "event":{"type":"input_rejected", "request":event,
+                            "reason":error.to_string()},
+                    }),
+                )?;
+                evidence.write_all(b"\n")?;
+                evidence.sync_all()?;
+            }
+            return Err(error);
+        }
+    };
     ensure!(owned == generation, "Claude hook generation changed");
     serde_json::to_writer(
         &mut *evidence,

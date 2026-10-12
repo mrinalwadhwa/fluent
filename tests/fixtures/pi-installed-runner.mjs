@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createFluentPiExtension } from "../../src/native_agent/pi_extension.mjs";
 
@@ -28,11 +31,22 @@ const missing = runner(async (event) => {
   if (event.event.type === "session_start") return { ok: true };
   throw new Error("owner unavailable");
 });
+const rejectionRoot = mkdtempSync(join(tmpdir(), "fluent-pi-rejection-"));
+process.env.FLUENT_NATIVE_PI_REJECTION_LOG = join(rejectionRoot, "input.jsonl");
 await missing.instance.emit({ type: "session_start", reason: "startup" });
 assert.deepEqual(await missing.instance.emitInput("late", [], "interactive", "steer"),
   { action: "handled" });
 assert.ok(missing.shutdowns > 0);
 assert.equal(missing.errors.length, 0);
+const rejectedInput = JSON.parse(readFileSync(process.env.FLUENT_NATIVE_PI_REJECTION_LOG, "utf8"));
+assert.equal(rejectedInput.generation, "fixture-generation");
+assert.equal(rejectedInput.session_id, "assigned-session");
+assert.equal(rejectedInput.text, "late");
+assert.equal(rejectedInput.result, "rejected");
+assert.equal(rejectedInput.boundary, "pi-input");
+assert.match(rejectedInput.reason, /owner unavailable/);
+delete process.env.FLUENT_NATIVE_PI_REJECTION_LOG;
+rmSync(rejectionRoot, { recursive: true, force: true });
 
 const shutdownFault = runner(async (event) => {
   if (event.event.type === "session_start") return { ok: true };

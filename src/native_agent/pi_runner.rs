@@ -132,6 +132,12 @@ fn environment(
             .iter()
             .map(|(key, value)| (key.into(), value.into())),
     );
+    values.push((
+        "FLUENT_NATIVE_PI_REJECTION_LOG".into(),
+        private_home
+            .join("native-pi-rejected-input.jsonl")
+            .into_os_string(),
+    ));
     values
 }
 
@@ -334,6 +340,11 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
     })();
     if outcome.is_err() {
         let _ = terminal.stop();
+    }
+    let rejected = private_home.join("native-pi-rejected-input.jsonl");
+    if rejected.is_file() {
+        fs::copy(&rejected, artifact.join("native-pi-rejected-input.jsonl"))?;
+        File::open(artifact.join("native-pi-rejected-input.jsonl"))?.sync_all()?;
     }
     outcome?;
     Ok(())

@@ -459,10 +459,42 @@ where
                         return Ok(());
                     }
                     let request: Value = serde_json::from_str(&line)?;
-                    let input_sequence = request_gate
+                    let admission = request_gate
                         .lock()
                         .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
-                        .admit_request(&request)?;
+                        .admit_request(&request);
+                    let input_sequence = match admission {
+                        Ok(sequence) => sequence,
+                        Err(error) => {
+                            if matches!(
+                                request["method"].as_str(),
+                                Some("turn/start" | "turn/steer")
+                            ) {
+                                let rejected = serde_json::json!({
+                                    "type": "input_rejected", "request": request,
+                                    "reason": error.to_string(),
+                                });
+                                let record = CodexEvidenceRecord {
+                                    format: "fluent-native-agent-event",
+                                    schema_version: 1,
+                                    provider: "codex",
+                                    execution_generation: generation,
+                                    assigned_conversation_id: thread_id,
+                                    conversation_id: thread_id,
+                                    turn_id: None,
+                                    input_sequence: 0,
+                                    event: &rejected,
+                                };
+                                let mut evidence = request_evidence.lock().map_err(|_| {
+                                    anyhow::anyhow!("native Codex evidence lock poisoned")
+                                })?;
+                                serde_json::to_writer(&mut *evidence, &record)?;
+                                evidence.write_all(b"\n")?;
+                                evidence.flush()?;
+                            }
+                            return Err(error);
+                        }
+                    };
                     if let Some(input_sequence) = input_sequence {
                         let record = CodexEvidenceRecord {
                             format: "fluent-native-agent-event",
