@@ -3,6 +3,7 @@
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
@@ -205,6 +206,124 @@ impl CodexRelayGate {
             turn_id: turn_id.into(),
             input_sequence: self.input_sequence,
         })
+    }
+}
+
+/// Correlate Pi's admitted input with durable session entries before accepting
+/// its final settled event. Pi emits `input` before it queues the message, so a
+/// settlement racing that callback must wait for the corresponding entry.
+pub struct PiSettlementGate {
+    generation: String,
+    session_id: String,
+    admission: NativeAdmission,
+    pending_inputs: VecDeque<u64>,
+    seen_entries: HashSet<String>,
+    last_entry_id: Option<String>,
+    last_sequence: u64,
+    completed: bool,
+}
+
+impl PiSettlementGate {
+    pub fn new(generation: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            generation: generation.into(),
+            session_id: session_id.into(),
+            admission: NativeAdmission::new(),
+            pending_inputs: VecDeque::new(),
+            seen_entries: HashSet::new(),
+            last_entry_id: None,
+            last_sequence: 0,
+            completed: false,
+        }
+    }
+
+    /// Call from Pi's awaited `input` handler before returning approval.
+    pub fn admit_input(&mut self, generation: &str, session_id: &str) -> Result<u64> {
+        self.require_identity(generation, session_id)?;
+        let sequence = self.admission.admit()?;
+        self.pending_inputs.push_back(sequence);
+        Ok(sequence)
+    }
+
+    /// Call when the admitted user message has a durable session entry ID.
+    pub fn observe_input_entry(
+        &mut self,
+        generation: &str,
+        session_id: &str,
+        sequence: u64,
+        entry_id: &str,
+    ) -> Result<()> {
+        self.require_identity(generation, session_id)?;
+        ensure!(
+            !entry_id.is_empty(),
+            "Pi input has no session entry identity"
+        );
+        ensure!(
+            self.pending_inputs.front() == Some(&sequence),
+            "Pi input session entries are not in admission order"
+        );
+        ensure!(
+            self.seen_entries.insert(entry_id.to_owned()),
+            "Pi input session entry identity was reused"
+        );
+        self.pending_inputs.pop_front();
+        self.last_entry_id = Some(entry_id.to_owned());
+        self.last_sequence = sequence;
+        Ok(())
+    }
+
+    /// `agent_end` and turn events are never completion evidence. Pi's
+    /// `agent_settled` is accepted only after every admitted input has an entry.
+    pub fn observe_event(
+        &mut self,
+        generation: &str,
+        session_id: &str,
+        event: &Value,
+    ) -> Result<Completion> {
+        if generation != self.generation || session_id != self.session_id || self.completed {
+            return Ok(Completion::Ignored);
+        }
+        if event.get("type").and_then(Value::as_str) != Some("agent_settled") {
+            return Ok(Completion::Ignored);
+        }
+        let aborted = event
+            .get("aborted")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow::anyhow!("Pi settled event omits aborted status"))?;
+        if aborted {
+            self.admission.begin_settlement()?;
+            self.completed = true;
+            bail!("Pi invocation was aborted");
+        }
+        if !self.pending_inputs.is_empty() {
+            return Ok(Completion::Ignored);
+        }
+        let Some(entry_id) = self.last_entry_id.clone() else {
+            return Ok(Completion::Ignored);
+        };
+        let cutoff = self.admission.begin_settlement()?;
+        ensure!(
+            cutoff == self.last_sequence,
+            "Pi input was not fully accounted for"
+        );
+        self.completed = true;
+        Ok(Completion::Accepted {
+            generation: self.generation.clone(),
+            turn_id: entry_id,
+            input_sequence: cutoff,
+        })
+    }
+
+    fn require_identity(&self, generation: &str, session_id: &str) -> Result<()> {
+        ensure!(
+            generation == self.generation,
+            "Pi input has another Task generation"
+        );
+        ensure!(
+            session_id == self.session_id,
+            "Pi input has another Task session"
+        );
+        Ok(())
     }
 }
 

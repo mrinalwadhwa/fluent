@@ -1,4 +1,4 @@
-use fluent::native_agent::{CodexRelayGate, Completion, NativeAdmission};
+use fluent::native_agent::{CodexRelayGate, Completion, NativeAdmission, PiSettlementGate};
 use fluent::work_model::{Attempt, CoderMapping, TerminalMode, WorkItem, reopen_attempt};
 use serde_json::json;
 
@@ -121,6 +121,135 @@ fn settlement_closes_input_before_advancement() {
     assert_eq!(relay.admit_request(&json!({"id": 1, "method": "turn/start", "params": {"threadId": "assigned-thread", "input": []}})).unwrap(), Some(1));
     assert_eq!(shared.begin_settlement().unwrap(), 1);
     assert!(relay.admit_request(&json!({"id": 2, "method": "turn/steer", "params": {"threadId": "assigned-thread", "input": []}})).is_err());
+}
+
+#[test]
+fn pi_native_waits_for_queued_input_before_settlement() {
+    let mut gate = PiSettlementGate::new("generation-2", "session-1");
+    assert_eq!(gate.admit_input("generation-2", "session-1").unwrap(), 1);
+    assert_eq!(gate.admit_input("generation-2", "session-1").unwrap(), 2);
+
+    // Pi may emit agent_end for an earlier turn while queued steering or a
+    // follow-up still has work to do. Even agent_settled cannot close an input
+    // whose handler returned before Pi placed it in the session.
+    assert_eq!(
+        gate.observe_event("generation-2", "session-1", &json!({"type": "agent_end"}))
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event(
+            "generation-2",
+            "session-1",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Ignored
+    );
+
+    gate.observe_input_entry("generation-2", "session-1", 1, "entry-1")
+        .unwrap();
+    assert_eq!(
+        gate.observe_event(
+            "generation-2",
+            "session-1",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Ignored
+    );
+    gate.observe_input_entry("generation-2", "session-1", 2, "entry-2")
+        .unwrap();
+    assert_eq!(
+        gate.observe_event(
+            "generation-1",
+            "session-1",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event(
+            "generation-2",
+            "other-session",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event(
+            "generation-2",
+            "session-1",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Accepted {
+            generation: "generation-2".into(),
+            turn_id: "entry-2".into(),
+            input_sequence: 2,
+        }
+    );
+    assert!(gate.admit_input("generation-2", "session-1").is_err());
+    assert_eq!(
+        gate.observe_event(
+            "generation-2",
+            "session-1",
+            &json!({"type": "agent_settled", "aborted": false})
+        )
+        .unwrap(),
+        Completion::Ignored
+    );
+
+    let mut aborted = PiSettlementGate::new("generation-3", "session-2");
+    aborted.admit_input("generation-3", "session-2").unwrap();
+    aborted
+        .observe_input_entry("generation-3", "session-2", 1, "entry-1")
+        .unwrap();
+    assert!(
+        aborted
+            .observe_event(
+                "generation-3",
+                "session-2",
+                &json!({"type": "agent_settled", "aborted": true})
+            )
+            .is_err()
+    );
+    assert!(aborted.admit_input("generation-3", "session-2").is_err());
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn attached_operator_does_not_hold_workflow_progression() {
+    use fluent::terminal_sessions::{ControlOutcome, TerminalIdentity, TerminalSession};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+    let session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+    let mut observer = session.observe(session.descriptor()).unwrap();
+    assert_eq!(
+        observer.acquire_control().unwrap(),
+        ControlOutcome::Acquired
+    );
+    let (sent, received) = mpsc::channel();
+    let stop = std::thread::spawn(move || {
+        let mut session = session;
+        sent.send(session.stop()).unwrap();
+    });
+
+    received
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    stop.join().unwrap();
+    assert!(observer.acquire_control().is_err());
+
+    let next = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-2");
+    let mut next_session = TerminalSession::start_fixture(next, "sleep 30").unwrap();
+    next_session.stop().unwrap();
 }
 
 #[test]
