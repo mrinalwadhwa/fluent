@@ -414,6 +414,91 @@ fn partial_terminal_setup_cleans_only_its_resources() {
     live.stop().unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires a real tmux pane under the macOS worker sandbox"]
+fn managed_terminal_pane_starts_in_assigned_workspace() {
+    use fluent::work_model::{WorkItem, WorkModelStore};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir_in("/private/tmp").unwrap();
+    let source = root.path().canonicalize().unwrap();
+    let workspace = source.join("assigned-workspace");
+    let home = workspace.join("private-home");
+    std::fs::create_dir_all(&home).unwrap();
+    assert_ne!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        workspace
+    );
+
+    let mut item = WorkItem::planned("work-1", "Terminal cwd fixture");
+    item.add_initial_attempt("attempt-1").unwrap();
+    WorkModelStore::new(&source)
+        .create_work_item(&item)
+        .unwrap();
+    let identity = TerminalIdentity {
+        source_root: source.clone(),
+        work_item_id: "work-1".into(),
+        attempt_id: "attempt-1".into(),
+        task_id: "attempt-1-write-1".into(),
+        role: "writer".into(),
+        provider: "fixture".into(),
+        artifact_dir: source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"),
+    };
+    std::fs::create_dir_all(&identity.artifact_dir).unwrap();
+    let resolver = fluent::content::ContentResolver::new(Some(&source));
+    let profile = fluent::os::render_profile_common_only(
+        &resolver,
+        home.to_str().unwrap(),
+        &[workspace.clone(), identity.artifact_dir.clone()],
+        &[],
+    )
+    .unwrap();
+    let environment = vec![
+        ("PATH".into(), std::env::var_os("PATH").unwrap()),
+        ("HOME".into(), home.into_os_string()),
+        ("TERM".into(), "xterm-256color".into()),
+    ];
+    let mut session =
+        TerminalSession::start_managed(identity, &profile, &workspace, "/bin/sh", &environment)
+            .unwrap();
+    let actual_cwd = workspace.join("pane-cwd.txt");
+    let socket = session.socket_path().unwrap();
+    let command = format!("/bin/pwd > {}", actual_cwd.display());
+    let probe = (|| -> anyhow::Result<String> {
+        let send = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["send-keys", "-l", &command])
+            .output()?;
+        anyhow::ensure!(
+            send.status.success(),
+            "sending pwd command: {}",
+            String::from_utf8_lossy(&send.stderr)
+        );
+        let enter = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["send-keys", "Enter"])
+            .output()?;
+        anyhow::ensure!(
+            enter.status.success(),
+            "submitting pwd command: {}",
+            String::from_utf8_lossy(&enter.stderr)
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !actual_cwd.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        anyhow::ensure!(actual_cwd.exists(), "pane did not write physical cwd");
+        Ok(std::fs::read_to_string(&actual_cwd)?)
+    })();
+    session.stop().unwrap();
+    let observed = probe.unwrap();
+    assert_eq!(observed.trim(), workspace.to_str().unwrap());
+}
+
 #[test]
 fn host_managed_terminal_acceptance() {
     if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_none() {

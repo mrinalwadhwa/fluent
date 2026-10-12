@@ -576,6 +576,8 @@ impl TerminalSession {
                 .arg("new-session")
                 .arg("-d")
                 .arg("-E")
+                .arg("-c")
+                .arg(working_dir)
                 .arg("-s")
                 .arg("fluent")
                 .arg(&pane_command)

@@ -76,6 +76,17 @@ printf '%s\n' "$candidate" > "$host_output/candidate.txt"
   tmux -V
 } > "$host_output/provider-versions.txt" 2>&1
 
+set +e
+cargo nextest run --offline --features test-support --test terminal_sessions \
+  --no-tests fail --run-ignored only --success-output immediate \
+  -E 'test(managed_terminal_pane_starts_in_assigned_workspace)' \
+  > "$host_output/terminal-cwd.log" 2>&1
+terminal_status=$?
+set -e
+printf 'terminal-cwd-status=%s\n' "$terminal_status" | tee "$host_output/terminal-cwd-status.txt"
+tail -n 30 "$host_output/terminal-cwd.log"
+test "$terminal_status" -eq 0
+
 cargo nextest run --offline --features test-support --test native_agent_tasks \
   --no-tests fail --success-output immediate \
   -E 'test(pi_installed_runner_compacts_before_queued_continuation) | test(pi_installed_runner_closes_input_after_receiver_failure)' \
