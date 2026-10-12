@@ -310,10 +310,12 @@ fn native_launch_blocker(
         && matches!(
             task_kind,
             TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
-        ))
-    .then_some(
-        "native terminal mode cannot launch this Task: the provider adapter is not available",
-    )
+        )
+        && !(task_kind == TaskKind::Write
+            && attempt.coder_mapping.for_task_kind(task_kind).coder == CoderKind::Codex))
+        .then_some(
+            "native terminal mode cannot launch this Task: the provider adapter is not available",
+        )
 }
 
 pub(crate) fn ensure_agent_launch_supported(
@@ -1015,6 +1017,34 @@ fn run_write_task_with_coder(
                 return Err(error);
             }
         };
+    }
+
+    if item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
+    {
+        let result = provider_readiness
+            .codex_worker()
+            .context("native Codex Task has no prepared worker")
+            .and_then(|worker| {
+                crate::native_agent::codex::check_capability(
+                    worker.launcher().execution_executable(),
+                )
+            });
+        if let Err(error) = result {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &classify_task_failure(&error),
+                &crate::notify::notify,
+            )?;
+            return Err(error);
+        }
     }
 
     // Render and apply the exact Writer boundary while the Task is still Planned.
@@ -5124,10 +5154,6 @@ fn run_task_coder_with_coder_with_feedback(
     }
 
     clear_no_change_declaration(project_root, task)?;
-    let coder = make_coder(
-        sandbox,
-        codex_worker.map(|worker| worker.launcher().execution_executable()),
-    );
     // Use the capture config the caller resolved once per logical role run, so every
     // outer retry threads the SAME immutable config — a config change or a concurrent
     // launch between attempts can never hand this role a different capture mid-run.
@@ -5159,18 +5185,73 @@ fn run_task_coder_with_coder_with_feedback(
         });
     let _handoff_correction =
         crate::execution::HandoffCorrection::enter(handoff_feedback.is_some());
-    let completion = coder.run_captured_reported_session(
-        &prompt,
-        &system_prompt,
-        workspace_path,
-        extra_args,
-        &launch_env,
-        capture.as_ref(),
-        session,
-    );
-    let completed = match transcript_path.as_deref().and_then(Path::parent) {
-        Some(artifact_dir) => crate::coder::finish_supervised_coder_run(completion, artifact_dir)?,
-        None => completion.into_result()?,
+    let native = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native);
+    let completed = if native {
+        anyhow::ensure!(
+            coder_kind == CoderKind::Codex,
+            "native provider adapter is unavailable"
+        );
+        anyhow::ensure!(
+            extra_args.is_empty(),
+            "native Codex Task does not support extra provider arguments"
+        );
+        anyhow::ensure!(
+            handoff_feedback.is_none(),
+            "native Codex handoff correction requires a new execution generation"
+        );
+        let worker = codex_worker.context("native Codex Task has no private worker home")?;
+        let profile = sandbox_profile.context("native Codex Task has no worker sandbox profile")?;
+        let artifact_dir = transcript_path
+            .as_deref()
+            .and_then(Path::parent)
+            .context("native Codex Task has no evidence area")?;
+        let identity = crate::terminal_sessions::TerminalIdentity {
+            source_root: project_root.to_path_buf(),
+            work_item_id: item.id.clone(),
+            attempt_id: attempt_id.to_owned(),
+            task_id: task_id.to_owned(),
+            role: task.role.clone(),
+            provider: "codex".into(),
+            artifact_dir: artifact_dir.to_path_buf(),
+        };
+        let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
+        crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+            identity,
+            worker_profile: profile,
+            workspace: workspace_path,
+            private_home: worker.home(),
+            executable: worker.launcher().execution_executable(),
+            model: &effective_model,
+            effort,
+            prompt: &combined_prompt,
+            session,
+            launch_env: &launch_env,
+        })?;
+        0
+    } else {
+        let coder = make_coder(
+            sandbox,
+            codex_worker.map(|worker| worker.launcher().execution_executable()),
+        );
+        let completion = coder.run_captured_reported_session(
+            &prompt,
+            &system_prompt,
+            workspace_path,
+            extra_args,
+            &launch_env,
+            capture.as_ref(),
+            session,
+        );
+        match transcript_path.as_deref().and_then(Path::parent) {
+            Some(artifact_dir) => {
+                crate::coder::finish_supervised_coder_run(completion, artifact_dir)?
+            }
+            None => completion.into_result()?,
+        }
     };
     if let (Some(worker), Some(artifact_dir)) = (
         codex_worker,
@@ -10276,18 +10357,28 @@ fn current_branch(project_root: &Path) -> Result<String> {
 mod tests {
 
     #[test]
-    fn native_attempt_cannot_select_headless_agent_launch() {
+    fn native_attempt_routes_codex_writer_and_blocks_unwired_roles() {
         use super::*;
         let item = WorkItem {
             attempts: vec![crate::work_model::Attempt {
                 id: "attempt-1".into(),
                 terminal_mode: crate::work_model::TerminalMode::Native,
+                coder_mapping: crate::work_model::CoderMapping {
+                    write: crate::work_model::CoderModelPair {
+                        coder: CoderKind::Codex,
+                        model: "gpt-test".into(),
+                        effort: Some("high".into()),
+                    },
+                    ..Default::default()
+                },
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let error = plan_coder_kind(&item, "attempt-1", TaskKind::Write).unwrap_err();
-        assert!(error.to_string().contains("native terminal"));
+        assert_eq!(
+            plan_coder_kind(&item, "attempt-1", TaskKind::Write).unwrap(),
+            CoderKind::Codex
+        );
         for task_kind in [TaskKind::Review, TaskKind::Rebase, TaskKind::Learn] {
             assert!(
                 ensure_agent_launch_supported(&item, "attempt-1", task_kind).is_err(),

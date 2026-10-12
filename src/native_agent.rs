@@ -1,5 +1,7 @@
 //! Validate Codex conversation identities before relaying native input and events.
 
+pub mod codex;
+
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 use serde_json::Value;
@@ -121,6 +123,7 @@ pub struct CodexRelayGate {
     thread_id: String,
     admission: Arc<NativeAdmission>,
     input_sequence: u64,
+    pending_input_requests: HashSet<String>,
     waiting_for_turn: bool,
     active_turn: Option<String>,
 }
@@ -140,6 +143,7 @@ impl CodexRelayGate {
             thread_id: thread_id.into(),
             admission,
             input_sequence: 0,
+            pending_input_requests: HashSet::new(),
             waiting_for_turn: false,
             active_turn: None,
         }
@@ -167,7 +171,19 @@ impl CodexRelayGate {
             bail!("native Codex request omits its Task conversation identity");
         }
         if method == "turn/start" || method == "turn/steer" {
+            let id = request
+                .get("id")
+                .filter(|id| !id.is_null())
+                .ok_or_else(|| anyhow::anyhow!("native Codex input has no request identity"))?;
+            let id = serde_json::to_string(id)?;
+            ensure!(
+                !self.pending_input_requests.contains(&id),
+                "native Codex input request identity was reused"
+            );
             self.input_sequence = self.admission.admit()?;
+            if method == "turn/steer" {
+                self.pending_input_requests.insert(id);
+            }
             if method == "turn/start" {
                 self.waiting_for_turn = true;
                 self.active_turn = None;
@@ -183,6 +199,17 @@ impl CodexRelayGate {
         event: &Value,
     ) -> Result<Completion> {
         if generation != self.generation {
+            return Ok(Completion::Ignored);
+        }
+        if let Some(id) = event.get("id").filter(|id| !id.is_null()) {
+            let id = serde_json::to_string(id)?;
+            if self.pending_input_requests.remove(&id) {
+                ensure!(
+                    event.get("error").is_none(),
+                    "native Codex input was rejected: {}",
+                    event["error"]
+                );
+            }
             return Ok(Completion::Ignored);
         }
         let method = event.get("method").and_then(Value::as_str);
@@ -209,6 +236,9 @@ impl CodexRelayGate {
             return Ok(Completion::Ignored);
         }
         if self.active_turn.as_deref() != Some(turn_id) {
+            return Ok(Completion::Ignored);
+        }
+        if !self.pending_input_requests.is_empty() {
             return Ok(Completion::Ignored);
         }
         self.active_turn = None;

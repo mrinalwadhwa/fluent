@@ -26,6 +26,17 @@ pub fn profile_with_terminal_socket(
     profile: &SandboxProfile,
     socket_dir: &Path,
 ) -> Result<SandboxProfile> {
+    profile_with_terminal_sockets(profile, socket_dir, &[])
+}
+
+/// Grant a managed terminal only its tmux namespace and invocation-owned
+/// provider sockets. The latter carry native protocol traffic inside the same
+/// worker boundary; the renderer never receives this authority.
+pub fn profile_with_terminal_sockets(
+    profile: &SandboxProfile,
+    socket_dir: &Path,
+    provider_socket_dirs: &[PathBuf],
+) -> Result<SandboxProfile> {
     anyhow::ensure!(
         socket_dir.is_absolute(),
         "terminal socket directory must be absolute"
@@ -44,15 +55,19 @@ pub fn profile_with_terminal_socket(
         "; /tmp aliases the private temporary namespace",
     );
     let physical = socket_dir.canonicalize()?;
-    for dir in [socket_dir, physical.as_path()] {
-        content.push_str(&format!(
-            "\n(allow file-read* (subpath {}))",
-            sbpl_string(dir)
-        ));
-        content.push_str(&format!(
-            "\n(allow file-write* (subpath {}))",
-            sbpl_string(dir)
-        ));
+    for dir in std::iter::once(socket_dir).chain(provider_socket_dirs.iter().map(PathBuf::as_path))
+    {
+        let physical_dir = dir.canonicalize()?;
+        for dir in [dir, physical_dir.as_path()] {
+            content.push_str(&format!(
+                "\n(allow file-read* (subpath {}))",
+                sbpl_string(dir)
+            ));
+            content.push_str(&format!(
+                "\n(allow file-write* (subpath {}))",
+                sbpl_string(dir)
+            ));
+        }
     }
     content
         .push_str("\n(deny network-outbound (local unix-socket (path-prefix \"/private/tmp/\")))");
@@ -68,6 +83,15 @@ pub fn profile_with_terminal_socket(
         "\n(allow network-outbound (local unix-socket (path-prefix {})))",
         sbpl_string(&physical)
     ));
+    for dir in provider_socket_dirs {
+        let physical = dir.canonicalize()?;
+        for operation in ["network-bind", "network-inbound", "network-outbound"] {
+            content.push_str(&format!(
+                "\n(allow {operation} (local unix-socket (path-prefix {})))",
+                sbpl_string(&physical)
+            ));
+        }
+    }
     let temp_file = NamedTempFile::with_prefix("fluent-terminal-sandbox-")?;
     std::fs::write(temp_file.path(), content)?;
     Ok(SandboxProfile {

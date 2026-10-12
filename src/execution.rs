@@ -801,6 +801,40 @@ pub enum CancelOutcome {
     AlreadyStopped,
 }
 
+/// Settle a completed native terminal while preserving the Task owner's
+/// ability to launch its later validation commands. A concurrent Attempt stop
+/// wins through the same execution lock and cannot be relabeled successful.
+pub(crate) fn settle_managed_terminal(path: &Path) -> Result<()> {
+    let _lock = crate::lease::acquire_blocking(&lock_path(path))
+        .with_context(|| format!("locking local execution record {}", path.display()))?;
+    let mut record: ExecutionRecord = serde_json::from_slice(&std::fs::read(path)?)?;
+    check_protocol(&record)?;
+    anyhow::ensure!(
+        record.state == ExecutionState::Running,
+        "native terminal is not running"
+    );
+    anyhow::ensure!(
+        recorded_identity_is_signalable(path, &record)?,
+        "native terminal lost its process identity before settlement"
+    );
+    crate::terminal_sessions::settle_for_execution(path, &record)?;
+    let (_, group) = effective_identity(path, &record)?
+        .ok_or_else(|| anyhow::anyhow!("native terminal has no process group"))?;
+    signal_process_group(group, libc::SIGTERM)?;
+    if !wait_for_identity_release(path, TERMINATION_GRACE)? {
+        signal_process_group(group, libc::SIGKILL)?;
+        anyhow::ensure!(
+            wait_for_identity_release(path, TERMINATION_GRACE)?,
+            "native terminal process group {group} did not settle"
+        );
+    }
+    record.state = ExecutionState::Settled;
+    record.settled_at = Some(crate::work_model::now_iso8601());
+    crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+    crate::terminal_sessions::retire_for_execution(path, &record)?;
+    Ok(())
+}
+
 pub fn cancel(path: &Path) -> Result<CancelOutcome> {
     let _lock = crate::lease::acquire_blocking(&lock_path(path))
         .with_context(|| format!("locking local execution record {}", path.display()))?;

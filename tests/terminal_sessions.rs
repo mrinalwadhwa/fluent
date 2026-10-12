@@ -65,6 +65,19 @@ fn detach_does_not_cancel_owned_worker() {
 }
 
 #[test]
+fn completed_terminal_settles_without_canceling_its_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+    let record_path = identity.artifact_dir.join("execution.json");
+    let mut session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+    session.finish().unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    assert_eq!(record["state"], "settled");
+    assert!(!session.is_live().unwrap());
+}
+
+#[test]
 fn stale_terminal_identity_cannot_attach_or_signal() {
     let root = tempfile::tempdir().unwrap();
     let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");

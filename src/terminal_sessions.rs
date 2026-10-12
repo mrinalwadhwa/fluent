@@ -422,11 +422,29 @@ impl TerminalSession {
     /// Start a foreground tmux server inside the supplied worker profile.
     /// Pane commands inherit that server's sandbox and private environment.
     pub fn start_managed(
+        identity: TerminalIdentity,
+        worker_profile: &crate::os::SandboxProfile,
+        working_dir: &Path,
+        shell_command: &str,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<Self> {
+        Self::start_managed_with_sockets(
+            identity,
+            worker_profile,
+            working_dir,
+            shell_command,
+            environment,
+            &[],
+        )
+    }
+
+    pub fn start_managed_with_sockets(
         mut identity: TerminalIdentity,
         worker_profile: &crate::os::SandboxProfile,
         working_dir: &Path,
         shell_command: &str,
         environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        provider_socket_dirs: &[PathBuf],
     ) -> Result<Self> {
         identity.source_root = identity.source_root.canonicalize()?;
         for id in [
@@ -482,7 +500,11 @@ impl TerminalSession {
         let socket = socket_dir.join("socket");
         let owner_handle = socket_dir.join("owner");
         std::fs::File::create(&owner_handle).context("creating terminal owner handle")?;
-        let profile = crate::os::profile_with_terminal_socket(worker_profile, &socket_dir)?;
+        let profile = crate::os::profile_with_terminal_sockets(
+            worker_profile,
+            &socket_dir,
+            provider_socket_dirs,
+        )?;
         let tmux = find_tmux()?;
         std::fs::create_dir_all(registry_dir(&identity))?;
         let resource = TerminalResource {
@@ -634,6 +656,25 @@ impl TerminalSession {
                 "managed terminal generation changed before settlement"
             );
             execution::cancel(&self.stored.execution_record)?;
+            if let Some(mut child) = self.child.take() {
+                child.wait()?;
+            }
+        }
+        self.socket_dir.take();
+        Ok(())
+    }
+
+    /// End a completed native invocation without canceling the owning Task's
+    /// remaining validation and artifact commands.
+    pub fn finish(&mut self) -> Result<()> {
+        if self.child.is_some() {
+            let record = read_record(&self.stored.execution_record)?;
+            ensure!(
+                record.launch_generation.as_deref()
+                    == Some(&self.stored.descriptor.execution_generation),
+                "managed terminal generation changed before settlement"
+            );
+            execution::settle_managed_terminal(&self.stored.execution_record)?;
             if let Some(mut child) = self.child.take() {
                 child.wait()?;
             }

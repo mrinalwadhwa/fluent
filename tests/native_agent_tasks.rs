@@ -86,6 +86,42 @@ fn old_turn_cannot_complete_current_invocation() {
 }
 
 #[test]
+fn codex_steering_must_be_acknowledged_before_settlement() {
+    let mut gate = CodexRelayGate::new("generation-1", "assigned-thread");
+    gate.admit_request(
+        &json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}}),
+    )
+    .unwrap();
+    gate.observe_event_for_generation("generation-1", &json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}})).unwrap();
+    gate.admit_request(
+        &json!({"id":2,"method":"turn/steer","params":{"threadId":"assigned-thread","input":[]}}),
+    )
+    .unwrap();
+    let completed = json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}});
+    assert_eq!(
+        gate.observe_event_for_generation("generation-1", &completed)
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert!(
+        gate.observe_event_for_generation(
+            "generation-1",
+            &json!({"id":2,"error":{"message":"rejected"}})
+        )
+        .is_err()
+    );
+
+    let mut acknowledged = CodexRelayGate::new("generation-2", "assigned-thread");
+    acknowledged.admit_request(&json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})).unwrap();
+    acknowledged.observe_event_for_generation("generation-2", &json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-2"}}})).unwrap();
+    acknowledged.admit_request(&json!({"id":2,"method":"turn/steer","params":{"threadId":"assigned-thread","input":[]}})).unwrap();
+    acknowledged
+        .observe_event_for_generation("generation-2", &json!({"id":2,"result":{}}))
+        .unwrap();
+    assert_eq!(acknowledged.observe_event_for_generation("generation-2", &json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-2","status":"completed"}}})).unwrap(), Completion::Accepted { generation: "generation-2".into(), turn_id: "turn-2".into(), input_sequence: 2 });
+}
+
+#[test]
 fn settlement_closes_input_before_advancement() {
     use std::sync::{Arc, Barrier};
 
@@ -413,6 +449,31 @@ fn native_task_preserves_private_provider_boundary() {
             .any(|args| args == ["resume", "assigned-session"])
     );
     assert!(!resumed_args.contains(&"--last".to_string()));
+    let remote = private_home.path().join("relay.sock");
+    let remote_command = coder
+        .native_task_command_with_remote(
+            project.path(),
+            private_home.path(),
+            CoderSession::Resume("assigned-session"),
+            "continue Task",
+            Some(&remote),
+        )
+        .unwrap();
+    let remote_args: Vec<_> = remote_command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let remote_uri = format!("unix://{}", remote.display());
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| { args[0] == "--remote" && args[1] == remote_uri })
+    );
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| args == ["resume", "assigned-session"])
+    );
 
     assert!(
         coder
@@ -438,6 +499,43 @@ fn native_task_preserves_private_provider_boundary() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn native_codex_pane_loads_the_assigned_thread() {
+    use fluent::coder::CodexCode;
+    use fluent::native_agent::codex::pane_script;
+
+    let root = tempfile::tempdir().unwrap();
+    let coder = CodexCode {
+        sandbox_profile: None,
+        trusted_sandbox: false,
+        model_override: Some("gpt-assigned".into()),
+        effort: Some("high".into()),
+        executable: root.path().join("codex"),
+    };
+    let script = pane_script(
+        &coder,
+        root.path(),
+        root.path(),
+        &root.path().join("app.sock"),
+        &root.path().join("relay.sock"),
+        &root.path().join("go"),
+        &root.path().join("thread"),
+        &root.path().join("provider.log"),
+        "assigned Task prompt",
+    )
+    .unwrap();
+    assert!(script.contains("'app-server' '--listen'"));
+    assert!(script.contains("--remote"));
+    assert!(script.contains("'resume' \"$assigned_thread\""));
+    assert!(script.contains("--model"));
+    assert!(script.contains("gpt-assigned"));
+    assert!(script.contains("model_reasoning_effort=high"));
+    assert!(script.contains("--disable"));
+    assert!(script.contains("hooks"));
+    assert!(script.contains("assigned Task prompt"));
+    assert_eq!(script.matches("__FLUENT_ASSIGNED_THREAD__").count(), 0);
 }
 
 #[test]
@@ -538,7 +636,7 @@ fn native_claude_task_uses_owned_settings_and_role() {
 
 #[cfg(unix)]
 #[test]
-fn native_terminal_controls_assigned_invocation() {
+fn codex_jsonl_relay_controls_assigned_invocation() {
     use fluent::native_agent::relay_codex_streams_with_admission;
     use std::io::{BufRead, BufReader, Write};
     use std::net::Shutdown;
@@ -639,6 +737,122 @@ fn native_terminal_controls_assigned_invocation() {
     assert!(error.to_string().contains("input is closed"));
     let _ = tui.shutdown(Shutdown::Both);
     let _ = provider.shutdown(Shutdown::Both);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_terminal_controls_assigned_invocation() {
+    use fluent::native_agent::codex::relay_codex_websockets;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_path = evidence.path().to_path_buf();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let resume: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(resume["method"], "thread/resume");
+        assert_eq!(resume["params"]["threadId"], "assigned-thread");
+        let turn: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(turn["method"], "turn/start");
+        assert_eq!(turn["params"]["threadId"], "assigned-thread");
+        for event in [
+            json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}),
+        ] {
+            socket.send(Message::Text(event.to_string())).unwrap();
+        }
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let late = socket.read();
+        assert!(late.is_err(), "a late turn crossed the assigned relay");
+    });
+    let admission = Arc::new(NativeAdmission::new());
+    let (completed, received) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        let settlement = Arc::clone(&admission);
+        relay_codex_websockets(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            admission,
+            evidence.reopen().unwrap(),
+            move |completion| {
+                if let Completion::Accepted { input_sequence, .. } = &completion {
+                    assert!(settlement.settle_if_current(*input_sequence)?);
+                }
+                completed.send(completion).map_err(anyhow::Error::new)
+            },
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"thread/resume","params":{"threadId":"assigned-thread"}})
+            .to_string(),
+    ))
+    .unwrap();
+    tui.send(Message::Text(
+        json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
+    for method in ["turn/started", "turn/completed"] {
+        let event: serde_json::Value =
+            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(event["method"], method);
+    }
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    tui.send(Message::Text(
+        json!({"id":3,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
+    let rejection: serde_json::Value =
+        serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(rejection["id"], 3);
+    assert!(
+        rejection["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("input is closed")
+    );
+    let evidence: Vec<serde_json::Value> = std::fs::read_to_string(evidence_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[0]["event"]["method"], "turn/started");
+    assert_eq!(evidence[1]["event"]["method"], "turn/completed");
+    let _ = tui.get_ref().shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    let _ = relay.join().unwrap();
 }
 
 #[cfg(unix)]

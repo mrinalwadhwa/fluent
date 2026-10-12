@@ -1124,6 +1124,17 @@ impl CodexCode {
         session: CoderSession<'_>,
         prompt: &str,
     ) -> Result<Command> {
+        self.native_task_command_with_remote(working_dir, private_home, session, prompt, None)
+    }
+
+    pub fn native_task_command_with_remote(
+        &self,
+        working_dir: &Path,
+        private_home: &Path,
+        session: CoderSession<'_>,
+        prompt: &str,
+        remote_socket: Option<&Path>,
+    ) -> Result<Command> {
         if !private_home.is_absolute() || !private_home.is_dir() {
             bail!("native Codex Task requires an existing private home");
         }
@@ -1133,6 +1144,12 @@ impl CodexCode {
         let mut command = self.build_command(working_dir, false);
         command.env("CODEX_HOME", private_home);
         command.args(["--disable", "hooks"]);
+        if let Some(socket) = remote_socket {
+            if !socket.is_absolute() {
+                bail!("native Codex relay socket must be absolute");
+            }
+            command.args(["--remote", &format!("unix://{}", socket.display())]);
+        }
         if let CoderSession::Resume(session_id) = session {
             if session_id.is_empty() {
                 bail!("native Codex Task cannot resume without a session identity");
