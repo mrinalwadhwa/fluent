@@ -30,6 +30,7 @@ pub mod learner;
 pub mod lease;
 pub(crate) mod lifecycle_recovery;
 pub mod lineage_lock;
+pub mod native_agent;
 pub mod notify;
 pub mod os;
 pub mod plan;
