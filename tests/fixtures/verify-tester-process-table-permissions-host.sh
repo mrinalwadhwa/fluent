@@ -9,12 +9,14 @@ fail() { printf 'host process-table check: %s\n' "$*" >&2; exit 1; }
 
 candidate_root=$(git rev-parse --show-toplevel)
 cd "$candidate_root"
-before_head=$(git rev-parse HEAD)
-[[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail 'candidate has tracked changes'
-
 evidence_dir=${FLUENT_HOST_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/fluent-process-table-host.XXXXXX")}
 mkdir -p "$evidence_dir"
 evidence_dir=$(cd "$evidence_dir" && pwd -P)
+git rev-parse HEAD > "$evidence_dir/initial-head.txt"
+git status --porcelain --untracked-files=no > "$evidence_dir/initial-status.txt"
+before_head=$(cat "$evidence_dir/initial-head.txt")
+[[ ! -s "$evidence_dir/initial-status.txt" ]] || fail 'candidate has tracked changes'
+
 fixture="$evidence_dir/fixture"
 approval_id=
 fixture_pid=

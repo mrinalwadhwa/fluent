@@ -26300,6 +26300,38 @@ fn tester_permissions_enforce_one_contract_across_routes() {
     assert!(!sentinel.exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn tester_permissions_host_fixture_retains_dirty_candidate_diagnostics() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let evidence = tmp.path().join("host-evidence");
+    fs::write(project.join(".fluent/tester.yaml"), "commands: []\n").unwrap();
+    let head = git::run_stdout(&project, &["rev-parse", "HEAD"], "read fixture HEAD").unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/verify-tester-process-table-permissions-host.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .current_dir(&project)
+        .env("FLUENT_HOST_EVIDENCE_DIR", &evidence)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("candidate has tracked changes"));
+    assert_eq!(
+        fs::read_to_string(evidence.join("initial-head.txt"))
+            .unwrap()
+            .trim(),
+        head
+    );
+    assert!(
+        fs::read_to_string(evidence.join("initial-status.txt"))
+            .unwrap()
+            .contains(".fluent/tester.yaml")
+    );
+    assert!(!evidence.join("build.log").exists());
+}
+
 #[test]
 fn tester_permissions_record_applied_authority_in_evidence() {
     let tmp = TempDir::new().unwrap();
