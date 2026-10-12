@@ -126,10 +126,13 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     };
 
     if val["format"] == "fluent-native-agent-event" {
-        return if val["schema_version"] == 1 && val["provider"] == "codex" {
-            parse_native_codex_event(&val["event"])
-        } else {
-            vec![]
+        if val["schema_version"] != 1 {
+            return vec![];
+        }
+        return match val["provider"].as_str() {
+            Some("codex") => parse_native_codex_event(&val["event"]),
+            Some("claude") => parse_native_claude_event(&val["event"]),
+            _ => vec![],
         };
     }
 
@@ -226,7 +229,9 @@ pub fn parse_line(line: &str) -> Vec<Event> {
 pub fn conversation_id_from_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     if value["format"] == "fluent-native-agent-event" {
-        if value["schema_version"] != 1 || value["provider"] != "codex" {
+        if value["schema_version"] != 1
+            || !matches!(value["provider"].as_str(), Some("codex" | "claude"))
+        {
             return None;
         }
         return value["assigned_conversation_id"]
@@ -238,6 +243,33 @@ pub fn conversation_id_from_line(line: &str) -> Option<String> {
         Event::SessionInit { session_id, .. } if !session_id.trim().is_empty() => Some(session_id),
         _ => None,
     })
+}
+
+fn parse_native_claude_event(event: &serde_json::Value) -> Vec<Event> {
+    match event["hook_event_name"].as_str() {
+        Some("SessionStart") => vec![Event::SessionInit {
+            session_id: event["session_id"].as_str().unwrap_or_default().into(),
+            model: event["model"].as_str().unwrap_or("unknown").into(),
+        }],
+        Some("PreToolUse") => {
+            let name = event["tool_name"].as_str().unwrap_or("?");
+            vec![Event::ToolUse {
+                id: event["tool_use_id"].as_str().unwrap_or_default().into(),
+                name: name.into(),
+                summary: summarize_tool_input(name, &event["tool_input"]),
+            }]
+        }
+        Some("PostToolUse" | "PostToolUseFailure") => vec![Event::ToolResult {
+            tool_use_id: event["tool_use_id"].as_str().unwrap_or_default().into(),
+            content: event["tool_response"].as_str().unwrap_or_default().into(),
+        }],
+        Some("Stop") => event["last_assistant_message"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![Event::Text { text: text.into() }])
+            .unwrap_or_default(),
+        _ => vec![],
+    }
 }
 
 fn parse_native_codex_event(event: &serde_json::Value) -> Vec<Event> {

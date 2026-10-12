@@ -379,7 +379,7 @@ fn attempt_retains_native_mode_across_resume() {
 
 #[test]
 fn native_task_preserves_private_provider_boundary() {
-    use fluent::coder::{CoderSession, CodexCode};
+    use fluent::coder::{CoderSession, CodexCode, SandboxedClaudeCode};
     use std::ffi::OsStr;
 
     let project = tempfile::tempdir().unwrap();
@@ -498,6 +498,46 @@ fn native_task_preserves_private_provider_boundary() {
                 "assigned Task prompt",
             )
             .is_err()
+    );
+
+    let settings = private_home.path().join("owned-settings.json");
+    std::fs::write(&settings, "{}").unwrap();
+    let claude = SandboxedClaudeCode {
+        sandbox_profile: None,
+        trusted_sandbox: false,
+        model_override: Some("claude-assigned".into()),
+        effort: Some("high".into()),
+    };
+    let native = claude
+        .native_task_command_in_terminal(
+            project.path(),
+            private_home.path(),
+            &settings,
+            CoderSession::Resume("assigned-claude-session"),
+            "role instructions",
+            "Task prompt",
+        )
+        .unwrap();
+    let args: Vec<_> = native
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(native.get_program(), OsStr::new("claude"));
+    for pair in [
+        ["--model", "claude-assigned"],
+        ["--effort", "high"],
+        ["--setting-sources", ""],
+        ["--resume", "assigned-claude-session"],
+        ["--append-system-prompt", "role instructions"],
+    ] {
+        assert!(args.windows(2).any(|window| window == pair));
+    }
+    assert_eq!(args.last().unwrap(), "Task prompt");
+    assert!(
+        native
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("CLAUDE_CONFIG_DIR")
+                && value == Some(private_home.path().as_os_str()))
     );
 }
 
@@ -632,6 +672,38 @@ fn native_claude_task_uses_owned_settings_and_role() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn native_claude_hooks_correlate_prompt_and_session() {
+    use fluent::native_agent::claude::ClaudeHookGate;
+
+    let mut gate = ClaudeHookGate::new("generation-1", Some("assigned-session"));
+    assert!(gate.observe("generation-1", &json!({"hook_event_name":"SessionStart","session_id":"other-session","source":"resume"})).is_err());
+    gate.observe("generation-1", &json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"resume"})).unwrap();
+    gate.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"prompt-1","prompt":"work"})).unwrap();
+    gate.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"prompt-2","prompt":"follow up"})).unwrap();
+    let old = json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"prompt-1","last_assistant_message":"older answer","background_tasks":[],"session_crons":[]});
+    assert_eq!(
+        gate.observe("generation-1", &old).unwrap(),
+        Completion::Ignored
+    );
+    let current = json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"prompt-2","last_assistant_message":"final answer","background_tasks":[],"session_crons":[]});
+    assert_eq!(
+        gate.observe("generation-1", &current).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "prompt-2".into(),
+            input_sequence: 2,
+        }
+    );
+    assert!(gate.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"prompt-3"})).is_err());
+    assert!(gate.observe("generation-2", &current).is_err());
+
+    let mut failed = ClaudeHookGate::new("generation-1", None);
+    failed.observe("generation-1", &json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"startup"})).unwrap();
+    failed.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"prompt-1"})).unwrap();
+    assert!(failed.observe("generation-1", &json!({"hook_event_name":"StopFailure","session_id":"assigned-session","prompt_id":"prompt-1","error":"rate_limit"})).is_err());
 }
 
 #[cfg(unix)]
@@ -977,12 +1049,18 @@ fn slow_display_cannot_block_evidence_or_supervision() {
 #[cfg(unix)]
 #[test]
 fn native_capability_or_evidence_failure_blocks_false_success() {
+    use fluent::native_agent::claude::{
+        ClaudeHookGate, receive_hook, supports_blocking_hook_failure,
+    };
     use fluent::native_agent::relay_codex_streams;
     use std::io::{self, BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
 
     struct FailedEvidence;
+    assert!(!supports_blocking_hook_failure("2.1.289 (Claude Code)"));
+    assert!(supports_blocking_hook_failure("2.1.295 (Claude Code)"));
+    assert!(supports_blocking_hook_failure("2.2.0 (Claude Code)"));
     impl Write for FailedEvidence {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("evidence volume unavailable"))
@@ -1016,6 +1094,41 @@ fn native_capability_or_evidence_failure_blocks_false_success() {
     let error = relay.join().unwrap().unwrap_err();
     assert!(error.to_string().contains("evidence volume unavailable"));
     assert!(received.try_recv().is_err());
+
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = ClaudeHookGate::new("generation-1", Some("assigned-session"));
+    for event in [
+        json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"resume"}),
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"prompt-1","prompt":"work"}),
+        json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"prompt-1","last_assistant_message":"done","background_tasks":[],"session_crons":[]}),
+    ] {
+        let (mut hook, receiver) = UnixStream::pair().unwrap();
+        hook.write_all(
+            format!("{}\n", json!({"generation":"generation-1","event":event})).as_bytes(),
+        )
+        .unwrap();
+        let completion = receive_hook(receiver, &mut gate, "generation-1", &mut writer).unwrap();
+        let mut ack = String::new();
+        BufReader::new(hook).read_line(&mut ack).unwrap();
+        assert_eq!(ack, "ok\n");
+        if event["hook_event_name"] == "Stop" {
+            assert!(matches!(completion, Completion::Accepted { .. }));
+        }
+    }
+    let saved = std::fs::read_to_string(evidence.path()).unwrap();
+    assert_eq!(saved.lines().count(), 3);
+    assert!(saved.contains("last_assistant_message"));
+    let (mut hook, receiver) = UnixStream::pair().unwrap();
+    hook.write_all(format!("{}\n", json!({"generation":"stale","event":{"hook_event_name":"SessionEnd","session_id":"assigned-session"}})).as_bytes()).unwrap();
+    assert!(receive_hook(receiver, &mut gate, "generation-1", &mut writer).is_err());
+    assert_eq!(
+        std::fs::read_to_string(evidence.path())
+            .unwrap()
+            .lines()
+            .count(),
+        3
+    );
 }
 
 #[cfg(unix)]
@@ -1100,6 +1213,38 @@ fn native_evidence_reaches_existing_consumers() {
         ).as_slice(),
         [Event::SessionInit { session_id, .. }] if session_id == "legacy-thread"
     ));
+
+    let claude = |event| {
+        json!({
+            "format":"fluent-native-agent-event","schema_version":1,"provider":"claude",
+            "execution_generation":"generation-2","assigned_conversation_id":"assigned-claude",
+            "conversation_id":"assigned-claude","turn_id":"prompt-1","input_sequence":1,
+            "event":event,
+        })
+        .to_string()
+    };
+    let start = claude(
+        json!({"hook_event_name":"SessionStart","session_id":"assigned-claude","source":"resume"}),
+    );
+    assert_eq!(
+        fluent::transcript::conversation_id_from_line(&start).as_deref(),
+        Some("assigned-claude")
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&start).as_slice(), [Event::SessionInit { session_id, .. }] if session_id == "assigned-claude")
+    );
+    let tool = claude(
+        json!({"hook_event_name":"PreToolUse","session_id":"assigned-claude","tool_name":"Bash","tool_use_id":"tool-1","tool_input":{"command":"git status"}}),
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&tool).as_slice(), [Event::ToolUse { id, name, .. }] if id == "tool-1" && name == "Bash")
+    );
+    let stop = claude(
+        json!({"hook_event_name":"Stop","session_id":"assigned-claude","prompt_id":"prompt-1","last_assistant_message":"Claude answer"}),
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&stop).as_slice(), [Event::Text { text }] if text == "Claude answer")
+    );
 }
 
 #[test]

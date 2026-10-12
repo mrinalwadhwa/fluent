@@ -1,5 +1,6 @@
 //! Validate Codex conversation identities before relaying native input and events.
 
+pub mod claude;
 pub mod codex;
 
 use anyhow::{Result, bail, ensure};

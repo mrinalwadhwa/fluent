@@ -668,6 +668,45 @@ impl SandboxedClaudeCode {
         if self.sandbox_profile.is_none() {
             bail!("native Claude Task requires a worker sandbox profile");
         }
+        self.validate_native_task(private_home, owned_settings)?;
+        let command = self.build_command(working_dir, false);
+        self.finish_native_task_command(
+            command,
+            private_home,
+            owned_settings,
+            session,
+            system_prompt,
+            prompt,
+        )
+    }
+
+    /// Build the CLI inside a terminal that already owns the worker sandbox.
+    pub fn native_task_command_in_terminal(
+        &self,
+        working_dir: &Path,
+        private_home: &Path,
+        owned_settings: &Path,
+        session: CoderSession<'_>,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<Command> {
+        self.validate_native_task(private_home, owned_settings)?;
+        let mut command = Command::new("claude");
+        command.current_dir(working_dir);
+        command.arg("--dangerously-skip-permissions");
+        command.args(["--model", self.model_override.as_deref().unwrap()]);
+        command.args(["--effort", self.effort.as_deref().unwrap()]);
+        self.finish_native_task_command(
+            command,
+            private_home,
+            owned_settings,
+            session,
+            system_prompt,
+            prompt,
+        )
+    }
+
+    fn validate_native_task(&self, private_home: &Path, owned_settings: &Path) -> Result<()> {
         if self.model_override.as_deref().is_none_or(str::is_empty)
             || self.effort.as_deref().is_none_or(str::is_empty)
         {
@@ -683,7 +722,18 @@ impl SandboxedClaudeCode {
         {
             bail!("native Claude Task requires settings inside its private home");
         }
-        let mut command = self.build_command(working_dir, false);
+        Ok(())
+    }
+
+    fn finish_native_task_command(
+        &self,
+        mut command: Command,
+        private_home: &Path,
+        owned_settings: &Path,
+        session: CoderSession<'_>,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<Command> {
         command.env("HOME", private_home);
         command.env("CLAUDE_CONFIG_DIR", private_home);
         command.args(["--setting-sources", ""]);

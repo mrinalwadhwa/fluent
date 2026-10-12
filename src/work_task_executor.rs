@@ -312,10 +312,13 @@ fn native_launch_blocker(
             TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
         )
         && !(task_kind == TaskKind::Write
-            && attempt.coder_mapping.for_task_kind(task_kind).coder == CoderKind::Codex))
-        .then_some(
-            "native terminal mode cannot launch this Task: the provider adapter is not available",
-        )
+            && matches!(
+                attempt.coder_mapping.for_task_kind(task_kind).coder,
+                CoderKind::Codex | CoderKind::Claude
+            )))
+    .then_some(
+        "native terminal mode cannot launch this Task: the provider adapter is not available",
+    )
 }
 
 pub(crate) fn ensure_agent_launch_supported(
@@ -1025,14 +1028,18 @@ fn run_write_task_with_coder(
         .find(|attempt| attempt.id == config.attempt_id)
         .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native)
     {
-        let result = provider_readiness
-            .codex_worker()
-            .context("native Codex Task has no prepared worker")
-            .and_then(|worker| {
-                crate::native_agent::codex::check_capability(
-                    worker.launcher().execution_executable(),
-                )
-            });
+        let result = match coder_kind {
+            CoderKind::Codex => provider_readiness
+                .codex_worker()
+                .context("native Codex Task has no prepared worker")
+                .and_then(|worker| {
+                    crate::native_agent::codex::check_capability(
+                        worker.launcher().execution_executable(),
+                    )
+                }),
+            CoderKind::Claude => crate::native_agent::claude::check_capability(),
+            _ => anyhow::bail!("native provider adapter is unavailable"),
+        };
         if let Err(error) = result {
             mark_task_failed_attempt_needs_user(
                 config.store,
@@ -5192,7 +5199,7 @@ fn run_task_coder_with_coder_with_feedback(
         .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native);
     let completed = if native {
         anyhow::ensure!(
-            coder_kind == CoderKind::Codex,
+            matches!(coder_kind, CoderKind::Codex | CoderKind::Claude),
             "native provider adapter is unavailable"
         );
         anyhow::ensure!(
@@ -5203,8 +5210,7 @@ fn run_task_coder_with_coder_with_feedback(
             handoff_feedback.is_none(),
             "native Codex handoff correction requires a new execution generation"
         );
-        let worker = codex_worker.context("native Codex Task has no private worker home")?;
-        let profile = sandbox_profile.context("native Codex Task has no worker sandbox profile")?;
+        let profile = sandbox_profile.context("native Task has no worker sandbox profile")?;
         let artifact_dir = transcript_path
             .as_deref()
             .and_then(Path::parent)
@@ -5215,22 +5221,38 @@ fn run_task_coder_with_coder_with_feedback(
             attempt_id: attempt_id.to_owned(),
             task_id: task_id.to_owned(),
             role: task.role.clone(),
-            provider: "codex".into(),
+            provider: coder_kind.as_str().into(),
             artifact_dir: artifact_dir.to_path_buf(),
         };
-        let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
-        crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
-            identity,
-            worker_profile: profile,
-            workspace: workspace_path,
-            private_home: worker.home(),
-            executable: worker.launcher().execution_executable(),
-            model: &effective_model,
-            effort,
-            prompt: &combined_prompt,
-            session,
-            launch_env: &launch_env,
-        })?;
+        if coder_kind == CoderKind::Codex {
+            let worker = codex_worker.context("native Codex Task has no private worker home")?;
+            let combined_prompt = format!("{system_prompt}\n\n---\n\n{prompt}");
+            crate::native_agent::codex::run(crate::native_agent::codex::CodexNativeTask {
+                identity,
+                worker_profile: profile,
+                workspace: workspace_path,
+                private_home: worker.home(),
+                executable: worker.launcher().execution_executable(),
+                model: &effective_model,
+                effort,
+                prompt: &combined_prompt,
+                session,
+                launch_env: &launch_env,
+            })?;
+        } else {
+            crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
+                identity,
+                worker_profile: profile,
+                workspace: workspace_path,
+                private_home: claude_home.context("native Claude Task has no private home")?,
+                model: &effective_model,
+                effort: effort.context("native Claude Task has no resolved effort")?,
+                prompt: &prompt,
+                system_prompt: &system_prompt,
+                session,
+                launch_env: &launch_env,
+            })?;
+        }
         0
     } else {
         let coder = make_coder(
@@ -10357,7 +10379,7 @@ fn current_branch(project_root: &Path) -> Result<String> {
 mod tests {
 
     #[test]
-    fn native_attempt_routes_codex_writer_and_blocks_unwired_roles() {
+    fn native_attempt_routes_codex_and_claude_writers() {
         use super::*;
         let item = WorkItem {
             attempts: vec![crate::work_model::Attempt {
@@ -10378,6 +10400,12 @@ mod tests {
         assert_eq!(
             plan_coder_kind(&item, "attempt-1", TaskKind::Write).unwrap(),
             CoderKind::Codex
+        );
+        let mut claude_item = item.clone();
+        claude_item.attempts[0].coder_mapping.write.coder = CoderKind::Claude;
+        assert_eq!(
+            plan_coder_kind(&claude_item, "attempt-1", TaskKind::Write).unwrap(),
+            CoderKind::Claude
         );
         for task_kind in [TaskKind::Review, TaskKind::Rebase, TaskKind::Learn] {
             assert!(
