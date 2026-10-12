@@ -15,7 +15,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 60 || area.height < 15 {
         frame.render_widget(
-            Paragraph::new("Resize terminal to at least 60 columns and 15 rows.  q quit").block(
+            Paragraph::new("Resize terminal to 60 columns and 15 rows. q quit").block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Fluent Dashboard "),

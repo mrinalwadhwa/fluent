@@ -995,6 +995,70 @@ fn details_distinguish_recorded_values_from_unknowns() {
 }
 
 #[test]
+fn loaded_worker_metadata_reaches_rows_and_details() {
+    use crate::work_model::{AttemptStatus, TaskStatus};
+    let root = tempfile::tempdir().unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Recorded review");
+    item.add_review_only_attempt(
+        "attempt-1",
+        &["architecture", "tests"],
+        "main",
+        "abcdef",
+        true,
+    )
+    .unwrap();
+    let attempt = &mut item.attempts[0];
+    attempt.status = AttemptStatus::Executing;
+    attempt.coder_mapping.review.model = "review-model".into();
+    attempt.coder_mapping.review.effort = Some("high".into());
+    let available_task = attempt.tasks[0].id.clone();
+    attempt.tasks[0].status = TaskStatus::Complete;
+    attempt.tasks[0].started_at = Some("2026-10-11T10:00:00Z".into());
+    attempt.tasks[0].completed_at = Some("2026-10-11T10:00:12Z".into());
+    attempt.tasks[1].status = TaskStatus::Planned;
+    crate::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&item)
+        .unwrap();
+    let identity = crate::terminal_sessions::TerminalIdentity::fixture(
+        root.path(),
+        "work",
+        "attempt-1",
+        &available_task,
+    );
+    let mut session =
+        crate::terminal_sessions::TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+    let source = project::SourceSnapshot::load(root.path());
+    session.stop().unwrap();
+    let source = source.unwrap();
+    assert_eq!(source.work[0].workers[0].state, "complete");
+    assert_eq!(source.work[0].workers[1].state, "planned");
+    assert!(
+        source.work[0].workers[0]
+            .terminal
+            .as_ref()
+            .unwrap()
+            .can_observe
+    );
+    assert!(source.work[0].workers[1].terminal.is_none());
+    let mut app = project_app(vec![source]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let rendered = text(&app, 140, 30);
+    assert!(rendered.contains("architecture [complete] term:on"));
+    assert!(rendered.contains("tests [planned] term:off"));
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let details = text(&app, 140, 30);
+    assert!(details.contains("Provider: fixture"));
+    assert!(details.contains("Model: review-model"));
+    assert!(details.contains("Effort: high"));
+    assert!(details.contains("Elapsed: 12s"));
+    assert!(details.contains("Agent terminal: Observe available"));
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+    let unavailable = text(&app, 140, 30);
+    assert!(unavailable.contains("Agent terminal:"));
+    assert!(unavailable.contains("unavailable"));
+}
+
+#[test]
 fn selection_preserves_composite_worker_identity() {
     let mut first = project_source("/one", vec![row("same", "executing")]);
     let mut second = project_source("/two", vec![row("same", "executing")]);
@@ -1066,6 +1130,15 @@ fn selection_preserves_composite_worker_identity() {
         Some("generation-3")
     );
     assert!(text(&app, 80, 20).contains("Writer"));
+    let mut removed = app.snapshot.clone();
+    removed.sources[0].work[0].workers.clear();
+    removed.sources[1].work[0].status.title = "Neighbor".into();
+    app.refresh(removed);
+    assert_eq!(
+        app.selected_key,
+        Some(project::RowKey::work("/one", "same"))
+    );
+    assert!(text(&app, 80, 20).contains("> ▸ Neighbor"));
 }
 
 #[test]
@@ -1115,7 +1188,15 @@ fn project_layout_keeps_selected_content_visible() {
     )]);
     app.snapshot.sources[0].work[29].status.title =
         "work-29 漢字 e\u{301} and a long title that must stay inside its pane".into();
-    for (width, height) in [(59, 14), (60, 15), (99, 18), (100, 18), (140, 24)] {
+    for (width, height) in [
+        (59, 14),
+        (60, 14),
+        (59, 15),
+        (60, 15),
+        (99, 18),
+        (100, 18),
+        (140, 24),
+    ] {
         app.resize(width, height);
         for _ in 0..29 {
             app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
@@ -1123,16 +1204,28 @@ fn project_layout_keeps_selected_content_visible() {
         let rendered = text(&app, width, height);
         if width < 60 {
             assert!(rendered.contains("Resize terminal"));
+            assert!(rendered.contains("q quit"));
+        } else if height < 15 {
+            assert!(rendered.contains("Resize terminal"));
+            assert!(rendered.contains("q quit"));
         } else {
             assert!(rendered.contains("work-29"));
+            assert!(rendered.contains("> ▸ work-29"));
+            assert!(rendered.contains('漢') && rendered.contains('字'));
+            assert!(rendered.contains("e\u{301}"));
             assert!(rendered.contains("q quit"));
             assert!(rendered.contains("? help"));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+            for y in 6..height - 2 {
+                assert_eq!(terminal.backend().buffer()[(0, y)].symbol(), "│");
+                assert_eq!(terminal.backend().buffer()[(width - 1, y)].symbol(), "│");
+            }
             if width >= 100 {
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                terminal.draw(|frame| render::draw(frame, &app)).unwrap();
                 let boundary = width * 43 / 100 - 1;
                 for y in 6..height - 2 {
                     assert_eq!(terminal.backend().buffer()[(boundary, y)].symbol(), "│");
+                    assert_eq!(terminal.backend().buffer()[(boundary + 1, y)].symbol(), "│");
                 }
             }
         }
