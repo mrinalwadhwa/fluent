@@ -500,6 +500,7 @@ fn native_evidence_reaches_existing_consumers() {
     assert_eq!(first["schema_version"], 1);
     assert_eq!(first["provider"], "codex");
     assert_eq!(first["execution_generation"], "generation-1");
+    assert_eq!(first["assigned_conversation_id"], "assigned-thread");
     assert_eq!(first["conversation_id"], "assigned-thread");
     assert_eq!(first["event"]["method"], "thread/started");
     assert_eq!(first["input_sequence"], 1);
@@ -528,4 +529,75 @@ fn native_evidence_reaches_existing_consumers() {
         ).as_slice(),
         [Event::SessionInit { session_id, .. }] if session_id == "legacy-thread"
     ));
+}
+
+#[test]
+fn continuation_reuses_conversation_not_live_terminal_identity() {
+    let make_record = |generation: &str| {
+        json!({
+            "format": "fluent-native-agent-event",
+            "schema_version": 1,
+            "provider": "codex",
+            "execution_generation": generation,
+            "assigned_conversation_id": "assigned-thread",
+            "conversation_id": "assigned-thread",
+            "turn_id": "turn-2",
+            "input_sequence": 1,
+            "event": {"method": "turn/completed", "params": {"threadId": "assigned-thread", "turn": {"id": "turn-2", "status": "completed"}}}
+        }).to_string()
+    };
+    let initial = make_record("generation-1");
+    let resumed = make_record("generation-2");
+    assert_eq!(
+        fluent::transcript::conversation_id_from_line(&initial).as_deref(),
+        Some("assigned-thread")
+    );
+    assert_eq!(
+        fluent::transcript::conversation_id_from_line(&resumed).as_deref(),
+        Some("assigned-thread")
+    );
+    assert_ne!(
+        serde_json::from_str::<serde_json::Value>(&initial).unwrap()["execution_generation"],
+        serde_json::from_str::<serde_json::Value>(&resumed).unwrap()["execution_generation"]
+    );
+    let mut unrelated: serde_json::Value = serde_json::from_str(&resumed).unwrap();
+    unrelated["conversation_id"] = json!("other-thread");
+    unrelated["event"]["params"]["threadId"] = json!("other-thread");
+    assert_eq!(
+        fluent::transcript::conversation_id_from_line(&unrelated.to_string()).as_deref(),
+        Some("assigned-thread")
+    );
+
+    let mut resumed_gate = CodexRelayGate::new("generation-2", "assigned-thread");
+    resumed_gate.admit_request(&json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})).unwrap();
+    let started = json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-2"}}});
+    assert_eq!(
+        resumed_gate
+            .observe_event_for_generation("generation-1", &started)
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        resumed_gate
+            .observe_event_for_generation("generation-2", &started)
+            .unwrap(),
+        Completion::Ignored
+    );
+    let finished = json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-2","status":"completed"}}});
+    assert_eq!(
+        resumed_gate
+            .observe_event_for_generation("generation-1", &finished)
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        resumed_gate
+            .observe_event_for_generation("generation-2", &finished)
+            .unwrap(),
+        Completion::Accepted {
+            generation: "generation-2".into(),
+            turn_id: "turn-2".into(),
+            input_sequence: 1
+        }
+    );
 }

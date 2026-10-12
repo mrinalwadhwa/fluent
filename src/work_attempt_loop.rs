@@ -9674,15 +9674,7 @@ pub(crate) fn writer_session_id(path: &Path) -> Option<String> {
     BufReader::new(file)
         .lines()
         .map_while(Result::ok)
-        .flat_map(|line| crate::transcript::parse_line(&line))
-        .find_map(|event| match event {
-            crate::transcript::Event::SessionInit { session_id, .. }
-                if !session_id.trim().is_empty() =>
-            {
-                Some(session_id)
-            }
-            _ => None,
-        })
+        .find_map(|line| crate::transcript::conversation_id_from_line(&line))
 }
 
 fn write_writer_completion_handoff(
@@ -25889,6 +25881,17 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             Some("claude-session-1")
         );
         assert_eq!(writer_session_id(&codex).as_deref(), Some("codex-thread-1"));
+
+        let native = tmp.path().join("native-codex.jsonl");
+        fs::write(
+            &native,
+            r#"{"format":"fluent-native-agent-event","schema_version":1,"provider":"codex","execution_generation":"generation-2","assigned_conversation_id":"codex-thread-1","conversation_id":"codex-thread-1","turn_id":"turn-2","input_sequence":1,"event":{"method":"turn/completed","params":{"threadId":"codex-thread-1","turn":{"id":"turn-2","status":"completed"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            writer_session_id(&native).as_deref(),
+            Some("codex-thread-1")
+        );
     }
 
     #[test]

@@ -170,6 +170,8 @@ The Codex relay records original app-server notifications in JSONL records
 marked `fluent-native-agent-event` with schema version 1, execution generation,
 conversation and turn IDs, and admitted input sequence. The transcript feed and
 usage reader recognize these records alongside existing headless transcripts.
+Writer continuation reads the assigned provider conversation ID from native
+evidence; a later terminal generation or unrelated notification cannot change it.
 The Task declares role `author`, copies explicit Work Item instructions
 or derives instructions from Work Item planning context into optional
 `Task.instructions`, and declares one writable workspace reference at

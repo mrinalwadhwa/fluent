@@ -220,6 +220,26 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     }
 }
 
+/// Recover the provider conversation that a Writer may resume. Native records
+/// carry the assigned conversation separately from the terminal generation and
+/// from any unrelated provider notification observed on the connection.
+pub fn conversation_id_from_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value["format"] == "fluent-native-agent-event" {
+        if value["schema_version"] != 1 || value["provider"] != "codex" {
+            return None;
+        }
+        return value["assigned_conversation_id"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
+    }
+    parse_line(line).into_iter().find_map(|event| match event {
+        Event::SessionInit { session_id, .. } if !session_id.trim().is_empty() => Some(session_id),
+        _ => None,
+    })
+}
+
 fn parse_native_codex_event(event: &serde_json::Value) -> Vec<Event> {
     let params = &event["params"];
     match event["method"].as_str() {

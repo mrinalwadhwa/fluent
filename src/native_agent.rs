@@ -85,6 +85,7 @@ struct CodexEvidenceRecord<'a> {
     schema_version: u32,
     provider: &'static str,
     execution_generation: &'a str,
+    assigned_conversation_id: &'a str,
     conversation_id: &'a str,
     turn_id: Option<&'a str>,
     input_sequence: u64,
@@ -300,6 +301,7 @@ where
                         schema_version: 1,
                         provider: "codex",
                         execution_generation: generation,
+                        assigned_conversation_id: thread_id,
                         conversation_id,
                         turn_id: params["turn"]["id"]
                             .as_str()
