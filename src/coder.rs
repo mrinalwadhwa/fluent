@@ -1539,7 +1539,7 @@ impl PiCode {
         command.arg("--no-extensions");
         command.arg("--extension").arg(extension);
         command.arg("--session").arg(session_file);
-        command.arg("--no-approve");
+        command.arg("--approve");
         command.args(["--append-system-prompt", system_prompt]);
         command.arg(prompt);
         Ok(command)

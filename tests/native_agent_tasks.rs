@@ -265,6 +265,134 @@ fn pi_native_waits_for_queued_input_before_settlement() {
     assert!(aborted.admit_input("generation-3", "session-2").is_err());
 }
 
+#[test]
+fn pi_extension_reports_admitted_entries_before_settlement() {
+    let script = r#"
+import assert from 'node:assert/strict';
+import { createFluentPiExtension } from './src/native_agent/pi_extension.mjs';
+const callbacks = new Map();
+const messages = [];
+const manager = {
+  getSessionId: () => 'assigned-session',
+  getSessionFile: () => '/private/task/session.jsonl',
+  getEntries: () => entries,
+};
+const ctx = { sessionManager: manager };
+let entries = [];
+createFluentPiExtension(async (message) => {
+  messages.push(message);
+  return { ok: true, input_sequence: message.event.type === 'input' ? messages.filter(item => item.event.type === 'input').length : undefined };
+})({ on: (kind, callback) => callbacks.set(kind, callback) });
+await callbacks.get('session_start')({ type: 'session_start', reason: 'startup' }, ctx);
+assert.deepEqual(await callbacks.get('input')({ type: 'input', text: 'first', streamingBehavior: 'steer' }, ctx), { action: 'continue' });
+assert.deepEqual(await callbacks.get('input')({ type: 'input', text: 'second', streamingBehavior: 'followUp' }, ctx), { action: 'continue' });
+entries = [
+  { type: 'message', id: 'entry-1', message: { role: 'user' } },
+  { type: 'message', id: 'entry-2', message: { role: 'user' } },
+];
+await callbacks.get('agent_before_settle')({ type: 'agent_before_settle', outcome: 'completed' }, ctx);
+await callbacks.get('agent_settled')({ type: 'agent_settled', aborted: false }, ctx);
+assert.deepEqual(messages.slice(-3).map(item => item.event.type), ['input_entry', 'input_entry', 'agent_settled']);
+assert.deepEqual(messages.slice(-3, -1).map(item => item.input_sequence), [1, 2]);
+assert.equal(callbacks.get('session_before_switch')().cancel, true);
+assert.equal(callbacks.get('session_before_fork')().cancel, true);
+assert.equal(callbacks.get('session_before_tree')().cancel, true);
+assert.equal(callbacks.get('user_bash')().result.exitCode, 1);
+await assert.rejects(callbacks.get('session_start')({ type: 'session_start', reason: 'reload' }, ctx));
+"#;
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", script])
+        .env("FLUENT_NATIVE_PI_GENERATION", "generation-1")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_receiver_acknowledges_durable_input_and_settlement() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    let mut observed = Vec::new();
+    for event in [
+        json!({"type":"session_start","reason":"startup"}),
+        json!({"type":"input","text":"first","streamingBehavior":"steer"}),
+        json!({"type":"input","text":"second","streamingBehavior":"followUp"}),
+        json!({"type":"input_entry","entry_id":"entry-1"}),
+        json!({"type":"input_entry","entry_id":"entry-2"}),
+        json!({"type":"agent_before_settle","outcome":"completed"}),
+        json!({"type":"agent_settled","aborted":false}),
+    ] {
+        let (mut client, receiver) = UnixStream::pair().unwrap();
+        let mut envelope = json!({"generation":"generation-1","session_id":"assigned-session","session_file":"/private/task/session.jsonl","event":event});
+        if envelope["event"]["entry_id"] == "entry-1" {
+            envelope["input_sequence"] = json!(1);
+        }
+        if envelope["event"]["entry_id"] == "entry-2" {
+            envelope["input_sequence"] = json!(2);
+        }
+        client
+            .write_all(format!("{}\n", envelope).as_bytes())
+            .unwrap();
+        let completion = receive_event(receiver, &mut gate, &mut writer).unwrap();
+        let mut reply = String::new();
+        BufReader::new(client).read_line(&mut reply).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["ok"], true);
+        observed.push((
+            event["type"].as_str().unwrap().to_string(),
+            reply["input_sequence"].clone(),
+            completion,
+        ));
+    }
+    assert_eq!(observed[1].1, json!(1));
+    assert_eq!(observed[2].1, json!(2));
+    assert!(matches!(
+        observed.last().unwrap().2,
+        Completion::Accepted {
+            input_sequence: 2,
+            ..
+        }
+    ));
+    let saved = std::fs::read_to_string(evidence.path()).unwrap();
+    assert_eq!(saved.lines().count(), 7);
+    assert!(saved.contains("entry-2"));
+    assert!(gate.observe(&json!({"generation":"generation-old","session_id":"assigned-session","session_file":"/private/task/session.jsonl","event":{"type":"agent_settled","aborted":false}})).is_err());
+}
+
+#[test]
+fn pi_native_model_config_keeps_only_assigned_provider() {
+    use fluent::native_agent::pi::select_local_model_config;
+    let source = json!({"providers": {
+        "local-openai": {"baseUrl":"http://localhost:1234/v1","api":"openai-completions","apiKey":"local","models":[{"id":"assigned-model"},{"id":"other-model"}]},
+        "remote": {"baseUrl":"https://example.invalid","models":[{"id":"remote-model"}]}
+    }});
+    let selected = select_local_model_config(&source, "assigned-model").unwrap();
+    assert_eq!(
+        selected["providers"]["local-openai"]["baseUrl"],
+        "http://localhost:1234/v1"
+    );
+    assert_eq!(
+        selected["providers"]["local-openai"]["models"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(selected["providers"].get("remote").is_none());
+    assert!(select_local_model_config(&source, "unknown-model").is_err());
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn attached_operator_does_not_hold_workflow_progression() {
@@ -573,6 +701,7 @@ fn native_task_preserves_private_provider_boundary() {
         assert!(pi_args.windows(2).any(|window| window == pair));
     }
     assert!(pi_args.contains(&"--no-extensions".to_string()));
+    assert!(pi_args.contains(&"--approve".to_string()));
     assert!(
         pi_args.windows(2).any(
             |window| window[0] == "--extension" && window[1] == extension.display().to_string()

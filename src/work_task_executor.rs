@@ -314,7 +314,7 @@ fn native_launch_blocker(
         && !(task_kind == TaskKind::Write
             && matches!(
                 attempt.coder_mapping.for_task_kind(task_kind).coder,
-                CoderKind::Codex | CoderKind::Claude
+                CoderKind::Codex | CoderKind::Claude | CoderKind::Pi
             )))
     .then_some(
         "native terminal mode cannot launch this Task: the provider adapter is not available",
@@ -1038,6 +1038,19 @@ fn run_write_task_with_coder(
                     )
                 }),
             CoderKind::Claude => crate::native_agent::claude::check_capability(),
+            CoderKind::Pi => {
+                let pair = item
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.id == config.attempt_id)
+                    .expect("native Attempt was found")
+                    .coder_mapping
+                    .for_task_kind(TaskKind::Write);
+                crate::native_agent::pi_runner::check_capability(
+                    &pair.model,
+                    pair.effort.as_deref(),
+                )
+            }
             _ => anyhow::bail!("native provider adapter is unavailable"),
         };
         if let Err(error) = result {
@@ -5199,22 +5212,25 @@ fn run_task_coder_with_coder_with_feedback(
         .is_some_and(|attempt| attempt.terminal_mode == crate::work_model::TerminalMode::Native);
     let completed = if native {
         anyhow::ensure!(
-            matches!(coder_kind, CoderKind::Codex | CoderKind::Claude),
+            matches!(
+                coder_kind,
+                CoderKind::Codex | CoderKind::Claude | CoderKind::Pi
+            ),
             "native provider adapter is unavailable"
         );
         anyhow::ensure!(
             extra_args.is_empty(),
-            "native Codex Task does not support extra provider arguments"
+            "native Task does not support extra provider arguments"
         );
         anyhow::ensure!(
             handoff_feedback.is_none(),
-            "native Codex handoff correction requires a new execution generation"
+            "native handoff correction requires a new execution generation"
         );
         let profile = sandbox_profile.context("native Task has no worker sandbox profile")?;
         let artifact_dir = transcript_path
             .as_deref()
             .and_then(Path::parent)
-            .context("native Codex Task has no evidence area")?;
+            .context("native Task has no evidence area")?;
         let identity = crate::terminal_sessions::TerminalIdentity {
             source_root: project_root.to_path_buf(),
             work_item_id: item.id.clone(),
@@ -5239,7 +5255,7 @@ fn run_task_coder_with_coder_with_feedback(
                 session,
                 launch_env: &launch_env,
             })?;
-        } else {
+        } else if coder_kind == CoderKind::Claude {
             crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
                 identity,
                 worker_profile: profile,
@@ -5250,6 +5266,29 @@ fn run_task_coder_with_coder_with_feedback(
                 prompt: &prompt,
                 system_prompt: &system_prompt,
                 session,
+                launch_env: &launch_env,
+            })?;
+        } else {
+            let previous_session = item
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| {
+                    let run = resumable_writer_run(attempt, CoderKind::Pi)?;
+                    attempt.tasks.iter().find(|task| task.id == run.task_id)
+                })
+                .and_then(|task| task.artifact_area.as_ref())
+                .map(|area| project_root.join(&area.path).join("pi-session.jsonl"));
+            crate::native_agent::pi_runner::run(crate::native_agent::pi_runner::PiNativeTask {
+                identity,
+                worker_profile: profile,
+                workspace: workspace_path,
+                model: &effective_model,
+                thinking: effort.context("native Pi Task has no resolved thinking level")?,
+                prompt: &prompt,
+                system_prompt: &system_prompt,
+                session,
+                previous_session: previous_session.as_deref(),
                 launch_env: &launch_env,
             })?;
         }
@@ -10379,7 +10418,7 @@ fn current_branch(project_root: &Path) -> Result<String> {
 mod tests {
 
     #[test]
-    fn native_attempt_routes_codex_and_claude_writers() {
+    fn native_attempt_routes_codex_claude_and_pi_writers() {
         use super::*;
         let item = WorkItem {
             attempts: vec![crate::work_model::Attempt {
@@ -10406,6 +10445,12 @@ mod tests {
         assert_eq!(
             plan_coder_kind(&claude_item, "attempt-1", TaskKind::Write).unwrap(),
             CoderKind::Claude
+        );
+        let mut pi_item = item.clone();
+        pi_item.attempts[0].coder_mapping.write.coder = CoderKind::Pi;
+        assert_eq!(
+            plan_coder_kind(&pi_item, "attempt-1", TaskKind::Write).unwrap(),
+            CoderKind::Pi
         );
         for task_kind in [TaskKind::Review, TaskKind::Rebase, TaskKind::Learn] {
             assert!(

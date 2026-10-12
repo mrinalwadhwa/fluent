@@ -2,6 +2,8 @@
 
 pub mod claude;
 pub mod codex;
+pub mod pi;
+pub mod pi_runner;
 
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
