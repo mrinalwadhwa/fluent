@@ -331,6 +331,105 @@ fn attempt_retains_native_mode_across_resume() {
     );
 }
 
+#[test]
+fn native_task_preserves_private_provider_boundary() {
+    use fluent::coder::{CoderSession, CodexCode};
+    use std::ffi::OsStr;
+
+    let project = tempfile::tempdir().unwrap();
+    let private_home = tempfile::tempdir().unwrap();
+    let coder = CodexCode {
+        sandbox_profile: Some("(version 1) (allow default)".into()),
+        trusted_sandbox: false,
+        model_override: Some("gpt-assigned".into()),
+        effort: Some("high".into()),
+        executable: "/private/task/codex".into(),
+    };
+    let command = coder
+        .native_task_command(
+            project.path(),
+            private_home.path(),
+            CoderSession::Ephemeral,
+            "assigned Task prompt",
+        )
+        .unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(command.get_program(), OsStr::new("sandbox-exec"));
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["-f", "(version 1) (allow default)"])
+    );
+    assert!(args.contains(&"/private/task/codex".to_string()));
+    assert!(args.windows(2).any(|args| args == ["--disable", "hooks"]));
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--model", "gpt-assigned"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["-c", "model_reasoning_effort=high"])
+    );
+    assert_eq!(args.last().unwrap(), "assigned Task prompt");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg == "exec" || arg == "--ignore-user-config")
+    );
+    assert!(
+        command
+            .get_envs()
+            .any(|(name, value)| name == OsStr::new("CODEX_HOME")
+                && value == Some(private_home.path().as_os_str()))
+    );
+
+    let resumed = coder
+        .native_task_command(
+            project.path(),
+            private_home.path(),
+            CoderSession::Resume("assigned-session"),
+            "continue Task",
+        )
+        .unwrap();
+    let resumed_args: Vec<_> = resumed
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        resumed_args
+            .windows(2)
+            .any(|args| args == ["resume", "assigned-session"])
+    );
+    assert!(!resumed_args.contains(&"--last".to_string()));
+
+    assert!(
+        coder
+            .native_task_command(
+                project.path(),
+                &project.path().join("absent-home"),
+                CoderSession::FreshPersistent,
+                "assigned Task prompt",
+            )
+            .is_err()
+    );
+    let unspecified_model = CodexCode {
+        model_override: None,
+        ..coder
+    };
+    assert!(
+        unspecified_model
+            .native_task_command(
+                project.path(),
+                private_home.path(),
+                CoderSession::FreshPersistent,
+                "assigned Task prompt",
+            )
+            .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn native_terminal_controls_assigned_invocation() {

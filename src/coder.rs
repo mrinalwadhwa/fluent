@@ -1067,6 +1067,35 @@ where
 }
 
 impl CodexCode {
+    /// Build the interactive Codex command for an assigned native Task. The
+    /// caller keeps the private worker home and sandbox profile alive through
+    /// the invocation; non-Writer homes must be discarded after settlement.
+    pub fn native_task_command(
+        &self,
+        working_dir: &Path,
+        private_home: &Path,
+        session: CoderSession<'_>,
+        prompt: &str,
+    ) -> Result<Command> {
+        if !private_home.is_absolute() || !private_home.is_dir() {
+            bail!("native Codex Task requires an existing private home");
+        }
+        if self.model_override.as_deref().is_none_or(str::is_empty) {
+            bail!("native Codex Task requires its resolved model");
+        }
+        let mut command = self.build_command(working_dir, false);
+        command.env("CODEX_HOME", private_home);
+        command.args(["--disable", "hooks"]);
+        if let CoderSession::Resume(session_id) = session {
+            if session_id.is_empty() {
+                bail!("native Codex Task cannot resume without a session identity");
+            }
+            command.args(["resume", session_id]);
+        }
+        command.arg(prompt);
+        Ok(command)
+    }
+
     fn effective_model(&self) -> Option<String> {
         self.model_override.clone().or_else(codex_model)
     }
