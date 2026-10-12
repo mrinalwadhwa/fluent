@@ -191,6 +191,7 @@ pub fn receive_event(
             "format":"fluent-native-agent-event", "schema_version":1,
             "provider":"pi", "execution_generation":envelope["generation"],
             "assigned_conversation_id":gate.session_id(), "conversation_id":envelope["session_id"],
+            "model":envelope["model"],
             "turn_id":envelope["event"]["entry_id"], "input_sequence":gate.last_sequence(),
             "event":envelope["event"],
         }),

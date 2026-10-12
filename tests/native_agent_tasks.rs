@@ -291,6 +291,7 @@ entries = [
   { type: 'message', id: 'entry-2', message: { role: 'user' } },
 ];
 await callbacks.get('agent_before_settle')({ type: 'agent_before_settle', outcome: 'completed' }, ctx);
+await callbacks.get('session_compact')({ type: 'session_compact' }, ctx);
 await callbacks.get('agent_settled')({ type: 'agent_settled', aborted: false }, ctx);
 assert.deepEqual(messages.slice(-3).map(item => item.event.type), ['input_entry', 'input_entry', 'agent_settled']);
 assert.deepEqual(messages.slice(-3, -1).map(item => item.input_sequence), [1, 2]);
@@ -299,6 +300,11 @@ assert.equal(callbacks.get('session_before_fork')().cancel, true);
 assert.equal(callbacks.get('session_before_tree')().cancel, true);
 assert.equal(callbacks.get('user_bash')().result.exitCode, 1);
 await assert.rejects(callbacks.get('session_start')({ type: 'session_start', reason: 'reload' }, ctx));
+const failing = new Map();
+createFluentPiExtension(async () => { throw new Error('receiver failed'); })
+  ({ on: (kind, callback) => failing.set(kind, callback) });
+await assert.rejects(failing.get('session_start')({ type: 'session_start', reason: 'startup' }, ctx));
+await assert.rejects(failing.get('input')({ type: 'input', text: 'late' }, ctx));
 "#;
     let output = std::process::Command::new("node")
         .args(["--input-type=module", "-e", script])
@@ -330,6 +336,8 @@ fn pi_receiver_acknowledges_durable_input_and_settlement() {
         json!({"type":"input","text":"second","streamingBehavior":"followUp"}),
         json!({"type":"input_entry","entry_id":"entry-1"}),
         json!({"type":"input_entry","entry_id":"entry-2"}),
+        json!({"type":"session_compact"}),
+        json!({"type":"session_compact_failed"}),
         json!({"type":"agent_before_settle","outcome":"completed"}),
         json!({"type":"agent_settled","aborted":false}),
     ] {
@@ -365,9 +373,27 @@ fn pi_receiver_acknowledges_durable_input_and_settlement() {
         }
     ));
     let saved = std::fs::read_to_string(evidence.path()).unwrap();
-    assert_eq!(saved.lines().count(), 7);
+    assert_eq!(saved.lines().count(), 9);
     assert!(saved.contains("entry-2"));
     assert!(gate.observe(&json!({"generation":"generation-old","session_id":"assigned-session","session_file":"/private/task/session.jsonl","event":{"type":"agent_settled","aborted":false}})).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_receiver_failure_does_not_acknowledge_input() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut read_only = std::fs::File::open(evidence.path()).unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    let (mut extension, receiver) = UnixStream::pair().unwrap();
+    extension.write_all(b"{\"generation\":\"generation-1\",\"session_id\":\"assigned\",\"session_file\":\"/private/task/session.jsonl\",\"event\":{\"type\":\"session_start\",\"reason\":\"startup\"}}\n").unwrap();
+    assert!(receive_event(receiver, &mut gate, &mut read_only).is_err());
+    let mut reply = String::new();
+    assert_eq!(BufReader::new(extension).read_line(&mut reply).unwrap(), 0);
+    assert!(reply.is_empty());
 }
 
 #[test]
@@ -1426,6 +1452,56 @@ fn native_evidence_reaches_existing_consumers() {
     assert!(
         matches!(fluent::transcript::parse_line(&stop).as_slice(), [Event::Text { text }] if text == "Claude answer")
     );
+
+    let pi = |event| {
+        json!({
+            "format":"fluent-native-agent-event","schema_version":1,"provider":"pi",
+            "execution_generation":"generation-3","assigned_conversation_id":"assigned-pi",
+            "conversation_id":"assigned-pi","model":"local-model",
+            "turn_id":null,"input_sequence":1,"event":event,
+        })
+        .to_string()
+    };
+    let pi_start = pi(json!({"type":"session_start","reason":"startup"}));
+    assert_eq!(
+        fluent::transcript::conversation_id_from_line(&pi_start).as_deref(),
+        Some("assigned-pi")
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&pi_start).as_slice(), [Event::SessionInit { session_id, model }] if session_id == "assigned-pi" && model == "local-model")
+    );
+    let pi_tool = pi(
+        json!({"type":"tool_execution_start","toolCallId":"tool-2","toolName":"bash","args":{"command":"git status"}}),
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&pi_tool).as_slice(), [Event::ToolUse { id, name, .. }] if id == "tool-2" && name == "bash")
+    );
+    let pi_message = pi(
+        json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Pi answer"}]}}),
+    );
+    assert!(
+        matches!(fluent::transcript::parse_line(&pi_message).as_slice(), [Event::Text { text }] if text == "Pi answer")
+    );
+    let pi_usage = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(pi_usage.path(), format!("{}\n", pi(json!({"type":"turn_end","message":{"model":"local-model","timestamp":1781715768038_u64,"usage":{"input":42,"output":7,"cacheRead":3}}})))).unwrap();
+    let rows = fluent::usage::extract_pi_usage(pi_usage.path(), "work-1", "attempt-1", "write-1");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].input_tokens, 42);
+    assert_eq!(rows[0].output_tokens, 7);
+
+    let claude_session = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(claude_session.path(), concat!(
+        "{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"model\":\"claude-assigned\",\"usage\":{\"input_tokens\":12,\"output_tokens\":2,\"cache_read_input_tokens\":1}}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"id\":\"msg-1\",\"model\":\"claude-assigned\",\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"cache_read_input_tokens\":1}}}\n"
+    )).unwrap();
+    let claude_rows = fluent::usage::extract_native_claude_session_usage(
+        claude_session.path(),
+        "work-1",
+        "attempt-1",
+        "write-1",
+    );
+    assert_eq!(claude_rows.len(), 1);
+    assert_eq!(claude_rows[0].output_tokens, 8);
 }
 
 #[test]
@@ -1497,4 +1573,393 @@ fn continuation_reuses_conversation_not_live_terminal_identity() {
             input_sequence: 1
         }
     );
+}
+
+/// Run only from the separately authorized host check. The fixture stays in
+/// its output directory so the provider transcript and candidate can be
+/// inspected together after the test exits.
+#[test]
+#[ignore]
+fn host_native_agent_acceptance() {
+    use std::fs::{self, File};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    assert_eq!(
+        std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
+        "1"
+    );
+    let output_root =
+        std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap());
+    fs::create_dir_all(&output_root).unwrap();
+    let binary = env!("CARGO_BIN_EXE_fluent");
+    const ATTACH: &str = r#"
+set timeout 20
+if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
+    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+} else {
+    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION)
+}
+after 300
+if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
+    send -- "Please retain result.txt and continue.\r"
+    after 300
+    send -- "The final file must have exactly the requested line.\r"
+    after 300
+}
+send -- "\002d"
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+    for (provider, model_var, effort_var) in [
+        (
+            "codex",
+            "FLUENT_NATIVE_CODEX_MODEL",
+            "FLUENT_NATIVE_CODEX_EFFORT",
+        ),
+        (
+            "claude",
+            "FLUENT_NATIVE_CLAUDE_MODEL",
+            "FLUENT_NATIVE_CLAUDE_EFFORT",
+        ),
+        ("pi", "FLUENT_NATIVE_PI_MODEL", "FLUENT_NATIVE_PI_EFFORT"),
+    ] {
+        let model = std::env::var(model_var).unwrap();
+        let effort = std::env::var(effort_var).unwrap();
+        let project = output_root.join(provider);
+        fs::create_dir(&project).unwrap();
+        let run = |program: &str, args: &[&str]| {
+            let output = Command::new(program)
+                .args(args)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{provider} fixture command {program} {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run("git", &["init", "-b", "main"]);
+        run("git", &["config", "user.name", "Native Fixture"]);
+        run(
+            "git",
+            &["config", "user.email", "native-fixture@example.invalid"],
+        );
+        run("git", &["config", "commit.gpgsign", "false"]);
+        fs::write(
+            project.join("README.md"),
+            "Native Task acceptance fixture.\n",
+        )
+        .unwrap();
+        run("git", &["add", "README.md"]);
+        run("git", &["commit", "-m", "Add fixture"]);
+        let work = format!("native-{provider}");
+        let instructions = format!(
+            "First run sleep 8 with the shell tool so an operator can attach and send two short inputs. Then create result.txt containing exactly native-{provider} followed by a newline. Commit the file. Keep the change small."
+        );
+        run(
+            binary,
+            &[
+                "work-item",
+                "create",
+                &work,
+                "--title",
+                "Native Task acceptance",
+                "--instructions",
+                &instructions,
+            ],
+        );
+        run(
+            binary,
+            &[
+                "attempt",
+                "create",
+                &work,
+                "attempt-1",
+                "--terminal-mode",
+                "native",
+                "--write-coder",
+                provider,
+                "--write-model",
+                &model,
+                "--write-effort",
+                &effort,
+                "--review-coder",
+                "codex",
+                "--review-model",
+                &std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap(),
+                "--review-effort",
+                &std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap(),
+            ],
+        );
+        let log = File::create(project.join("task.stdout.log")).unwrap();
+        let error_log = File::create(project.join("task.stderr.log")).unwrap();
+        let mut child = Command::new(binary)
+            .args(["task", "run", &work, "attempt-1", "attempt-1-write-1"])
+            .current_dir(&project)
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(error_log))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let artifact = project.join(format!(
+            ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1"
+        ));
+        let session = loop {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{provider} native Task ended before attachment; see {}",
+                project.display()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "{provider} native Task did not expose its terminal"
+            );
+            let output = Command::new(binary)
+                .args(["terminal", "list", "--source", project.to_str().unwrap()])
+                .output()
+                .unwrap();
+            if output.status.success()
+                && let Ok(list) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                && let Some(descriptor) = list.as_array().and_then(|items| {
+                    items.iter().find(|item| {
+                        item["task_id"] == "attempt-1-write-1" && item["can_observe"] == true
+                    })
+                })
+                && let Some(session) = descriptor["session_id"].as_str()
+            {
+                let transcript =
+                    fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+                if transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|record| {
+                        record["input_sequence"]
+                            .as_u64()
+                            .is_some_and(|sequence| sequence >= 1)
+                    })
+                {
+                    break session.to_string();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        for (label, control) in [
+            ("observer-before", false),
+            ("control", true),
+            ("observer-after", false),
+        ] {
+            let log = File::create(project.join(format!("{label}.log"))).unwrap();
+            let status = Command::new("expect")
+                .args(["-c", ATTACH])
+                .env("FLUENT_NATIVE_BINARY", binary)
+                .env("FLUENT_NATIVE_SOURCE", &project)
+                .env("FLUENT_NATIVE_SESSION", &session)
+                .env("FLUENT_NATIVE_CONTROL", if control { "1" } else { "0" })
+                .stdout(Stdio::from(log))
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "{provider} {label} attachment failed; see {}",
+                project.display()
+            );
+        }
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!(
+                    "{provider} native Task exceeded the host deadline; see {}",
+                    project.display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            status.success(),
+            "{provider} native Task failed; see {}",
+            project.display()
+        );
+        let transcript = fs::read_to_string(artifact.join("transcript.jsonl")).unwrap();
+        let records: Vec<serde_json::Value> = transcript
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            records
+                .iter()
+                .any(|record| record["format"] == "fluent-native-agent-event"
+                    && record["provider"] == provider
+                    && record["schema_version"] == 1),
+            "{provider} has no canonical native evidence"
+        );
+        assert!(
+            records
+                .iter()
+                .filter_map(|record| record["input_sequence"].as_u64())
+                .max()
+                .is_some_and(|sequence| sequence >= 3),
+            "{provider} did not admit both attached inputs"
+        );
+        let shown = Command::new(binary)
+            .args(["work-item", "show", &work])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(shown.status.success());
+        let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+        let task = &item["attempts"][0]["tasks"][0];
+        assert_eq!(task["status"], "complete");
+        let workspace = project.join(task["output"]["workspace_path"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(workspace.join("result.txt")).unwrap(),
+            format!("native-{provider}\n")
+        );
+        assert!(task["output"]["commit"].as_str().is_some());
+        if provider == "codex" {
+            run(binary, &["review", &work, "attempt-1"]);
+            let review_log = File::create(project.join("review.stdout.log")).unwrap();
+            let review_error = File::create(project.join("review.stderr.log")).unwrap();
+            let mut review = Command::new(binary)
+                .args(["task", "run", &work, "attempt-1", "attempt-1-review-tests"])
+                .current_dir(&project)
+                .stdout(Stdio::from(review_log))
+                .stderr(Stdio::from(review_error))
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(600);
+            loop {
+                if let Some(status) = review.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "ephemeral native Codex Reviewer failed; see {}",
+                        project.display()
+                    );
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    review.kill().unwrap();
+                    let _ = review.wait();
+                    panic!("ephemeral native Codex Reviewer exceeded the host deadline");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let review_artifact = project.join(format!(
+                ".fluent/work/artifacts/{work}/attempt-1/attempt-1-review-tests"
+            ));
+            assert!(review_artifact.join("review.md").is_file());
+            let transcript = fs::read_to_string(review_artifact.join("transcript.jsonl")).unwrap();
+            assert!(
+                transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .any(|record| record["format"] == "fluent-native-agent-event"
+                        && record["provider"] == "codex")
+            );
+        }
+
+        let cancel_work = format!("native-{provider}-cancel");
+        run(
+            binary,
+            &[
+                "work-item",
+                "create",
+                &cancel_work,
+                "--title",
+                "Native cancellation",
+                "--instructions",
+                "Run sleep 60 with the shell tool before changing any files. The host will cancel this Attempt while the tool runs.",
+            ],
+        );
+        run(
+            binary,
+            &[
+                "attempt",
+                "create",
+                &cancel_work,
+                "attempt-1",
+                "--terminal-mode",
+                "native",
+                "--write-coder",
+                provider,
+                "--write-model",
+                &model,
+                "--write-effort",
+                &effort,
+            ],
+        );
+        let cancel_log = File::create(project.join("cancel.stdout.log")).unwrap();
+        let cancel_error = File::create(project.join("cancel.stderr.log")).unwrap();
+        let mut cancelled = Command::new(binary)
+            .args([
+                "task",
+                "run",
+                &cancel_work,
+                "attempt-1",
+                "attempt-1-write-1",
+            ])
+            .current_dir(&project)
+            .stdout(Stdio::from(cancel_log))
+            .stderr(Stdio::from(cancel_error))
+            .spawn()
+            .unwrap();
+        let cancel_artifact = project.join(format!(
+            ".fluent/work/artifacts/{cancel_work}/attempt-1/attempt-1-write-1/transcript.jsonl"
+        ));
+        let cancel_deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            assert!(
+                cancelled.try_wait().unwrap().is_none(),
+                "{provider} cancellation fixture ended before cancellation"
+            );
+            assert!(
+                Instant::now() < cancel_deadline,
+                "{provider} cancellation fixture did not start"
+            );
+            let transcript = fs::read_to_string(&cancel_artifact).unwrap_or_default();
+            if transcript
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|record| {
+                    record["input_sequence"]
+                        .as_u64()
+                        .is_some_and(|sequence| sequence >= 1)
+                })
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        run(binary, &["attempt", "cancel", &cancel_work, "attempt-1"]);
+        let cancel_deadline = Instant::now() + Duration::from_secs(20);
+        let cancelled_status = loop {
+            if let Some(status) = cancelled.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= cancel_deadline {
+                cancelled.kill().unwrap();
+                let _ = cancelled.wait();
+                panic!("{provider} cancellation did not stop its Task runner");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            !cancelled_status.success(),
+            "{provider} cancelled Task reported success"
+        );
+        let shown = Command::new(binary)
+            .args(["work-item", "show", &cancel_work])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(shown.status.success());
+        let item: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+        assert_ne!(item["attempts"][0]["tasks"][0]["status"], "complete");
+    }
 }

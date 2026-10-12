@@ -194,6 +194,60 @@ pub fn extract_claude_usage(
     rows
 }
 
+/// Read token usage from the session file written by native Claude.
+/// Claude can write several updates for one assistant message, so keep its
+/// latest usage before recording that message once.
+pub fn extract_native_claude_session_usage(
+    session_path: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Vec<UsageRow> {
+    let Ok(content) = fs::read_to_string(session_path) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, UsageRow)> = Vec::new();
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["type"] != "assistant" {
+            continue;
+        }
+        let message = &value["message"];
+        let usage = &message["usage"];
+        let (Some(id), Some(input_tokens), Some(output_tokens)) = (
+            message["id"].as_str(),
+            usage["input_tokens"].as_u64(),
+            usage["output_tokens"].as_u64(),
+        ) else {
+            continue;
+        };
+        let row = UsageRow {
+            ts: value["timestamp"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            coder: "claude".to_string(),
+            work_item_id: work_item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            task_id: task_id.to_string(),
+            model: message["model"].as_str().unwrap_or("unknown").to_string(),
+            input_tokens,
+            output_tokens,
+            cached_input_tokens: usage["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            reasoning_output_tokens: None,
+            duration_ms: None,
+        };
+        if let Some((_, previous)) = rows.iter_mut().find(|(existing, _)| existing == id) {
+            *previous = row;
+        } else {
+            rows.push((id.to_string(), row));
+        }
+    }
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
 pub fn extract_codex_usage(
     transcript_path: &Path,
     work_item_id: &str,
@@ -343,9 +397,17 @@ pub fn extract_pi_usage(
     let mut prev_turn_end_ms: Option<u64> = None;
 
     for line in content.lines() {
-        let val: serde_json::Value = match serde_json::from_str(line) {
+        let record: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
+        };
+        let val = if record["format"] == "fluent-native-agent-event"
+            && record["schema_version"] == 1
+            && record["provider"] == "pi"
+        {
+            &record["event"]
+        } else {
+            &record
         };
 
         // Capture session start timestamp (ISO-8601) for first-turn duration.
@@ -413,7 +475,19 @@ pub fn log_usage_from_transcript(
     task_id: &str,
 ) {
     let mut rows = match coder {
-        "claude" => extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id),
+        "claude" => {
+            let native_session = transcript_path.with_file_name("claude-task-usage.jsonl");
+            if native_session.is_file() {
+                extract_native_claude_session_usage(
+                    &native_session,
+                    work_item_id,
+                    attempt_id,
+                    task_id,
+                )
+            } else {
+                extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id)
+            }
+        }
         "codex" => extract_codex_usage(transcript_path, work_item_id, attempt_id, task_id),
         "pi" => extract_pi_usage(transcript_path, work_item_id, attempt_id, task_id),
         _ => return,

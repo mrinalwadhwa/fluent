@@ -56,7 +56,8 @@ export function createFluentPiExtension(send) {
         throw new Error("Pi switched Fluent's assigned Task conversation");
       }
       try {
-        return await send({ generation, session_id: sessionId, session_file: sessionFile, event, ...extra });
+        return await send({ generation, session_id: sessionId, session_file: sessionFile,
+          model: ctx.model?.id, event, ...extra });
       } catch (error) {
         broken = true;
         throw error;

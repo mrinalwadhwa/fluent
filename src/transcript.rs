@@ -132,6 +132,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         return match val["provider"].as_str() {
             Some("codex") => parse_native_codex_event(&val["event"]),
             Some("claude") => parse_native_claude_event(&val["event"]),
+            Some("pi") => parse_native_pi_event(&val),
             _ => vec![],
         };
     }
@@ -230,7 +231,7 @@ pub fn conversation_id_from_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     if value["format"] == "fluent-native-agent-event" {
         if value["schema_version"] != 1
-            || !matches!(value["provider"].as_str(), Some("codex" | "claude"))
+            || !matches!(value["provider"].as_str(), Some("codex" | "claude" | "pi"))
         {
             return None;
         }
@@ -243,6 +244,60 @@ pub fn conversation_id_from_line(line: &str) -> Option<String> {
         Event::SessionInit { session_id, .. } if !session_id.trim().is_empty() => Some(session_id),
         _ => None,
     })
+}
+
+fn parse_native_pi_event(record: &serde_json::Value) -> Vec<Event> {
+    let event = &record["event"];
+    match event["type"].as_str() {
+        Some("session_start") => vec![Event::SessionInit {
+            session_id: record["assigned_conversation_id"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            model: record["model"].as_str().unwrap_or("unknown").into(),
+        }],
+        Some("tool_execution_start") => {
+            let name = event["toolName"].as_str().unwrap_or("?");
+            vec![Event::ToolUse {
+                id: event["toolCallId"].as_str().unwrap_or_default().into(),
+                name: name.into(),
+                summary: summarize_tool_input(name, &event["args"]),
+            }]
+        }
+        Some("tool_execution_end") => vec![Event::ToolResult {
+            tool_use_id: event["toolCallId"].as_str().unwrap_or_default().into(),
+            content: event["result"]["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default(),
+        }],
+        Some("message_end") if event["message"]["role"] == "assistant" => {
+            event["message"]["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block["type"].as_str() {
+                            Some("text") => block["text"]
+                                .as_str()
+                                .map(|text| Event::Text { text: text.into() }),
+                            Some("thinking") => block["thinking"]
+                                .as_str()
+                                .map(|text| Event::Thinking { text: text.into() }),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => vec![],
+    }
 }
 
 fn parse_native_claude_event(event: &serde_json::Value) -> Vec<Event> {

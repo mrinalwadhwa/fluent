@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -376,6 +376,19 @@ pub fn receive_hook(
     Ok(completion)
 }
 
+fn copy_session_tail(source: &Path, output: &Path, start: u64) -> Result<()> {
+    let mut source = File::open(source)?;
+    ensure!(
+        start <= source.metadata()?.len(),
+        "native Claude session shrank during Task execution"
+    );
+    source.seek(SeekFrom::Start(start))?;
+    let mut current_usage = File::create(output)?;
+    std::io::copy(&mut source, &mut current_usage)?;
+    current_usage.sync_all()?;
+    Ok(())
+}
+
 pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
     ensure!(
         task.private_home.is_dir(),
@@ -437,6 +450,7 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
                 _ => None,
             },
         );
+        let mut session_start_bytes = None;
         let transcript = artifact.join("transcript.jsonl");
         let mut evidence = OpenOptions::new()
             .append(true)
@@ -448,6 +462,19 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
             match listener.accept() {
                 Ok((stream, _)) => {
                     let observed = receive_hook(stream, &mut gate, &generation, &mut evidence);
+                    if session_start_bytes.is_none()
+                        && let Some(path) = gate.transcript_path()
+                    {
+                        ensure!(
+                            path.starts_with(task.private_home),
+                            "native Claude transcript escaped its private home"
+                        );
+                        session_start_bytes = Some(match fs::metadata(path) {
+                            Ok(meta) => meta.len(),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                            Err(error) => return Err(error.into()),
+                        });
+                    }
                     match observed {
                         Ok(Completion::Accepted { .. }) => {
                             break Ok(());
@@ -494,10 +521,33 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
         );
         fs::copy(native_transcript, artifact.join("claude-session.jsonl"))?;
         File::open(artifact.join("claude-session.jsonl"))?.sync_all()?;
+        copy_session_tail(
+            &artifact.join("claude-session.jsonl"),
+            &artifact.join("claude-task-usage.jsonl"),
+            session_start_bytes.unwrap_or(0),
+        )?;
         Ok(())
     })();
     if outcome.is_err() {
         let _ = terminal.stop();
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_session_tail;
+
+    #[test]
+    fn claude_usage_keeps_only_current_invocation_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("session.jsonl");
+        let output = dir.path().join("task-usage.jsonl");
+        let older = b"{\"type\":\"assistant\",\"message\":{\"id\":\"old\"}}\n";
+        let current = b"{\"type\":\"assistant\",\"message\":{\"id\":\"new\"}}\n";
+        std::fs::write(&source, [older.as_slice(), current.as_slice()].concat()).unwrap();
+        copy_session_tail(&source, &output, older.len() as u64).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), current);
+        assert!(copy_session_tail(&source, &output, 10_000).is_err());
+    }
 }
