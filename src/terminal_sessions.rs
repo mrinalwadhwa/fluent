@@ -1350,17 +1350,6 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
         .parent()
         .and_then(Path::file_name)
         .context("terminal Task path is absent")?;
-    let expected = owner
-        .project_root
-        .join(".fluent/work/artifacts")
-        .join(&owner.work_item_id)
-        .join(&owner.attempt_id)
-        .join(task)
-        .join("execution.json");
-    ensure!(
-        path == expected,
-        "terminal execution owner changed before retirement"
-    );
     let registry = owner
         .project_root
         .join(".fluent/work/terminal-sessions")
@@ -1376,6 +1365,17 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     }
+    let expected = owner
+        .project_root
+        .join(".fluent/work/artifacts")
+        .join(&owner.work_item_id)
+        .join(&owner.attempt_id)
+        .join(task)
+        .join("execution.json");
+    ensure!(
+        path == expected,
+        "terminal execution owner changed before retirement"
+    );
     let bytes = match std::fs::read(&receipt) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1688,6 +1688,31 @@ mod setup_cleanup_tests {
     }
 
     #[test]
+    fn retirement_ignores_unmanaged_execution_without_a_receipt() {
+        let source = tempfile::tempdir().unwrap();
+        let path = source
+            .path()
+            .join(".fluent/work/artifacts/work-1/attempt-1/learner/runs/run-1/execution.json");
+        let record = ExecutionRecord {
+            schema_version: 2,
+            state: ExecutionState::Canceled,
+            owner_pid: 0,
+            leader_pid: 0,
+            process_group_id: 0,
+            started_at: String::new(),
+            heartbeat_at: String::new(),
+            settled_at: None,
+            attempt_owner: Some(execution::AttemptExecutionOwner {
+                project_root: source.path().into(),
+                work_item_id: "work-1".into(),
+                attempt_id: "attempt-1".into(),
+            }),
+            launch_generation: None,
+        };
+        retire_for_execution(&path, &record).unwrap();
+    }
+
+    #[test]
     fn retirement_removes_only_the_settled_generation_resource() {
         let source = tempfile::tempdir().unwrap();
         let socket_dir = tempfile::Builder::new()
@@ -1730,6 +1755,9 @@ mod setup_cleanup_tests {
             }),
             launch_generation: Some("old".into()),
         };
+        let substituted_path = source.path().join("other/task-1/execution.json");
+        assert!(retire_for_execution(&substituted_path, &record).is_err());
+        assert!(registry.join("resource.json").exists());
         let stored = StoredTerminal {
             descriptor: TerminalDescriptor {
                 schema_version: 1,
