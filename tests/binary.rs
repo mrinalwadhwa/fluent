@@ -26672,6 +26672,93 @@ fn tester_permissions_reject_unapproved_or_stale_launch() {
         ])
         .assert()
         .success();
+    let changed_policy = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env(
+            "FLUENT_TEST_TESTER_PERMISSION_POLICY_REVISION",
+            "fixture-v2",
+        )
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(changed_policy.status.success());
+    let changed_policy: serde_json::Value = serde_json::from_slice(&changed_policy.stdout).unwrap();
+    assert_ne!(changed_policy["policy_digest"], request["policy_digest"]);
+    assert_ne!(changed_policy["request_digest"], request["request_digest"]);
+    assert_eq!(changed_policy["approval_state"], "absent");
+    let policy_launch = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env(
+            "FLUENT_TEST_TESTER_PERMISSION_POLICY_REVISION",
+            "fixture-v2",
+        )
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!policy_launch.status.success());
+    assert!(String::from_utf8_lossy(&policy_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let original_command = format!("touch {}", sentinel.display());
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: '{original_command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n  - command: 'true'\n    test_harness: shell-harness\n"
+        ),
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["add", ".fluent/tester.yaml"],
+        "stage adjacent command",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add adjacent Tester command"],
+        "commit adjacent command",
+    )
+    .unwrap();
+    let config_candidate = git::run_stdout(
+        &project,
+        &["rev-parse", "HEAD"],
+        "read changed configuration",
+    )
+    .unwrap();
+    let config_show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &config_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(config_show.status.success());
+    let config_request: serde_json::Value = serde_json::from_slice(&config_show.stdout).unwrap();
+    assert_eq!(config_request["command"], request["command"]);
+    assert_ne!(config_request["config_digest"], request["config_digest"]);
+    assert_eq!(config_request["approval_state"], "absent");
+    let config_launch = check();
+    assert!(!config_launch.status.success());
+    assert!(String::from_utf8_lossy(&config_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    write_request(&original_command);
     let other_checkout = tmp.path().join("other-checkout");
     git::run(
         &project,

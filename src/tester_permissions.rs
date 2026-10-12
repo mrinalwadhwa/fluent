@@ -53,14 +53,23 @@ fn digest(bytes: impl AsRef<[u8]>) -> String {
 /// Identify the semantic Seatbelt policy independently of an ephemeral profile
 /// path or a particular approval generation.
 pub(crate) fn permission_policy_digest() -> String {
-    digest(
-        [
-            b"tester-process-table-policy-v1\n".as_slice(),
-            PROCESS_TABLE_RULE.as_bytes(),
-            include_bytes!("../sandboxes/common.sb").as_slice(),
-        ]
-        .concat(),
-    )
+    let policy = [
+        b"tester-process-table-policy-v1\n".as_slice(),
+        PROCESS_TABLE_RULE.as_bytes(),
+        include_bytes!("../sandboxes/common.sb").as_slice(),
+    ]
+    .concat();
+    #[cfg(feature = "test-support")]
+    let policy = {
+        let mut policy = policy;
+        if let Some(revision) = std::env::var_os("FLUENT_TEST_TESTER_PERMISSION_POLICY_REVISION") {
+            use std::os::unix::ffi::OsStrExt;
+            policy.extend_from_slice(b"\ntest-policy-revision:");
+            policy.extend_from_slice(revision.as_bytes());
+        }
+        policy
+    };
+    digest(policy)
 }
 
 fn committed_request_input(checkout: &Path, candidate: &str, relative: &str) -> Result<Vec<u8>> {
