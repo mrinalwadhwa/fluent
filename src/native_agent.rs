@@ -4,6 +4,17 @@ use anyhow::{Result, bail, ensure};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::net::Shutdown;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::sync::mpsc::{TrySendError, sync_channel};
+#[cfg(unix)]
+use std::time::Duration;
+
 #[derive(Default)]
 struct AdmissionState {
     last_sequence: u64,
@@ -178,4 +189,121 @@ impl CodexRelayGate {
             input_sequence: self.input_sequence,
         })
     }
+}
+
+/// Relay one Codex TUI connection to its private app-server connection. Both
+/// directions share the invocation gate; original provider messages reach the
+/// evidence sink before the TUI receives them. The caller owns process lifetime
+/// and Task settlement.
+#[cfg(unix)]
+pub fn relay_codex_streams<W, F>(
+    client: UnixStream,
+    server: UnixStream,
+    generation: &str,
+    thread_id: &str,
+    mut evidence: W,
+    mut on_completion: F,
+) -> Result<()>
+where
+    W: Write + Send,
+    F: FnMut(Completion) -> Result<()> + Send,
+{
+    let gate = Arc::new(Mutex::new(CodexRelayGate::new(generation, thread_id)));
+    let client_reader = client.try_clone()?;
+    let server_reader = server.try_clone()?;
+    let upstream_abort_client = client.try_clone()?;
+    let upstream_abort_server = server.try_clone()?;
+    let downstream_abort_client = client.try_clone()?;
+    let downstream_abort_server = server.try_clone()?;
+    let display_client = client.try_clone()?;
+    display_client.set_write_timeout(Some(Duration::from_millis(250)))?;
+    let (display_tx, display_rx) = sync_channel::<String>(32);
+    std::thread::scope(|scope| {
+        let display = scope.spawn(move || {
+            let mut writer = display_client;
+            while let Ok(line) = display_rx.recv() {
+                if writer.write_all(line.as_bytes()).is_err() {
+                    break;
+                }
+            }
+        });
+        let request_gate = Arc::clone(&gate);
+        let upstream = scope.spawn(move || -> Result<()> {
+            let result = (|| {
+                let mut reader = BufReader::new(client_reader);
+                let mut writer = server;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line)? == 0 {
+                        let _ = writer.shutdown(Shutdown::Write);
+                        return Ok(());
+                    }
+                    let request: Value = serde_json::from_str(&line)?;
+                    request_gate
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                        .admit_request(&request)?;
+                    writer.write_all(line.as_bytes())?;
+                    writer.flush()?;
+                }
+            })();
+            if result.is_err() {
+                let _ = upstream_abort_client.shutdown(Shutdown::Both);
+                let _ = upstream_abort_server.shutdown(Shutdown::Both);
+            }
+            result
+        });
+        let downstream = scope.spawn(move || -> Result<()> {
+            let result = (|| {
+                let mut reader = BufReader::new(server_reader);
+                let mut display = Some(display_tx);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line)? == 0 {
+                        drop(display);
+                        let _ = downstream_abort_client.shutdown(Shutdown::Read);
+                        return Ok(());
+                    }
+                    let event: Value = serde_json::from_str(&line)?;
+                    let completion = gate
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                        .observe_event_for_generation(generation, &event)?;
+                    evidence.write_all(line.as_bytes())?;
+                    evidence.flush()?;
+                    if completion != Completion::Ignored {
+                        on_completion(completion)?;
+                    }
+                    if let Some(sender) = display.as_ref() {
+                        if matches!(
+                            sender.try_send(line.clone()),
+                            Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
+                        ) {
+                            // Detach a stalled display; canonical evidence and
+                            // completion still flow from the provider stream.
+                            display = None;
+                            let _ = downstream_abort_client.shutdown(Shutdown::Both);
+                        }
+                    }
+                }
+            })();
+            if result.is_err() {
+                let _ = downstream_abort_client.shutdown(Shutdown::Both);
+                let _ = downstream_abort_server.shutdown(Shutdown::Both);
+            }
+            result
+        });
+        let upstream = upstream
+            .join()
+            .map_err(|_| anyhow::anyhow!("native Codex request relay panicked"))?;
+        let downstream = downstream
+            .join()
+            .map_err(|_| anyhow::anyhow!("native Codex event relay panicked"))?;
+        display
+            .join()
+            .map_err(|_| anyhow::anyhow!("native Codex display relay panicked"))?;
+        upstream.and(downstream)
+    })
 }

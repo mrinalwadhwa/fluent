@@ -201,3 +201,224 @@ fn attempt_retains_native_mode_across_resume() {
         TerminalMode::Headless
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn native_terminal_controls_assigned_invocation() {
+    use fluent::native_agent::relay_codex_streams;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+
+    let (mut tui, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, mut provider) = UnixStream::pair().unwrap();
+    tui.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    provider
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_path = evidence.path().to_path_buf();
+    let (completed, received) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        relay_codex_streams(
+            relay_client,
+            relay_server,
+            "generation-1",
+            "assigned-thread",
+            evidence.reopen().unwrap(),
+            move |completion| completed.send(completion).map_err(anyhow::Error::new),
+        )
+    });
+
+    tui.write_all(
+        b"{\"id\":1,\"method\":\"thread/resume\",\"params\":{\"threadId\":\"assigned-thread\"}}\n",
+    )
+    .unwrap();
+    let mut provider_lines = BufReader::new(provider.try_clone().unwrap());
+    let mut line = String::new();
+    provider_lines.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["params"]["threadId"],
+        "assigned-thread"
+    );
+    tui.write_all(b"{\"id\":2,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n").unwrap();
+    line.clear();
+    provider_lines.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["method"],
+        "turn/start"
+    );
+
+    let started = "{\"method\":\"turn/started\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\"}}}\n";
+    let finished = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}\n";
+    provider.write_all(started.as_bytes()).unwrap();
+    provider.write_all(finished.as_bytes()).unwrap();
+    let mut tui_lines = BufReader::new(tui.try_clone().unwrap());
+    line.clear();
+    tui_lines.read_line(&mut line).unwrap();
+    assert_eq!(line, started);
+    line.clear();
+    tui_lines.read_line(&mut line).unwrap();
+    assert_eq!(line, finished);
+    assert_eq!(
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(evidence_path).unwrap(),
+        format!("{started}{finished}")
+    );
+
+    tui.write_all(b"{\"id\":3,\"method\":\"turn/start\",\"params\":{\"threadId\":\"other-thread\",\"input\":[]}}\n").unwrap();
+    line.clear();
+    assert_eq!(provider_lines.read_line(&mut line).unwrap(), 0);
+    let error = relay.join().unwrap().unwrap_err();
+    assert!(error.to_string().contains("another Task conversation"));
+    let _ = tui.shutdown(Shutdown::Both);
+    let _ = provider.shutdown(Shutdown::Both);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_relay_provider_exit_releases_attached_client() {
+    use fluent::native_agent::relay_codex_streams;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+
+    let (_client, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider) = UnixStream::pair().unwrap();
+    let (finished, result) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        let outcome = relay_codex_streams(
+            relay_client,
+            relay_server,
+            "generation-1",
+            "assigned-thread",
+            Vec::<u8>::new(),
+            |_| Ok(()),
+        );
+        let _ = finished.send(outcome);
+    });
+    drop(provider);
+    if result
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .is_err()
+    {
+        panic!("provider exit left the Codex relay waiting for client input");
+    }
+    relay.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn slow_display_cannot_block_evidence_or_supervision() {
+    use fluent::native_agent::relay_codex_streams;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (mut tui, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, mut provider) = UnixStream::pair().unwrap();
+    provider
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_path = evidence.path().to_path_buf();
+    let (completed, received) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        relay_codex_streams(
+            relay_client,
+            relay_server,
+            "generation-1",
+            "assigned-thread",
+            evidence.reopen().unwrap(),
+            move |completion| completed.send(completion).map_err(anyhow::Error::new),
+        )
+    });
+    tui.write_all(b"{\"id\":1,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n").unwrap();
+    let mut request = String::new();
+    BufReader::new(provider.try_clone().unwrap())
+        .read_line(&mut request)
+        .unwrap();
+    assert!(request.contains("turn/start"));
+    let started = "{\"method\":\"turn/started\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\"}}}\n";
+    provider.write_all(started.as_bytes()).unwrap();
+    let bulk = format!(
+        "{}\n",
+        json!({"method": "item/updated", "params": {"text": "x".repeat(32768)}})
+    );
+    for _ in 0..64 {
+        provider.write_all(bulk.as_bytes()).unwrap();
+    }
+    let finished = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}\n";
+    provider.write_all(finished.as_bytes()).unwrap();
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    let captured = std::fs::read_to_string(evidence_path).unwrap();
+    assert!(captured.starts_with(started));
+    assert!(captured.ends_with(finished));
+    assert_eq!(captured.matches("item/updated").count(), 64);
+    let _ = tui.shutdown(Shutdown::Both);
+    drop(provider);
+    relay.join().unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn native_capability_or_evidence_failure_blocks_false_success() {
+    use fluent::native_agent::relay_codex_streams;
+    use std::io::{self, BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+
+    struct FailedEvidence;
+    impl Write for FailedEvidence {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("evidence volume unavailable"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (mut tui, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, mut provider) = UnixStream::pair().unwrap();
+    let (completed, received) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        relay_codex_streams(
+            relay_client,
+            relay_server,
+            "generation-1",
+            "assigned-thread",
+            FailedEvidence,
+            move |completion| completed.send(completion).map_err(anyhow::Error::new),
+        )
+    });
+    tui.write_all(b"{\"id\":1,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n").unwrap();
+    let mut request = String::new();
+    BufReader::new(provider.try_clone().unwrap())
+        .read_line(&mut request)
+        .unwrap();
+    assert!(request.contains("turn/start"));
+    provider.write_all(b"{\"method\":\"turn/started\",\"params\":{\"threadId\":\"assigned-thread\",\"turn\":{\"id\":\"turn-1\"}}}\n").unwrap();
+    let error = relay.join().unwrap().unwrap_err();
+    assert!(error.to_string().contains("evidence volume unavailable"));
+    assert!(received.try_recv().is_err());
+}
