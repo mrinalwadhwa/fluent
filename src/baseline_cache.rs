@@ -744,6 +744,39 @@ mod tests {
         assert!(resolve_identity(root.path(), true, None).is_err());
     }
 
+    #[test]
+    fn permission_request_blocks_unsandboxed_baseline_routes_before_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        initialized_project(root.path());
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: echo ok\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(root.path()));
+        let attempt_artifact = root.path().join("attempt-baseline");
+        let landed_artifact = root.path().join("landed-baseline");
+
+        let capture_error =
+            capture(root.path(), root.path(), &attempt_artifact, true, &resolver).unwrap_err();
+        assert!(
+            capture_error
+                .to_string()
+                .contains("process-table-read requires the macOS sandbox")
+        );
+        assert!(!attempt_artifact.exists());
+
+        let landed_error =
+            capture_landed(root.path(), root.path(), &landed_artifact, true, &resolver)
+                .unwrap_err();
+        assert!(
+            landed_error
+                .to_string()
+                .contains("process-table-read requires the macOS sandbox")
+        );
+        assert!(!landed_artifact.exists());
+    }
+
     fn write_trustworthy_artifact(path: &Path, marker: &str) -> Result<TesterOutcome> {
         fs::create_dir_all(path.join("commands"))?;
         fs::write(path.join("commands/0-stdout.log"), marker)?;
