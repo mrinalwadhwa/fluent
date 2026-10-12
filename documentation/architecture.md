@@ -160,6 +160,12 @@ without inputs retain the legacy storage shape.
 
 `fluent attempt create <work-item-id> <attempt-id>` creates the first operational transition
 from intake: it appends a planned Attempt with one initial `write` Task.
+Attempt creation resolves `terminal.mode` from user and project configuration,
+then applies `--terminal-mode headless|native` when supplied. It stores the
+resolved mode on the Attempt so a retry or continuation cannot pick up a later
+configuration change. Missing legacy fields mean `headless`. Until a native
+provider adapter is available, agent Tasks on a native Attempt stop before
+launch and report the missing adapter.
 The Task declares role `author`, copies explicit Work Item instructions
 or derives instructions from Work Item planning context into optional
 `Task.instructions`, and declares one writable workspace reference at

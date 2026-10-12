@@ -450,6 +450,10 @@ pub enum AttemptCommands {
         /// Attempt ID (auto-assigned if omitted)
         attempt_id: Option<String>,
 
+        /// Agent terminal execution mode for this Attempt
+        #[arg(long, value_parser = ["headless", "native"])]
+        terminal_mode: Option<String>,
+
         /// Coding agent to launch: claude, codex, or pi
         #[arg(long)]
         coder: Option<String>,

@@ -31,8 +31,8 @@ pub const WORK_MODEL_WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// before this marker omit the field and are read as version 0. They remain
 /// readable, but the explicit `work-item upgrade` command rewrites them using
 /// this version after checking every record.
-pub const WORK_MODEL_RECORD_SCHEMA_VERSION: u32 = 12;
-const NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION: u32 = 13;
+pub const WORK_MODEL_RECORD_SCHEMA_VERSION: u32 = 14;
+const NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION: u32 = 15;
 pub const WORK_MODEL_UPGRADE_SCHEMA_VERSION: u32 = 1;
 pub const MIN_ADDITIONAL_WRITE_ROUNDS: usize = 1;
 pub const MAX_ADDITIONAL_WRITE_ROUNDS: usize = 3;
@@ -971,6 +971,15 @@ impl WorkItem {
         attempt_id: impl Into<String>,
         coder_mapping: CoderMapping,
     ) -> Result<(), WorkModelError> {
+        self.add_initial_attempt_with_settings(attempt_id, coder_mapping, TerminalMode::Headless)
+    }
+
+    pub fn add_initial_attempt_with_settings(
+        &mut self,
+        attempt_id: impl Into<String>,
+        coder_mapping: CoderMapping,
+        terminal_mode: TerminalMode,
+    ) -> Result<(), WorkModelError> {
         self.ensure_not_abandoned()?;
         self.ensure_execution_ready()?;
         let attempt_id = attempt_id.into();
@@ -1016,6 +1025,7 @@ impl WorkItem {
             kind: AttemptKind::Write,
             status: AttemptStatus::Planned,
             coder_mapping,
+            terminal_mode,
             tasks: vec![Task {
                 id: task_id,
                 kind: TaskKind::Write,
@@ -5799,6 +5809,20 @@ pub fn round_cap_resolution_digest(resolution: &str) -> String {
 }
 
 /// One execution history branch for a work item.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalMode {
+    #[default]
+    Headless,
+    Native,
+}
+
+impl TerminalMode {
+    pub fn is_headless(&self) -> bool {
+        *self == Self::Headless
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: String,
@@ -5808,6 +5832,9 @@ pub struct Attempt {
     pub status: AttemptStatus,
     #[serde(default)]
     pub coder_mapping: CoderMapping,
+    /// Keep the resolved execution route through retries and continuation.
+    #[serde(default, skip_serializing_if = "TerminalMode::is_headless")]
+    pub terminal_mode: TerminalMode,
     #[serde(default)]
     pub tasks: Vec<Task>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5898,6 +5925,7 @@ impl Default for Attempt {
             kind: AttemptKind::default(),
             status: AttemptStatus::Planned,
             coder_mapping: CoderMapping::default(),
+            terminal_mode: TerminalMode::Headless,
             tasks: Vec::new(),
             review_state: None,
             pause_kind: None,
@@ -10133,8 +10161,8 @@ pub struct WorkModelSnapshot {
 const WORK_MODEL_WRITER_ENVELOPE_FORMAT: &str = "fluent-work-item-writer";
 // Fence both installation source lineages: neither predecessor preserves the
 // union of revision audits, assignments, and separately authorized retries.
-const WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 10;
-const NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 11;
+const WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 12;
+const NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 13;
 
 fn is_supported_writer_envelope_schema(version: u32) -> bool {
     matches!(
@@ -10265,8 +10293,8 @@ struct StoredRecordVersions {
 impl WorkItemTransaction {
     // Source journals lack either managed revision files or retry authority.
     // Preserve their modeled formats, but publish the combined format separately.
-    const SCHEMA_VERSION: u32 = 12;
-    const NO_CHANGE_COMPLETION_SCHEMA_VERSION: u32 = 13;
+    const SCHEMA_VERSION: u32 = 14;
+    const NO_CHANGE_COMPLETION_SCHEMA_VERSION: u32 = 15;
 
     fn is_supported_schema(version: u32) -> bool {
         matches!(version, 1..=Self::NO_CHANGE_COMPLETION_SCHEMA_VERSION)
@@ -10336,6 +10364,8 @@ struct AttemptRecord {
     status: AttemptStatus,
     #[serde(default)]
     coder_mapping: CoderMapping,
+    #[serde(default, skip_serializing_if = "TerminalMode::is_headless")]
+    terminal_mode: TerminalMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_state: Option<AttemptReviewState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10478,6 +10508,7 @@ impl AttemptRecord {
             order,
             status: attempt.status.clone(),
             coder_mapping: attempt.coder_mapping.clone(),
+            terminal_mode: attempt.terminal_mode,
             review_state: attempt.review_state.clone(),
             pause_kind: attempt.pause_kind.clone(),
             pause_recovery: attempt.pause_recovery,
@@ -10506,6 +10537,7 @@ impl From<AttemptRecord> for Attempt {
             kind: record.kind,
             status: record.status,
             coder_mapping: record.coder_mapping,
+            terminal_mode: record.terminal_mode,
             tasks: Vec::new(),
             review_state: record.review_state,
             pause_kind: record.pause_kind,

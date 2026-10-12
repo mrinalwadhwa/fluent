@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='fluent-evidence-fence-') as temporary:
     item_path = work / 'items/evidence-fence.json'
     attempt_path = work / 'attempts/evidence-fence/attempt-1.json'
     item = json.loads(item_path.read_text())
-    assert item['schema_version'] == 12
+    assert item['schema_version'] == 13
     # Seed storage authority, not acceptance eligibility. Production CLI tests
     # establish eligibility; this fixture detects fields discarded by writers.
     attempt = json.loads(attempt_path.read_text())
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='fluent-evidence-fence-') as temporary:
             assert interrupted.returncode != 0, interrupted.stdout + interrupted.stderr
             journal = work / 'transactions/evidence-fence.json'
             transaction = json.loads(journal.read_text())
-            assert transaction['schema_version'] == 12
+            assert transaction['schema_version'] == 13
             assert transaction['work_item']['attempts'][0]['evidence_recoveries'] == [recovery]
         for command in [('work-item', 'abandon', 'evidence-fence', '--reason', 'must refuse'), ('work-item', 'upgrade', 'evidence-fence')]:
             before = snapshot(work)

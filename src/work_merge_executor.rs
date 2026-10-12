@@ -3138,6 +3138,11 @@ fn rebase_candidate_with_coder(
     artifact_dir: &Path,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<RebaseOutcome> {
+    crate::work_task_executor::ensure_agent_launch_supported(
+        item,
+        &candidate.attempt_id,
+        TaskKind::Rebase,
+    )?;
     // A provider readiness failure must not create an executing Rebase Task.
     // Keep a prepared Codex home alive through the eventual sandboxed launch.
     let provider_readiness = if cfg!(test) {

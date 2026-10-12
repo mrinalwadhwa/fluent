@@ -82,14 +82,14 @@ def write_collection(directory, reverse):
     for scenario, item_id in (("current-authority", "released-refusal"),
                               ("pending-publication", "released-pending-refusal")):
         files = {f"{scenario}/item.json": json.dumps({"model_writer_version": {
-            "format": "fluent-work-item-writer", "schema_version": 10}}).encode()}
+            "format": "fluent-work-item-writer", "schema_version": 11}}).encode()}
         protected = [{"path": f"items/{item_id}.json", "kind": "file",
                       "artifact": f"{scenario}/item.json",
                       "sha256": hashlib.sha256(next(iter(files.values()))).hexdigest()}]
         diagnostic = f"unsupported Work Item writer envelope format/schema items/{item_id}.json"
         if scenario == "pending-publication":
             name = f"{scenario}/transaction.json"
-            raw = json.dumps({"schema_version": 12, "id": item_id}).encode()
+            raw = json.dumps({"schema_version": 13, "id": item_id}).encode()
             files[name] = raw
             protected.append({"path": f"transactions/{item_id}.json", "kind": "file",
                               "artifact": name, "sha256": hashlib.sha256(raw).hexdigest()})

@@ -843,6 +843,7 @@ fn cmd_attempt(
         AttemptCommands::Create {
             work_item_id,
             attempt_id,
+            terminal_mode,
             coder,
             model,
             effort,
@@ -876,7 +877,13 @@ fn cmd_attempt(
                     effort,
                 ),
             )?;
-            item.add_initial_attempt_with_coder_mapping(attempt_id.clone(), coder_mapping)?;
+            let terminal_mode =
+                fluent::config::attempt_terminal_mode(project_root, terminal_mode.as_deref())?;
+            item.add_initial_attempt_with_settings(
+                attempt_id.clone(),
+                coder_mapping,
+                terminal_mode,
+            )?;
 
             store.write_work_item(&item)?;
             println!("Created Attempt {attempt_id} for Work Item {work_item_id}");

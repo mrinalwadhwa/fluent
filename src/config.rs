@@ -893,6 +893,14 @@ fn load_policy_layers(
 struct Config {
     #[serde(default)]
     coders: CoderConfig,
+    #[serde(default)]
+    terminal: TerminalConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TerminalConfig {
+    mode: Option<crate::work_model::TerminalMode>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -921,6 +929,33 @@ fn user_config_path() -> Option<std::path::PathBuf> {
 
 fn project_config_path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(".fluent/config.yaml")
+}
+
+/// Resolve the saved terminal mode when creating a new Attempt. A CLI override
+/// wins over project and user configuration; existing Attempts never re-read it.
+pub fn attempt_terminal_mode(
+    project_root: &Path,
+    override_mode: Option<&str>,
+) -> Result<crate::work_model::TerminalMode> {
+    use crate::work_model::TerminalMode;
+    if let Some(mode) = override_mode {
+        return match mode {
+            "headless" => Ok(TerminalMode::Headless),
+            "native" => Ok(TerminalMode::Native),
+            _ => anyhow::bail!("unknown terminal mode {mode:?}; expected headless or native"),
+        };
+    }
+    let project = read_config(&project_config_path(project_root))?;
+    if let Some(mode) = project.and_then(|config| config.terminal.mode) {
+        return Ok(mode);
+    }
+    let user = user_config_path()
+        .map(|path| read_config(&path))
+        .transpose()?
+        .flatten();
+    Ok(user
+        .and_then(|config| config.terminal.mode)
+        .unwrap_or_default())
 }
 
 /// Reject an unreadable or invalid project coder mapping before setup mutates

@@ -2040,6 +2040,8 @@ fn default_learner_run_coder(
     config: &WorkAttemptRunConfig<'_>,
     request: &LearnerCoderRequest<'_>,
 ) -> Result<()> {
+    let item = config.store.read_work_item(config.work_item_id)?;
+    work_task_executor::ensure_agent_launch_supported(&item, config.attempt_id, TaskKind::Learn)?;
     #[cfg(test)]
     if let Some(run_coder) = config.learner_run_coder {
         return run_coder(request);

@@ -61,7 +61,7 @@ def project(path: Path, candidate: Path, commit: str):
                                          before["raw-facts"]["protected"] if
                                          entry["path"] == f"items/{item_id}.json")])
         require(item["model_writer_version"]["format"] == "fluent-work-item-writer"
-                and item["model_writer_version"]["schema_version"] == 10,
+                and item["model_writer_version"]["schema_version"] == 11,
                 "current writer envelope mismatch")
         require("unsupported Work Item writer envelope format/schema" in facts["stderr"]
                 and f"items/{item_id}.json" in facts["stderr"],
@@ -70,7 +70,7 @@ def project(path: Path, candidate: Path, commit: str):
         transaction = json.loads(artifacts[next(entry["artifact"] for entry in
                                                 before["raw-facts"]["protected"] if
                                                 entry["path"] == f"transactions/{item_id}.json")])
-        require(transaction["schema_version"] == 12 and transaction["id"] == item_id,
+        require(transaction["schema_version"] == 13 and transaction["id"] == item_id,
                 "pending transaction format mismatch")
         require("invalid work model" in facts["stderr"]
                 and f"transactions/{item_id}.json" in facts["stderr"]

@@ -302,12 +302,48 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-fn plan_coder_kind(item: &WorkItem, attempt_id: &str, task_kind: TaskKind) -> Result<CoderKind> {
+fn native_launch_blocker(
+    attempt: &crate::work_model::Attempt,
+    task_kind: TaskKind,
+) -> Option<&'static str> {
+    (attempt.terminal_mode == crate::work_model::TerminalMode::Native
+        && matches!(
+            task_kind,
+            TaskKind::Write | TaskKind::Review | TaskKind::Rebase | TaskKind::Learn
+        ))
+    .then_some(
+        "native terminal mode cannot launch this Task: the provider adapter is not available",
+    )
+}
+
+pub(crate) fn ensure_agent_launch_supported(
+    item: &WorkItem,
+    attempt_id: &str,
+    task_kind: TaskKind,
+) -> Result<()> {
     item.attempts
         .iter()
         .find(|attempt| attempt.id == attempt_id)
-        .map(|attempt| attempt.coder_mapping.for_task_kind(task_kind).coder)
+        .map(|attempt| {
+            if let Some(reason) = native_launch_blocker(attempt, task_kind) {
+                anyhow::bail!(reason);
+            }
+            Ok(())
+        })
         .ok_or_else(|| anyhow::anyhow!("Attempt {attempt_id:?} not found"))
+        .and_then(std::convert::identity)
+}
+
+fn plan_coder_kind(item: &WorkItem, attempt_id: &str, task_kind: TaskKind) -> Result<CoderKind> {
+    ensure_agent_launch_supported(item, attempt_id, task_kind)?;
+    Ok(item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .expect("launch guard found Attempt")
+        .coder_mapping
+        .for_task_kind(task_kind)
+        .coder)
 }
 
 fn prepare_provider_readiness(
@@ -466,6 +502,12 @@ fn reserve_task_start_with_coder(
         }
         let attempt = &item.attempts[attempt_index];
         attempt.ensure_not_canceled()?;
+        if let Some(reason) = native_launch_blocker(attempt, expected_kind) {
+            return Err(WorkModelError::AttemptResumeIneligible {
+                attempt_id: attempt_id.into(),
+                reason: reason.into(),
+            });
+        }
         if expected_kind == TaskKind::Review {
             crate::recovery_contracts::review_evidence::validate(
                 project_root,
@@ -10232,6 +10274,28 @@ fn current_branch(project_root: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn native_attempt_cannot_select_headless_agent_launch() {
+        use super::*;
+        let item = WorkItem {
+            attempts: vec![crate::work_model::Attempt {
+                id: "attempt-1".into(),
+                terminal_mode: crate::work_model::TerminalMode::Native,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let error = plan_coder_kind(&item, "attempt-1", TaskKind::Write).unwrap_err();
+        assert!(error.to_string().contains("native terminal"));
+        for task_kind in [TaskKind::Review, TaskKind::Rebase, TaskKind::Learn] {
+            assert!(
+                ensure_agent_launch_supported(&item, "attempt-1", task_kind).is_err(),
+                "{task_kind:?} must wait for its native adapter"
+            );
+        }
+        assert!(plan_coder_kind(&item, "attempt-1", TaskKind::Tester).is_ok());
+    }
 
     #[test]
     fn usage_limit_git_config_roots_resolve_worktree_includes() {
