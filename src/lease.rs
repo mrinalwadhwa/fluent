@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{FlockOperation, flock};
@@ -24,6 +25,12 @@ pub fn learner_lock_path(project_root: &Path, work_item_id: &str, attempt_id: &s
 
 pub struct TaskLease {
     _file: File,
+}
+
+impl TaskLease {
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        self._file.as_raw_fd()
+    }
 }
 
 /// The outcome of a non-blocking lease acquisition that distinguishes a live peer

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -687,11 +688,56 @@ impl Attachment {
         if self.control.is_none() {
             command.arg("-r");
         }
-        let status = command.status().context("attaching managed terminal")?;
+        let status = spawn_attachment_client(&mut command, self.control.as_ref())
+            .context("attaching managed terminal")?
+            .wait()?;
         Ok(status.code().unwrap_or(1))
     }
 
     pub fn detach(self) {}
+}
+
+fn spawn_attachment_client(command: &mut Command, control: Option<&TaskLease>) -> Result<Child> {
+    let Some(control) = control else {
+        return command.spawn().context("starting observation client");
+    };
+    let fd = control.raw_fd();
+    // The shell keeps the lease while it waits for the writable client. Close
+    // the descriptor in tmux itself so its server cannot extend that lifetime.
+    let mut wrapper = Command::new("/bin/sh");
+    wrapper
+        .arg("-c")
+        .arg(format!("\"$@\" {fd}>&-; exit $?"))
+        .arg("fluent-terminal-control")
+        .arg(command.get_program())
+        .args(command.get_args());
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => {
+                wrapper.env(key, value);
+            }
+            None => {
+                wrapper.env_remove(key);
+            }
+        }
+    }
+    if let Some(dir) = command.get_current_dir() {
+        wrapper.current_dir(dir);
+    }
+    // Rust opens File descriptors close-on-exec. Pass the acquired lease to the
+    // wrapper so a dead Fluent parent cannot release Control before tmux exits.
+    unsafe {
+        wrapper.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    wrapper
+        .spawn()
+        .context("starting writable attachment client")
 }
 
 pub fn resolve(source_root: &Path, session_id: &str) -> Result<Attachment> {
@@ -1367,6 +1413,85 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
     }
     std::fs::remove_file(receipt)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod control_client_tests {
+    use super::*;
+
+    #[test]
+    fn writable_client_keeps_control_after_parent_releases_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let occupied_descriptors: Vec<_> = (0..16)
+            .map(|index| std::fs::File::create(root.path().join(format!("open-{index}"))).unwrap())
+            .collect();
+        let path = root.path().join("control.lock");
+        let lease = match lease::try_acquire(&path).unwrap() {
+            LeaseAttempt::Acquired(lease) => lease,
+            LeaseAttempt::Contended => panic!("new control lock was occupied"),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 2"]);
+        let mut client = spawn_attachment_client(&mut command, Some(&lease)).unwrap();
+        drop(lease);
+        assert!(matches!(
+            lease::try_acquire(&path).unwrap(),
+            LeaseAttempt::Contended
+        ));
+        client.kill().unwrap();
+        client.wait().unwrap();
+        assert!(matches!(
+            lease::try_acquire(&path).unwrap(),
+            LeaseAttempt::Acquired(_)
+        ));
+        drop(occupied_descriptors);
+    }
+
+    #[test]
+    fn writable_client_keeps_control_after_parent_process_exits() {
+        if let Some(root) = std::env::var_os("FLUENT_TEST_CONTROL_PARENT") {
+            let root = PathBuf::from(root);
+            let lease = match lease::try_acquire(&root.join("control.lock")).unwrap() {
+                LeaseAttempt::Acquired(lease) => lease,
+                LeaseAttempt::Contended => panic!("new control lock was occupied"),
+            };
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 2"]);
+            let client = spawn_attachment_client(&mut command, Some(&lease)).unwrap();
+            std::fs::write(root.join("client.pid"), client.id().to_string()).unwrap();
+            std::process::exit(0);
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("writable_client_keeps_control_after_parent_process_exits")
+            .env("FLUENT_TEST_CONTROL_PARENT", root.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let pid: i32 = std::fs::read_to_string(root.path().join("client.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let path = root.path().join("control.lock");
+        assert!(matches!(
+            lease::try_acquire(&path).unwrap(),
+            LeaseAttempt::Contended
+        ));
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match lease::try_acquire(&path).unwrap() {
+                LeaseAttempt::Acquired(_) => break,
+                LeaseAttempt::Contended if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                LeaseAttempt::Contended => panic!("Control stayed occupied after client exit"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

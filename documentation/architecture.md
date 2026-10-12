@@ -3581,8 +3581,10 @@ commands inherit the worker's workspace permissions. An attachment has no
 authority to start a worker.
 
 `fluent terminal attach` observes by default. Control uses a process-held
-lock beside the host-owned descriptor. A second controller may still observe,
-and detaching releases only the client lease. Cancellation inventories tmux
+lock beside the host-owned descriptor. The writable client inherits the lock
+through a wrapper that waits for tmux, so Control remains occupied if the Fluent
+CLI exits while tmux is attached. A second controller may still observe, and
+detaching releases only the client lease. Cancellation inventories tmux
 pane descendants, the captured pane process sessions, processes holding a
 private per-generation file handle, and processes with that generation's
 private Seatbelt socket grant before stopping the server. The policy check

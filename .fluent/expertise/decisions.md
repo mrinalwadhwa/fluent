@@ -4,6 +4,22 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Inventory terminal descendants by owned handle and Seatbelt grant
+
+Terminal cancellation inventories pane descendants and process sessions, then
+checks the private owner handle and the per-generation macOS Seatbelt socket
+grant. The handle finds processes that retain the inherited descriptor after
+leaving the pane's process tree. A child can close that descriptor, clear its
+environment, change session, or be reparented, so the grant provides the
+remaining ownership signal. Compare the grant against an ungranted existing
+path to exclude unrestricted processes; a missing probe path gives unreliable
+results. If the process or policy inventory cannot be verified, settlement
+fails instead of claiming cleanup. This depends on the worker's private socket
+grant remaining unique to that invocation and on macOS exposing its policy to
+the host; changes to either require a new ownership proof.
+
+---
+
 ## Keep joint child settlement as a separate workflow model
 
 `tests/formal/workflow/JointSettlement.tla` models the crash boundary where
