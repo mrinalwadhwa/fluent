@@ -26333,6 +26333,40 @@ fn tester_permissions_host_fixture_retains_dirty_candidate_diagnostics() {
 }
 
 #[test]
+fn tester_permissions_profile_watcher_selects_process_table_profile() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join("authority");
+    fs::create_dir(&store).unwrap();
+    fs::write(store.join("baseline"), b"(version 1)\n(deny default)\n").unwrap();
+    let selected = store.join("selected");
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all\"))\n";
+    fs::write(&selected, profile).unwrap();
+    let path_file = tmp.path().join("profile-path.txt");
+    let evidence = tmp.path().join("selected-profile.sb");
+    let watcher = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/watch-tester-process-table-profile.py");
+    let output = Command::new("python3")
+        .args([
+            watcher.as_os_str(),
+            store.as_os_str(),
+            path_file.as_os_str(),
+            evidence.as_os_str(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(path_file).unwrap().trim(),
+        selected.to_str().unwrap()
+    );
+    assert_eq!(fs::read(evidence).unwrap(), profile);
+}
+
+#[test]
 fn tester_permissions_record_applied_authority_in_evidence() {
     let tmp = TempDir::new().unwrap();
     let project = setup_git_project(&tmp);

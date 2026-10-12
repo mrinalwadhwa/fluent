@@ -20,8 +20,13 @@ before_head=$(cat "$evidence_dir/initial-head.txt")
 fixture="$evidence_dir/fixture"
 approval_id=
 fixture_pid=
+watcher_pid=
 cleanup() {
     status=$?
+    if [[ -n "$watcher_pid" ]]; then
+        kill "$watcher_pid" 2>/dev/null || true
+        wait "$watcher_pid" 2>/dev/null || true
+    fi
     if [[ -n "$fixture_pid" ]]; then
         kill -CONT "$fixture_pid" 2>/dev/null || true
         kill "$fixture_pid" 2>/dev/null || true
@@ -153,6 +158,10 @@ authority = shlex.quote(str(operator_home / '.config/fluent/tester-permissions')
 unrelated = shlex.quote(str(operator_home / '.fluent-process-table-unrelated-write'))
 allowed = (f'{probe} allowed && {probe} control-denied {pid}'
            f' && ! touch {authority}/forged-by-tester && ! touch {unrelated}'
+           ' && (i=0; until test -s "$FLUENT_FIXTURE_PROFILE_PATH_FILE"; do'
+           ' i=$((i+1)); test "$i" -lt 300 || exit 17; sleep 0.1; done;'
+           ' profile=$(cat "$FLUENT_FIXTURE_PROFILE_PATH_FILE");'
+           ' test -f "$profile" && ! touch "$profile")'
            f' && ! {fluent} tester permissions approve --candidate "$FLUENT_FIXTURE_SHA"'
            ' --command-index 0 --capability process-table-read'
            ' --request-digest "$FLUENT_FIXTURE_REQUEST"'
@@ -195,9 +204,23 @@ PY
 export FLUENT_FIXTURE_SHA="$fixture_head"
 export FLUENT_FIXTURE_REQUEST="$request_digest"
 export FLUENT_FIXTURE_APPROVAL_ID="$approval_id"
+profile_path_file="$fixture/selected-profile-path.txt"
+export FLUENT_FIXTURE_PROFILE_PATH_FILE="$profile_path_file"
+authority_dir=$(python3 - <<'PY'
+import os, pwd
+from pathlib import Path
+print(Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve() / '.config/fluent/tester-permissions')
+PY
+)
+python3 "$candidate_root/tests/fixtures/watch-tester-process-table-profile.py" \
+    "$authority_dir" "$profile_path_file" "$evidence_dir/selected-profile.sb" \
+    > "$evidence_dir/profile-watcher.log" 2>&1 &
+watcher_pid=$!
 
 (cd "$fixture" && "$binary" tester check) \
     > "$evidence_dir/approved-run.log" 2>&1 || fail 'approved production Tester run failed'
+wait "$watcher_pid" || fail 'selected production profile was not captured'
+watcher_pid=
 python3 - "$evidence_dir" "$fixture_head" "$approval_id" "$request_digest" <<'PY'
 import json, os, pwd, shutil, sys
 from pathlib import Path
