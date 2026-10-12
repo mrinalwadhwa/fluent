@@ -65,6 +65,24 @@ impl NativeAdmission {
         state.settling = true;
         Ok(state.last_sequence)
     }
+
+    /// Settle a completion candidate only if it accounts for the latest
+    /// admitted input. A newer turn leaves admission open for its completion.
+    pub fn settle_if_current(&self, input_sequence: u64) -> Result<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native admission lock poisoned"))?;
+        ensure!(
+            !state.settling,
+            "native invocation already started settling"
+        );
+        if state.last_sequence != input_sequence {
+            return Ok(false);
+        }
+        state.settling = true;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +355,34 @@ pub fn relay_codex_streams<W, F>(
     server: UnixStream,
     generation: &str,
     thread_id: &str,
+    evidence: W,
+    on_completion: F,
+) -> Result<()>
+where
+    W: Write + Send,
+    F: FnMut(Completion) -> Result<()> + Send,
+{
+    relay_codex_streams_with_admission(
+        client,
+        server,
+        generation,
+        thread_id,
+        Arc::new(NativeAdmission::new()),
+        evidence,
+        on_completion,
+    )
+}
+
+/// Share the input boundary with the execution owner. The owner closes
+/// admission when it chooses to settle; a provider turn notification alone
+/// does not end an invocation that may receive another turn.
+#[cfg(unix)]
+pub fn relay_codex_streams_with_admission<W, F>(
+    client: UnixStream,
+    server: UnixStream,
+    generation: &str,
+    thread_id: &str,
+    admission: Arc<NativeAdmission>,
     mut evidence: W,
     mut on_completion: F,
 ) -> Result<()>
@@ -344,7 +390,9 @@ where
     W: Write + Send,
     F: FnMut(Completion) -> Result<()> + Send,
 {
-    let gate = Arc::new(Mutex::new(CodexRelayGate::new(generation, thread_id)));
+    let gate = Arc::new(Mutex::new(CodexRelayGate::with_admission(
+        generation, thread_id, admission,
+    )));
     let client_reader = client.try_clone()?;
     let server_reader = server.try_clone()?;
     let upstream_abort_client = client.try_clone()?;

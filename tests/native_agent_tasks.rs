@@ -115,6 +115,16 @@ fn settlement_closes_input_before_advancement() {
     assert!(admission.admit().is_err());
     assert!(admission.begin_settlement().is_err());
 
+    let raced = NativeAdmission::new();
+    assert_eq!(raced.admit().unwrap(), 1);
+    // A new turn admitted after a completion candidate invalidates that
+    // candidate without closing the invocation's input boundary.
+    assert_eq!(raced.admit().unwrap(), 2);
+    assert!(!raced.settle_if_current(1).unwrap());
+    assert_eq!(raced.admit().unwrap(), 3);
+    assert!(raced.settle_if_current(3).unwrap());
+    assert!(raced.admit().is_err());
+
     let shared = Arc::new(NativeAdmission::new());
     let mut relay =
         CodexRelayGate::with_admission("generation-3", "assigned-thread", Arc::clone(&shared));
@@ -529,10 +539,11 @@ fn native_claude_task_uses_owned_settings_and_role() {
 #[cfg(unix)]
 #[test]
 fn native_terminal_controls_assigned_invocation() {
-    use fluent::native_agent::relay_codex_streams;
+    use fluent::native_agent::relay_codex_streams_with_admission;
     use std::io::{BufRead, BufReader, Write};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
     use std::sync::mpsc;
 
     let (mut tui, relay_client) = UnixStream::pair().unwrap();
@@ -545,14 +556,22 @@ fn native_terminal_controls_assigned_invocation() {
     let evidence = tempfile::NamedTempFile::new().unwrap();
     let evidence_path = evidence.path().to_path_buf();
     let (completed, received) = mpsc::channel();
+    let admission = Arc::new(NativeAdmission::new());
     let relay = std::thread::spawn(move || {
-        relay_codex_streams(
+        let settlement = Arc::clone(&admission);
+        relay_codex_streams_with_admission(
             relay_client,
             relay_server,
             "generation-1",
             "assigned-thread",
+            admission,
             evidence.reopen().unwrap(),
-            move |completion| completed.send(completion).map_err(anyhow::Error::new),
+            move |completion| {
+                if let Completion::Accepted { input_sequence, .. } = &completion {
+                    assert!(settlement.settle_if_current(*input_sequence)?);
+                }
+                completed.send(completion).map_err(anyhow::Error::new)
+            },
         )
     });
 
@@ -611,11 +630,13 @@ fn native_terminal_controls_assigned_invocation() {
         serde_json::from_str::<serde_json::Value>(finished).unwrap()
     );
 
-    tui.write_all(b"{\"id\":3,\"method\":\"turn/start\",\"params\":{\"threadId\":\"other-thread\",\"input\":[]}}\n").unwrap();
+    // Completion closes this invocation. A later turn addressed to the same
+    // conversation must not cross the relay into the provider.
+    tui.write_all(b"{\"id\":3,\"method\":\"turn/start\",\"params\":{\"threadId\":\"assigned-thread\",\"input\":[]}}\n").unwrap();
     line.clear();
     assert_eq!(provider_lines.read_line(&mut line).unwrap(), 0);
     let error = relay.join().unwrap().unwrap_err();
-    assert!(error.to_string().contains("another Task conversation"));
+    assert!(error.to_string().contains("input is closed"));
     let _ = tui.shutdown(Shutdown::Both);
     let _ = provider.shutdown(Shutdown::Both);
 }
