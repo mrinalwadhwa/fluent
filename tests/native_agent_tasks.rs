@@ -1,4 +1,4 @@
-use fluent::native_agent::{CodexRelayGate, Completion};
+use fluent::native_agent::{CodexRelayGate, Completion, NativeAdmission};
 use serde_json::json;
 
 #[test]
@@ -82,4 +82,42 @@ fn old_turn_cannot_complete_current_invocation() {
             .unwrap(),
         Completion::Ignored
     );
+}
+
+#[test]
+fn settlement_closes_input_before_advancement() {
+    use std::sync::{Arc, Barrier};
+
+    let admission = Arc::new(NativeAdmission::new());
+    assert_eq!(admission.admit().unwrap(), 1);
+    let barrier = Arc::new(Barrier::new(3));
+    let admitted = {
+        let admission = Arc::clone(&admission);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            admission.admit().ok()
+        })
+    };
+    let cutoff = {
+        let admission = Arc::clone(&admission);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            admission.begin_settlement().unwrap()
+        })
+    };
+    barrier.wait();
+    let admitted = admitted.join().unwrap();
+    let cutoff = cutoff.join().unwrap();
+    assert_eq!(cutoff, admitted.unwrap_or(1));
+    assert!(admission.admit().is_err());
+    assert!(admission.begin_settlement().is_err());
+
+    let shared = Arc::new(NativeAdmission::new());
+    let mut relay =
+        CodexRelayGate::with_admission("generation-3", "assigned-thread", Arc::clone(&shared));
+    assert_eq!(relay.admit_request(&json!({"id": 1, "method": "turn/start", "params": {"threadId": "assigned-thread", "input": []}})).unwrap(), Some(1));
+    assert_eq!(shared.begin_settlement().unwrap(), 1);
+    assert!(relay.admit_request(&json!({"id": 2, "method": "turn/steer", "params": {"threadId": "assigned-thread", "input": []}})).is_err());
 }

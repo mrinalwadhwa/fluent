@@ -2,6 +2,57 @@
 
 use anyhow::{Result, bail, ensure};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct AdmissionState {
+    last_sequence: u64,
+    settling: bool,
+}
+
+/// Serialize native input with the decision to settle an invocation.
+/// The execution owner must call `begin_settlement` before it publishes a Task
+/// result, and account for every sequence at or below the returned cutoff.
+#[derive(Default)]
+pub struct NativeAdmission {
+    state: Mutex<AdmissionState>,
+}
+
+impl NativeAdmission {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn admit(&self) -> Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native admission lock poisoned"))?;
+        ensure!(
+            !state.settling,
+            "native invocation is settling; input is closed"
+        );
+        state.last_sequence = state
+            .last_sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("native input sequence overflow"))?;
+        Ok(state.last_sequence)
+    }
+
+    /// Close admission and return the last accepted input sequence.
+    pub fn begin_settlement(&self) -> Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native admission lock poisoned"))?;
+        ensure!(
+            !state.settling,
+            "native invocation already started settling"
+        );
+        state.settling = true;
+        Ok(state.last_sequence)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completion {
@@ -21,6 +72,7 @@ pub enum Completion {
 pub struct CodexRelayGate {
     generation: String,
     thread_id: String,
+    admission: Arc<NativeAdmission>,
     input_sequence: u64,
     waiting_for_turn: bool,
     active_turn: Option<String>,
@@ -28,9 +80,18 @@ pub struct CodexRelayGate {
 
 impl CodexRelayGate {
     pub fn new(generation: impl Into<String>, thread_id: impl Into<String>) -> Self {
+        Self::with_admission(generation, thread_id, Arc::new(NativeAdmission::new()))
+    }
+
+    pub fn with_admission(
+        generation: impl Into<String>,
+        thread_id: impl Into<String>,
+        admission: Arc<NativeAdmission>,
+    ) -> Self {
         Self {
             generation: generation.into(),
             thread_id: thread_id.into(),
+            admission,
             input_sequence: 0,
             waiting_for_turn: false,
             active_turn: None,
@@ -59,10 +120,7 @@ impl CodexRelayGate {
             bail!("native Codex request omits its Task conversation identity");
         }
         if method == "turn/start" || method == "turn/steer" {
-            self.input_sequence = self
-                .input_sequence
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("native input sequence overflow"))?;
+            self.input_sequence = self.admission.admit()?;
             if method == "turn/start" {
                 self.waiting_for_turn = true;
                 self.active_turn = None;
