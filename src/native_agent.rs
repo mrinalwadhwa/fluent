@@ -15,7 +15,9 @@ pub enum Completion {
 
 /// Keep one loaded Codex thread and its latest turn bound to a Task generation.
 /// The transport must call `admit_request` before forwarding a TUI request and
-/// `observe_event` before considering a provider notification as completion.
+/// `observe_event_for_generation` before considering a provider notification
+/// as completion. The generation comes from the owned transport, not provider
+/// JSON, because the provider does not assign Fluent's execution generation.
 pub struct CodexRelayGate {
     generation: String,
     thread_id: String,
@@ -70,7 +72,14 @@ impl CodexRelayGate {
         Ok(None)
     }
 
-    pub fn observe_event(&mut self, event: &Value) -> Result<Completion> {
+    pub fn observe_event_for_generation(
+        &mut self,
+        generation: &str,
+        event: &Value,
+    ) -> Result<Completion> {
+        if generation != self.generation {
+            return Ok(Completion::Ignored);
+        }
         let method = event.get("method").and_then(Value::as_str);
         if !matches!(method, Some("turn/started" | "turn/completed")) {
             return Ok(Completion::Ignored);
