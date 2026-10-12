@@ -26712,7 +26712,24 @@ fn tester_permissions_do_not_leak_to_other_execution_scopes() {
         fluent::coder::CoderKind::Codex,
     )
     .unwrap();
-    for profile in [&baseline, &writer] {
+    let reviewer = fluent::os::render_profile_for_access_for_coder(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        fluent::coder::CoderKind::Claude,
+    )
+    .unwrap();
+    let learner = fluent::os::render_profile_for_access_for_coder_with_denied_writes(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        &[tmp.path().join("writer-workspace")],
+        fluent::coder::CoderKind::Claude,
+    )
+    .unwrap();
+    for profile in [&baseline, &writer, &reviewer, &learner] {
         let rules = fs::read_to_string(&profile.path).unwrap();
         assert!(!rules.contains("(allow sysctl-read (sysctl-name \"kern.proc.all\"))"));
         assert!(rules.contains("(deny file-read-data (subpath \""));

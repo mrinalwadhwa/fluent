@@ -144,6 +144,12 @@ C
 /usr/bin/clang -Wall -Wextra -Werror -o "$fixture/probe" "$fixture/probe.c" \
     > "$evidence_dir/probe-build.log" 2>&1 || fail 'process-table probe build failed'
 
+# Render the production worker profile variants and observe real Seatbelt
+# denial for the same query before granting a Tester command any capability.
+cargo run --locked --offline --release --example probe_worker_process_table_profiles -- \
+    "$fixture/probe" "$fixture" "$evidence_dir" \
+    > "$evidence_dir/worker-profile-probes.log" 2>&1 || fail 'worker profiles admitted the process-table query'
+
 # A host-owned sibling is the only target of the process-control denial probe.
 sleep 300 &
 fixture_pid=$!
