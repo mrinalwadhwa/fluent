@@ -1461,6 +1461,143 @@ fn native_terminal_controls_assigned_invocation() {
 
 #[cfg(unix)]
 #[test]
+fn codex_websocket_backpressure_recovers_required_frame_once() {
+    use fluent::native_agent::codex::relay_codex_websockets;
+    use std::io::{self, Write};
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    // Make a single large response exceed the socket buffer while the TUI
+    // pauses. The handshake completes before either peer stops reading.
+    let buffer_size: libc::c_int = 4096;
+    let configured = unsafe {
+        libc::setsockopt(
+            relay_client.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&buffer_size as *const libc::c_int).cast(),
+            std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+        )
+    };
+    assert_eq!(configured, 0);
+
+    struct SignalEvidence(Option<mpsc::Sender<()>>);
+
+    impl Write for SignalEvidence {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(signal) = self.0.take() {
+                signal.send(()).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    let (written_tx, written_rx) = mpsc::channel();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        let resume: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(resume["method"], "thread/resume");
+        assert_eq!(resume["params"]["threadId"], "assigned-thread");
+        socket
+            .send(Message::Text(
+                json!({"id":1,"result":{"data":"x".repeat(8 * 1024 * 1024)}}).to_string(),
+            ))
+            .unwrap();
+        let turn: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(turn["method"], "turn/start");
+        assert_eq!(turn["params"]["threadId"], "assigned-thread");
+        for event in [
+            json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}),
+        ] {
+            socket.send(Message::Text(event.to_string())).unwrap();
+        }
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        assert!(socket.read().is_err(), "unexpected later TUI input");
+    });
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            SignalEvidence(Some(written_tx)),
+            move |completion| completed_tx.send(completion).map_err(anyhow::Error::new),
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"thread/resume","params":{"threadId":"assigned-thread"}})
+            .to_string(),
+    ))
+    .unwrap();
+    // The relay has serialized the complete response and is about to enqueue
+    // it for the display writer; pause this peer past its socket write timeout.
+    written_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    let response: serde_json::Value =
+        serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(response["id"], 1);
+    assert_eq!(
+        response["result"]["data"].as_str().unwrap().len(),
+        8 * 1024 * 1024
+    );
+    tui.send(Message::Text(
+        json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
+    for method in ["turn/started", "turn/completed"] {
+        let event: serde_json::Value =
+            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(event["method"], method);
+    }
+    assert_eq!(
+        completed_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .unwrap();
+    assert!(tui.read().is_err(), "required frame was delivered twice");
+    let _ = tui.get_ref().shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    // Closing this test peer can reset the relay's concurrent read.
+    let _ = relay.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_websocket_backpressure_fails_and_settles_workers() {
     use fluent::native_agent::codex::relay_codex_websockets;
     use std::os::unix::net::UnixStream;

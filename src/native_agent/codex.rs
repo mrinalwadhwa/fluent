@@ -404,9 +404,34 @@ fn read_socket(socket: &Mutex<WebSocket<UnixStream>>) -> Result<SocketRead> {
 }
 
 fn send_required_tui_frame(client: &mut WebSocket<UnixStream>, text: String) -> Result<()> {
-    client
-        .send(Message::Text(text))
-        .context("Codex TUI WebSocket protocol send failed")
+    const DRAIN_LIMIT: Duration = Duration::from_secs(3);
+    let mut result = client.send(Message::Text(text));
+    let deadline = Instant::now() + DRAIN_LIMIT;
+    loop {
+        match result {
+            Ok(()) => return Ok(()),
+            Err(tungstenite::Error::Io(ref error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "Codex TUI WebSocket protocol send failed: required frame did not drain within {DRAIN_LIMIT:?}: {error}"
+                    );
+                }
+                // tungstenite retains the frame after a stream write failure.
+                // Flush its buffered bytes; sending the message again would
+                // duplicate a partly delivered protocol response.
+                std::thread::sleep(Duration::from_millis(10));
+                result = client.flush();
+            }
+            Err(error) => {
+                return Err(error).context("Codex TUI WebSocket protocol send failed");
+            }
+        }
+    }
 }
 
 /// Relay framed app-server messages. Unix app-server sockets use WebSocket
