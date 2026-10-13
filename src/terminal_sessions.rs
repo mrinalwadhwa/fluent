@@ -439,12 +439,34 @@ impl TerminalSession {
     }
 
     pub fn start_managed_with_sockets(
+        identity: TerminalIdentity,
+        worker_profile: &crate::os::SandboxProfile,
+        working_dir: &Path,
+        shell_command: &str,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        provider_socket_dirs: &[PathBuf],
+    ) -> Result<Self> {
+        Self::start_managed_with_resources(
+            identity,
+            worker_profile,
+            working_dir,
+            shell_command,
+            environment,
+            provider_socket_dirs,
+            &[],
+            &[],
+        )
+    }
+
+    pub fn start_managed_with_resources(
         mut identity: TerminalIdentity,
         worker_profile: &crate::os::SandboxProfile,
         working_dir: &Path,
         shell_command: &str,
         environment: &[(std::ffi::OsString, std::ffi::OsString)],
         provider_socket_dirs: &[PathBuf],
+        provider_runtime_sockets: &[PathBuf],
+        provider_runtime_files: &[PathBuf],
     ) -> Result<Self> {
         identity.source_root = identity.source_root.canonicalize()?;
         for id in [
@@ -500,10 +522,12 @@ impl TerminalSession {
         let socket = socket_dir.join("socket");
         let owner_handle = socket_dir.join("owner");
         std::fs::File::create(&owner_handle).context("creating terminal owner handle")?;
-        let profile = crate::os::profile_with_terminal_sockets(
+        let profile = crate::os::profile_with_terminal_resources(
             worker_profile,
             &socket_dir,
             provider_socket_dirs,
+            provider_runtime_sockets,
+            provider_runtime_files,
         )?;
         let tmux = find_tmux()?;
         std::fs::create_dir_all(registry_dir(&identity))?;

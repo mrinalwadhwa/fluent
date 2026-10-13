@@ -37,6 +37,18 @@ pub fn profile_with_terminal_sockets(
     socket_dir: &Path,
     provider_socket_dirs: &[PathBuf],
 ) -> Result<SandboxProfile> {
+    profile_with_terminal_resources(profile, socket_dir, provider_socket_dirs, &[], &[])
+}
+
+/// Grant exact provider runtime files alongside the invocation's private
+/// socket directories. Shared provider parents receive traversal only.
+pub fn profile_with_terminal_resources(
+    profile: &SandboxProfile,
+    socket_dir: &Path,
+    provider_socket_dirs: &[PathBuf],
+    provider_runtime_sockets: &[PathBuf],
+    provider_runtime_files: &[PathBuf],
+) -> Result<SandboxProfile> {
     anyhow::ensure!(
         socket_dir.is_absolute(),
         "terminal socket directory must be absolute"
@@ -90,6 +102,47 @@ pub fn profile_with_terminal_sockets(
                 "\n(allow {operation} (local unix-socket (path-prefix {})))",
                 sbpl_string(&physical)
             ));
+        }
+    }
+    for file in provider_runtime_sockets
+        .iter()
+        .chain(provider_runtime_files)
+    {
+        anyhow::ensure!(file.is_absolute(), "provider runtime file must be absolute");
+        let parent = file
+            .parent()
+            .context("provider runtime file has no parent")?;
+        let physical_parent = parent.canonicalize()?;
+        let physical_file = physical_parent.join(
+            file.file_name()
+                .context("provider runtime file has no name")?,
+        );
+        for path in parent
+            .ancestors()
+            .chain(physical_parent.ancestors())
+            .chain(std::iter::once(Path::new("/tmp")))
+            .filter(|path| path.parent().is_some())
+        {
+            content.push_str(&format!(
+                "\n(allow file-read-metadata (literal {}))",
+                sbpl_string(path)
+            ));
+        }
+        for path in [file, physical_file.as_path()] {
+            for operation in ["file-read*", "file-write*"] {
+                content.push_str(&format!(
+                    "\n(allow {operation} (literal {}))",
+                    sbpl_string(path)
+                ));
+            }
+            if provider_runtime_sockets.contains(file) {
+                for operation in ["network-bind", "network-inbound", "network-outbound"] {
+                    content.push_str(&format!(
+                        "\n(allow {operation} (local unix-socket (path-literal {})))",
+                        sbpl_string(path)
+                    ));
+                }
+            }
         }
     }
     let temp_file = NamedTempFile::with_prefix("fluent-terminal-sandbox-")?;

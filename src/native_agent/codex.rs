@@ -2,12 +2,14 @@
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::Shutdown;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{TrySendError, sync_channel};
@@ -30,6 +32,77 @@ pub struct CodexNativeTask<'a> {
     pub prompt: &'a str,
     pub session: CoderSession<'a>,
     pub launch_env: &'a [(String, String)],
+}
+
+struct CodexDaemonResources {
+    socket: PathBuf,
+    lock: PathBuf,
+    owned: bool,
+}
+
+impl CodexDaemonResources {
+    fn paths(requested_socket: &Path) -> Result<Self> {
+        ensure!(
+            requested_socket.is_absolute(),
+            "Codex socket must be absolute"
+        );
+        // Codex 0.162.0 hashes the literal --listen path, then binds beside
+        // its lock in a per-user daemon directory under /private/tmp.
+        let uid = unsafe { libc::geteuid() };
+        let parent = PathBuf::from(format!("/private/tmp/codex-daemon-{uid}"));
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(requested_socket.as_os_str().as_encoded_bytes())
+        );
+        Ok(Self {
+            socket: parent.join(&digest),
+            lock: parent.join(format!("{digest}.lock")),
+            owned: false,
+        })
+    }
+
+    fn prepare(requested_socket: &Path) -> Result<Self> {
+        let mut resources = Self::paths(requested_socket)?;
+        let parent = resources.socket.parent().unwrap();
+        match fs::DirBuilder::new().mode(0o700).create(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).context("creating Codex daemon directory"),
+        }
+        let metadata = fs::symlink_metadata(parent)?;
+        ensure!(
+            metadata.file_type().is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "Codex daemon directory is not private to the current user"
+        );
+        for path in [&resources.socket, &resources.lock] {
+            ensure!(
+                fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                "Codex daemon resource already exists: {}",
+                path.display()
+            );
+        }
+        resources.owned = true;
+        Ok(resources)
+    }
+}
+
+impl Drop for CodexDaemonResources {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        for path in [&self.socket, &self.lock] {
+            if let Ok(metadata) = fs::symlink_metadata(path)
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && (metadata.file_type().is_socket() || metadata.file_type().is_file())
+            {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 /// Check the selected executable's remote TUI and private Unix app-server
@@ -505,6 +578,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         .prefix("fluent-na-")
         .tempdir_in("/private/tmp")?;
     let app_socket = sockets.path().join("app.sock");
+    let daemon_resources = CodexDaemonResources::prepare(&app_socket)?;
     let relay_socket = sockets.path().join("relay.sock");
     let listener = UnixListener::bind(&relay_socket).context("bind native Codex relay")?;
     listener.set_nonblocking(true)?;
@@ -536,13 +610,15 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     )?;
     fs::write(&script_path, script)?;
     let shell_command = format!("/bin/sh {}", quote(&script_path.display().to_string()));
-    let mut terminal = TerminalSession::start_managed_with_sockets(
+    let mut terminal = TerminalSession::start_managed_with_resources(
         task.identity.clone(),
         task.worker_profile,
         task.workspace,
         &shell_command,
         &environment(&task),
         &[sockets.path().to_path_buf()],
+        &[daemon_resources.socket.clone()],
+        &[daemon_resources.lock.clone()],
     )?;
     let outcome = (|| -> Result<()> {
         let (thread_id, start_event) = bootstrap(&app_socket, &task)?;
@@ -652,6 +728,188 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn daemon_resources_follow_requested_socket_and_stay_distinct() {
+        let first = Path::new("/private/tmp/fluent-na-first/app.sock");
+        let second = Path::new("/private/tmp/fluent-na-second/app.sock");
+        let first_resources = CodexDaemonResources::paths(first).unwrap();
+        let second_resources = CodexDaemonResources::paths(second).unwrap();
+        assert_ne!(first_resources.socket, second_resources.socket);
+        assert_ne!(first_resources.lock, second_resources.lock);
+        assert_eq!(
+            first_resources.socket.parent(),
+            first_resources.lock.parent()
+        );
+        assert_eq!(first_resources.lock.extension().unwrap(), "lock");
+        assert!(first_resources.socket.file_name().unwrap().len() == 64);
+        assert_eq!(
+            first_resources.socket.file_name().unwrap(),
+            "c1ecc951864a9fdaacf032ec1712231b8be21dd9167980d4a65bcae3247f40af"
+        );
+    }
+
+    #[test]
+    fn daemon_cleanup_removes_only_this_invocation() {
+        let requested = tempfile::tempdir().unwrap();
+        let resources = CodexDaemonResources {
+            socket: requested.path().join("socket"),
+            lock: requested.path().join("socket.lock"),
+            owned: true,
+        };
+        let socket = resources.socket.clone();
+        let lock = resources.lock.clone();
+        let other = resources.socket.with_extension("other");
+        fs::write(&resources.socket, "owned").unwrap();
+        fs::write(&resources.lock, "owned").unwrap();
+        fs::write(&other, "unrelated").unwrap();
+        drop(resources);
+        assert!(!socket.exists());
+        assert!(!lock.exists());
+        assert_eq!(fs::read(&other).unwrap(), b"unrelated");
+        fs::remove_file(&other).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the installed Codex binary and an unsandboxed macOS host"]
+    fn installed_codex_starts_with_exact_daemon_grants() {
+        use crate::content::ContentResolver;
+        use std::os::unix::net::UnixListener;
+        use std::os::unix::process::CommandExt;
+
+        let executable = PathBuf::from(std::env::var_os("FLUENT_TEST_INSTALLED_CODEX").unwrap());
+        let private = tempfile::Builder::new()
+            .prefix("fluent-na-regression-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let terminal = tempfile::Builder::new()
+            .prefix("fluent-t-regression-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let app_socket = private.path().join("app.sock");
+        let daemon = CodexDaemonResources::prepare(&app_socket).unwrap();
+        let sibling_file = daemon.socket.with_extension("unrelated-file");
+        let sibling_socket = daemon.socket.with_extension("unrelated-socket");
+        fs::write(&sibling_file, "unrelated").unwrap();
+        let _listener = UnixListener::bind(&sibling_socket).unwrap();
+        let resolver = ContentResolver::new(None);
+        let installed_package = executable.canonicalize().unwrap();
+        let installed_package = installed_package.parent().unwrap().parent().unwrap();
+        let launcher_dir = executable.parent().unwrap();
+        let node = Command::new("/usr/bin/which").arg("node").output().unwrap();
+        assert!(node.status.success());
+        let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+        let node_dir = node.parent().unwrap();
+        let base = crate::os::render_profile_for_scoped_codex_provider_with_tools(
+            &resolver,
+            private.path(),
+            &[private.path().to_path_buf()],
+            &[],
+            private.path(),
+            &[
+                installed_package.to_path_buf(),
+                launcher_dir.to_path_buf(),
+                node_dir.to_path_buf(),
+            ],
+        )
+        .unwrap();
+        let profile = crate::os::profile_with_terminal_resources(
+            &base,
+            terminal.path(),
+            &[private.path().to_path_buf()],
+            &[daemon.socket.clone()],
+            &[daemon.lock.clone()],
+        )
+        .unwrap();
+        let mut server = crate::os::command_under_profile(&profile, &executable);
+        server.args([
+            "--disable",
+            "hooks",
+            "app-server",
+            "--listen",
+            &format!("unix://{}", app_socket.display()),
+        ]);
+        server.env_clear();
+        server.env("HOME", private.path());
+        server.env("CODEX_HOME", private.path());
+        server.env("PATH", std::env::var_os("PATH").unwrap());
+        server.current_dir(private.path());
+        server.process_group(0);
+        let mut child = server
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let deadline = Instant::now() + Duration::from_secs(12);
+            while !app_socket.exists() && Instant::now() < deadline {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "installed Codex exited before binding"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(
+                app_socket.exists(),
+                "installed Codex did not bind requested socket"
+            );
+            assert!(
+                daemon.socket.exists(),
+                "installed Codex did not bind daemon socket"
+            );
+            assert!(
+                daemon.lock.exists(),
+                "installed Codex did not create daemon lock"
+            );
+            assert_eq!(
+                fs::metadata(&app_socket).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            UnixStream::connect(&app_socket).unwrap();
+            assert!(child.try_wait().unwrap().is_none());
+
+            let check = r#"import errno, os, socket, sys
+file_path, socket_path = sys.argv[1:]
+for operation in (lambda: open(file_path).read(),
+                  lambda: open(file_path, 'w').write('wrong'),
+                  lambda: socket.socket(socket.AF_UNIX).connect(socket_path)):
+    try:
+        operation()
+    except OSError as error:
+        assert error.errno in (errno.EPERM, errno.EACCES), error
+    else:
+        raise AssertionError('unrelated daemon resource was accessible')
+"#;
+            let output = crate::os::command_under_profile(&profile, Path::new("/usr/bin/python3"))
+                .args([
+                    "-c",
+                    check,
+                    sibling_file.to_str().unwrap(),
+                    sibling_socket.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }));
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        let _ = fs::remove_file(&sibling_socket);
+        let _ = fs::remove_file(&sibling_file);
+        if let Err(error) = result {
+            eprintln!(
+                "installed Codex stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::panic::resume_unwind(error);
+        }
+    }
 
     #[test]
     fn capability_check_requires_both_native_protocol_surfaces() {

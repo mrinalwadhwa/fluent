@@ -87,6 +87,20 @@ printf 'terminal-cwd-status=%s\n' "$terminal_status" | tee "$host_output/termina
 tail -n 30 "$host_output/terminal-cwd.log"
 test "$terminal_status" -eq 0
 
+# Start the installed app-server without credentials or protocol/model calls.
+# This checks its real daemon lock/socket path before any paid provider work.
+export FLUENT_TEST_INSTALLED_CODEX="$(command -v codex)"
+set +e
+cargo nextest run --offline --features test-support --lib \
+  --no-tests fail --run-ignored only --success-output immediate \
+  -E 'test(installed_codex_starts_with_exact_daemon_grants)' \
+  > "$host_output/codex-daemon-startup.log" 2>&1
+codex_startup_status=$?
+set -e
+printf 'codex-daemon-startup-status=%s\n' "$codex_startup_status" | tee "$host_output/codex-daemon-startup-status.txt"
+tail -n 30 "$host_output/codex-daemon-startup.log"
+test "$codex_startup_status" -eq 0
+
 cargo nextest run --offline --features test-support --test native_agent_tasks \
   --no-tests fail --success-output immediate \
   -E 'test(pi_installed_runner_compacts_before_queued_continuation) | test(pi_installed_runner_closes_input_after_receiver_failure)' \
