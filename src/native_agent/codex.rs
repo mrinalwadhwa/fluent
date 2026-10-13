@@ -641,6 +641,28 @@ fn trace_relay<T: Write>(
     method: Option<&str>,
     input_sequence: u64,
 ) -> Result<()> {
+    trace_relay_with_read_flag(
+        trace,
+        generation,
+        thread_id,
+        direction,
+        outcome,
+        method,
+        input_sequence,
+        None,
+    )
+}
+
+fn trace_relay_with_read_flag<T: Write>(
+    trace: &Mutex<(T, usize)>,
+    generation: &str,
+    thread_id: &str,
+    direction: &str,
+    outcome: &str,
+    method: Option<&str>,
+    input_sequence: u64,
+    include_turns: Option<bool>,
+) -> Result<()> {
     let mut trace = trace
         .lock()
         .map_err(|_| anyhow::anyhow!("Codex relay trace lock poisoned"))?;
@@ -662,6 +684,7 @@ fn trace_relay<T: Write>(
             "outcome": outcome,
             "method": safe_method.unwrap_or("<other>"),
             "input_sequence": input_sequence,
+            "include_turns": include_turns,
         }),
     )?;
     trace.0.write_all(b"\n")?;
@@ -713,6 +736,10 @@ fn fresh_thread_display_read(start: &Value, request: &Value, assigned: &str) -> 
     ensure!(
         request["params"]["threadId"] == assigned,
         "Codex TUI read another thread"
+    );
+    ensure!(
+        request["params"]["includeTurns"] == true,
+        "Codex TUI display read did not request thread history"
     );
     let thread = &start["result"]["thread"];
     ensure!(
@@ -910,7 +937,9 @@ where
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
                             continue;
                         }
-                        if responses.fresh && *resumed && method == "thread/read" && next_sequence == 0 {
+                        if responses.fresh && *resumed && method == "thread/read"
+                            && request["params"]["includeTurns"] == true
+                            && next_sequence == 0 {
                             let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
                             bootstrap_display.try_send(reply.to_string())
                                 .map_err(|error| anyhow::anyhow!("Codex TUI display-only read could not drain: {error}"))?;
@@ -925,7 +954,11 @@ where
                         trace_relay(&request_trace, generation, thread_id, "tui-to-app", "send-error", Some(method), next_sequence)?;
                         return Err(error).with_context(|| format!("forwarding native Codex TUI {method} to app-server"));
                     }
-                    trace_relay(&request_trace, generation, thread_id, "tui-to-app", "forwarded", Some(method), next_sequence)?;
+                    trace_relay_with_read_flag(
+                        &request_trace, generation, thread_id, "tui-to-app", "forwarded",
+                        Some(method), next_sequence,
+                        if method == "thread/read" { request["params"]["includeTurns"].as_bool() } else { None },
+                    )?;
                 }
             })();
             let _ = client_abort.shutdown(Shutdown::Both);
@@ -1512,6 +1545,7 @@ mod tests {
     struct OwnedAppServerFixture {
         child: Option<std::process::Child>,
         group: i32,
+        verified_group: bool,
     }
 
     #[cfg(unix)]
@@ -1556,51 +1590,72 @@ mod tests {
             let mut fixture = Self {
                 child: Some(child),
                 group,
+                verified_group: false,
             };
             // Keep the leader unreaped until both signals are sent. Its PID
             // cannot be reused as another process group's ID in that time.
             let actual = unsafe { libc::getpgid(group) };
             if actual != group || group == unsafe { libc::getpgrp() } {
-                if let Some(child) = fixture.child.as_mut() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                fixture.child = None;
-                anyhow::bail!("app-server fixture did not own a separate process group");
+                let cleanup = fixture.finish();
+                anyhow::bail!(
+                    "app-server fixture did not own a separate process group: getpgid={actual}; cleanup: {cleanup:?}"
+                );
             }
+            fixture.verified_group = true;
             Ok(fixture)
         }
 
         fn finish(&mut self) -> Result<String> {
+            self.finish_with(
+                |group, signal| {
+                    if unsafe { libc::kill(-group, signal) } == -1 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |child| child.kill(),
+            )
+        }
+
+        fn finish_with(
+            &mut self,
+            mut signal_group: impl FnMut(i32, i32) -> io::Result<()>,
+            mut kill_leader: impl FnMut(&mut std::process::Child) -> io::Result<()>,
+        ) -> Result<String> {
             let Some(child) = self.child.as_mut() else {
                 return Ok(String::new());
             };
-            // Keep the leader unreaped while signalling: its PID reserves the
-            // group number, including when the leader is already a zombie.
+            // The constructor verified this Child's private group. Keep its
+            // exact PID unreaped until all group signals and probes finish;
+            // getpgid may return ESRCH for an unreaped zombie on macOS.
             let mut errors = Vec::new();
             let mut permission_errors = Vec::new();
-            let valid_group = self.group > 0 && self.group != unsafe { libc::getpgrp() };
-            let actual = if valid_group {
+            let owned_group = self.verified_group
+                && self.group > 0
+                && self.group == child.id() as i32
+                && self.group != unsafe { libc::getpgrp() };
+            let actual = if owned_group {
                 unsafe { libc::getpgid(self.group) }
             } else {
-                errors.push("unsafe fixture group".into());
                 -1
             };
-            if actual != self.group {
+            let group_identity_ok = owned_group
+                && (actual == self.group
+                    || (actual == -1
+                        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)));
+            if !group_identity_ok {
                 errors.push(format!("fixture group identity changed: {actual}"));
-                if let Err(error) = child.kill()
+                if let Err(error) = kill_leader(child)
                     && error.kind() != io::ErrorKind::InvalidInput
                 {
-                    errors.push(format!(
-                        "kill fixture leader after group identity loss: {error}"
-                    ));
+                    errors.push(format!("kill fixture leader after identity loss: {error}"));
                 }
             }
             // The launcher may have exited while a reparented process still
             // holds stderr. Send both signals before reaping the leader.
             for signal in [libc::SIGTERM, libc::SIGKILL] {
-                if actual == self.group && unsafe { libc::kill(-self.group, signal) } == -1 {
-                    let error = io::Error::last_os_error();
+                if group_identity_ok && let Err(error) = signal_group(self.group, signal) {
                     if error.raw_os_error() != Some(libc::ESRCH) {
                         let diagnostic =
                             format!("signal owned app-server fixture group with {signal}: {error}");
@@ -1615,63 +1670,74 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(150));
                 }
             }
+            // Probe while the Child still reserves the group number. A zero
+            // probe after reaping could address a different group's identity.
+            let group_probe = if group_identity_ok {
+                Some(signal_group(self.group, 0))
+            } else {
+                None
+            };
+            if matches!(group_probe, Some(Ok(()))) {
+                errors.push("owned app-server fixture group survived cleanup".into());
+            }
             let deadline = Instant::now() + Duration::from_secs(2);
+            let mut reaped = false;
+            let mut needed_leader_kill = false;
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(_)) => {
+                        reaped = true;
+                        break;
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         errors.push(format!("reap app-server fixture leader: {error}"));
-                        if let Err(kill_error) = child.kill() {
-                            errors.push(format!(
-                                "kill fixture leader after wait failure: {kill_error}"
-                            ));
-                        }
-                        if let Err(wait_error) = child.wait() {
-                            errors.push(format!(
-                                "reap fixture leader after wait failure: {wait_error}"
-                            ));
-                        }
                         break;
                     }
                 }
                 if Instant::now() >= deadline {
                     errors.push("app-server fixture leader did not exit".into());
-                    if let Err(error) = child.kill() {
+                    needed_leader_kill = true;
+                    if let Err(error) = kill_leader(child) {
                         errors.push(format!("kill app-server fixture leader: {error}"));
                     }
-                    if let Err(error) = child.wait() {
-                        errors.push(format!(
-                            "reap app-server fixture leader after kill: {error}"
-                        ));
+                    let kill_deadline = Instant::now() + Duration::from_millis(250);
+                    while Instant::now() < kill_deadline {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                reaped = true;
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                            Err(error) => {
+                                errors.push(format!(
+                                    "reap app-server fixture leader after kill: {error}"
+                                ));
+                                break;
+                            }
+                        }
                     }
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            if !reaped {
+                errors.push("app-server fixture leader remains owned and unreaped".into());
+                anyhow::bail!("{}", errors.join("; "));
+            }
             let stderr = child.stderr.take();
             self.child = None;
-            // Once reaped, never signal this numeric group again. It may be
-            // reused. An EPERM caused solely by the unreaped zombie is safe
-            // only when no process still belongs to the group.
-            let group_probe = if valid_group {
-                unsafe { libc::kill(-self.group, 0) }
-            } else {
-                -1
-            };
-            let group_absent = valid_group
-                && group_probe == -1
-                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-            if !group_absent {
+            // macOS may return EPERM when TERM has already left only an
+            // unreaped zombie. Retain failures if the group survived or the
+            // leader needed a separate kill after the group signals.
+            if needed_leader_kill || matches!(group_probe, Some(Ok(()))) {
                 errors.extend(permission_errors);
             }
-            if group_probe == 0 {
-                errors.push("owned app-server fixture group survived cleanup".into());
-            } else if !group_absent && valid_group {
-                errors.push(format!(
-                    "inspect owned app-server fixture group after reaping: {}",
-                    io::Error::last_os_error()
-                ));
+            if let Some(Err(error)) = group_probe
+                && error.raw_os_error() != Some(libc::ESRCH)
+                && error.raw_os_error() != Some(libc::EPERM)
+            {
+                errors.push(format!("inspect owned app-server fixture group: {error}"));
             }
             let stderr = match stderr {
                 Some(stderr) => match read_fixture_stderr_bounded(stderr) {
@@ -1771,6 +1837,56 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn installed_handoff_trace_ready(trace: &str) -> Result<bool> {
+        let events = trace
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let resume = events.iter().position(|event| {
+            event["method"] == "thread/resume" && event["outcome"] == "bootstrap-replied"
+        });
+        let Some(resume) = resume else {
+            return Ok(false);
+        };
+        let read = events.iter().enumerate().any(|(index, event)| {
+            index > resume
+                && event["method"] == "thread/read"
+                && event["outcome"] == "ui-only-replied"
+                && event["input_sequence"] == 0
+        });
+        ensure!(
+            !events.iter().any(|event| {
+                event["method"] == "thread/resume" && event["outcome"] == "forwarded"
+            }),
+            "empty Codex thread was resumed through the app-server"
+        );
+        ensure!(
+            !events.iter().any(|event| {
+                event["method"] == "turn/start" && event["outcome"] == "forwarded"
+            }),
+            "credential-free TUI submitted a model turn"
+        );
+        ensure!(
+            !events.iter().skip(resume + 1).any(|event| {
+                event["method"] == "thread/turns/list"
+                    && event["outcome"] == "forwarded"
+                    && event["input_sequence"] == 0
+            }),
+            "empty Codex thread requested a paginated history page"
+        );
+        ensure!(
+            !events.iter().skip(resume + 1).any(|event| {
+                event["method"] == "thread/read"
+                    && event["outcome"] == "forwarded"
+                    && event["include_turns"] == true
+                    && event["input_sequence"] == 0
+            }),
+            "empty Codex thread attempted provider history lookup"
+        );
+        Ok(read)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn app_server_fixture_bounds_stderr_held_by_exited_launcher() {
         let mut command = Command::new("/bin/sh");
@@ -1861,24 +1977,103 @@ mod tests {
             .stderr(std::process::Stdio::piped());
         let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        assert!(fixture.finish().is_ok());
+        fixture.finish().unwrap();
         assert!(fixture.child.is_none());
     }
 
     #[cfg(unix)]
     #[test]
     fn app_server_fixture_reports_changed_group_without_signalling_it() {
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("exit 0")
+        let mut owner_command = Command::new("/bin/sleep");
+        owner_command
+            .arg("60")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
-        fixture.group += 1;
+        let mut fixture = OwnedAppServerFixture::spawn(&mut owner_command).unwrap();
+        let mut sentinel_command = Command::new("/bin/sleep");
+        sentinel_command
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut sentinel = OwnedAppServerFixture::spawn(&mut sentinel_command).unwrap();
+        fixture.group = sentinel.group;
         let error = fixture.finish().unwrap_err().to_string();
         assert!(error.contains("fixture group identity changed"), "{error}");
         assert!(fixture.child.is_none());
+        assert!(
+            sentinel
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let sentinel_child = sentinel.child.as_mut().unwrap();
+        sentinel_child.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while sentinel_child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(sentinel_child.try_wait().unwrap().is_some());
+        sentinel.child = None;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_fixture_denied_kill_is_bounded_and_retains_child() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        let start = Instant::now();
+        let error = fixture
+            .finish_with(
+                |_, _| Err(io::Error::from_raw_os_error(libc::EPERM)),
+                |_| Err(io::Error::from_raw_os_error(libc::EPERM)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(start.elapsed() < Duration::from_secs(3), "{error}");
+        assert!(
+            error.contains("Permission denied") || error.contains("Operation not permitted"),
+            "{error}"
+        );
+        assert!(error.contains("remains owned and unreaped"), "{error}");
+        let child = fixture.child.as_mut().unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(child.try_wait().unwrap().is_some());
+        fixture.child = None;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_handoff_allows_metadata_read_but_rejects_history_lookup() {
+        let event = |method, outcome, include_turns: Option<bool>| {
+            json!({"method":method,"outcome":outcome,"include_turns":include_turns,"input_sequence":0}).to_string()
+        };
+        let trace = [
+            event("thread/read", "forwarded", Some(false)),
+            event("thread/resume", "bootstrap-replied", None),
+            event("thread/read", "forwarded", Some(false)),
+            event("thread/read", "ui-only-replied", None),
+        ]
+        .join("\n");
+        assert!(installed_handoff_trace_ready(&trace).unwrap());
+        let bad = format!("{trace}\n{}", event("thread/read", "forwarded", Some(true)));
+        assert!(
+            installed_handoff_trace_ready(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("provider history lookup")
+        );
     }
 
     #[test]
@@ -1909,6 +2104,8 @@ mod tests {
             json!({"id":7,"result":{"thread":{"id":"assigned","turns":[],"historyMode":"legacy"}}})
         );
         assert!(fresh_thread_display_read(&start, &read, "other").is_err());
+        let metadata = json!({"id":8,"params":{"threadId":"assigned","includeTurns":false}});
+        assert!(fresh_thread_display_read(&start, &metadata, "assigned").is_err());
         let mut materialized = start;
         materialized["result"]["thread"]["turns"] = json!([{"id":"real-turn"}]);
         assert!(fresh_thread_display_read(&materialized, &read, "assigned").is_err());
@@ -2581,67 +2778,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(12);
             loop {
                 let trace = fs::read_to_string(&trace_path).unwrap_or_default();
-                let resumed = trace.lines().any(|line| {
-                    serde_json::from_str::<Value>(line)
-                        .ok()
-                        .is_some_and(|event| {
-                            event["method"] == "thread/resume"
-                                && event["outcome"] == "bootstrap-replied"
-                        })
-                });
-                let read = trace.lines().any(|line| {
-                    serde_json::from_str::<Value>(line)
-                        .ok()
-                        .is_some_and(|event| {
-                            event["method"] == "thread/read"
-                                && event["outcome"] == "ui-only-replied"
-                        })
-                });
-                if resumed && read {
-                    ensure!(
-                        !trace.lines().any(|line| {
-                            serde_json::from_str::<Value>(line)
-                                .ok()
-                                .is_some_and(|event| {
-                                    event["method"] == "thread/resume"
-                                        && event["outcome"] == "forwarded"
-                                })
-                        }),
-                        "empty Codex thread was resumed through the app-server"
-                    );
-                    ensure!(
-                        !trace.lines().any(|line| {
-                            serde_json::from_str::<Value>(line)
-                                .ok()
-                                .is_some_and(|event| {
-                                    event["method"] == "turn/start"
-                                        && event["outcome"] == "forwarded"
-                                })
-                        }),
-                        "credential-free TUI submitted a model turn"
-                    );
-                    ensure!(
-                        !trace.lines().any(|line| {
-                            serde_json::from_str::<Value>(line)
-                                .ok()
-                                .is_some_and(|event| {
-                                    event["method"] == "thread/turns/list"
-                                        && event["outcome"] == "forwarded"
-                                })
-                        }),
-                        "empty Codex thread requested a paginated history page"
-                    );
-                    ensure!(
-                        !trace.lines().any(|line| {
-                            serde_json::from_str::<Value>(line)
-                                .ok()
-                                .is_some_and(|event| {
-                                    event["method"] == "thread/read"
-                                        && event["outcome"] == "forwarded"
-                                })
-                        }),
-                        "empty Codex thread attempted provider history lookup"
-                    );
+                if installed_handoff_trace_ready(&trace)? {
                     break;
                 }
                 ensure!(
