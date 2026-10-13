@@ -434,6 +434,10 @@ fn bootstrap_protocol(
                 "cwd": workspace,
                 "model": model,
                 "ephemeral": session == CoderSession::Ephemeral,
+                // An empty thread has no rollout to page yet. The installed
+                // TUI can display a legacy empty history and then own its
+                // first real user turn on this same app-server connection.
+                "historyMode": "legacy",
                 "approvalPolicy": "never",
                 "sandbox": "danger-full-access",
             }),
@@ -1459,7 +1463,231 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use std::io::{self, Read};
+
+    #[cfg(unix)]
+    struct OwnedAppServerFixture {
+        child: Option<std::process::Child>,
+        group: i32,
+    }
+
+    #[cfg(unix)]
+    fn read_fixture_stderr_bounded(mut stderr: std::process::ChildStderr) -> Result<String> {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&stderr);
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        ensure!(flags >= 0, "inspect app-server fixture stderr flags");
+        ensure!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
+            "make app-server fixture stderr nonblocking"
+        );
+        let mut bytes = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            let mut chunk = [0u8; 4096];
+            match stderr.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error).context("read app-server fixture stderr"),
+            }
+            if bytes.len() >= 64 * 1024 {
+                break;
+            }
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[cfg(unix)]
+    impl OwnedAppServerFixture {
+        fn spawn(command: &mut Command) -> Result<Self> {
+            use std::os::unix::process::CommandExt;
+
+            command.process_group(0);
+            let child = command.spawn()?;
+            let group = i32::try_from(child.id())?;
+            let mut fixture = Self {
+                child: Some(child),
+                group,
+            };
+            // Keep the leader unreaped until both signals are sent. Its PID
+            // cannot be reused as another process group's ID in that time.
+            let actual = unsafe { libc::getpgid(group) };
+            if actual != group || group == unsafe { libc::getpgrp() } {
+                if let Some(child) = fixture.child.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                fixture.child = None;
+                anyhow::bail!("app-server fixture did not own a separate process group");
+            }
+            Ok(fixture)
+        }
+
+        fn finish(&mut self) -> Result<String> {
+            let Some(child) = self.child.as_mut() else {
+                return Ok(String::new());
+            };
+            ensure!(
+                self.group > 0 && self.group != unsafe { libc::getpgrp() },
+                "unsafe fixture group"
+            );
+            // The launcher may have exited while its reparented daemon still
+            // holds stderr. Signal the whole owned group before reading it.
+            for signal in [libc::SIGTERM, libc::SIGKILL] {
+                let result = unsafe { libc::kill(-self.group, signal) };
+                if result == -1 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error).context("signal owned app-server fixture group");
+                    }
+                }
+                if signal == libc::SIGTERM {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if child.try_wait()?.is_some() {
+                    break;
+                }
+                ensure!(
+                    Instant::now() < deadline,
+                    "app-server fixture leader did not exit"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let stderr = child.stderr.take();
+            self.child = None;
+            let Some(stderr) = stderr else {
+                return Ok(String::new());
+            };
+            read_fixture_stderr_bounded(stderr)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for OwnedAppServerFixture {
+        fn drop(&mut self) {
+            if self.child.is_some() {
+                let _ = self.finish();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_private_tmux_fixture(socket: &Path) -> Result<()> {
+        let mut client = Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .arg("kill-server")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if client.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let _ = client.kill();
+                let _ = client.try_wait();
+                anyhow::bail!("private tmux cleanup exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn join_fixture_relay_bounded(
+        handle: std::thread::JoinHandle<Result<()>>,
+        abort: Option<UnixStream>,
+    ) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(13);
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !handle.is_finished() {
+            if let Some(abort) = abort {
+                let _ = abort.shutdown(Shutdown::Both);
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        ensure!(
+            handle.is_finished(),
+            "installed Codex relay did not stop after cleanup"
+        );
+        let _ = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("installed Codex relay panicked"))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_fixture_bounds_stderr_held_by_exited_launcher() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("sleep 1 >&2 & exit 0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let launcher_started = Instant::now();
+        child.wait().unwrap();
+        assert!(launcher_started.elapsed() < Duration::from_millis(750));
+        let start = Instant::now();
+        read_fixture_stderr_bounded(stderr).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(600));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires unsandboxed process-group signals"]
+    fn app_server_fixture_cleans_reparented_stderr_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let pid_path = root.path().join("daemon.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; sleep 60 >&2 & echo $! > \"$1\"; exit 0")
+            .arg("fixture")
+            .arg(&pid_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_path.exists());
+        let daemon_pid: i32 = fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::getpgid(daemon_pid) }, fixture.group);
+        let start = Instant::now();
+        fixture.finish().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(daemon_pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(unsafe { libc::kill(daemon_pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
 
     #[test]
     fn client_exit_diagnostic_keeps_identity_and_hides_other_pane_text() {
@@ -1507,6 +1735,52 @@ mod tests {
             "features": {"hooks": false}
         }}});
         socket.send(Message::Text(response.to_string())).unwrap();
+    }
+
+    fn configure_no_auth_tui_fixture(home: &Path) -> Result<()> {
+        let path = home.join("config.toml");
+        let mut config: toml::Table = fs::read_to_string(&path)?.parse()?;
+        config.insert(
+            "model_provider".into(),
+            toml::Value::String("fixture-local".into()),
+        );
+        let provider: toml::Table = toml::from_str(
+            "name = 'Fixture local'\nbase_url = 'http://127.0.0.1:9/v1'\nwire_api = 'responses'\nrequires_openai_auth = false\n",
+        )?;
+        config.insert(
+            "model_providers".into(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "fixture-local".into(),
+                toml::Value::Table(provider),
+            )])),
+        );
+        fs::write(path, toml::to_string(&config)?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn installed_tui_fixture_selects_private_no_auth_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        prepare_native_config(&home, &workspace).unwrap();
+        configure_no_auth_tui_fixture(&home).unwrap();
+        let config: toml::Table = fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some("fixture-local"));
+        assert_eq!(
+            config["model_providers"]["fixture-local"]["requires_openai_auth"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            config["model_providers"]["fixture-local"]["base_url"].as_str(),
+            Some("http://127.0.0.1:9/v1")
+        );
     }
     use std::os::unix::fs::PermissionsExt;
 
@@ -1954,6 +2228,10 @@ mod tests {
         let workspace = private.path().join("assigned-worktree");
         fs::create_dir(&workspace).unwrap();
         let workspace = prepare_native_config(private.path(), &workspace).unwrap();
+        // Keep this installed TUI test credential-free, including provider
+        // model prewarm. The endpoint is loopback only and admission below
+        // rejects any model turn before it can reach the provider.
+        configure_no_auth_tui_fixture(private.path()).unwrap();
         let app_socket = private.path().join("app.sock");
         let daemon = CodexDaemonResources::prepare(&app_socket).unwrap();
         let model = std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap();
@@ -1961,41 +2239,47 @@ mod tests {
         let mut server =
             app_server_command(&executable, &model, Some(&effort), &app_socket).unwrap();
         server
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
             .env("HOME", private.path())
             .env("CODEX_HOME", private.path());
         server.current_dir(&workspace);
-        let mut child = server
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = OwnedAppServerFixture::spawn(
+            server
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
         let tmux_socket = private.path().join("tmux.sock");
         let relay_socket = private.path().join("relay.sock");
         let trace_path = private.path().join("relay-trace.jsonl");
         let mut relay_thread = None;
+        let mut relay_abort = None;
         let outcome = (|| -> Result<()> {
             let listener = UnixListener::bind(&relay_socket)?;
             listener.set_nonblocking(true)?;
             let deadline = Instant::now() + Duration::from_secs(12);
             while !app_socket.exists() && Instant::now() < deadline {
-                ensure!(
-                    child.try_wait()?.is_none(),
-                    "installed Codex exited before binding"
-                );
                 std::thread::sleep(Duration::from_millis(25));
             }
             ensure!(
                 app_socket.exists() && daemon.socket.exists(),
                 "Codex socket absent"
             );
-            let (thread_id, start, initialized, owner) = bootstrap(
+            let (thread_id, start, initialized, mut owner) = bootstrap(
                 &app_socket,
                 &workspace,
                 &model,
                 Some(&effort),
                 CoderSession::FreshPersistent,
             )?;
+            let account = request(&mut owner, 4, "account/read", json!({}))?;
+            ensure!(
+                account["result"]["requiresOpenaiAuth"] == false,
+                "credential-free fixture still requires OpenAI authentication"
+            );
+            relay_abort = Some(owner.get_ref().try_clone()?);
             let coder = CodexCode {
                 sandbox_profile: None,
                 trusted_sandbox: false,
@@ -2014,9 +2298,10 @@ mod tests {
             fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\nexport HOME={}\nexport CODEX_HOME={}\nexec {}\n",
+                    "#!/bin/sh\nexec /usr/bin/env -i HOME={} CODEX_HOME={} PATH={} TERM=xterm-256color {}\n",
                     quote(&private.path().display().to_string()),
                     quote(&private.path().display().to_string()),
+                    quote(&std::env::var("PATH")?),
                     command_line(&tui_command)?,
                 ),
             )?;
@@ -2099,6 +2384,17 @@ mod tests {
                         }),
                         "credential-free TUI submitted a model turn"
                     );
+                    ensure!(
+                        !trace.lines().any(|line| {
+                            serde_json::from_str::<Value>(line)
+                                .ok()
+                                .is_some_and(|event| {
+                                    event["method"] == "thread/turns/list"
+                                        && event["outcome"] == "forwarded"
+                                })
+                        }),
+                        "empty Codex thread requested a paginated history page"
+                    );
                     break;
                 }
                 ensure!(
@@ -2130,24 +2426,30 @@ mod tests {
                 !String::from_utf8_lossy(&pane.stdout).contains("Failed to resume task"),
                 "installed Codex TUI rejected its assigned thread"
             );
+            ensure!(
+                !String::from_utf8_lossy(&pane.stdout)
+                    .contains("failed to load a bounded thread history page"),
+                "installed Codex TUI could not load its empty thread"
+            );
+            ensure!(
+                !relay_thread.as_ref().unwrap().is_finished(),
+                "installed Codex relay stopped before TUI handoff settled"
+            );
             Ok(())
         })();
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&tmux_socket)
-            .args(["kill-session", "-t", "handoff"])
-            .status();
-        if let Some(relay_thread) = relay_thread {
-            let _ = relay_thread.join();
-        }
-        let _ = child.kill();
-        let output = child.wait_with_output().unwrap();
+        let tmux_cleanup = stop_private_tmux_fixture(&tmux_socket);
+        let daemon_cleanup = child.finish();
+        let relay_cleanup = relay_thread
+            .map(|relay_thread| join_fixture_relay_bounded(relay_thread, relay_abort))
+            .unwrap_or(Ok(()));
         if outcome.is_err() {
-            eprintln!(
-                "installed Codex stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            if let Ok(stderr) = &daemon_cleanup {
+                eprintln!("installed Codex stderr: {stderr}");
+            }
         }
+        tmux_cleanup.unwrap();
+        daemon_cleanup.unwrap();
+        relay_cleanup.unwrap();
         outcome.unwrap();
     }
 
@@ -2246,6 +2548,7 @@ mod tests {
             assert_eq!(start["method"], "thread/start");
             assert_eq!(start["params"]["model"], "gpt-assigned");
             assert_eq!(start["params"]["approvalPolicy"], "never");
+            assert_eq!(start["params"]["historyMode"], "legacy");
             socket
                 .send(Message::Text(
                     "{\"id\":3,\"result\":{\"thread\":{\"id\":\"assigned-thread\"}}}".into(),
@@ -2290,7 +2593,8 @@ mod tests {
             let start: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
-            socket.send(Message::Text(json!({"id":3,"result":{"thread":{"id":"assigned-thread"},"model":"gpt-assigned"}}).to_string())).unwrap();
+            assert_eq!(start["params"]["historyMode"], "legacy");
+            socket.send(Message::Text(json!({"id":3,"result":{"thread":{"id":"assigned-thread","historyMode":"legacy","turns":[]},"model":"gpt-assigned"}}).to_string())).unwrap();
             let turn: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(
@@ -2359,8 +2663,8 @@ mod tests {
                 "thread/resume",
                 json!({"threadId":"assigned-thread"})
             )
-            .unwrap()["result"]["thread"]["id"],
-            "assigned-thread"
+            .unwrap()["result"]["thread"]["historyMode"],
+            "legacy"
         );
         assert_eq!(
             request(
@@ -2379,11 +2683,18 @@ mod tests {
                 ..
             }
         ));
-        fake_release.send(()).unwrap();
         let _ = tui.close(None);
-        drop(tui);
         let relay_result = relay_thread.join().unwrap();
-        assert!(relay_result.is_ok(), "{relay_result:?}");
+        fake_release.send(()).unwrap();
+        drop(tui);
+        if let Err(error) = relay_result {
+            // Closing one side of the paired fixture sockets can reset the
+            // other after the accepted turn has already been observed.
+            assert!(
+                format!("{error:#}").contains("Connection reset without closing handshake"),
+                "{error:#}"
+            );
+        }
         fake.join().unwrap();
     }
 
@@ -2405,6 +2716,7 @@ mod tests {
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
             assert_eq!(start["params"]["ephemeral"], true);
+            assert_eq!(start["params"]["historyMode"], "legacy");
             socket
                 .send(Message::Text(
                     "{\"id\":3,\"result\":{\"thread\":{\"id\":\"review-thread\"}}}".into(),
