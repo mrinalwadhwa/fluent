@@ -365,13 +365,16 @@ fn bootstrap_protocol(
     model: &str,
     effort: Option<&str>,
     session: CoderSession<'_>,
-) -> Result<(String, Value)> {
-    request(
+) -> Result<(String, Value, Value)> {
+    // The native TUI uses this same connection after bootstrap, including its
+    // experimental thread and turn requests.
+    let initialized = request(
         socket,
         1,
         "initialize",
         json!({
-            "clientInfo": {"name": "fluent-native-task", "version": env!("CARGO_PKG_VERSION")}
+            "clientInfo": {"name": "fluent-native-task", "version": env!("CARGO_PKG_VERSION")},
+            "capabilities": {"experimentalApi": true}
         }),
     )?;
     socket.send(Message::Text("{\"method\":\"initialized\"}".into()))?;
@@ -445,10 +448,16 @@ fn bootstrap_protocol(
             "Codex resumed another Task conversation"
         );
     }
-    Ok((thread_id.to_owned(), result))
+    Ok((thread_id.to_owned(), result, initialized))
 }
 
-fn bootstrap(app_socket: &Path, task: &CodexNativeTask<'_>) -> Result<(String, Value)> {
+fn bootstrap(
+    app_socket: &Path,
+    workspace: &Path,
+    model: &str,
+    effort: Option<&str>,
+    session: CoderSession<'_>,
+) -> Result<(String, Value, Value, WebSocket<UnixStream>)> {
     let deadline = Instant::now() + Duration::from_secs(12);
     while !app_socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -462,13 +471,9 @@ fn bootstrap(app_socket: &Path, task: &CodexNativeTask<'_>) -> Result<(String, V
     stream.set_write_timeout(Some(Duration::from_secs(12)))?;
     let (mut socket, _) = tungstenite::client("ws://localhost/", stream)
         .map_err(|error| anyhow::anyhow!("Codex app-server WebSocket handshake failed: {error}"))?;
-    bootstrap_protocol(
-        &mut socket,
-        task.workspace,
-        task.model,
-        task.effort,
-        task.session,
-    )
+    let (thread_id, result, initialized) =
+        bootstrap_protocol(&mut socket, workspace, model, effort, session)?;
+    Ok((thread_id, result, initialized, socket))
 }
 
 fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
@@ -668,9 +673,48 @@ pub fn relay_codex_websockets_with_trace<W, F, T>(
     generation: &str,
     thread_id: &str,
     admission: Arc<NativeAdmission>,
+    evidence: W,
+    on_completion: F,
+    trace: T,
+) -> Result<()>
+where
+    W: Write + Send,
+    F: FnMut(Completion) -> Result<()> + Send,
+    T: Write + Send,
+{
+    relay_codex_websockets_with_handoff(
+        client,
+        server,
+        generation,
+        thread_id,
+        admission,
+        evidence,
+        on_completion,
+        trace,
+        None,
+    )
+}
+
+struct CodexHandoff {
+    initialized: Value,
+    thread: Value,
+}
+
+/// The TUI opens a new connection to Fluent, but the app-server connection
+/// that started its empty thread must remain loaded. Codex cannot resume that
+/// thread by id until its first real turn creates a rollout. Complete the
+/// TUI's handshake from the provider's original responses, then forward its
+/// first prompt and later requests over the subscribed bootstrap connection.
+fn relay_codex_websockets_with_handoff<W, F, T>(
+    client: WebSocket<UnixStream>,
+    server: WebSocket<UnixStream>,
+    generation: &str,
+    thread_id: &str,
+    admission: Arc<NativeAdmission>,
     mut evidence: W,
     mut on_completion: F,
     trace: T,
+    handoff: Option<CodexHandoff>,
 ) -> Result<()>
 where
     W: Write + Send,
@@ -743,7 +787,9 @@ where
         let upstream_server = Arc::clone(&server);
         let request_gate = Arc::clone(&gate);
         let request_trace = Arc::clone(&trace);
+        let bootstrap_display = display_tx.clone();
         let upstream = scope.spawn(move || -> Result<()> {
+            let mut handoff = handoff.map(|handoff| (handoff, false, false, false));
             let result = (|| {
                 loop {
                     let line = match read_socket(&upstream_client) {
@@ -798,6 +844,46 @@ where
                             continue;
                         }
                         return Err(error);
+                    }
+                    if let Some((responses, initialized, acknowledged, resumed)) = &mut handoff {
+                        let reply = match method {
+                            "initialize" => {
+                                ensure!(!*initialized, "Codex TUI initialized twice");
+                                *initialized = true;
+                                Some(&responses.initialized)
+                            }
+                            "initialized" => {
+                                ensure!(*initialized && !*acknowledged, "Codex TUI initialization order changed");
+                                *acknowledged = true;
+                                None
+                            }
+                            "thread/resume" => {
+                                ensure!(*acknowledged && !*resumed, "Codex TUI resumed outside its bootstrap handoff");
+                                *resumed = true;
+                                Some(&responses.thread)
+                            }
+                            _ => {
+                                ensure!(*acknowledged, "Codex TUI sent a request before initialization");
+                                if method.starts_with("turn/") {
+                                    ensure!(*resumed, "Codex TUI sent input before its assigned thread was attached");
+                                }
+                                None
+                            }
+                        };
+                        if method == "initialized" {
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-acknowledged", Some(method), next_sequence)?;
+                            continue;
+                        }
+                        if let Some(reply) = reply {
+                            let id = request.get("id").filter(|id| !id.is_null())
+                                .context("Codex TUI bootstrap request omitted its id")?;
+                            let mut reply = reply.clone();
+                            reply["id"] = id.clone();
+                            bootstrap_display.try_send(reply.to_string())
+                                .map_err(|error| anyhow::anyhow!("Codex TUI bootstrap response could not drain: {error}"))?;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
+                            continue;
+                        }
                     }
                     let forwarded = upstream_server.lock()
                         .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?
@@ -1158,7 +1244,13 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         &[daemon_resources.lock.clone()],
     )?;
     let outcome = (|| -> Result<()> {
-        let (thread_id, start_event) = bootstrap(&app_socket, &task)?;
+        let (thread_id, start_event, initialized, bootstrap_socket) = bootstrap(
+            &app_socket,
+            task.workspace,
+            task.model,
+            task.effort,
+            task.session,
+        )?;
         let generation = terminal.descriptor().execution_generation.clone();
         fs::write(&generation_file, &generation)?;
         let transcript = artifact.join("transcript.jsonl");
@@ -1244,8 +1336,6 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     None,
                     0,
                 )?;
-                let server = UnixStream::connect(&app_socket)
-                    .context("connect relay to private app-server")?;
                 trace_relay(
                     &boundary,
                     &generation_for_relay,
@@ -1255,13 +1345,6 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     None,
                     0,
                 )?;
-                server.set_read_timeout(Some(Duration::from_secs(12)))?;
-                let (server, _) =
-                    tungstenite::client("ws://localhost/", server).map_err(|error| {
-                        anyhow::anyhow!(
-                            "private Codex app-server WebSocket handshake failed: {error}"
-                        )
-                    })?;
                 trace_relay(
                     &boundary,
                     &generation_for_relay,
@@ -1271,9 +1354,9 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     None,
                     0,
                 )?;
-                relay_codex_websockets_with_trace(
+                relay_codex_websockets_with_handoff(
                     client,
-                    server,
+                    bootstrap_socket,
                     &generation_for_relay,
                     &thread_id_for_relay,
                     admission,
@@ -1287,6 +1370,10 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                         Ok(())
                     },
                     trace,
+                    Some(CodexHandoff {
+                        initialized,
+                        thread: start_event,
+                    }),
                 )
             });
             if let Err(error) = result {
@@ -1854,6 +1941,216 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the installed Codex binary and an unsandboxed macOS host"]
+    fn installed_codex_fresh_thread_survives_bootstrap_handoff() {
+        let executable = PathBuf::from(std::env::var_os("FLUENT_TEST_INSTALLED_CODEX").unwrap());
+        let private = tempfile::Builder::new()
+            .prefix("fluent-na-handoff-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace = private.path().join("assigned-worktree");
+        fs::create_dir(&workspace).unwrap();
+        let workspace = prepare_native_config(private.path(), &workspace).unwrap();
+        let app_socket = private.path().join("app.sock");
+        let daemon = CodexDaemonResources::prepare(&app_socket).unwrap();
+        let model = std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap();
+        let effort = std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap();
+        let mut server =
+            app_server_command(&executable, &model, Some(&effort), &app_socket).unwrap();
+        server
+            .env("HOME", private.path())
+            .env("CODEX_HOME", private.path());
+        server.current_dir(&workspace);
+        let mut child = server
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let tmux_socket = private.path().join("tmux.sock");
+        let relay_socket = private.path().join("relay.sock");
+        let trace_path = private.path().join("relay-trace.jsonl");
+        let mut relay_thread = None;
+        let outcome = (|| -> Result<()> {
+            let listener = UnixListener::bind(&relay_socket)?;
+            listener.set_nonblocking(true)?;
+            let deadline = Instant::now() + Duration::from_secs(12);
+            while !app_socket.exists() && Instant::now() < deadline {
+                ensure!(
+                    child.try_wait()?.is_none(),
+                    "installed Codex exited before binding"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            ensure!(
+                app_socket.exists() && daemon.socket.exists(),
+                "Codex socket absent"
+            );
+            let (thread_id, start, initialized, owner) = bootstrap(
+                &app_socket,
+                &workspace,
+                &model,
+                Some(&effort),
+                CoderSession::FreshPersistent,
+            )?;
+            let coder = CodexCode {
+                sandbox_profile: None,
+                trusted_sandbox: false,
+                model_override: Some(model.clone()),
+                effort: Some(effort.clone()),
+                executable: executable.clone(),
+            };
+            let tui_command = coder.native_task_command_with_remote(
+                &workspace,
+                private.path(),
+                CoderSession::Resume(&thread_id),
+                "",
+                Some(&relay_socket),
+            )?;
+            let script = private.path().join("native-tui.sh");
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nexport HOME={}\nexport CODEX_HOME={}\nexec {}\n",
+                    quote(&private.path().display().to_string()),
+                    quote(&private.path().display().to_string()),
+                    command_line(&tui_command)?,
+                ),
+            )?;
+            let admission = Arc::new(NativeAdmission::new());
+            // This regression must never submit a paid model turn.
+            admission.begin_settlement()?;
+            let relay_trace = trace_path.clone();
+            relay_thread = Some(std::thread::spawn(move || -> Result<()> {
+                let deadline = Instant::now() + Duration::from_secs(12);
+                let client = loop {
+                    match listener.accept() {
+                        Ok((client, _)) => break client,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(error) => return Err(error).context("accept installed Codex TUI"),
+                    }
+                };
+                let client = tungstenite::accept(client)
+                    .map_err(|error| anyhow::anyhow!("installed Codex TUI WebSocket: {error}"))?;
+                relay_codex_websockets_with_handoff(
+                    client,
+                    owner,
+                    "installed-handoff",
+                    &thread_id,
+                    admission,
+                    File::create(relay_trace.with_extension("evidence.jsonl"))?,
+                    |_| Ok(()),
+                    File::create(relay_trace)?,
+                    Some(CodexHandoff {
+                        initialized,
+                        thread: start,
+                    }),
+                )
+            }));
+            let started = Command::new("tmux")
+                .arg("-S")
+                .arg(&tmux_socket)
+                .args(["new-session", "-d", "-s", "handoff", "-c"])
+                .arg(&workspace)
+                .arg(format!("/bin/sh {}", quote(&script.display().to_string())))
+                .status()?;
+            ensure!(
+                started.success(),
+                "tmux could not launch the installed Codex TUI"
+            );
+            let deadline = Instant::now() + Duration::from_secs(12);
+            loop {
+                let trace = fs::read_to_string(&trace_path).unwrap_or_default();
+                if trace.lines().any(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .is_some_and(|event| {
+                            event["method"] == "thread/resume"
+                                && event["outcome"] == "bootstrap-replied"
+                        })
+                }) {
+                    ensure!(
+                        !trace.lines().any(|line| {
+                            serde_json::from_str::<Value>(line)
+                                .ok()
+                                .is_some_and(|event| {
+                                    event["method"] == "thread/resume"
+                                        && event["outcome"] == "forwarded"
+                                })
+                        }),
+                        "empty Codex thread was resumed through the app-server"
+                    );
+                    ensure!(
+                        !trace.lines().any(|line| {
+                            serde_json::from_str::<Value>(line)
+                                .ok()
+                                .is_some_and(|event| {
+                                    event["method"] == "turn/start"
+                                        && event["outcome"] == "forwarded"
+                                })
+                        }),
+                        "credential-free TUI submitted a model turn"
+                    );
+                    break;
+                }
+                ensure!(
+                    Instant::now() < deadline,
+                    "installed TUI did not complete its assigned resume handoff"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            ensure!(
+                Command::new("tmux")
+                    .arg("-S")
+                    .arg(&tmux_socket)
+                    .args(["has-session", "-t", "handoff"])
+                    .status()?
+                    .success(),
+                "installed Codex TUI exited after its resume handoff"
+            );
+            let pane = Command::new("tmux")
+                .arg("-S")
+                .arg(&tmux_socket)
+                .args(["capture-pane", "-p", "-t", "handoff"])
+                .output()?;
+            ensure!(
+                pane.status.success(),
+                "installed Codex TUI ended during handoff"
+            );
+            ensure!(
+                !String::from_utf8_lossy(&pane.stdout).contains("Failed to resume task"),
+                "installed Codex TUI rejected its assigned thread"
+            );
+            Ok(())
+        })();
+        let _ = Command::new("tmux")
+            .arg("-S")
+            .arg(&tmux_socket)
+            .args(["kill-session", "-t", "handoff"])
+            .status();
+        if let Some(relay_thread) = relay_thread {
+            let _ = relay_thread.join();
+        }
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        if outcome.is_err() {
+            eprintln!(
+                "installed Codex stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        outcome.unwrap();
+    }
+
     #[test]
     fn capability_check_requires_both_native_protocol_surfaces() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1956,7 +2253,7 @@ mod tests {
                 .unwrap();
         });
         let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
-        let (thread, _) = bootstrap_protocol(
+        let (thread, _, _) = bootstrap_protocol(
             &mut owner,
             &workspace.path().canonicalize().unwrap(),
             "gpt-assigned",
@@ -1965,6 +2262,128 @@ mod tests {
         )
         .unwrap();
         assert_eq!(thread, "assigned-thread");
+        fake.join().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_hands_its_live_thread_to_native_resume() {
+        let workspace = tempfile::tempdir().unwrap();
+        let canonical = workspace.path().canonicalize().unwrap();
+        let (owner, provider) = UnixStream::pair().unwrap();
+        let (fake_release, fake_wait) = mpsc::channel();
+        let fake = std::thread::spawn(move || {
+            let mut socket = tungstenite::accept(provider).unwrap();
+            let initialize: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(initialize["method"], "initialize");
+            socket
+                .send(Message::Text(
+                    json!({"id":1,"result":{"userAgent":"installed-provider"}}).to_string(),
+                ))
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&socket.read().unwrap().into_text().unwrap())
+                    .unwrap()["method"],
+                "initialized"
+            );
+            answer_config_read(&mut socket, "gpt-assigned");
+            let start: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(start["method"], "thread/start");
+            socket.send(Message::Text(json!({"id":3,"result":{"thread":{"id":"assigned-thread"},"model":"gpt-assigned"}}).to_string())).unwrap();
+            let turn: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(
+                turn["method"], "turn/start",
+                "empty thread was resumed through the app-server"
+            );
+            assert_eq!(turn["params"]["threadId"], "assigned-thread");
+            socket
+                .send(Message::Text(
+                    json!({"id":4,"result":{"turn":{"id":"turn-1"}}}).to_string(),
+                ))
+                .unwrap();
+            socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+            socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}).to_string())).unwrap();
+            fake_wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            let _ = socket.close(None);
+        });
+        let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
+        let (thread_id, start, initialized) = bootstrap_protocol(
+            &mut owner,
+            &canonical,
+            "gpt-assigned",
+            Some("medium"),
+            CoderSession::FreshPersistent,
+        )
+        .unwrap();
+        let (tui, relay) = UnixStream::pair().unwrap();
+        let (completions, received) = mpsc::channel();
+        let relay_thread = std::thread::spawn(move || {
+            let relay = tungstenite::accept(relay).unwrap();
+            relay_codex_websockets_with_handoff(
+                relay,
+                owner,
+                "generation-1",
+                &thread_id,
+                Arc::new(NativeAdmission::new()),
+                Vec::<u8>::new(),
+                |completion| {
+                    completions.send(completion).unwrap();
+                    Ok(())
+                },
+                Vec::<u8>::new(),
+                Some(CodexHandoff {
+                    initialized,
+                    thread: start,
+                }),
+            )
+        });
+        let (mut tui, _) = tungstenite::client("ws://localhost/", tui).unwrap();
+        assert_eq!(
+            request(
+                &mut tui,
+                1,
+                "initialize",
+                json!({"clientInfo":{"name":"native-tui","version":"1"}})
+            )
+            .unwrap()["result"]["userAgent"],
+            "installed-provider"
+        );
+        tui.send(Message::Text("{\"method\":\"initialized\"}".into()))
+            .unwrap();
+        assert_eq!(
+            request(
+                &mut tui,
+                2,
+                "thread/resume",
+                json!({"threadId":"assigned-thread"})
+            )
+            .unwrap()["result"]["thread"]["id"],
+            "assigned-thread"
+        );
+        assert_eq!(
+            request(
+                &mut tui,
+                4,
+                "turn/start",
+                json!({"threadId":"assigned-thread","input":[]})
+            )
+            .unwrap()["result"]["turn"]["id"],
+            "turn-1"
+        );
+        assert!(matches!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Completion::Accepted {
+                input_sequence: 1,
+                ..
+            }
+        ));
+        fake_release.send(()).unwrap();
+        let _ = tui.close(None);
+        drop(tui);
+        let relay_result = relay_thread.join().unwrap();
+        assert!(relay_result.is_ok(), "{relay_result:?}");
         fake.join().unwrap();
     }
 
@@ -1993,7 +2412,7 @@ mod tests {
                 .unwrap();
         });
         let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
-        let (thread, _) = bootstrap_protocol(
+        let (thread, _, _) = bootstrap_protocol(
             &mut owner,
             &workspace.path().canonicalize().unwrap(),
             "gpt-review",

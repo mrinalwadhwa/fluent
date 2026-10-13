@@ -1213,7 +1213,9 @@ impl CodexCode {
             }
             command.args(["resume", session_id]);
         }
-        command.arg(prompt);
+        if !prompt.is_empty() {
+            command.arg(prompt);
+        }
         Ok(command)
     }
 

@@ -16,6 +16,13 @@ extension and writes its assigned session in a private agent directory. The
 terminal can be attached for interaction, but its display is not the Task
 evidence source.
 
+For a fresh Codex Task, Fluent starts the assigned thread before opening the
+TUI and keeps that app-server connection subscribed. Codex does not create a
+resumable rollout until the first turn. The relay answers the TUI's initial
+resume request with the app-server's original thread response, then forwards
+the TUI's single Task prompt over that same connection. The app-server records
+the real turn and Fluent retains its original events.
+
 Native Claude requires Claude Code 2.1.295 or later. This version supports
 `onFailure: "block"` for the managed hooks, including hook launch errors and
 timeouts. Fluent checks this capability before reserving a native Task.

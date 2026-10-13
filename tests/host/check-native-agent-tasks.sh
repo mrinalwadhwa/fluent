@@ -93,7 +93,7 @@ export FLUENT_TEST_INSTALLED_CODEX="$(command -v codex)"
 set +e
 cargo nextest run --offline --features test-support --lib \
   --no-tests fail --run-ignored only --success-output immediate \
-  -E 'test(installed_codex_starts_with_exact_daemon_grants)' \
+  -E 'test(installed_codex_starts_with_exact_daemon_grants) | test(installed_codex_fresh_thread_survives_bootstrap_handoff)' \
   > "$host_output/codex-daemon-startup.log" 2>&1
 codex_startup_status=$?
 set -e
