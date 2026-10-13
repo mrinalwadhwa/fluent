@@ -702,6 +702,28 @@ where
 struct CodexHandoff {
     initialized: Value,
     thread: Value,
+    fresh: bool,
+}
+
+// The installed TUI reads full history immediately after attaching. A new
+// app-server thread has no rollout yet, so includeTurns fails until its first
+// real prompt. Return only the provider's empty thread object to the display;
+// the canonical transcript still contains only provider messages.
+fn fresh_thread_display_read(start: &Value, request: &Value, assigned: &str) -> Result<Value> {
+    ensure!(
+        request["params"]["threadId"] == assigned,
+        "Codex TUI read another thread"
+    );
+    let thread = &start["result"]["thread"];
+    ensure!(
+        thread["id"] == assigned,
+        "Codex start response changed thread identity"
+    );
+    ensure!(
+        thread["turns"].as_array().is_some_and(Vec::is_empty),
+        "Codex fresh thread has nonempty history"
+    );
+    Ok(json!({"id": request["id"], "result": {"thread": thread}}))
 }
 
 /// The TUI opens a new connection to Fluent, but the app-server connection
@@ -886,6 +908,13 @@ where
                             bootstrap_display.try_send(reply.to_string())
                                 .map_err(|error| anyhow::anyhow!("Codex TUI bootstrap response could not drain: {error}"))?;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
+                            continue;
+                        }
+                        if responses.fresh && *resumed && method == "thread/read" && next_sequence == 0 {
+                            let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
+                            bootstrap_display.try_send(reply.to_string())
+                                .map_err(|error| anyhow::anyhow!("Codex TUI display-only read could not drain: {error}"))?;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
                     }
@@ -1123,6 +1152,18 @@ fn settle_native_result<T>(
     result
 }
 
+fn add_fixture_cleanup<T>(result: Result<T>, label: &str, cleanup: Result<()>) -> Result<T> {
+    match (result, cleanup) {
+        (Err(primary), Err(error)) => Err(NativeFailureWithSettlement {
+            primary,
+            secondary: format!("{label} also failed: {error:#}"),
+        }
+        .into()),
+        (Ok(_), Err(error)) => Err(error.context(format!("{label} failed"))),
+        (result, Ok(())) => result,
+    }
+}
+
 fn parse_client_exit(status: &str, generation: &str, thread_id: &str) -> Result<i32> {
     let fields: Vec<_> = status.trim_end().split('\t').collect();
     ensure!(
@@ -1268,6 +1309,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         let (tx, rx) = mpsc::channel::<Result<Completion>>();
         let thread_id_for_relay = thread_id.clone();
         let generation_for_relay = generation.clone();
+        let fresh_thread = !matches!(task.session, CoderSession::Resume(_));
         let relay_trace = artifact.join("native-codex-relay-diagnostics.jsonl");
         let relay_trace_for_worker = relay_trace.clone();
         let relay = std::thread::spawn(move || {
@@ -1377,6 +1419,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     Some(CodexHandoff {
                         initialized,
                         thread: start_event,
+                        fresh: fresh_thread,
                     }),
                 )
             });
@@ -1532,18 +1575,40 @@ mod tests {
             let Some(child) = self.child.as_mut() else {
                 return Ok(String::new());
             };
-            ensure!(
-                self.group > 0 && self.group != unsafe { libc::getpgrp() },
-                "unsafe fixture group"
-            );
-            // The launcher may have exited while its reparented daemon still
-            // holds stderr. Signal the whole owned group before reading it.
+            // Keep the leader unreaped while signalling: its PID reserves the
+            // group number, including when the leader is already a zombie.
+            let mut errors = Vec::new();
+            let mut permission_errors = Vec::new();
+            let valid_group = self.group > 0 && self.group != unsafe { libc::getpgrp() };
+            let actual = if valid_group {
+                unsafe { libc::getpgid(self.group) }
+            } else {
+                errors.push("unsafe fixture group".into());
+                -1
+            };
+            if actual != self.group {
+                errors.push(format!("fixture group identity changed: {actual}"));
+                if let Err(error) = child.kill()
+                    && error.kind() != io::ErrorKind::InvalidInput
+                {
+                    errors.push(format!(
+                        "kill fixture leader after group identity loss: {error}"
+                    ));
+                }
+            }
+            // The launcher may have exited while a reparented process still
+            // holds stderr. Send both signals before reaping the leader.
             for signal in [libc::SIGTERM, libc::SIGKILL] {
-                let result = unsafe { libc::kill(-self.group, signal) };
-                if result == -1 {
+                if actual == self.group && unsafe { libc::kill(-self.group, signal) } == -1 {
                     let error = io::Error::last_os_error();
                     if error.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(error).context("signal owned app-server fixture group");
+                        let diagnostic =
+                            format!("signal owned app-server fixture group with {signal}: {error}");
+                        if error.raw_os_error() == Some(libc::EPERM) {
+                            permission_errors.push(diagnostic);
+                        } else {
+                            errors.push(diagnostic);
+                        }
                     }
                 }
                 if signal == libc::SIGTERM {
@@ -1552,21 +1617,78 @@ mod tests {
             }
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
-                if child.try_wait()?.is_some() {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {}
+                    Err(error) => {
+                        errors.push(format!("reap app-server fixture leader: {error}"));
+                        if let Err(kill_error) = child.kill() {
+                            errors.push(format!(
+                                "kill fixture leader after wait failure: {kill_error}"
+                            ));
+                        }
+                        if let Err(wait_error) = child.wait() {
+                            errors.push(format!(
+                                "reap fixture leader after wait failure: {wait_error}"
+                            ));
+                        }
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    errors.push("app-server fixture leader did not exit".into());
+                    if let Err(error) = child.kill() {
+                        errors.push(format!("kill app-server fixture leader: {error}"));
+                    }
+                    if let Err(error) = child.wait() {
+                        errors.push(format!(
+                            "reap app-server fixture leader after kill: {error}"
+                        ));
+                    }
                     break;
                 }
-                ensure!(
-                    Instant::now() < deadline,
-                    "app-server fixture leader did not exit"
-                );
                 std::thread::sleep(Duration::from_millis(10));
             }
             let stderr = child.stderr.take();
             self.child = None;
-            let Some(stderr) = stderr else {
-                return Ok(String::new());
+            // Once reaped, never signal this numeric group again. It may be
+            // reused. An EPERM caused solely by the unreaped zombie is safe
+            // only when no process still belongs to the group.
+            let group_probe = if valid_group {
+                unsafe { libc::kill(-self.group, 0) }
+            } else {
+                -1
             };
-            read_fixture_stderr_bounded(stderr)
+            let group_absent = valid_group
+                && group_probe == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if !group_absent {
+                errors.extend(permission_errors);
+            }
+            if group_probe == 0 {
+                errors.push("owned app-server fixture group survived cleanup".into());
+            } else if !group_absent && valid_group {
+                errors.push(format!(
+                    "inspect owned app-server fixture group after reaping: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            let stderr = match stderr {
+                Some(stderr) => match read_fixture_stderr_bounded(stderr) {
+                    Ok(stderr) => stderr,
+                    Err(error) => {
+                        errors.push(format!("read app-server fixture stderr: {error:#}"));
+                        String::new()
+                    }
+                },
+                None => String::new(),
+            };
+            ensure!(
+                errors.is_empty(),
+                "{}; app-server stderr: {stderr}",
+                errors.join("; ")
+            );
+            Ok(stderr)
         }
     }
 
@@ -1576,6 +1698,23 @@ mod tests {
             if self.child.is_some() {
                 let _ = self.finish();
             }
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_published_fixture_pid(path: &Path, deadline: Instant) -> Result<i32> {
+        loop {
+            if let Ok(contents) = fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<i32>()
+                && pid > 0
+            {
+                return Ok(pid);
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "fixture did not publish a valid positive daemon PID"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1651,6 +1790,28 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(600));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fixture_pid_reader_waits_for_complete_positive_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("daemon.pid");
+        fs::write(&path, "").unwrap();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            fs::write(writer_path, "12345\n").unwrap();
+        });
+        assert_eq!(
+            read_published_fixture_pid(&path, Instant::now() + Duration::from_secs(1)).unwrap(),
+            12345
+        );
+        writer.join().unwrap();
+        fs::write(&path, "0\n").unwrap();
+        assert!(
+            read_published_fixture_pid(&path, Instant::now() + Duration::from_millis(30)).is_err()
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires unsandboxed process-group signals"]
@@ -1668,15 +1829,14 @@ mod tests {
             .stderr(std::process::Stdio::piped());
         let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !pid_path.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(pid_path.exists());
-        let daemon_pid: i32 = fs::read_to_string(&pid_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let daemon_pid = read_published_fixture_pid(&pid_path, deadline);
+        let daemon_pid = match daemon_pid {
+            Ok(pid) => pid,
+            Err(error) => {
+                let cleanup = fixture.finish();
+                panic!("{error:#}; cleanup: {cleanup:?}");
+            }
+        };
         assert_eq!(unsafe { libc::getpgid(daemon_pid) }, fixture.group);
         let start = Instant::now();
         fixture.finish().unwrap();
@@ -1687,6 +1847,71 @@ mod tests {
         }
         assert_eq!(unsafe { libc::kill(daemon_pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires unsandboxed process-group signals"]
+    fn app_server_fixture_reaps_zombie_only_group() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(fixture.finish().is_ok());
+        assert!(fixture.child.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_fixture_reports_changed_group_without_signalling_it() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        fixture.group += 1;
+        let error = fixture.finish().unwrap_err().to_string();
+        assert!(error.contains("fixture group identity changed"), "{error}");
+        assert!(fixture.child.is_none());
+    }
+
+    #[test]
+    fn installed_preflight_keeps_primary_error_with_all_cleanup_failures() {
+        let outcome = add_fixture_cleanup::<()>(
+            Err(anyhow::anyhow!("TUI thread/read failed")),
+            "private tmux cleanup",
+            Err(anyhow::anyhow!("tmux timed out")),
+        );
+        let outcome = add_fixture_cleanup(
+            outcome,
+            "app-server fixture cleanup",
+            Err(anyhow::anyhow!("permission denied")),
+        );
+        let text = outcome.unwrap_err().to_string();
+        assert!(text.contains("TUI thread/read failed"), "{text}");
+        assert!(text.contains("tmux timed out"), "{text}");
+        assert!(text.contains("permission denied"), "{text}");
+    }
+
+    #[test]
+    fn empty_thread_display_read_requires_provider_identity_and_empty_history() {
+        let start =
+            json!({"result":{"thread":{"id":"assigned","turns":[],"historyMode":"legacy"}}});
+        let read = json!({"id":7,"params":{"threadId":"assigned","includeTurns":true}});
+        assert_eq!(
+            fresh_thread_display_read(&start, &read, "assigned").unwrap(),
+            json!({"id":7,"result":{"thread":{"id":"assigned","turns":[],"historyMode":"legacy"}}})
+        );
+        assert!(fresh_thread_display_read(&start, &read, "other").is_err());
+        let mut materialized = start;
+        materialized["result"]["thread"]["turns"] = json!([{"id":"real-turn"}]);
+        assert!(fresh_thread_display_read(&materialized, &read, "assigned").is_err());
     }
 
     #[test]
@@ -2257,7 +2482,8 @@ mod tests {
         let mut relay_thread = None;
         let mut relay_abort = None;
         let outcome = (|| -> Result<()> {
-            let listener = UnixListener::bind(&relay_socket)?;
+            let listener = UnixListener::bind(&relay_socket)
+                .context("bind installed Codex TUI relay socket")?;
             listener.set_nonblocking(true)?;
             let deadline = Instant::now() + Duration::from_secs(12);
             while !app_socket.exists() && Instant::now() < deadline {
@@ -2337,6 +2563,7 @@ mod tests {
                     Some(CodexHandoff {
                         initialized,
                         thread: start,
+                        fresh: true,
                     }),
                 )
             }));
@@ -2354,14 +2581,23 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(12);
             loop {
                 let trace = fs::read_to_string(&trace_path).unwrap_or_default();
-                if trace.lines().any(|line| {
+                let resumed = trace.lines().any(|line| {
                     serde_json::from_str::<Value>(line)
                         .ok()
                         .is_some_and(|event| {
                             event["method"] == "thread/resume"
                                 && event["outcome"] == "bootstrap-replied"
                         })
-                }) {
+                });
+                let read = trace.lines().any(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .is_some_and(|event| {
+                            event["method"] == "thread/read"
+                                && event["outcome"] == "ui-only-replied"
+                        })
+                });
+                if resumed && read {
                     ensure!(
                         !trace.lines().any(|line| {
                             serde_json::from_str::<Value>(line)
@@ -2395,11 +2631,22 @@ mod tests {
                         }),
                         "empty Codex thread requested a paginated history page"
                     );
+                    ensure!(
+                        !trace.lines().any(|line| {
+                            serde_json::from_str::<Value>(line)
+                                .ok()
+                                .is_some_and(|event| {
+                                    event["method"] == "thread/read"
+                                        && event["outcome"] == "forwarded"
+                                })
+                        }),
+                        "empty Codex thread attempted provider history lookup"
+                    );
                     break;
                 }
                 ensure!(
                     Instant::now() < deadline,
-                    "installed TUI did not complete its assigned resume handoff"
+                    "installed TUI did not complete its assigned fresh-thread history handoff"
                 );
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -2447,9 +2694,13 @@ mod tests {
                 eprintln!("installed Codex stderr: {stderr}");
             }
         }
-        tmux_cleanup.unwrap();
-        daemon_cleanup.unwrap();
-        relay_cleanup.unwrap();
+        let outcome = add_fixture_cleanup(outcome, "private tmux cleanup", tmux_cleanup);
+        let outcome = add_fixture_cleanup(
+            outcome,
+            "app-server fixture cleanup",
+            daemon_cleanup.map(|_| ()),
+        );
+        let outcome = add_fixture_cleanup(outcome, "Codex relay cleanup", relay_cleanup);
         outcome.unwrap();
     }
 
@@ -2623,6 +2874,10 @@ mod tests {
         .unwrap();
         let (tui, relay) = UnixStream::pair().unwrap();
         let (completions, received) = mpsc::channel();
+        let evidence_path = workspace.path().join("canonical.jsonl");
+        let trace_path = workspace.path().join("relay.jsonl");
+        let evidence = File::create(&evidence_path).unwrap();
+        let trace = File::create(&trace_path).unwrap();
         let relay_thread = std::thread::spawn(move || {
             let relay = tungstenite::accept(relay).unwrap();
             relay_codex_websockets_with_handoff(
@@ -2631,15 +2886,16 @@ mod tests {
                 "generation-1",
                 &thread_id,
                 Arc::new(NativeAdmission::new()),
-                Vec::<u8>::new(),
+                evidence,
                 |completion| {
                     completions.send(completion).unwrap();
                     Ok(())
                 },
-                Vec::<u8>::new(),
+                trace,
                 Some(CodexHandoff {
                     initialized,
                     thread: start,
+                    fresh: true,
                 }),
             )
         });
@@ -2665,6 +2921,16 @@ mod tests {
             )
             .unwrap()["result"]["thread"]["historyMode"],
             "legacy"
+        );
+        assert_eq!(
+            request(
+                &mut tui,
+                3,
+                "thread/read",
+                json!({"threadId":"assigned-thread","includeTurns":true})
+            )
+            .unwrap()["result"]["thread"]["turns"],
+            json!([])
         );
         assert_eq!(
             request(
@@ -2696,6 +2962,16 @@ mod tests {
             );
         }
         fake.join().unwrap();
+        assert!(
+            fs::read_to_string(trace_path)
+                .unwrap()
+                .contains("ui-only-replied")
+        );
+        assert!(
+            !fs::read_to_string(evidence_path)
+                .unwrap()
+                .contains("thread/read")
+        );
     }
 
     #[test]
