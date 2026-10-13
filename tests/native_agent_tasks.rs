@@ -1461,6 +1461,58 @@ fn native_terminal_controls_assigned_invocation() {
 
 #[cfg(unix)]
 #[test]
+fn codex_websocket_backpressure_fails_and_settles_workers() {
+    use fluent::native_agent::codex::relay_codex_websockets;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        let result = relay_codex_websockets(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            std::io::sink(),
+            |_| Ok(()),
+        );
+        done_tx
+            .send(result.map_err(|error| error.to_string()))
+            .unwrap();
+    });
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        let frame = json!({"method":"account/updated","params":{"data":"x".repeat(256 * 1024)}})
+            .to_string();
+        for _ in 0..96 {
+            if socket.send(Message::Text(frame.clone())).is_err() {
+                break;
+            }
+        }
+    });
+    let (tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    // Keep the TUI socket open without reading required app-server frames.
+    let failure = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("relay did not settle after TUI backpressure");
+    assert!(failure.unwrap_err().contains("Codex TUI"));
+    let _ = tui.get_ref().shutdown(std::net::Shutdown::Both);
+    provider.join().unwrap();
+    relay.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_relay_provider_exit_releases_attached_client() {
     use fluent::native_agent::relay_codex_streams;
     use std::os::unix::net::UnixStream;
@@ -1929,6 +1981,83 @@ fn continuation_reuses_conversation_not_live_terminal_identity() {
     );
 }
 
+struct HostTaskChildGuard {
+    child: std::process::Child,
+    binary: std::path::PathBuf,
+    project: std::path::PathBuf,
+    work: String,
+    runtime: std::path::PathBuf,
+    reap_timeout: std::time::Duration,
+    armed: bool,
+}
+
+impl Drop for HostTaskChildGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Cancel through the public owner before reaping the fixture's child.
+        // The fixture owns this disposable Attempt and retains the cancel log.
+        let cancel_log = self.runtime.join("task.cleanup.log");
+        let cancel_error = self.runtime.join("task.cleanup.stderr.log");
+        let mut command = std::process::Command::new(&self.binary);
+        command
+            .args(["attempt", "cancel", &self.work, "attempt-1"])
+            .current_dir(&self.project);
+        if let Ok(stdout) = std::fs::File::create(cancel_log) {
+            command.stdout(std::process::Stdio::from(stdout));
+        }
+        if let Ok(stderr) = std::fs::File::create(cancel_error) {
+            command.stderr(std::process::Stdio::from(stderr));
+        }
+        if let Ok(mut cancel) = command.spawn() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while cancel.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = cancel.kill();
+            let _ = cancel.wait();
+        }
+        let deadline = std::time::Instant::now() + self.reap_timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                _ => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn host_fixture_child_guard_reaps_on_panic() {
+    let root = tempfile::tempdir().unwrap();
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let result = std::panic::catch_unwind(|| {
+        let _guard = HostTaskChildGuard {
+            child,
+            binary: "/usr/bin/false".into(),
+            project: root.path().into(),
+            work: "fixture-only".into(),
+            runtime: root.path().into(),
+            reap_timeout: std::time::Duration::from_millis(50),
+            armed: true,
+        };
+        panic!("fixture assertion failed");
+    });
+    assert!(result.is_err());
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+}
+
 /// Run only from the separately authorized host check. The fixture stays in
 /// its output directory so the provider transcript and candidate can be
 /// inspected together after the test exits.
@@ -2107,7 +2236,7 @@ exit [lindex $outcome 3]
         }
         let log = File::create(runtime.join("task.stdout.log")).unwrap();
         let error_log = File::create(runtime.join("task.stderr.log")).unwrap();
-        let mut child = Command::new(binary)
+        let child = Command::new(binary)
             .args(["task", "run", &work, "attempt-1", "attempt-1-write-1"])
             .current_dir(&project)
             .env("FLUENT_NATIVE_PI_ENDPOINT", &pi_endpoint)
@@ -2115,25 +2244,54 @@ exit [lindex $outcome 3]
             .stderr(Stdio::from(error_log))
             .spawn()
             .unwrap();
+        let mut child = HostTaskChildGuard {
+            child,
+            binary: binary.into(),
+            project: project.clone(),
+            work: work.clone(),
+            runtime: runtime.clone(),
+            reap_timeout: Duration::from_secs(10),
+            armed: true,
+        };
         let deadline = Instant::now() + Duration::from_secs(600);
         let artifact = project.join(format!(
             ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1"
         ));
         let session = loop {
             assert!(
-                child.try_wait().unwrap().is_none(),
+                child.child.try_wait().unwrap().is_none(),
                 "{provider} native Task ended before attachment; inspect {} and {}",
                 project.display(),
                 runtime.display()
-            );
-            assert!(
-                Instant::now() < deadline,
-                "{provider} native Task did not expose its terminal"
             );
             let output = Command::new(binary)
                 .args(["terminal", "list", "--source", project.to_str().unwrap()])
                 .output()
                 .unwrap();
+            let transcript =
+                fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+            let records: Vec<serde_json::Value> = transcript
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect();
+            let last_sequence = records
+                .iter()
+                .filter_map(|record| record["input_sequence"].as_u64())
+                .max()
+                .unwrap_or(0);
+            let last_protocol: Vec<_> = records
+                .iter()
+                .rev()
+                .take(5)
+                .map(|record| {
+                    record["event"]["method"]
+                        .as_str()
+                        .or_else(|| record["event"]["type"].as_str())
+                        .unwrap_or("response")
+                        .to_string()
+                })
+                .collect();
+            let mut last_terminal = None;
             if output.status.success()
                 && let Ok(list) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 && let Some(descriptor) = list.as_array().and_then(|items| {
@@ -2143,20 +2301,23 @@ exit [lindex $outcome 3]
                 })
                 && let Some(session) = descriptor["session_id"].as_str()
             {
-                let transcript =
-                    fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
-                if transcript
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                    .any(|record| {
-                        record["input_sequence"]
-                            .as_u64()
-                            .is_some_and(|sequence| sequence >= 1)
-                    })
-                {
+                last_terminal = Some(descriptor.clone());
+                if last_sequence >= 1 {
                     break session.to_string();
                 }
             }
+            assert!(
+                Instant::now() < deadline,
+                "{provider} native Task timed out waiting for {}: terminal={last_terminal:?}, max_input_sequence={last_sequence}, recent_protocol={last_protocol:?}, task_pid={}, task_alive=true, inspect {} and {}",
+                if last_terminal.is_none() {
+                    "terminal descriptor"
+                } else {
+                    "launch prompt admission"
+                },
+                child.child.id(),
+                project.display(),
+                runtime.display()
+            );
             std::thread::sleep(Duration::from_millis(100));
         };
         if provider == "pi" {
@@ -2303,7 +2464,7 @@ exit [lindex $outcome 3]
                 .filter(|line| line.contains(boundary))
                 .count()
                 > previous_boundaries;
-            if boundary_seen || child.try_wait().unwrap().is_some() {
+            if boundary_seen || child.child.try_wait().unwrap().is_some() {
                 let last = transcript
                     .lines()
                     .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -2344,12 +2505,12 @@ exit [lindex $outcome 3]
             &race_generation,
         );
         let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
+            if let Some(status) = child.child.try_wait().unwrap() {
                 break status;
             }
             if Instant::now() >= deadline {
-                child.kill().unwrap();
-                let _ = child.wait();
+                child.child.kill().unwrap();
+                let _ = child.child.wait();
                 panic!(
                     "{provider} native Task exceeded the host deadline; inspect {} and {}",
                     project.display(),
@@ -3077,6 +3238,7 @@ exit [lindex $outcome 3]
                 );
             }
         }
+        child.armed = false;
     }
 }
 

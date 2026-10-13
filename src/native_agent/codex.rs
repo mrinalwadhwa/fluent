@@ -403,6 +403,12 @@ fn read_socket(socket: &Mutex<WebSocket<UnixStream>>) -> Result<SocketRead> {
     }
 }
 
+fn send_required_tui_frame(client: &mut WebSocket<UnixStream>, text: String) -> Result<()> {
+    client
+        .send(Message::Text(text))
+        .context("Codex TUI WebSocket protocol send failed")
+}
+
 /// Relay framed app-server messages. Unix app-server sockets use WebSocket
 /// HTTP Upgrade, while the older stream fixture intentionally covers JSONL
 /// framing only. This path is the one used by managed Task launch.
@@ -423,6 +429,8 @@ where
     let server_abort = server.get_ref().try_clone()?;
     let downstream_abort_client = client.get_ref().try_clone()?;
     let downstream_abort_server = server.get_ref().try_clone()?;
+    let display_abort_client = client.get_ref().try_clone()?;
+    let display_abort_server = server.get_ref().try_clone()?;
     client
         .get_ref()
         .set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -440,18 +448,26 @@ where
     let gate = Arc::new(Mutex::new(CodexRelayGate::with_admission(
         generation, thread_id, admission,
     )));
+    // These frames include responses to TUI protocol requests. Losing one can
+    // leave the TUI waiting forever before it submits the assigned prompt.
     let (display_tx, display_rx) = sync_channel::<String>(32);
     std::thread::scope(|scope| {
         let display_client = Arc::clone(&client);
-        let display = scope.spawn(move || {
-            while let Ok(text) = display_rx.recv() {
-                let Ok(mut client) = display_client.lock() else {
-                    break;
-                };
-                if client.send(Message::Text(text)).is_err() {
-                    break;
+        let display = scope.spawn(move || -> Result<()> {
+            let result = (|| {
+                while let Ok(text) = display_rx.recv() {
+                    let mut client = display_client
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
+                    send_required_tui_frame(&mut client, text)?;
                 }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = display_abort_client.shutdown(Shutdown::Both);
+                let _ = display_abort_server.shutdown(Shutdown::Both);
             }
+            result
         });
         let upstream_client = Arc::clone(&client);
         let upstream_server = Arc::clone(&server);
@@ -468,9 +484,16 @@ where
                         SocketRead::Text(line) => line,
                     };
                     let request: Value = serde_json::from_str(&line)?;
+                    let method = request["method"].as_str().unwrap_or("<missing>");
                     let admitted = request_gate.lock()
                         .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
                         .admit_request(&request);
+                    if admitted.as_ref().is_ok_and(Option::is_none) {
+                        eprintln!("native Codex TUI request: {method}");
+                    }
+                    if admitted.as_ref().is_ok_and(Option::is_some) {
+                        eprintln!("native Codex TUI admitted input: {method}");
+                    }
                     if let Err(error) = admitted {
                         if let Some(id) = request.get("id") {
                             let response = json!({"id": id, "error": {"code": -32000, "message": error.to_string()}});
@@ -494,7 +517,6 @@ where
         let response_gate = Arc::clone(&gate);
         let downstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
-                let mut display = Some(display_tx);
                 loop {
                     let line = match read_socket(&downstream_server)? {
                         SocketRead::Pending => {
@@ -514,6 +536,12 @@ where
                             gate.input_sequence,
                         )
                     };
+                    if input_sequence == 0 {
+                        eprintln!(
+                            "native Codex app-server message before turn: {}",
+                            event["method"].as_str().unwrap_or("response")
+                        );
+                    }
                     let params = &event["params"];
                     let conversation_id = params["threadId"]
                         .as_str()
@@ -538,13 +566,14 @@ where
                     if completion != Completion::Ignored {
                         on_completion(completion)?;
                     }
-                    if let Some(sender) = display.as_ref()
-                        && matches!(
-                            sender.try_send(line),
-                            Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
-                        )
-                    {
-                        display = None;
+                    match display_tx.try_send(line) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            anyhow::bail!("Codex TUI WebSocket protocol backpressure");
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            anyhow::bail!("Codex TUI WebSocket protocol sender disconnected");
+                        }
                     }
                 }
             })();
@@ -558,11 +587,58 @@ where
         let downstream = downstream
             .join()
             .map_err(|_| anyhow::anyhow!("Codex WebSocket event relay panicked"))?;
-        display
+        let display = display
             .join()
             .map_err(|_| anyhow::anyhow!("Codex WebSocket display relay panicked"))?;
-        upstream.and(downstream)
+        display.and(downstream).and(upstream)
     })
+}
+
+#[derive(Debug)]
+struct NativeFailureWithSettlement {
+    primary: anyhow::Error,
+    secondary: String,
+}
+
+impl std::fmt::Display for NativeFailureWithSettlement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}; {}", self.primary, self.secondary)
+    }
+}
+
+impl std::error::Error for NativeFailureWithSettlement {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.primary.as_ref())
+    }
+}
+
+fn settle_native_result<T>(
+    result: Result<T>,
+    stop: Result<()>,
+    joined: std::thread::Result<()>,
+) -> Result<T> {
+    let mut result = result;
+    if let Err(error) = stop {
+        result = match result {
+            Err(primary) => Err(NativeFailureWithSettlement {
+                primary,
+                secondary: format!("terminal settlement also failed: {error:#}"),
+            }
+            .into()),
+            Ok(_) => Err(error.context("native Codex terminal settlement failed")),
+        };
+    }
+    if joined.is_err() {
+        result = match result {
+            Err(primary) => Err(NativeFailureWithSettlement {
+                primary,
+                secondary: "native Codex relay also panicked".into(),
+            }
+            .into()),
+            Ok(_) => Err(anyhow::anyhow!("native Codex relay panicked")),
+        };
+    }
+    result
 }
 
 /// Run the assigned Task through a private app-server, one relay, and one
@@ -682,6 +758,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                 )
             });
             if let Err(error) = result {
+                eprintln!("native Codex relay failed: {error:#}");
                 let _ = tx.send(Err(error));
             }
         });
@@ -712,9 +789,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
             terminal.stop()
         };
         let joined = relay.join();
-        stop?;
-        joined.map_err(|_| anyhow::anyhow!("native Codex relay panicked"))?;
-        result?;
+        settle_native_result(result, stop, joined)?;
         File::open(&transcript)?.sync_all()?;
         Ok(())
     })();
@@ -729,6 +804,38 @@ mod tests {
     use super::*;
     use std::io;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn native_failure_survives_terminal_settlement_failure() {
+        let result: Result<()> = Err(anyhow::anyhow!("TUI protocol send failed"));
+        let stop = Err(anyhow::anyhow!(
+            "terminal pane does not have its generation-specific sandbox grant"
+        ));
+        let error = settle_native_result(result, stop, Ok(())).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.starts_with("TUI protocol send failed"), "{text}");
+        assert!(text.contains("TUI protocol send failed"), "{text}");
+        assert!(text.contains("generation-specific sandbox grant"), "{text}");
+    }
+
+    #[test]
+    fn required_tui_websocket_send_reports_transport_failure() {
+        let (tui_stream, relay_stream) = UnixStream::pair().unwrap();
+        let relay = std::thread::spawn(move || {
+            let mut socket = tungstenite::accept(relay_stream).unwrap();
+            socket.get_ref().shutdown(Shutdown::Write).unwrap();
+            send_required_tui_frame(&mut socket, "required-response".into())
+                .unwrap_err()
+                .to_string()
+        });
+        let _tui = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+        assert!(
+            relay
+                .join()
+                .unwrap()
+                .contains("Codex TUI WebSocket protocol send failed")
+        );
+    }
 
     fn neighboring_daemon_socket(daemon: &CodexDaemonResources) -> PathBuf {
         daemon.socket.with_extension("s")
