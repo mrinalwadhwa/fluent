@@ -975,33 +975,55 @@ mod tests {
             );
             UnixStream::connect(&app_socket).unwrap();
             assert!(child.try_wait().unwrap().is_none());
+            assert_eq!(fs::read(&siblings.file).unwrap(), b"unrelated");
+            UnixStream::connect(&siblings.socket).unwrap();
 
-            let check = r#"import errno, os, socket, sys
-file_path, socket_path = sys.argv[1:]
-for operation in (lambda: open(file_path).read(),
-                  lambda: open(file_path, 'w').write('wrong'),
-                  lambda: socket.socket(socket.AF_UNIX).connect(socket_path)):
-    try:
-        operation()
-    except OSError as error:
-        assert error.errno in (errno.EPERM, errno.EACCES), error
-    else:
-        raise AssertionError('unrelated daemon resource was accessible')
-"#;
-            let output = crate::os::command_under_profile(&profile, Path::new("/usr/bin/python3"))
-                .args([
-                    "-c",
-                    check,
-                    siblings.file.to_str().unwrap(),
-                    siblings.socket.to_str().unwrap(),
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let check = include_str!("../../tests/fixtures/codex-confinement-probe.mjs");
+            for (operation, path) in [
+                ("read", siblings.file.as_path()),
+                ("write", siblings.file.as_path()),
+                ("connect", siblings.socket.as_path()),
+            ] {
+                let mut probe = crate::os::command_under_profile(&profile, &node);
+                probe
+                    .args(["--input-type=module", "-e", check, operation])
+                    .arg(path)
+                    .env_clear()
+                    .env("HOME", private.path())
+                    .env("TMPDIR", private.path())
+                    .current_dir(private.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let mut probe = probe.spawn().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match probe.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Ok(None) => {
+                            let _ = probe.kill();
+                            let _ = probe.wait();
+                            panic!("{operation} confinement probe timed out");
+                        }
+                        Err(error) => {
+                            let _ = probe.kill();
+                            let _ = probe.wait();
+                            panic!("{operation} confinement probe wait failed: {error}");
+                        }
+                    }
+                }
+                let output = probe.wait_with_output().unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .contains(&format!("{operation}: denied ")),
+                    "{operation} confinement probe failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }));
         unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
         let _ = child.kill();
