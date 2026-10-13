@@ -87,8 +87,8 @@ printf 'terminal-cwd-status=%s\n' "$terminal_status" | tee "$host_output/termina
 tail -n 30 "$host_output/terminal-cwd.log"
 test "$terminal_status" -eq 0
 
-# Start the installed app-server without credentials or protocol/model calls.
-# This checks its real daemon lock/socket path before any paid provider work.
+# Start the installed app-server and make credential-free initialize and
+# config/read calls to check its effective settings before paid model work.
 export FLUENT_TEST_INSTALLED_CODEX="$(command -v codex)"
 set +e
 cargo nextest run --offline --features test-support --lib \

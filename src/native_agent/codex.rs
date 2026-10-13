@@ -1135,6 +1135,12 @@ mod tests {
             .prefix("fluent-na-regression-")
             .tempdir_in("/private/tmp")
             .unwrap();
+        fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            fs::metadata(private.path()).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "fixture Codex home must be private before writing config"
+        );
         let terminal = tempfile::Builder::new()
             .prefix("fluent-t-regression-")
             .tempdir_in("/private/tmp")
