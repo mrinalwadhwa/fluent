@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::Shutdown;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,79 @@ pub struct CodexNativeTask<'a> {
     pub prompt: &'a str,
     pub session: CoderSession<'a>,
     pub launch_env: &'a [(String, String)],
+}
+
+/// Give this invocation exactly one trusted project in its private Codex
+/// configuration. A source-checkout entry can preexist in that home, so never
+/// carry project entries into the Task.
+fn prepare_native_config(private_home: &Path, workspace: &Path) -> Result<PathBuf> {
+    ensure!(
+        private_home.is_absolute() && private_home.is_dir(),
+        "Codex home must be private and absolute"
+    );
+    let home_metadata = fs::symlink_metadata(private_home)?;
+    ensure!(
+        home_metadata.file_type().is_dir()
+            && home_metadata.uid() == unsafe { libc::geteuid() }
+            && home_metadata.mode() & 0o077 == 0,
+        "Codex home is not private to the current user"
+    );
+    let workspace = workspace
+        .canonicalize()
+        .context("resolve assigned Codex worktree")?;
+    ensure!(
+        workspace.is_dir(),
+        "assigned Codex worktree is not a directory"
+    );
+    let path = private_home.join("config.toml");
+    let existing = match fs::symlink_metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect private Codex config"),
+    };
+    let mut config = if let Some(metadata) = existing {
+        ensure!(
+            metadata.file_type().is_file() && metadata.mode() & 0o077 == 0,
+            "private Codex config is not a private regular file"
+        );
+        let source = fs::read_to_string(&path)?;
+        ensure!(
+            source.len() <= 1024 * 1024,
+            "private Codex config is oversized"
+        );
+        source
+            .parse::<toml::Table>()
+            .context("parse private Codex config")?
+    } else {
+        toml::Table::new()
+    };
+    // The worker's authentication, sessions and skills are separate files.
+    // Keep only TUI preferences from a generated config: model, hooks, MCP,
+    // and project trust from earlier commands must not govern this Task.
+    config.retain(|key, _| key == "tui");
+    let mut project = toml::Table::new();
+    project.insert("trust_level".into(), toml::Value::String("trusted".into()));
+    let mut projects = toml::Table::new();
+    projects.insert(
+        workspace
+            .to_str()
+            .context("assigned Codex worktree is not UTF-8")?
+            .into(),
+        toml::Value::Table(project),
+    );
+    config.insert("projects".into(), toml::Value::Table(projects));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".native-config-")
+        .tempfile_in(private_home)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    write!(temporary, "{}", toml::to_string(&config)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .context("install private Codex config")?;
+    Ok(workspace)
 }
 
 struct CodexDaemonResources {
@@ -189,6 +263,9 @@ pub fn pane_script(
     )?;
     let mut server = Command::new(&coder.executable);
     server.args(["--disable", "hooks"]);
+    if let Some(model) = &coder.model_override {
+        server.args(["--model", model]);
+    }
     if let Some(effort) = &coder.effort {
         server.args(["-c", &format!("model_reasoning_effort={effort}")]);
     }
@@ -256,6 +333,24 @@ fn bootstrap_protocol(
         }),
     )?;
     socket.send(Message::Text("{\"method\":\"initialized\"}".into()))?;
+    let config = request(socket, 2, "config/read", json!({"cwd": workspace}))?;
+    let canonical = workspace
+        .canonicalize()
+        .context("resolve assigned Codex worktree")?;
+    let projects = config["result"]["config"]["projects"]
+        .as_object()
+        .context("Codex config/read omitted project trust")?;
+    ensure!(
+        projects.len() == 1
+            && projects
+                .get(
+                    canonical
+                        .to_str()
+                        .context("assigned Codex worktree is not UTF-8")?
+                )
+                .is_some_and(|entry| entry["trust_level"] == "trusted"),
+        "Codex app-server did not trust only the assigned worktree"
+    );
     let result = match session {
         CoderSession::Resume(thread_id) => {
             ensure!(
@@ -264,7 +359,7 @@ fn bootstrap_protocol(
             );
             request(
                 socket,
-                2,
+                3,
                 "thread/resume",
                 json!({
                     "threadId": thread_id, "cwd": workspace,
@@ -273,7 +368,7 @@ fn bootstrap_protocol(
         }
         CoderSession::FreshPersistent | CoderSession::Ephemeral => request(
             socket,
-            2,
+            3,
             "thread/start",
             json!({
                 "cwd": workspace,
@@ -334,19 +429,20 @@ fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
     .iter()
     .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
     .collect();
+    values.push(("GIT_EDITOR".into(), "false".into()));
+    values.push(("GIT_SEQUENCE_EDITOR".into(), "false".into()));
+    values.extend(
+        task.launch_env
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "HOME" | "CODEX_HOME" | "PWD"))
+            .map(|(key, value)| (key.into(), value.into())),
+    );
     values.push(("HOME".into(), task.private_home.as_os_str().to_owned()));
     values.push((
         "CODEX_HOME".into(),
         task.private_home.as_os_str().to_owned(),
     ));
     values.push(("PWD".into(), task.workspace.as_os_str().to_owned()));
-    values.push(("GIT_EDITOR".into(), "false".into()));
-    values.push(("GIT_SEQUENCE_EDITOR".into(), "false".into()));
-    values.extend(
-        task.launch_env
-            .iter()
-            .map(|(key, value)| (key.into(), value.into())),
-    );
     values
 }
 
@@ -675,6 +771,11 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         "native Codex private home is absent"
     );
     ensure!(!task.model.is_empty(), "native Codex model is unresolved");
+    let assigned_workspace = prepare_native_config(task.private_home, task.workspace)?;
+    ensure!(
+        assigned_workspace == task.workspace,
+        "native Codex workspace must use its canonical assigned path"
+    );
     let sockets = tempfile::Builder::new()
         .prefix("fluent-na-")
         .tempdir_in("/private/tmp")?;
@@ -828,6 +929,17 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io;
+
+    fn answer_config_read(socket: &mut WebSocket<UnixStream>) {
+        let read: Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(read["method"], "config/read");
+        let workspace = read["params"]["cwd"].as_str().unwrap();
+        let response = json!({"id":2,"result":{"config":{"projects":{
+            (workspace): {"trust_level":"trusted"}
+        }}}});
+        socket.send(Message::Text(response.to_string())).unwrap();
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -1027,6 +1139,23 @@ mod tests {
             .prefix("fluent-t-regression-")
             .tempdir_in("/private/tmp")
             .unwrap();
+        let workspace = private.path().join("assigned-worktree");
+        fs::create_dir(&workspace).unwrap();
+        let project_config = workspace.join(".codex");
+        fs::create_dir(&project_config).unwrap();
+        fs::write(project_config.join("config.toml"),
+            "model = \"project-unrelated\"\nmodel_reasoning_effort = \"low\"\n[features]\nhooks = true\n").unwrap();
+        let private_config = private.path().join("config.toml");
+        fs::write(
+            &private_config,
+            "[projects.\"/unrelated/source\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&private_config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            prepare_native_config(private.path(), &workspace).unwrap(),
+            workspace
+        );
         let app_socket = private.path().join("app.sock");
         let daemon = CodexDaemonResources::prepare(&app_socket).unwrap();
         let mut siblings = NeighboringDaemonFixture::new(&daemon);
@@ -1064,6 +1193,13 @@ mod tests {
         server.args([
             "--disable",
             "hooks",
+            "--model",
+            &std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap(),
+            "-c",
+            &format!(
+                "model_reasoning_effort={}",
+                std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap()
+            ),
             "app-server",
             "--listen",
             &format!("unix://{}", app_socket.display()),
@@ -1072,7 +1208,7 @@ mod tests {
         server.env("HOME", private.path());
         server.env("CODEX_HOME", private.path());
         server.env("PATH", std::env::var_os("PATH").unwrap());
-        server.current_dir(private.path());
+        server.current_dir(&workspace);
         server.process_group(0);
         let mut child = server
             .stdin(std::process::Stdio::piped())
@@ -1107,6 +1243,38 @@ mod tests {
             );
             UnixStream::connect(&app_socket).unwrap();
             assert!(child.try_wait().unwrap().is_none());
+            let stream = UnixStream::connect(&app_socket).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (mut client, _) = tungstenite::client("ws://localhost/", stream).unwrap();
+            request(
+                &mut client,
+                1,
+                "initialize",
+                json!({"clientInfo":{"name":"fluent-native-config-check","version":"1"}}),
+            )
+            .unwrap();
+            client
+                .send(Message::Text("{\"method\":\"initialized\"}".into()))
+                .unwrap();
+            let effective =
+                request(&mut client, 2, "config/read", json!({"cwd": workspace})).unwrap();
+            let config = &effective["result"]["config"];
+            assert_eq!(config["projects"].as_object().unwrap().len(), 1);
+            assert_eq!(
+                config["projects"][workspace.to_str().unwrap()]["trust_level"],
+                "trusted"
+            );
+            assert_eq!(
+                config["model"],
+                std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap()
+            );
+            assert_eq!(
+                config["model_reasoning_effort"],
+                std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap()
+            );
+            assert_ne!(config["features"]["hooks"], true);
             assert_eq!(fs::read(&siblings.file).unwrap(), b"unrelated");
             UnixStream::connect(&siblings.socket).unwrap();
 
@@ -1181,7 +1349,69 @@ mod tests {
     }
 
     #[test]
+    fn native_config_trusts_only_canonical_assigned_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("worker");
+        let workspace = root.path().join("work \"assigned\"");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let original = toml::to_string(&toml::toml! {
+            [tui]
+            notifications = ["task-complete"]
+            [projects."/unrelated/source"]
+            trust_level = "trusted"
+            [features]
+            hooks = true
+            model = "unrelated-model"
+        })
+        .unwrap();
+        let path = home.join("config.toml");
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let canonical = prepare_native_config(&home, &workspace).unwrap();
+        assert_eq!(canonical, workspace.canonicalize().unwrap());
+        let parsed: toml::Table = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(parsed["projects"].as_table().unwrap().len(), 1);
+        assert_eq!(
+            parsed["projects"][canonical.to_str().unwrap()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            parsed["tui"]["notifications"][0].as_str(),
+            Some("task-complete")
+        );
+        assert!(parsed.get("features").is_none());
+        assert!(parsed["projects"].get(source.to_str().unwrap()).is_none());
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn native_config_rejects_an_existing_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("worker");
+        let workspace = root.path().join("assigned");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let unrelated = root.path().join("unrelated.toml");
+        fs::write(&unrelated, "[tui]\nnotifications = []\n").unwrap();
+        std::os::unix::fs::symlink(&unrelated, home.join("config.toml")).unwrap();
+        assert!(prepare_native_config(&home, &workspace).is_err());
+        assert_eq!(
+            fs::read_to_string(unrelated).unwrap(),
+            "[tui]\nnotifications = []\n"
+        );
+    }
+
+    #[test]
     fn bootstrap_binds_one_assigned_thread_before_tui_starts() {
+        let workspace = tempfile::tempdir().unwrap();
         let (owner, provider) = UnixStream::pair().unwrap();
         let fake = std::thread::spawn(move || {
             let mut socket = tungstenite::accept(provider).unwrap();
@@ -1196,6 +1426,7 @@ mod tests {
                     .unwrap()["method"],
                 "initialized"
             );
+            answer_config_read(&mut socket);
             let start: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
@@ -1203,14 +1434,14 @@ mod tests {
             assert_eq!(start["params"]["approvalPolicy"], "never");
             socket
                 .send(Message::Text(
-                    "{\"id\":2,\"result\":{\"thread\":{\"id\":\"assigned-thread\"}}}".into(),
+                    "{\"id\":3,\"result\":{\"thread\":{\"id\":\"assigned-thread\"}}}".into(),
                 ))
                 .unwrap();
         });
         let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
         let (thread, _) = bootstrap_protocol(
             &mut owner,
-            Path::new("/private/work"),
+            &workspace.path().canonicalize().unwrap(),
             "gpt-assigned",
             CoderSession::FreshPersistent,
         )
@@ -1221,6 +1452,7 @@ mod tests {
 
     #[test]
     fn bootstrap_starts_ephemeral_reviewer_thread() {
+        let workspace = tempfile::tempdir().unwrap();
         let (owner, provider) = UnixStream::pair().unwrap();
         let fake = std::thread::spawn(move || {
             let mut socket = tungstenite::accept(provider).unwrap();
@@ -1231,20 +1463,21 @@ mod tests {
                 .unwrap();
             let _: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            answer_config_read(&mut socket);
             let start: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
             assert_eq!(start["params"]["ephemeral"], true);
             socket
                 .send(Message::Text(
-                    "{\"id\":2,\"result\":{\"thread\":{\"id\":\"review-thread\"}}}".into(),
+                    "{\"id\":3,\"result\":{\"thread\":{\"id\":\"review-thread\"}}}".into(),
                 ))
                 .unwrap();
         });
         let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
         let (thread, _) = bootstrap_protocol(
             &mut owner,
-            Path::new("/private/review"),
+            &workspace.path().canonicalize().unwrap(),
             "gpt-review",
             CoderSession::Ephemeral,
         )
@@ -1254,11 +1487,59 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_rejects_a_different_resumed_thread() {
+    fn bootstrap_rejects_source_trust_before_assigned_thread() {
+        let workspace = tempfile::tempdir().unwrap();
         let (owner, provider) = UnixStream::pair().unwrap();
         let fake = std::thread::spawn(move || {
             let mut socket = tungstenite::accept(provider).unwrap();
-            for _ in 0..3 {
+            let initialize: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(initialize["method"], "initialize");
+            socket
+                .send(Message::Text(json!({"id":1,"result":{}}).to_string()))
+                .unwrap();
+            let initialized: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(initialized["method"], "initialized");
+            let read: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(read["method"], "config/read");
+            socket
+                .send(Message::Text(
+                    json!({"id":2,"result":{"config":{"projects":{
+                        "/unrelated/source": {"trust_level":"trusted"}
+                    }}}})
+                    .to_string(),
+                ))
+                .unwrap();
+            socket
+                .get_mut()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            assert!(socket.read().is_err(), "unexpected assigned thread launch");
+        });
+        let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
+        assert!(
+            bootstrap_protocol(
+                &mut owner,
+                &workspace.path().canonicalize().unwrap(),
+                "gpt-assigned",
+                CoderSession::FreshPersistent
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("did not trust only")
+        );
+        fake.join().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_rejects_a_different_resumed_thread() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (owner, provider) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut socket = tungstenite::accept(provider).unwrap();
+            for _ in 0..4 {
                 let message: Value =
                     serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
                 match message["method"].as_str().unwrap() {
@@ -1266,11 +1547,22 @@ mod tests {
                         .send(Message::Text("{\"id\":1,\"result\":{}}".into()))
                         .unwrap(),
                     "initialized" => {}
+                    "config/read" => {
+                        let path = message["params"]["cwd"].as_str().unwrap();
+                        socket
+                            .send(Message::Text(
+                                json!({"id":2,"result":{"config":{"projects":{
+                                    (path): {"trust_level":"trusted"}
+                                }}}})
+                                .to_string(),
+                            ))
+                            .unwrap();
+                    }
                     "thread/resume" => {
                         assert_eq!(message["params"]["threadId"], "assigned-thread");
                         socket
                             .send(Message::Text(
-                                "{\"id\":2,\"result\":{\"thread\":{\"id\":\"another-thread\"}}}"
+                                "{\"id\":3,\"result\":{\"thread\":{\"id\":\"another-thread\"}}}"
                                     .into(),
                             ))
                             .unwrap();
@@ -1283,7 +1575,7 @@ mod tests {
         assert!(
             bootstrap_protocol(
                 &mut owner,
-                Path::new("/private/work"),
+                &workspace.path().canonicalize().unwrap(),
                 "gpt-assigned",
                 CoderSession::Resume("assigned-thread"),
             )

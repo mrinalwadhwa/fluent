@@ -24,6 +24,7 @@ rustix = { version = "1", features = ["fs"] }
 libc = "0.2"
 ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
