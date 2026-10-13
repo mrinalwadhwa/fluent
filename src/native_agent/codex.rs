@@ -727,7 +727,52 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
     use std::os::unix::fs::PermissionsExt;
+
+    fn neighboring_daemon_socket(daemon: &CodexDaemonResources) -> PathBuf {
+        daemon.socket.with_extension("s")
+    }
+
+    struct NeighboringDaemonFixture {
+        file: PathBuf,
+        socket: PathBuf,
+        file_owned: bool,
+        listener: Option<UnixListener>,
+    }
+
+    impl NeighboringDaemonFixture {
+        fn new(daemon: &CodexDaemonResources) -> Self {
+            Self {
+                file: daemon.socket.with_extension("unrelated-file"),
+                socket: neighboring_daemon_socket(daemon),
+                file_owned: false,
+                listener: None,
+            }
+        }
+
+        fn create(&mut self) -> io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&self.file)?;
+            self.file_owned = true;
+            file.write_all(b"unrelated")?;
+            self.listener = Some(UnixListener::bind(&self.socket)?);
+            Ok(())
+        }
+    }
+
+    impl Drop for NeighboringDaemonFixture {
+        fn drop(&mut self) {
+            if self.listener.take().is_some() {
+                let _ = fs::remove_file(&self.socket);
+            }
+            if self.file_owned {
+                let _ = fs::remove_file(&self.file);
+            }
+        }
+    }
 
     #[test]
     fn daemon_resources_follow_requested_socket_and_stay_distinct() {
@@ -770,12 +815,75 @@ mod tests {
         fs::remove_file(&other).unwrap();
     }
 
+    #[test]
+    fn neighboring_daemon_socket_fits_unix_address() {
+        let private = tempfile::Builder::new()
+            .prefix("fluent-na-regression-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let daemon = CodexDaemonResources::paths(&private.path().join("app.sock")).unwrap();
+        let sibling_socket = neighboring_daemon_socket(&daemon);
+        let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        assert!(
+            sibling_socket.as_os_str().as_encoded_bytes().len() < address.sun_path.len(),
+            "neighboring daemon socket exceeds the Unix address limit: {}",
+            sibling_socket.display()
+        );
+        assert_eq!(sibling_socket.parent(), daemon.socket.parent());
+        assert_ne!(sibling_socket, daemon.socket);
+        assert_ne!(sibling_socket, daemon.lock);
+        assert!(
+            sibling_socket
+                .file_name()
+                .unwrap()
+                .as_encoded_bytes()
+                .starts_with(daemon.socket.file_name().unwrap().as_encoded_bytes())
+        );
+    }
+
+    #[test]
+    fn neighboring_daemon_fixture_cleans_up_after_setup_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon = CodexDaemonResources {
+            socket: directory.path().join("daemon"),
+            lock: directory.path().join("daemon.lock"),
+            owned: false,
+        };
+        let mut siblings = NeighboringDaemonFixture::new(&daemon);
+        fs::write(&siblings.file, "existing file").unwrap();
+        assert_eq!(
+            siblings.create().unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        drop(siblings);
+        assert_eq!(
+            fs::read(directory.path().join("daemon.unrelated-file")).unwrap(),
+            b"existing file"
+        );
+
+        let daemon = CodexDaemonResources {
+            socket: directory.path().join("other"),
+            lock: directory.path().join("other.lock"),
+            owned: false,
+        };
+        let siblings = NeighboringDaemonFixture::new(&daemon);
+        let file = siblings.file.clone();
+        let socket = siblings.socket.clone();
+        fs::write(&socket, "existing socket path").unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let mut siblings = siblings;
+            siblings.create().unwrap();
+        });
+        assert!(result.is_err());
+        assert!(!file.exists());
+        assert_eq!(fs::read(&socket).unwrap(), b"existing socket path");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires the installed Codex binary and an unsandboxed macOS host"]
     fn installed_codex_starts_with_exact_daemon_grants() {
         use crate::content::ContentResolver;
-        use std::os::unix::net::UnixListener;
         use std::os::unix::process::CommandExt;
 
         let executable = PathBuf::from(std::env::var_os("FLUENT_TEST_INSTALLED_CODEX").unwrap());
@@ -789,10 +897,8 @@ mod tests {
             .unwrap();
         let app_socket = private.path().join("app.sock");
         let daemon = CodexDaemonResources::prepare(&app_socket).unwrap();
-        let sibling_file = daemon.socket.with_extension("unrelated-file");
-        let sibling_socket = daemon.socket.with_extension("unrelated-socket");
-        fs::write(&sibling_file, "unrelated").unwrap();
-        let _listener = UnixListener::bind(&sibling_socket).unwrap();
+        let mut siblings = NeighboringDaemonFixture::new(&daemon);
+        siblings.create().unwrap();
         let resolver = ContentResolver::new(None);
         let installed_package = executable.canonicalize().unwrap();
         let installed_package = installed_package.parent().unwrap().parent().unwrap();
@@ -886,8 +992,8 @@ for operation in (lambda: open(file_path).read(),
                 .args([
                     "-c",
                     check,
-                    sibling_file.to_str().unwrap(),
-                    sibling_socket.to_str().unwrap(),
+                    siblings.file.to_str().unwrap(),
+                    siblings.socket.to_str().unwrap(),
                 ])
                 .output()
                 .unwrap();
@@ -900,8 +1006,6 @@ for operation in (lambda: open(file_path).read(),
         unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
         let _ = child.kill();
         let output = child.wait_with_output().unwrap();
-        let _ = fs::remove_file(&sibling_socket);
-        let _ = fs::remove_file(&sibling_file);
         if let Err(error) = result {
             eprintln!(
                 "installed Codex stderr: {}",
