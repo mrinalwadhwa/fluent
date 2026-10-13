@@ -240,6 +240,44 @@ fn command_line(command: &std::process::Command) -> Result<String> {
     Ok(words.join(" "))
 }
 
+fn app_server_command(
+    executable: &Path,
+    model: &str,
+    effort: Option<&str>,
+    app_socket: &Path,
+) -> Result<Command> {
+    fn config_string(value: &str) -> Result<String> {
+        let config = toml::to_string(&toml::Table::from_iter([(
+            "value".to_owned(),
+            toml::Value::String(value.to_owned()),
+        )]))?;
+        Ok(config
+            .strip_prefix("value = ")
+            .context("encode native Codex config string")?
+            .trim_end()
+            .to_owned())
+    }
+
+    ensure!(!model.is_empty(), "native Codex model is unresolved");
+    let mut server = Command::new(executable);
+    server.args(["--disable", "hooks"]);
+    // App-server reads trusted project config; CLI config overrides must win.
+    server.args(["-c", &format!("model={}", config_string(model)?)]);
+    if let Some(effort) = effort {
+        server.args([
+            "-c",
+            &format!("model_reasoning_effort={}", config_string(effort)?),
+        ]);
+    }
+    server.args(["-c", "features.hooks=false"]);
+    server.args([
+        "app-server",
+        "--listen",
+        &format!("unix://{}", app_socket.display()),
+    ]);
+    Ok(server)
+}
+
 /// Build the pane script from the same command builder that checks the private
 /// home, assigned model, effort, disabled hooks, and exact resume identity.
 pub fn pane_script(
@@ -261,19 +299,15 @@ pub fn pane_script(
         prompt,
         Some(relay_socket),
     )?;
-    let mut server = Command::new(&coder.executable);
-    server.args(["--disable", "hooks"]);
-    if let Some(model) = &coder.model_override {
-        server.args(["--model", model]);
-    }
-    if let Some(effort) = &coder.effort {
-        server.args(["-c", &format!("model_reasoning_effort={effort}")]);
-    }
-    server.args([
-        "app-server",
-        "--listen",
-        &format!("unix://{}", app_socket.display()),
-    ]);
+    let server = app_server_command(
+        &coder.executable,
+        coder
+            .model_override
+            .as_deref()
+            .context("native Codex model is unresolved")?,
+        coder.effort.as_deref(),
+        app_socket,
+    )?;
     Ok(format!(
         "#!/bin/sh\nset -eu\n{} >{} 2>&1 &\nserver=$!\nfor n in $(seq 1 200); do\n  [ -S {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -S {} ] || exit 1\nfor n in $(seq 1 1200); do\n  [ -f {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -f {} ] || exit 1\nassigned_thread=$(cat {})\n[ -n \"$assigned_thread\" ] || exit 1\nexec {}\n",
         command_line(&server)?,
@@ -322,6 +356,7 @@ fn bootstrap_protocol(
     socket: &mut WebSocket<UnixStream>,
     workspace: &Path,
     model: &str,
+    effort: Option<&str>,
     session: CoderSession<'_>,
 ) -> Result<(String, Value)> {
     request(
@@ -350,6 +385,21 @@ fn bootstrap_protocol(
                 )
                 .is_some_and(|entry| entry["trust_level"] == "trusted"),
         "Codex app-server did not trust only the assigned worktree"
+    );
+    let effective = &config["result"]["config"];
+    ensure!(
+        effective["model"].as_str() == Some(model),
+        "Codex app-server did not select the assigned model"
+    );
+    if let Some(effort) = effort {
+        ensure!(
+            effective["model_reasoning_effort"].as_str() == Some(effort),
+            "Codex app-server did not select the assigned effort"
+        );
+    }
+    ensure!(
+        effective["features"]["hooks"] == false,
+        "Codex app-server did not disable hooks"
     );
     let result = match session {
         CoderSession::Resume(thread_id) => {
@@ -405,7 +455,13 @@ fn bootstrap(app_socket: &Path, task: &CodexNativeTask<'_>) -> Result<(String, V
     stream.set_write_timeout(Some(Duration::from_secs(12)))?;
     let (mut socket, _) = tungstenite::client("ws://localhost/", stream)
         .map_err(|error| anyhow::anyhow!("Codex app-server WebSocket handshake failed: {error}"))?;
-    bootstrap_protocol(&mut socket, task.workspace, task.model, task.session)
+    bootstrap_protocol(
+        &mut socket,
+        task.workspace,
+        task.model,
+        task.effort,
+        task.session,
+    )
 }
 
 fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
@@ -930,17 +986,57 @@ mod tests {
     use super::*;
     use std::io;
 
-    fn answer_config_read(socket: &mut WebSocket<UnixStream>) {
+    fn answer_config_read(socket: &mut WebSocket<UnixStream>, model: &str) {
         let read: Value =
             serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(read["method"], "config/read");
         let workspace = read["params"]["cwd"].as_str().unwrap();
-        let response = json!({"id":2,"result":{"config":{"projects":{
-            (workspace): {"trust_level":"trusted"}
-        }}}});
+        let response = json!({"id":2,"result":{"config":{
+            "projects": {(workspace): {"trust_level":"trusted"}},
+            "model": model,
+            "model_reasoning_effort": "medium",
+            "features": {"hooks": false}
+        }}});
         socket.send(Message::Text(response.to_string())).unwrap();
     }
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn pane_and_installed_fixture_share_encoded_app_server_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let model = "gpt-\"quote\"'$(touch forbidden)";
+        let executable = root.path().join("codex");
+        let socket = root.path().join("app.sock");
+        let server = app_server_command(&executable, model, Some("medium"), &socket).unwrap();
+        let args: Vec<_> = server.get_args().map(|arg| arg.to_str().unwrap()).collect();
+        let encoded = args.iter().find(|arg| arg.starts_with("model=")).unwrap();
+        let parsed: toml::Table = format!("value = {}", encoded.strip_prefix("model=").unwrap())
+            .parse()
+            .unwrap();
+        assert_eq!(parsed["value"], toml::Value::String(model.to_owned()));
+        assert!(args.contains(&"model_reasoning_effort=\"medium\""));
+        assert!(args.contains(&"features.hooks=false"));
+        let coder = CodexCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: Some(model.to_owned()),
+            effort: Some("medium".into()),
+            executable,
+        };
+        let script = pane_script(
+            &coder,
+            root.path(),
+            root.path(),
+            &socket,
+            &root.path().join("relay.sock"),
+            &root.path().join("go"),
+            &root.path().join("thread"),
+            &root.path().join("server.log"),
+            "assigned prompt",
+        )
+        .unwrap();
+        assert!(script.contains(&command_line(&server).unwrap()));
+    }
 
     #[test]
     fn native_failure_survives_terminal_settlement_failure() {
@@ -1195,21 +1291,12 @@ mod tests {
             &[daemon.lock.clone()],
         )
         .unwrap();
-        let mut server = crate::os::command_under_profile(&profile, &executable);
-        server.args([
-            "--disable",
-            "hooks",
-            "--model",
-            &std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap(),
-            "-c",
-            &format!(
-                "model_reasoning_effort={}",
-                std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap()
-            ),
-            "app-server",
-            "--listen",
-            &format!("unix://{}", app_socket.display()),
-        ]);
+        let model = std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap();
+        let effort = std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap();
+        let launch = app_server_command(&executable, &model, Some(&effort), &app_socket).unwrap();
+        let mut server =
+            crate::os::command_under_profile(&profile, Path::new(launch.get_program()));
+        server.args(launch.get_args());
         server.env_clear();
         server.env("HOME", private.path());
         server.env("CODEX_HOME", private.path());
@@ -1280,7 +1367,7 @@ mod tests {
                 config["model_reasoning_effort"],
                 std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap()
             );
-            assert_ne!(config["features"]["hooks"], true);
+            assert_eq!(config["features"]["hooks"], false);
             assert_eq!(fs::read(&siblings.file).unwrap(), b"unrelated");
             UnixStream::connect(&siblings.socket).unwrap();
 
@@ -1432,7 +1519,7 @@ mod tests {
                     .unwrap()["method"],
                 "initialized"
             );
-            answer_config_read(&mut socket);
+            answer_config_read(&mut socket, "gpt-assigned");
             let start: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
@@ -1449,6 +1536,7 @@ mod tests {
             &mut owner,
             &workspace.path().canonicalize().unwrap(),
             "gpt-assigned",
+            Some("medium"),
             CoderSession::FreshPersistent,
         )
         .unwrap();
@@ -1469,7 +1557,7 @@ mod tests {
                 .unwrap();
             let _: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
-            answer_config_read(&mut socket);
+            answer_config_read(&mut socket, "gpt-review");
             let start: Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
             assert_eq!(start["method"], "thread/start");
@@ -1485,6 +1573,7 @@ mod tests {
             &mut owner,
             &workspace.path().canonicalize().unwrap(),
             "gpt-review",
+            Some("medium"),
             CoderSession::Ephemeral,
         )
         .unwrap();
@@ -1530,6 +1619,7 @@ mod tests {
                 &mut owner,
                 &workspace.path().canonicalize().unwrap(),
                 "gpt-assigned",
+                Some("medium"),
                 CoderSession::FreshPersistent
             )
             .unwrap_err()
@@ -1537,6 +1627,80 @@ mod tests {
             .contains("did not trust only")
         );
         fake.join().unwrap();
+    }
+
+    #[test]
+    fn bootstrap_rejects_conflicting_effective_settings_before_any_thread() {
+        for (field, value) in [
+            ("model", json!("project-unrelated")),
+            ("model_reasoning_effort", json!("low")),
+            ("hooks", json!(true)),
+        ] {
+            for resume in [false, true] {
+                let value = value.clone();
+                let workspace = tempfile::tempdir().unwrap();
+                let canonical = workspace.path().canonicalize().unwrap();
+                let (owner, provider) = UnixStream::pair().unwrap();
+                let fake = std::thread::spawn(move || {
+                    let mut socket = tungstenite::accept(provider).unwrap();
+                    let initialize: Value =
+                        serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+                    assert_eq!(initialize["method"], "initialize");
+                    socket
+                        .send(Message::Text(json!({"id":1,"result":{}}).to_string()))
+                        .unwrap();
+                    let initialized: Value =
+                        serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+                    assert_eq!(initialized["method"], "initialized");
+                    let read: Value =
+                        serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+                    assert_eq!(read["method"], "config/read");
+                    let path = read["params"]["cwd"].as_str().unwrap();
+                    let mut config = json!({
+                        "projects": {(path): {"trust_level":"trusted"}},
+                        "model": "gpt-assigned",
+                        "model_reasoning_effort": "medium",
+                        "features": {"hooks": false}
+                    });
+                    if field == "hooks" {
+                        config["features"]["hooks"] = value.clone();
+                    } else {
+                        config[field] = value.clone();
+                    }
+                    socket
+                        .send(Message::Text(
+                            json!({"id":2,"result":{"config":config}}).to_string(),
+                        ))
+                        .unwrap();
+                    socket
+                        .get_mut()
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    assert!(
+                        socket.read().is_err(),
+                        "unexpected thread call after {field} mismatch"
+                    );
+                });
+                let (mut owner, _) = tungstenite::client("ws://localhost/", owner).unwrap();
+                let session = if resume {
+                    CoderSession::Resume("assigned-thread")
+                } else {
+                    CoderSession::FreshPersistent
+                };
+                assert!(
+                    bootstrap_protocol(
+                        &mut owner,
+                        &canonical,
+                        "gpt-assigned",
+                        Some("medium"),
+                        session
+                    )
+                    .is_err(),
+                    "{field} mismatch allowed thread launch"
+                );
+                fake.join().unwrap();
+            }
+        }
     }
 
     #[test]
@@ -1557,9 +1721,12 @@ mod tests {
                         let path = message["params"]["cwd"].as_str().unwrap();
                         socket
                             .send(Message::Text(
-                                json!({"id":2,"result":{"config":{"projects":{
-                                    (path): {"trust_level":"trusted"}
-                                }}}})
+                                json!({"id":2,"result":{"config":{
+                                    "projects": {(path): {"trust_level":"trusted"}},
+                                    "model":"gpt-assigned",
+                                    "model_reasoning_effort":"medium",
+                                    "features":{"hooks":false}
+                                }}})
                                 .to_string(),
                             ))
                             .unwrap();
@@ -1583,6 +1750,7 @@ mod tests {
                 &mut owner,
                 &workspace.path().canonicalize().unwrap(),
                 "gpt-assigned",
+                Some("medium"),
                 CoderSession::Resume("assigned-thread"),
             )
             .is_err()
