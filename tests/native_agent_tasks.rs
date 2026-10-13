@@ -2252,6 +2252,33 @@ struct HostTaskChildGuard {
     armed: bool,
 }
 
+fn host_first_turn_record(transcript: &str, generation: &str) -> Option<serde_json::Value> {
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| {
+            record["execution_generation"] == generation
+                && record["event"]["method"] == "turn/started"
+                && record["input_sequence"] == 1
+                && record["turn_id"].as_str().is_some_and(|id| !id.is_empty())
+                && record["assigned_conversation_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+                && record["event"]["params"]["threadId"] == record["assigned_conversation_id"]
+        })
+}
+
+#[test]
+fn host_first_turn_probe_ignores_prior_generation() {
+    let transcript = [
+        json!({"execution_generation":"old-generation","assigned_conversation_id":"thread-1","input_sequence":1,"turn_id":"old-turn","event":{"method":"turn/started","params":{"threadId":"thread-1"}}}).to_string(),
+        json!({"execution_generation":"current-generation","assigned_conversation_id":"thread-1","input_sequence":1,"turn_id":"current-turn","event":{"method":"turn/started","params":{"threadId":"thread-1"}}}).to_string(),
+    ].join("\n");
+    assert!(host_first_turn_record(&transcript, "other-generation").is_none());
+    let record = host_first_turn_record(&transcript, "current-generation").unwrap();
+    assert_eq!(record["turn_id"], "current-turn");
+}
+
 impl Drop for HostTaskChildGuard {
     fn drop(&mut self) {
         if !self.armed {
@@ -2537,11 +2564,7 @@ exit [lindex $outcome 3]
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .collect();
-            let last_sequence = records
-                .iter()
-                .filter_map(|record| record["input_sequence"].as_u64())
-                .max()
-                .unwrap_or(0);
+            let mut last_sequence = 0;
             let last_protocol: Vec<_> = records
                 .iter()
                 .rev()
@@ -2563,10 +2586,17 @@ exit [lindex $outcome 3]
                     })
                 })
                 && let Some(session) = descriptor["session_id"].as_str()
+                && let Some(generation) = descriptor["execution_generation"].as_str()
             {
                 last_terminal = Some(descriptor.clone());
+                last_sequence = records
+                    .iter()
+                    .filter(|record| record["execution_generation"] == generation)
+                    .filter_map(|record| record["input_sequence"].as_u64())
+                    .max()
+                    .unwrap_or(0);
                 if last_sequence >= 1 {
-                    break session.to_string();
+                    break (session.to_string(), generation.to_string());
                 }
             }
             assert!(
@@ -2583,22 +2613,14 @@ exit [lindex $outcome 3]
             );
             std::thread::sleep(Duration::from_millis(100));
         };
+        let (session, generation) = session;
         if first_turn_only {
             assert_eq!(provider, "codex");
             let first_turn_deadline = Instant::now() + Duration::from_secs(90);
             loop {
                 let transcript =
                     fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
-                if let Some(record) = transcript
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                    .find(|record| {
-                        record["event"]["method"] == "turn/started"
-                            && record["input_sequence"] == 1
-                            && record["event"]["params"]["threadId"]
-                                == record["assigned_conversation_id"]
-                    })
-                {
+                if let Some(record) = host_first_turn_record(&transcript, &generation) {
                     fs::write(
                         runtime.join("first-turn.json"),
                         serde_json::to_vec_pretty(&json!({

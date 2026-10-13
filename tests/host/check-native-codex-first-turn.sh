@@ -16,6 +16,7 @@ export FLUENT_NATIVE_HOST_OUTPUT_DIR="$output"
 export FLUENT_TEST_NATIVE_CODEX_FIRST_TURN_ONLY=1
 printf 'candidate=%s\noutput=%s\n' "$candidate" "$output"
 printf '%s\n' "$candidate" > "$output/candidate.txt"
+printf 'model=%s\neffort=%s\n' "$FLUENT_NATIVE_CODEX_MODEL" "$FLUENT_NATIVE_CODEX_EFFORT" > "$output/selected-codex.txt"
 codex --version > "$output/codex-version.txt"
 tmux -V > "$output/tmux-version.txt"
 
@@ -28,5 +29,8 @@ status=$?
 set -e
 printf '%s\n' "$status" > "$output/status.txt"
 tail -n 30 "$output/codex-first-turn.log"
+if [ -f target/debug/fluent ]; then
+  shasum -a 256 target/debug/fluent > "$output/fluent-binary.sha256"
+fi
 test "$(git rev-parse HEAD)" = "$candidate"
 exit "$status"
