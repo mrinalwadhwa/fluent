@@ -938,6 +938,37 @@ fn native_task_preserves_private_provider_boundary() {
             .windows(2)
             .any(|args| args == ["resume", "assigned-session"])
     );
+    assert!(!remote_args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert_eq!(remote_command.get_program(), OsStr::new("sandbox-exec"));
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| args == ["-f", "(version 1) (allow default)"])
+    );
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| args == ["--model", "gpt-assigned"])
+    );
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| args == ["-c", "model_reasoning_effort=high"])
+    );
+    assert!(
+        remote_args
+            .windows(2)
+            .any(|args| args == ["--disable", "hooks"])
+    );
+    assert!(
+        remote_command
+            .get_envs()
+            .any(|(name, value)| name == OsStr::new("CODEX_HOME")
+                && value == Some(private_home.path().as_os_str()))
+    );
+    assert_eq!(remote_command.get_current_dir(), Some(project.path()));
+    assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert!(resumed_args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
 
     assert!(
         coder
@@ -1088,6 +1119,7 @@ fn native_codex_pane_loads_the_assigned_thread() {
     assert!(script.contains("'app-server' '--listen'"));
     assert!(script.contains("--remote"));
     assert!(script.contains("'resume' \"$assigned_thread\""));
+    assert!(!script.contains("--dangerously-bypass-approvals-and-sandbox"));
     assert!(script.contains("--model"));
     assert!(script.contains("gpt-assigned"));
     assert!(script.contains("model_reasoning_effort=high"));

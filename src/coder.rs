@@ -1191,7 +1191,14 @@ impl CodexCode {
         if self.model_override.as_deref().is_none_or(str::is_empty) {
             bail!("native Codex Task requires its resolved model");
         }
-        let mut command = self.build_command(working_dir, false);
+        // The remote client inherits permissions from its assigned app-server
+        // thread. Codex rejects client permission overrides on remote resume.
+        let mut command = self.build_command_with_session(
+            working_dir,
+            false,
+            CoderSession::Ephemeral,
+            remote_socket.is_none(),
+        );
         command.env("CODEX_HOME", private_home);
         command.args(["--disable", "hooks"]);
         if let Some(socket) = remote_socket {
@@ -1215,11 +1222,11 @@ impl CodexCode {
     }
 
     fn build_command(&self, working_dir: &Path, exec_mode: bool) -> Command {
-        self.build_command_with_session(working_dir, exec_mode, CoderSession::Ephemeral)
+        self.build_command_with_session(working_dir, exec_mode, CoderSession::Ephemeral, true)
     }
 
     fn build_writer_command(&self, working_dir: &Path, session: CoderSession<'_>) -> Command {
-        self.build_command_with_session(working_dir, true, session)
+        self.build_command_with_session(working_dir, true, session, true)
     }
 
     fn build_command_with_session(
@@ -1227,6 +1234,7 @@ impl CodexCode {
         working_dir: &Path,
         exec_mode: bool,
         session: CoderSession<'_>,
+        client_permission_override: bool,
     ) -> Command {
         let mut cmd = if let Some(profile) = &self.sandbox_profile {
             let mut cmd = Command::new(if self.trusted_sandbox {
@@ -1271,7 +1279,9 @@ impl CodexCode {
         if !matches!(session, CoderSession::Resume(_)) {
             cmd.args(["--cd", &working_dir.to_string_lossy()]);
         }
-        cmd.args(["--dangerously-bypass-approvals-and-sandbox"]);
+        if client_permission_override {
+            cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+        }
         if let Some(model) = self.effective_model() {
             cmd.args(["--model", &model]);
         }
@@ -6466,6 +6476,14 @@ mod model_default_tests {
         assert!(!cmd_has_arg(&cmd, "--ignore-user-config"));
         assert!(!cmd_has_arg(&cmd, "--ephemeral"));
         assert!(!cmd_has_arg(&cmd, "hooks"));
+        assert!(cmd_has_arg(
+            &cmd,
+            "--dangerously-bypass-approvals-and-sandbox"
+        ));
+        assert!(cmd_has_arg(
+            &coder.build_command(dir.path(), true),
+            "--dangerously-bypass-approvals-and-sandbox"
+        ));
     }
 
     #[test]

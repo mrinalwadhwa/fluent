@@ -1053,6 +1053,7 @@ fn recognized_pane_output(snapshot: Option<&str>) -> Vec<&'static str> {
         "Permission denied",
         "Model not found",
         "Unknown model",
+        "Error: Permission overrides are not supported when resuming a remote task.",
     ]
     .into_iter()
     .filter(|phrase| snapshot.is_some_and(|text| text.contains(phrase)))
@@ -1398,6 +1399,13 @@ mod tests {
             )),
             vec!["Connection reset without closing handshake"]
         );
+        assert_eq!(
+            recognized_pane_output(Some(
+                "private-token Error: Permission overrides are not supported when resuming a remote task. another-secret"
+            )),
+            vec!["Error: Permission overrides are not supported when resuming a remote task."]
+        );
+        assert!(recognized_pane_output(Some("private-token another-secret")).is_empty());
     }
 
     fn answer_config_read(socket: &mut WebSocket<UnixStream>, model: &str) {
