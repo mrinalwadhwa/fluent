@@ -289,6 +289,8 @@ pub fn pane_script(
     go_marker: &Path,
     thread_file: &Path,
     provider_log: &Path,
+    generation_file: &Path,
+    client_exit: &Path,
     prompt: &str,
 ) -> Result<String> {
     let placeholder = "__FLUENT_ASSIGNED_THREAD__";
@@ -308,8 +310,9 @@ pub fn pane_script(
         coder.effort.as_deref(),
         app_socket,
     )?;
+    let client_exit_tmp = client_exit.with_extension("tmp");
     Ok(format!(
-        "#!/bin/sh\nset -eu\n{} >{} 2>&1 &\nserver=$!\nfor n in $(seq 1 200); do\n  [ -S {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -S {} ] || exit 1\nfor n in $(seq 1 1200); do\n  [ -f {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -f {} ] || exit 1\nassigned_thread=$(cat {})\n[ -n \"$assigned_thread\" ] || exit 1\nexec {}\n",
+        "#!/bin/sh\nset -eu\numask 077\n{} >{} 2>&1 &\nserver=$!\nfor n in $(seq 1 200); do\n  [ -S {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -S {} ] || exit 1\nfor n in $(seq 1 1200); do\n  [ -f {} ] && break\n  kill -0 \"$server\" 2>/dev/null || exit 1\n  sleep 0.05\ndone\n[ -f {} ] || exit 1\nassigned_thread=$(cat {})\nassigned_generation=$(cat {})\n[ -n \"$assigned_thread\" ] && [ -n \"$assigned_generation\" ] || exit 1\nif {}; then client_status=0; else client_status=$?; fi\nprintf '%s\\t%s\\t%d\\n' \"$assigned_generation\" \"$assigned_thread\" \"$client_status\" >{}\nmv {} {}\n# Keep the pane briefly so its final native display can be classified.\nsleep 5\nexit \"$client_status\"\n",
         command_line(&server)?,
         quote(&provider_log.display().to_string()),
         quote(&app_socket.display().to_string()),
@@ -317,7 +320,11 @@ pub fn pane_script(
         quote(&go_marker.display().to_string()),
         quote(&go_marker.display().to_string()),
         quote(&thread_file.display().to_string()),
+        quote(&generation_file.display().to_string()),
         command_line(&command)?.replace(&quote(placeholder), "\"$assigned_thread\""),
+        quote(&client_exit_tmp.display().to_string()),
+        quote(&client_exit_tmp.display().to_string()),
+        quote(&client_exit.display().to_string()),
     ))
 }
 
@@ -595,13 +602,82 @@ pub fn relay_codex_websockets<W, F>(
     generation: &str,
     thread_id: &str,
     admission: Arc<NativeAdmission>,
-    mut evidence: W,
-    mut on_completion: F,
+    evidence: W,
+    on_completion: F,
 ) -> Result<()>
 where
     W: Write + Send,
     F: FnMut(Completion) -> Result<()> + Send,
 {
+    relay_codex_websockets_with_trace(
+        client,
+        server,
+        generation,
+        thread_id,
+        admission,
+        evidence,
+        on_completion,
+        std::io::sink(),
+    )
+}
+
+// Keep only protocol direction and method names. Request bodies, response
+// bodies, pane bytes, and provider errors can contain private credentials.
+fn trace_relay<T: Write>(
+    trace: &Mutex<(T, usize)>,
+    generation: &str,
+    thread_id: &str,
+    direction: &str,
+    outcome: &str,
+    method: Option<&str>,
+    input_sequence: u64,
+) -> Result<()> {
+    let mut trace = trace
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Codex relay trace lock poisoned"))?;
+    if trace.1 >= 272 || (trace.1 >= 256 && matches!(outcome, "received" | "forwarded")) {
+        return Ok(());
+    }
+    let safe_method = method.filter(|method| {
+        method.len() <= 64
+            && method
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-'))
+    });
+    serde_json::to_writer(
+        &mut trace.0,
+        &json!({
+            "execution_generation": generation,
+            "assigned_conversation_id": thread_id,
+            "direction": direction,
+            "outcome": outcome,
+            "method": safe_method.unwrap_or("<other>"),
+            "input_sequence": input_sequence,
+        }),
+    )?;
+    trace.0.write_all(b"\n")?;
+    trace.0.flush()?;
+    trace.1 += 1;
+    Ok(())
+}
+
+/// Retain bounded, payload-free diagnostics for the production relay.
+pub fn relay_codex_websockets_with_trace<W, F, T>(
+    client: WebSocket<UnixStream>,
+    server: WebSocket<UnixStream>,
+    generation: &str,
+    thread_id: &str,
+    admission: Arc<NativeAdmission>,
+    mut evidence: W,
+    mut on_completion: F,
+    trace: T,
+) -> Result<()>
+where
+    W: Write + Send,
+    F: FnMut(Completion) -> Result<()> + Send,
+    T: Write + Send,
+{
+    let trace = Arc::new(Mutex::new((trace, 0usize)));
     let client_abort = client.get_ref().try_clone()?;
     let server_abort = server.get_ref().try_clone()?;
     let downstream_abort_client = client.get_ref().try_clone()?;
@@ -630,13 +706,30 @@ where
     let (display_tx, display_rx) = sync_channel::<String>(32);
     std::thread::scope(|scope| {
         let display_client = Arc::clone(&client);
+        let display_trace = Arc::clone(&trace);
+        let display_gate = Arc::clone(&gate);
         let display = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 while let Ok(text) = display_rx.recv() {
                     let mut client = display_client
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
-                    send_required_tui_frame(&mut client, text)?;
+                    if let Err(error) = send_required_tui_frame(&mut client, text) {
+                        let sequence = display_gate
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                            .input_sequence;
+                        trace_relay(
+                            &display_trace,
+                            generation,
+                            thread_id,
+                            "app-to-tui",
+                            "send-error",
+                            None,
+                            sequence,
+                        )?;
+                        return Err(error);
+                    }
                 }
                 Ok(())
             })();
@@ -649,22 +742,46 @@ where
         let upstream_client = Arc::clone(&client);
         let upstream_server = Arc::clone(&server);
         let request_gate = Arc::clone(&gate);
+        let request_trace = Arc::clone(&trace);
         let upstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 loop {
-                    let line = match read_socket(&upstream_client)? {
-                        SocketRead::Pending => {
+                    let line = match read_socket(&upstream_client) {
+                        Err(error) => {
+                            let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "read-error", None, sequence)?;
+                            return Err(error).context("reading native Codex TUI requests");
+                        }
+                        Ok(SocketRead::Closed) => {
+                            let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "closed", None, sequence)?;
+                            return Ok(());
+                        }
+                        Ok(SocketRead::Pending) => {
                             std::thread::sleep(Duration::from_millis(1));
                             continue;
                         }
-                        SocketRead::Closed => return Ok(()),
-                        SocketRead::Text(line) => line,
+                        Ok(SocketRead::Text(line)) => line,
                     };
-                    let request: Value = serde_json::from_str(&line)?;
+                    let request: Value = match serde_json::from_str(&line) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "decode-error", None, sequence)?;
+                            return Err(error.into());
+                        }
+                    };
                     let method = request["method"].as_str().unwrap_or("<missing>");
-                    let admitted = request_gate.lock()
+                    let sequence = request_gate.lock()
                         .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
-                        .admit_request(&request);
+                        .input_sequence;
+                    trace_relay(&request_trace, generation, thread_id, "tui-to-app", "received", Some(method), sequence)?;
+                    let (admitted, next_sequence) = {
+                        let mut gate = request_gate.lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?;
+                        let admitted = gate.admit_request(&request);
+                        (admitted, gate.input_sequence)
+                    };
                     if admitted.as_ref().is_ok_and(Option::is_none) {
                         eprintln!("native Codex TUI request: {method}");
                     }
@@ -672,6 +789,7 @@ where
                         eprintln!("native Codex TUI admitted input: {method}");
                     }
                     if let Err(error) = admitted {
+                        trace_relay(&request_trace, generation, thread_id, "tui-to-app", "rejected", Some(method), next_sequence)?;
                         if let Some(id) = request.get("id") {
                             let response = json!({"id": id, "error": {"code": -32000, "message": error.to_string()}});
                             upstream_client.lock()
@@ -681,9 +799,14 @@ where
                         }
                         return Err(error);
                     }
-                    upstream_server.lock()
+                    let forwarded = upstream_server.lock()
                         .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?
-                        .send(Message::Text(line))?;
+                        .send(Message::Text(line));
+                    if let Err(error) = forwarded {
+                        trace_relay(&request_trace, generation, thread_id, "tui-to-app", "send-error", Some(method), next_sequence)?;
+                        return Err(error).with_context(|| format!("forwarding native Codex TUI {method} to app-server"));
+                    }
+                    trace_relay(&request_trace, generation, thread_id, "tui-to-app", "forwarded", Some(method), next_sequence)?;
                 }
             })();
             let _ = client_abort.shutdown(Shutdown::Both);
@@ -692,26 +815,91 @@ where
         });
         let downstream_server = Arc::clone(&server);
         let response_gate = Arc::clone(&gate);
+        let response_trace = Arc::clone(&trace);
         let downstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 loop {
-                    let line = match read_socket(&downstream_server)? {
-                        SocketRead::Pending => {
+                    let line = match read_socket(&downstream_server) {
+                        Err(error) => {
+                            let sequence = response_gate
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                                .input_sequence;
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "read-error",
+                                None,
+                                sequence,
+                            )?;
+                            return Err(error).context("reading native Codex app-server events");
+                        }
+                        Ok(SocketRead::Closed) => {
+                            let sequence = response_gate
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                                .input_sequence;
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "closed",
+                                None,
+                                sequence,
+                            )?;
+                            return Ok(());
+                        }
+                        Ok(SocketRead::Pending) => {
                             std::thread::sleep(Duration::from_millis(1));
                             continue;
                         }
-                        SocketRead::Closed => return Ok(()),
-                        SocketRead::Text(line) => line,
+                        Ok(SocketRead::Text(line)) => line,
                     };
-                    let event: Value = serde_json::from_str(&line)?;
-                    let (completion, input_sequence) = {
+                    let event: Value = match serde_json::from_str(&line) {
+                        Ok(event) => event,
+                        Err(error) => {
+                            let sequence = response_gate
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                                .input_sequence;
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "decode-error",
+                                None,
+                                sequence,
+                            )?;
+                            return Err(error.into());
+                        }
+                    };
+                    let (observed, input_sequence) = {
                         let mut gate = response_gate
                             .lock()
                             .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?;
                         (
-                            gate.observe_event_for_generation(generation, &event)?,
+                            gate.observe_event_for_generation(generation, &event),
                             gate.input_sequence,
                         )
+                    };
+                    let completion = match observed {
+                        Ok(completion) => completion,
+                        Err(error) => {
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "rejected",
+                                event["method"].as_str(),
+                                input_sequence,
+                            )?;
+                            return Err(error);
+                        }
                     };
                     if input_sequence == 0 {
                         eprintln!(
@@ -719,6 +907,15 @@ where
                             event["method"].as_str().unwrap_or("response")
                         );
                     }
+                    trace_relay(
+                        &response_trace,
+                        generation,
+                        thread_id,
+                        "app-to-tui",
+                        "received",
+                        event["method"].as_str(),
+                        input_sequence,
+                    )?;
                     let params = &event["params"];
                     let conversation_id = params["threadId"]
                         .as_str()
@@ -746,9 +943,27 @@ where
                     match display_tx.try_send(line) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "backpressure",
+                                event["method"].as_str(),
+                                input_sequence,
+                            )?;
                             anyhow::bail!("Codex TUI WebSocket protocol backpressure");
                         }
                         Err(TrySendError::Disconnected(_)) => {
+                            trace_relay(
+                                &response_trace,
+                                generation,
+                                thread_id,
+                                "app-to-tui",
+                                "sender-disconnected",
+                                event["method"].as_str(),
+                                input_sequence,
+                            )?;
                             anyhow::bail!("Codex TUI WebSocket protocol sender disconnected");
                         }
                     }
@@ -818,6 +1033,65 @@ fn settle_native_result<T>(
     result
 }
 
+fn parse_client_exit(status: &str, generation: &str, thread_id: &str) -> Result<i32> {
+    let fields: Vec<_> = status.trim_end().split('\t').collect();
+    ensure!(
+        fields.len() == 3 && fields[0] == generation && fields[1] == thread_id,
+        "native Codex client exit belongs to another invocation"
+    );
+    fields[2]
+        .parse::<i32>()
+        .context("parse native Codex client exit status")
+}
+
+fn recognized_pane_output(snapshot: Option<&str>) -> Vec<&'static str> {
+    [
+        "Connection reset without closing handshake",
+        "Failed to connect",
+        "Authentication failed",
+        "Unauthorized",
+        "Permission denied",
+        "Model not found",
+        "Unknown model",
+    ]
+    .into_iter()
+    .filter(|phrase| snapshot.is_some_and(|text| text.contains(phrase)))
+    .collect()
+}
+
+fn record_client_diagnostic(
+    artifact: &Path,
+    status_path: &Path,
+    generation: &str,
+    thread_id: &str,
+    terminal: &TerminalSession,
+) -> Result<Option<i32>> {
+    let exit_status = match fs::read_to_string(status_path) {
+        Ok(status) => Some(parse_client_exit(&status, generation, thread_id)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read native Codex client exit"),
+    };
+    let snapshot = terminal.capture_pane_snapshot().ok();
+    let output_signals = recognized_pane_output(snapshot.as_deref());
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(artifact.join("native-codex-client-diagnostics.jsonl"))?;
+    serde_json::to_writer(
+        &mut file,
+        &json!({
+            "execution_generation": generation,
+            "assigned_conversation_id": thread_id,
+            "exit_status": exit_status,
+            "pane_snapshot_available": snapshot.is_some(),
+            "recognized_output": output_signals,
+        }),
+    )?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(exit_status)
+}
+
 /// Run the assigned Task through a private app-server, one relay, and one
 /// managed tmux pane. A provider notification only nominates completion; the
 /// caller still runs its normal Writer validation and publishes the Task result.
@@ -844,8 +1118,10 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     fs::create_dir_all(artifact)?;
     let go_marker = sockets.path().join("start-tui");
     let thread_file = sockets.path().join("assigned-thread");
+    let generation_file = sockets.path().join("assigned-generation");
     let script_path = artifact.join("native-codex-pane.sh");
     let provider_log = artifact.join("native-provider-stderr.log");
+    let client_exit = sockets.path().join("client-exit");
     // The pane starts its private server and waits until the owner has loaded
     // one assigned thread through the same app-server process.
     let coder = CodexCode {
@@ -864,6 +1140,8 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         &go_marker,
         &thread_file,
         &provider_log,
+        &generation_file,
+        &client_exit,
         task.prompt,
     )?;
     fs::write(&script_path, script)?;
@@ -881,6 +1159,7 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     let outcome = (|| -> Result<()> {
         let (thread_id, start_event) = bootstrap(&app_socket, &task)?;
         let generation = terminal.descriptor().execution_generation.clone();
+        fs::write(&generation_file, &generation)?;
         let transcript = artifact.join("transcript.jsonl");
         write_bootstrap_evidence(&transcript, &generation, &thread_id, &start_event)?;
         fs::write(&thread_file, &thread_id)?;
@@ -891,7 +1170,40 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         let relay_stopping = Arc::clone(&stopping);
         let (tx, rx) = mpsc::channel::<Result<Completion>>();
         let thread_id_for_relay = thread_id.clone();
+        let generation_for_relay = generation.clone();
+        let relay_trace = artifact.join("native-codex-relay-diagnostics.jsonl");
+        let relay_trace_for_worker = relay_trace.clone();
         let relay = std::thread::spawn(move || {
+            let trace = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&relay_trace_for_worker);
+            let trace = match trace {
+                Ok(trace) => trace,
+                Err(error) => {
+                    let _ = tx.send(Err(error.into()));
+                    return;
+                }
+            };
+            let boundary = match trace.try_clone() {
+                Ok(file) => Mutex::new((file, 0)),
+                Err(error) => {
+                    let _ = tx.send(Err(error.into()));
+                    return;
+                }
+            };
+            if let Err(error) = trace_relay(
+                &boundary,
+                &generation_for_relay,
+                &thread_id_for_relay,
+                "tui-to-app",
+                "awaiting-connection",
+                None,
+                0,
+            ) {
+                let _ = tx.send(Err(error));
+                return;
+            }
             let deadline = Instant::now() + Duration::from_secs(60);
             let client = loop {
                 match listener.accept() {
@@ -909,12 +1221,39 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                 }
             };
             let result = client.and_then(|client| {
+                trace_relay(
+                    &boundary,
+                    &generation_for_relay,
+                    &thread_id_for_relay,
+                    "tui-to-app",
+                    "connected",
+                    None,
+                    0,
+                )?;
                 client.set_read_timeout(Some(Duration::from_secs(12)))?;
                 let client = tungstenite::accept(client).map_err(|error| {
                     anyhow::anyhow!("Codex native TUI WebSocket handshake failed: {error}")
                 })?;
+                trace_relay(
+                    &boundary,
+                    &generation_for_relay,
+                    &thread_id_for_relay,
+                    "tui-to-app",
+                    "handshake-complete",
+                    None,
+                    0,
+                )?;
                 let server = UnixStream::connect(&app_socket)
                     .context("connect relay to private app-server")?;
+                trace_relay(
+                    &boundary,
+                    &generation_for_relay,
+                    &thread_id_for_relay,
+                    "app-to-tui",
+                    "connected",
+                    None,
+                    0,
+                )?;
                 server.set_read_timeout(Some(Duration::from_secs(12)))?;
                 let (server, _) =
                     tungstenite::client("ws://localhost/", server).map_err(|error| {
@@ -922,10 +1261,19 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                             "private Codex app-server WebSocket handshake failed: {error}"
                         )
                     })?;
-                relay_codex_websockets(
+                trace_relay(
+                    &boundary,
+                    &generation_for_relay,
+                    &thread_id_for_relay,
+                    "app-to-tui",
+                    "handshake-complete",
+                    None,
+                    0,
+                )?;
+                relay_codex_websockets_with_trace(
                     client,
                     server,
-                    &generation,
+                    &generation_for_relay,
                     &thread_id_for_relay,
                     admission,
                     evidence,
@@ -937,9 +1285,19 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                         }
                         Ok(())
                     },
+                    trace,
                 )
             });
             if let Err(error) = result {
+                let _ = trace_relay(
+                    &boundary,
+                    &generation_for_relay,
+                    &thread_id_for_relay,
+                    "relay",
+                    "failed",
+                    None,
+                    0,
+                );
                 eprintln!("native Codex relay failed: {error:#}");
                 let _ = tx.send(Err(error));
             }
@@ -963,7 +1321,20 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     Err(error) => break Err(error),
                 },
             }
+            if client_exit.exists() {
+                break Err(anyhow::anyhow!(
+                    "native Codex client exited before the assigned turn completed"
+                ));
+            }
         };
+        if result.is_err() && !client_exit.exists() {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while !client_exit.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let diagnostic =
+            record_client_diagnostic(artifact, &client_exit, &generation, &thread_id, &terminal);
         stopping.store(true, Ordering::Release);
         let stop = if result.is_ok() {
             terminal.finish()
@@ -971,7 +1342,23 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
             terminal.stop()
         };
         let joined = relay.join();
-        settle_native_result(result, stop, joined)?;
+        let trace_sync = if relay_trace.exists() {
+            OpenOptions::new()
+                .read(true)
+                .open(&relay_trace)
+                .and_then(|file| file.sync_all())
+        } else {
+            Ok(())
+        };
+        let result = settle_native_result(result, stop, joined);
+        if let Err(error) = trace_sync {
+            return result.and_then(|_| Err(error).context("sync native Codex relay diagnostics"));
+        }
+        if let Err(error) = diagnostic {
+            return result
+                .and_then(|_| Err(error.context("record native Codex client diagnostics")));
+        }
+        result?;
         File::open(&transcript)?.sync_all()?;
         Ok(())
     })();
@@ -985,6 +1372,33 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn client_exit_diagnostic_keeps_identity_and_hides_other_pane_text() {
+        assert_eq!(
+            parse_client_exit(
+                "generation-1\tassigned-thread\t23\n",
+                "generation-1",
+                "assigned-thread"
+            )
+            .unwrap(),
+            23
+        );
+        assert!(
+            parse_client_exit(
+                "generation-2\tassigned-thread\t23\n",
+                "generation-1",
+                "assigned-thread"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            recognized_pane_output(Some(
+                "private-token Connection reset without closing handshake"
+            )),
+            vec!["Connection reset without closing handshake"]
+        );
+    }
 
     fn answer_config_read(socket: &mut WebSocket<UnixStream>, model: &str) {
         let read: Value =
@@ -1032,6 +1446,8 @@ mod tests {
             &root.path().join("go"),
             &root.path().join("thread"),
             &root.path().join("server.log"),
+            &root.path().join("generation"),
+            &root.path().join("client-exit"),
             "assigned prompt",
         )
         .unwrap();

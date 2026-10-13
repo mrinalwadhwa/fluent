@@ -1080,6 +1080,8 @@ fn native_codex_pane_loads_the_assigned_thread() {
         &root.path().join("go"),
         &root.path().join("thread"),
         &root.path().join("provider.log"),
+        &root.path().join("generation"),
+        &root.path().join("client-exit"),
         "assigned Task prompt",
     )
     .unwrap();
@@ -1092,6 +1094,10 @@ fn native_codex_pane_loads_the_assigned_thread() {
     assert!(script.contains("--disable"));
     assert!(script.contains("hooks"));
     assert!(script.contains("assigned Task prompt"));
+    assert!(script.contains("assigned_generation=$(cat"));
+    assert!(script.contains("client_status=$?"));
+    assert!(script.contains("$assigned_generation"));
+    assert!(script.contains("$assigned_thread"));
     assert_eq!(script.matches("__FLUENT_ASSIGNED_THREAD__").count(), 0);
 }
 
@@ -1457,6 +1463,124 @@ fn native_terminal_controls_assigned_invocation() {
     let _ = tui.get_ref().shutdown(Shutdown::Both);
     provider.join().unwrap();
     let _ = relay.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_relay_records_which_peer_exits_before_first_turn() {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().join("relay.jsonl");
+    let trace = std::fs::File::create(&trace_path).unwrap();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        let _ = socket.read();
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets_with_trace(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            std::io::sink(),
+            |_| Ok(()),
+            trace,
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"thread/resume","params":{"threadId":"assigned-thread","secret":"private-token"}})
+            .to_string(),
+    ))
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    tui.close(None).unwrap();
+    drop(tui);
+    let _ = relay.join().unwrap();
+    provider.join().unwrap();
+    let diagnostic = std::fs::read_to_string(trace_path).unwrap();
+    assert!(!diagnostic.contains("private-token"));
+    let records: Vec<serde_json::Value> = diagnostic
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["direction"] == "tui-to-app"
+                && record["outcome"] == "closed"
+                && record["input_sequence"] == 0)
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record["execution_generation"] == "generation-1"
+                && record["assigned_conversation_id"] == "assigned-thread")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_relay_records_app_server_exit_before_first_turn() {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().join("relay.jsonl");
+    let trace = std::fs::File::create(&trace_path).unwrap();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        let _ = socket.read();
+        socket.close(None).unwrap();
+    });
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets_with_trace(
+            client,
+            server,
+            "generation-2",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            std::io::sink(),
+            |_| Ok(()),
+            trace,
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"thread/resume","params":{"threadId":"assigned-thread"}})
+            .to_string(),
+    ))
+    .unwrap();
+    let _ = relay.join().unwrap();
+    provider.join().unwrap();
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(trace_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let first_end = records
+        .iter()
+        .find(|record| matches!(record["outcome"].as_str(), Some("closed" | "read-error")))
+        .unwrap();
+    assert_eq!(first_end["direction"], "app-to-tui");
+    assert_eq!(first_end["input_sequence"], 0);
 }
 
 #[cfg(unix)]
@@ -2220,6 +2344,8 @@ fn host_native_agent_acceptance() {
         std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
         "1"
     );
+    let first_turn_only =
+        std::env::var("FLUENT_TEST_NATIVE_CODEX_FIRST_TURN_ONLY").is_ok_and(|value| value == "1");
     let output_root =
         std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap());
     fs::create_dir_all(&output_root).unwrap();
@@ -2457,6 +2583,51 @@ exit [lindex $outcome 3]
             );
             std::thread::sleep(Duration::from_millis(100));
         };
+        if first_turn_only {
+            assert_eq!(provider, "codex");
+            let first_turn_deadline = Instant::now() + Duration::from_secs(90);
+            loop {
+                let transcript =
+                    fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+                if let Some(record) = transcript
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .find(|record| {
+                        record["event"]["method"] == "turn/started"
+                            && record["input_sequence"] == 1
+                            && record["event"]["params"]["threadId"]
+                                == record["assigned_conversation_id"]
+                    })
+                {
+                    fs::write(
+                        runtime.join("first-turn.json"),
+                        serde_json::to_vec_pretty(&json!({
+                            "execution_generation": record["execution_generation"],
+                            "assigned_conversation_id": record["assigned_conversation_id"],
+                            "turn_id": record["turn_id"],
+                            "input_sequence": record["input_sequence"],
+                            "terminal_session": session,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    return;
+                }
+                assert!(
+                    child.child.try_wait().unwrap().is_none(),
+                    "Codex exited before turn/started; inspect {} and {}",
+                    artifact.display(),
+                    runtime.display()
+                );
+                assert!(
+                    Instant::now() < first_turn_deadline,
+                    "Codex did not start its first turn; inspect {} and {}",
+                    artifact.display(),
+                    runtime.display()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         if provider == "pi" {
             let source_dir = std::env::var_os("PI_CODING_AGENT_DIR")
                 .map(std::path::PathBuf::from)

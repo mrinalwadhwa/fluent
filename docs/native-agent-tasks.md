@@ -38,6 +38,17 @@ from the current invocation. Native Pi saves `pi-session.jsonl` for continuity.
 An interrupted invocation or missing evidence fails through the Task recovery
 path; the next Task cannot claim its completion.
 
+If Codex exits before its first turn, run
+`tests/host/check-native-codex-first-turn.sh` with the authorized host flag and
+resolved Codex model and effort. It stops after an assigned `turn/started` and
+cancels the disposable Task through the public owner. Inspect the fixture's
+`native-codex-relay-diagnostics.jsonl` for the first failing direction and
+`native-codex-client-diagnostics.jsonl` for the client exit status. These files
+carry the execution generation and assigned thread. The relay trace stores
+protocol method names without payloads; the client record stores only known
+output signals from the native pane. This focused check does not replace the
+full real-provider acceptance check.
+
 Run `tests/host/check-native-agent-tasks.sh` only after host and provider-run
 authorization. It requires resolved model and effort variables, a local Pi
 endpoint matching the selected `local-openai` profile, and `expect` for terminal

@@ -665,6 +665,33 @@ impl TerminalSession {
         execution::execution_is_live(&self.stored.execution_record)
     }
 
+    /// Read a bounded pane snapshot while the owner still holds this terminal.
+    /// Callers must filter it before writing diagnostics because it can contain
+    /// provider output and Task text.
+    pub fn capture_pane_snapshot(&self) -> Result<String> {
+        let socket = self
+            .stored
+            .socket
+            .as_ref()
+            .context("terminal has no tmux socket")?;
+        let output = Command::new(find_tmux()?)
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(socket)
+            .args(["capture-pane", "-p", "-S", "-80"])
+            .output()
+            .context("capturing terminal pane before settlement")?;
+        ensure!(
+            output.status.success(),
+            "terminal pane is unavailable for diagnostics"
+        );
+        ensure!(
+            output.stdout.len() <= 64 * 1024,
+            "terminal pane snapshot is oversized"
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     pub fn observe(&self, requested: &TerminalDescriptor) -> Result<Attachment> {
         validate(&self.stored, requested)?;
         Ok(Attachment {
