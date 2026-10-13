@@ -1631,6 +1631,7 @@ mod tests {
             // getpgid may return ESRCH for an unreaped zombie on macOS.
             let mut errors = Vec::new();
             let mut permission_errors = Vec::new();
+            let mut denied_live_term = false;
             let owned_group = self.verified_group
                 && self.group > 0
                 && self.group == child.id() as i32
@@ -1660,6 +1661,7 @@ mod tests {
                         let diagnostic =
                             format!("signal owned app-server fixture group with {signal}: {error}");
                         if error.raw_os_error() == Some(libc::EPERM) {
+                            denied_live_term |= signal == libc::SIGTERM && actual == self.group;
                             permission_errors.push(diagnostic);
                         } else {
                             errors.push(diagnostic);
@@ -1730,7 +1732,7 @@ mod tests {
             // macOS may return EPERM when TERM has already left only an
             // unreaped zombie. Retain failures if the group survived or the
             // leader needed a separate kill after the group signals.
-            if needed_leader_kill || matches!(group_probe, Some(Ok(()))) {
+            if denied_live_term || needed_leader_kill || matches!(group_probe, Some(Ok(()))) {
                 errors.extend(permission_errors);
             }
             if let Some(Err(error)) = group_probe
@@ -2051,6 +2053,41 @@ mod tests {
         }
         assert!(child.try_wait().unwrap().is_some());
         fixture.child = None;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_fixture_reports_denied_term_on_live_leader() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        let error = fixture
+            .finish_with(
+                |_, signal| {
+                    if signal == libc::SIGTERM {
+                        Err(io::Error::from_raw_os_error(libc::EPERM))
+                    } else if signal == 0 {
+                        Err(io::Error::from_raw_os_error(libc::ESRCH))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |child| child.kill(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("signal owned app-server fixture group"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Operation not permitted") || error.contains("Permission denied"),
+            "{error}"
+        );
+        assert!(fixture.child.is_none());
     }
 
     #[cfg(unix)]
@@ -2788,6 +2825,10 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(25));
             }
             std::thread::sleep(Duration::from_millis(500));
+            ensure!(
+                installed_handoff_trace_ready(&fs::read_to_string(&trace_path)?)?,
+                "installed Codex TUI lost its fresh-thread handoff"
+            );
             ensure!(
                 Command::new("tmux")
                     .arg("-S")
