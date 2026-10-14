@@ -1840,7 +1840,9 @@ mod tests {
 
     #[cfg(unix)]
     fn installed_handoff_trace_ready(trace: &str) -> Result<bool> {
-        let events = trace
+        // The relay may still be writing the last record when the preflight polls.
+        let complete = trace.rsplit_once('\n').map_or("", |(complete, _)| complete);
+        let events = complete
             .lines()
             .map(serde_json::from_str::<Value>)
             .collect::<serde_json::Result<Vec<_>>>()?;
@@ -2102,15 +2104,31 @@ mod tests {
             event("thread/read", "forwarded", Some(false)),
             event("thread/read", "ui-only-replied", None),
         ]
-        .join("\n");
+        .join("\n")
+            + "\n";
         assert!(installed_handoff_trace_ready(&trace).unwrap());
-        let bad = format!("{trace}\n{}", event("thread/read", "forwarded", Some(true)));
+        let bad = format!("{trace}{}\n", event("thread/read", "forwarded", Some(true)));
         assert!(
             installed_handoff_trace_ready(&bad)
                 .unwrap_err()
                 .to_string()
                 .contains("provider history lookup")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_handoff_ignores_split_record_but_rejects_malformed_complete_record() {
+        let resume = json!({"method":"thread/resume","outcome":"bootstrap-replied"});
+        let read = json!({"method":"thread/read","outcome":"ui-only-replied","input_sequence":0});
+        let trace = format!("{resume}\n{{\"method\":\"thread/read\"");
+        assert!(!installed_handoff_trace_ready(&trace).unwrap());
+
+        let trace = format!("{resume}\n{read}\n{{\"method\":");
+        assert!(installed_handoff_trace_ready(&trace).unwrap());
+
+        let malformed = format!("{resume}\n{{\"method\":\n{read}\n");
+        assert!(installed_handoff_trace_ready(&malformed).is_err());
     }
 
     #[test]
