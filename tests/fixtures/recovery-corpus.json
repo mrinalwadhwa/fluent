@@ -3,7 +3,7 @@
   "cases": [
     {
       "id": "unchanged-writer-invalid-completion-retry",
-      "incident": "A Writer retained candidate B and an assignment from candidate A, then submitted explanatory result text in its completion and no-change handoffs. Its first approved repair failed during preparation before a new provider launch.",
+      "incident": "A Writer retained candidate B and an assignment from candidate A, then submitted explanatory result text in its completion and no-change handoffs. Its first approved repair failed during preparation before a new provider launch, while a receipt from the earlier launch remained in the Task area.",
       "scope": "attempt",
       "work-item-id": "replay-no-change-completion",
       "attempt-id": "attempt-1",
@@ -20,6 +20,7 @@
         "completed-candidate-b",
         "invalid-completion-and-no-change-handoffs",
         "earlier-provider-generation",
+        "retained-earlier-launch-receipt",
         "unlaunched-preparation-generation",
         "outstanding-host-review-tester-learning"
       ]

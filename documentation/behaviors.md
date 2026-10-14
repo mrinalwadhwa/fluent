@@ -11110,7 +11110,8 @@ Test: tests/binary.rs (combined_installation_old_readers_preserve_authority)
 WHEN an unchanged Writer leaves an invalid completion or no-change handoff, or
 an earlier approved retry fails before provider launch, THE SYSTEM SHALL let an
 operator approve one retry of the same Task through `repair-writer-completion`
-and require a separate resume.
+and require a separate resume. A retained receipt from an earlier launch does
+not block a retry when the current execution generation has no matching receipt.
 Test: tests/binary.rs (no_change_completion_retry_resumes_initial_pause)
 Test: tests/binary.rs (no_change_completion_retry_resumes_saved_prelaunch_failure)
 
@@ -11132,8 +11133,10 @@ Test: tests/binary.rs (no_change_completion_retry_rebuilds_without_credit)
 
 IF the candidate, baseline, assignment, retained evidence, owner, cancellation,
 or launch generation fails validation, THEN THE SYSTEM SHALL reject recovery
-before changing protected Work or artifacts.
+before changing protected Work or artifacts. A receipt for the current generation
+or a malformed retained receipt blocks recovery.
 Test: tests/binary.rs (no_change_completion_retry_rejects_invalid_authority)
+Test: tests/binary.rs (no_change_completion_retry_rejects_current_or_invalid_receipt)
 
 ### B5
 

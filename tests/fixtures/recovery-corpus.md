@@ -52,6 +52,12 @@ candidate-bound operation checks without launching or dispatching the command;
 the public binary tests cover the real extension, revision, retry, and resume
 routes.
 
+The `unchanged-writer-invalid-completion-retry` case records a failed
+preparation after an earlier approved completion repair. The retained launch
+receipt belongs to the earlier generation; the current execution generation
+has no matching receipt. The binary regression drives public approval and
+resume, and checks that the old receipt remains byte-identical.
+
 `writer-assignment-mismatch` records the saved shape addressed by this repair:
 the completed corrective Writer changed its candidate, while its original
 finding assignment and source evidence remained the obligations to reevaluate.

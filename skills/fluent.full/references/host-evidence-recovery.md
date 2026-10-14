@@ -736,8 +736,10 @@ For scheduler-owned Work, use `fluent queue resume <work-item> --attempt
 Writer with no output and an unchanged, clean candidate; its saved matrix or
 no-change declaration must be invalid. A saved pre-launch failure must have
 the earlier completion-recovery assignment and a native execution record
-proving that the provider did not launch. Both cases require the same candidate,
-valid assignment and retained source evidence, settled owners, and an
+proving that its current generation did not launch. A well-formed receipt from
+an earlier generation may remain in the Task area; a receipt for the current
+generation or an invalid receipt blocks recovery. Both cases require the same
+candidate, valid assignment and retained source evidence, settled owners, and an
 uncanceled Attempt. A generic failed Task, changed inputs, or uncertain launch
 outcome does not qualify. The approval keeps the original failure files, Task
 snapshot, assignment, and accepted evidence, and gives the retry fresh output

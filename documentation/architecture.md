@@ -1713,6 +1713,12 @@ carry a result discriminator that the pinned predecessor cannot deserialize,
 even if older outer Work and Attempt envelopes are restored. New authority uses
 Work and Attempt record schema 13, writer envelope schema 11, and transaction
 schema 13; ordinary records retain their predecessor formats.
+For a failed preparation, the execution record must still name a launch that
+never spawned a child. An earlier child may have left a receipt in the same Task
+area. Fluent accepts that receipt only when it is well formed and names a
+different generation; the current generation's receipt or an ambiguous receipt
+blocks recovery. The retry audit binds the retained receipt bytes with the other
+failure files and prepares fresh outputs for the same Task.
 
 Context recovery selects the latest completed Writer even when completed
 targeted Reviews follow it; every Task must still be settled. If carried-finding
