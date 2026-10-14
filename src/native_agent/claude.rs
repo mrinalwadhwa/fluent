@@ -700,8 +700,7 @@ mod tests {
             true
         );
         assert_eq!(
-            value["projects"][project.path().canonicalize().unwrap().to_str().unwrap()]
-                ["hasTrustDialogAccepted"],
+            value["projects"][project.path().canonicalize().unwrap().to_str().unwrap()]["hasTrustDialogAccepted"],
             true
         );
     }
