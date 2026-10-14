@@ -2642,8 +2642,16 @@ exit [lindex $outcome 3]
 "#;
 
 const HOST_NATIVE_RACE_CONTROL: &str = r#"
+proc trace_race {message} {
+    global env
+    if {![info exists env(FLUENT_NATIVE_RACE_STATE)]} { return }
+    set trace [open $env(FLUENT_NATIVE_RACE_STATE) a]
+    puts $trace $message
+    close $trace
+}
 set timeout 60
 spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+trace_race "attachment-pid=[exp_pid]"
 if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
     set timeout 15
     expect {
@@ -2673,8 +2681,15 @@ puts $attempt "$result $error"
 close $attempt
 # Keep this attachment on the Writer terminal through settlement. Detaching
 # here would make EOF mean only that the operator left the terminal.
-expect eof
+set timeout 60
+trace_race "waiting-for-attachment-eof"
+expect {
+    eof { trace_race "attachment-eof" }
+    timeout { trace_race "attachment-eof-timeout"; exit 124 }
+}
+trace_race "waiting-for-attachment-child"
 set outcome [wait]
+trace_race "attachment-reaped"
 exit [lindex $outcome 3]
 "#;
 
@@ -2696,6 +2711,45 @@ fn host_native_race_passes_provider_to_expect() {
             .and_then(|(_, value)| value);
         assert_eq!(configured, Some(std::ffi::OsStr::new(provider)));
     }
+}
+
+#[test]
+fn host_claude_race_observes_eof_before_reaping_attachment() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir().unwrap();
+    let terminal = root.path().join("fake-terminal");
+    let ready = root.path().join("race.ready");
+    let release = root.path().join("race.release");
+    let attempt = root.path().join("race.attempt");
+    let state = root.path().join("race.state");
+    std::fs::write(&terminal, "#!/bin/sh\nsleep 4\n").unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = host_native_race_command("claude")
+        .env("FLUENT_NATIVE_BINARY", &terminal)
+        .env("FLUENT_NATIVE_SOURCE", root.path())
+        .env("FLUENT_NATIVE_SESSION", "fixture")
+        .env("FLUENT_NATIVE_RACE_READY", &ready)
+        .env("FLUENT_NATIVE_RACE_RELEASE", &release)
+        .env("FLUENT_NATIVE_RACE_ATTEMPT", &attempt)
+        .env("FLUENT_NATIVE_RACE_STATE", &state)
+        .env("FLUENT_NATIVE_RACE_TEXT", "race-marker")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "Claude fixture did not attach");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&release, b"send").unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert!(attempt.is_file());
+    let trace = std::fs::read_to_string(state).unwrap();
+    assert!(trace.contains("attachment-eof\n"), "{trace}");
+    assert!(trace.contains("attachment-reaped\n"), "{trace}");
 }
 
 #[test]
@@ -3179,6 +3233,7 @@ fn host_native_agent_acceptance() {
             .env("FLUENT_NATIVE_RACE_READY", &race_ready)
             .env("FLUENT_NATIVE_RACE_RELEASE", &race_release)
             .env("FLUENT_NATIVE_RACE_ATTEMPT", &race_attempt)
+            .env("FLUENT_NATIVE_RACE_STATE", runtime.join("race.state"))
             .env("FLUENT_NATIVE_RACE_TEXT", &race_marker)
             .stdout(Stdio::from(
                 File::create(runtime.join("race.attach.log")).unwrap(),
@@ -3234,22 +3289,40 @@ fn host_native_agent_acceptance() {
             std::thread::sleep(Duration::from_millis(25));
         };
         fs::write(&race_release, b"send").unwrap();
-        let race_deadline = Instant::now() + Duration::from_secs(60);
+        let race_deadline = Instant::now() + Duration::from_secs(70);
         let race_status = loop {
             if let Some(status) = race.try_wait().unwrap() {
                 break status;
             }
             if Instant::now() >= race_deadline {
+                let trace = fs::read_to_string(runtime.join("race.state")).unwrap_or_default();
+                let attachment_pid = trace
+                    .lines()
+                    .find_map(|line| line.strip_prefix("attachment-pid=")?.parse::<u32>().ok());
+                let mut diagnostic = format!("race state:\n{trace}\n");
+                for pid in [Some(race.id()), attachment_pid].into_iter().flatten() {
+                    if let Ok(output) = Command::new("ps")
+                        .args(["-o", "pid,ppid,stat,command", "-p", &pid.to_string()])
+                        .output()
+                    {
+                        diagnostic.push_str(&String::from_utf8_lossy(&output.stdout));
+                    }
+                }
+                let _ = fs::write(runtime.join("race.timeout.txt"), diagnostic);
                 race.kill().unwrap();
                 let _ = race.wait();
-                panic!("{provider} race attachment did not close");
+                panic!(
+                    "{provider} race attachment did not close; inspect {}",
+                    runtime.join("race.timeout.txt").display()
+                );
             }
             std::thread::sleep(Duration::from_millis(25));
         };
         assert!(
             race_status.success(),
-            "{provider} race attachment failed; inspect {}",
-            runtime.join("race.attach.log").display()
+            "{provider} race attachment failed; inspect {} and {}",
+            runtime.join("race.attach.log").display(),
+            runtime.join("race.state").display()
         );
         assert!(
             race_attempt.is_file(),
