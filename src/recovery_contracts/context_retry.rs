@@ -13,6 +13,17 @@ pub(crate) const COMPLETION_APPROVE: &str = "writer-completion-no-change-retry";
 pub(crate) const COMPLETION_RESUME: &str = "writer-completion-no-change-resume";
 pub(crate) const COMPLETION_START: &str = "writer-completion-no-change-start";
 
+fn host_write_baseline_path(
+    store: &work_model::WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Result<std::path::PathBuf> {
+    Ok(store
+        .work_task_path(work_item_id, attempt_id, task_id)?
+        .with_extension("write-baseline"))
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RetrySource {
@@ -106,10 +117,26 @@ pub(crate) fn recognized(root: &Path, item: &WorkItem, attempt: &Attempt) -> Res
         let Some(area) = &task.artifact_area else {
             return Ok(false);
         };
-        let matrix = fs::read(
+        // A plain Writer pause has no completion matrix to repair.
+        let matrix = match fs::read(
             root.join(&area.path)
                 .join(crate::recovery_contracts::WRITER_COMPLETION_MATRIX_FILE),
-        )?;
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let task_index = attempt
+            .tasks
+            .iter()
+            .position(|candidate| candidate.id == task.id)
+            .unwrap();
+        if attempt.tasks[task_index + 1..]
+            .iter()
+            .any(|later| later.kind == TaskKind::Write && later.status == TaskStatus::Planned)
+        {
+            return Ok(false);
+        }
         let invalid_matrix =
             serde_json::from_slice::<work_model::WriterCompletionMatrix>(&matrix).is_err();
         let invalid_no_change = fs::read(root.join(&area.path).join("no-change.json"))
@@ -295,7 +322,7 @@ fn inspect_invalid_completion(
             && candidate_workspace_is_clean_at_managed(root, output, &output.commit),
         "completion retry candidate changed or is dirty"
     );
-    let baseline_path = crate::work_task_executor::host_write_baseline_path(
+    let baseline_path = host_write_baseline_path(
         &work_model::WorkModelStore::new(root),
         &item.id,
         &attempt.id,
@@ -708,7 +735,7 @@ pub(crate) fn validate_pending(
                     && candidate_workspace_is_clean_at_managed(root, output, &output.commit),
                 "completion retry candidate changed or is dirty"
             );
-            let baseline = crate::work_task_executor::host_write_baseline_path(
+            let baseline = host_write_baseline_path(
                 &work_model::WorkModelStore::new(root),
                 &item.id,
                 &attempt.id,
@@ -718,7 +745,7 @@ pub(crate) fn validate_pending(
                 fs::read_to_string(baseline)?.trim() == output.commit,
                 "completion retry host baseline changed"
             );
-            let baseline = crate::work_task_executor::host_write_baseline_path(
+            let baseline = host_write_baseline_path(
                 &work_model::WorkModelStore::new(root),
                 &item.id,
                 &attempt.id,
@@ -760,7 +787,7 @@ pub(crate) fn validate_retained_files(root: &Path, retry: &Retry) -> Result<()> 
         );
     }
     if retry.source == RetrySource::InvalidCompletion {
-        let baseline = crate::work_task_executor::host_write_baseline_path(
+        let baseline = host_write_baseline_path(
             &work_model::WorkModelStore::new(root),
             &retry.before.work_item_id,
             &retry.before.id,

@@ -1758,18 +1758,22 @@ fn writer_envelope_rejects_unknown_or_malformed_values() {
     let future_schema = record["model_writer_version"]["schema_version"]
         .as_u64()
         .unwrap()
-        + 1;
+        + 100;
     for envelope in [
         serde_json::json!({"format": "other", "schema_version": 1, "version": "0.3.0"}),
         serde_json::json!({"format": "fluent-work-item-writer", "schema_version": future_schema, "version": "0.3.0"}),
         serde_json::json!({"format": "fluent-work-item-writer", "schema_version": 0, "version": "0.3.0"}),
         serde_json::json!({"format": "fluent-work-item-writer", "schema_version": 1, "version": "invalid"}),
         serde_json::json!({"format": "fluent-work-item-writer", "schema_version": 1}),
+        serde_json::json!({"format": "fluent-work-item-writer", "schema_version": 1, "version": "0.3.0", "authority": "unexpected"}),
     ] {
-        record["model_writer_version"] = envelope;
+        record["model_writer_version"] = envelope.clone();
         fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
         let before = work_tree(temp.path());
-        assert!(store.read_work_item_snapshot("work-1").is_err());
+        assert!(
+            store.read_work_item_snapshot("work-1").is_err(),
+            "{envelope}"
+        );
         assert!(store.mutate_work_item("work-1", |_| Ok(())).is_err());
         assert_eq!(work_tree(temp.path()), before);
     }

@@ -14140,6 +14140,10 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             "FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN",
         ),
         ("landing-recovery", "FLUENT_LANDING_RECOVERY_OLD_BIN"),
+        (
+            "no-change-completion",
+            "FLUENT_NO_CHANGE_COMPLETION_OLD_BIN",
+        ),
     ];
     for (failed_helper, setup_status, prints_path) in [
         ("", 0, true),
@@ -14165,6 +14169,8 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
         ("carried-finding", 37, true),
         ("landing-recovery", 37, false),
         ("landing-recovery", 37, true),
+        ("no-change-completion", 37, false),
+        ("no-change-completion", 37, true),
         ("combined-recovery-base", 37, false),
         ("combined-recovery-base", 37, true),
         ("combined-recovery-assignment", 37, false),
@@ -14218,7 +14224,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FLUENT_TEST_CARGO_CALLS"
-printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
+printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" "${FLUENT_NO_CHANGE_COMPLETION_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
 case "$1" in
     build) mkdir -p target/debug; touch target/debug/fluent ;;
     nextest) exit 0 ;;
@@ -14250,6 +14256,7 @@ esac
             .env_remove("FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN")
             .env_remove("FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN")
             .env_remove("FLUENT_LANDING_RECOVERY_OLD_BIN")
+            .env_remove("FLUENT_NO_CHANGE_COMPLETION_OLD_BIN")
             .env("FLUENT_TEST_CARGO_CALLS", &cargo_calls)
             .env("FLUENT_TEST_READER_PATHS", &reader_paths)
             .env(

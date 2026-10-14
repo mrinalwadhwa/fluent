@@ -10145,7 +10145,7 @@ fn is_supported_writer_envelope_schema(version: u32) -> bool {
 
 /// Fence readers that deserialize the existing writer field as Option<String>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum StoredModelWriterVersion {
     Legacy(String),
     Envelope {
