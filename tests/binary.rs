@@ -2143,9 +2143,25 @@ fn no_change_completion_retry_keeps_carried_assignment() {
 fn no_change_completion_pause_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
     let fixture = writer_recovery_fixture_with_authority(tmp, false);
     let store = WorkModelStore::new(&fixture.project);
+    let retained_input = ArtifactRef {
+        producer_id: "planning".into(),
+        path: format!(
+            ".fluent/work/artifacts/{}/attempt-1/retained-assignment-input.txt",
+            fixture.work
+        ),
+    };
+    let retained_path = fixture.project.join(&retained_input.path);
+    fs::create_dir_all(retained_path.parent().unwrap()).unwrap();
+    fs::write(&retained_path, b"Retained assignment input\n").unwrap();
+    let retained_digest = format!(
+        "sha256:{:x}",
+        Sha256::digest(fs::read(&retained_path).unwrap())
+    );
     store
         .mutate_work_item(&fixture.work, |item| {
-            let source = item.attempts[0].tasks[0].clone();
+            let source = &mut item.attempts[0].tasks[0];
+            source.input_artifacts.push(retained_input.clone());
+            let source_id = source.id.clone();
             let task = item.attempts[0]
                 .tasks
                 .iter_mut()
@@ -2156,9 +2172,12 @@ fn no_change_completion_pause_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
                 work_item_id: fixture.work.clone(),
                 attempt_id: "attempt-1".into(),
                 writer_task_id: task.id.clone(),
-                source_task_id: source.id,
+                source_task_id: source_id,
                 source_candidate_commit: fixture.candidate.clone(),
-                source_task_inputs: vec![],
+                source_task_inputs: vec![WriterCorrectionAssignmentInput {
+                    artifact: retained_input,
+                    digest: retained_digest,
+                }],
                 evidence: vec![],
                 findings: vec![],
                 origin: WriterCorrectionAssignmentOrigin::Captured,
@@ -3007,6 +3026,15 @@ fn no_change_completion_retry_real_confinement() {
         .iter()
         .find(|artifact| artifact.producer_id == "writer-completion-no-change-retry")
         .unwrap();
+    let assignment = task.writer_correction_assignment.as_ref().unwrap();
+    assert_eq!(assignment.source_task_inputs.len(), 1);
+    let retained_input = fixture
+        .project
+        .join(&assignment.source_task_inputs[0].artifact.path);
+    assert!(rendered.contains(&format!(
+        "(allow file-read*  (subpath \"{}\"))",
+        retained_input.canonicalize().unwrap().display()
+    )));
     let protected = [
         fixture.area.join("writer-completion.json"),
         fixture.area.join("no-change.json"),
@@ -3014,6 +3042,7 @@ fn no_change_completion_retry_real_confinement() {
         store
             .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
             .unwrap(),
+        retained_input,
     ];
     for path in &protected {
         let path = path.canonicalize().unwrap();
