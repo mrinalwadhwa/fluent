@@ -536,6 +536,44 @@ fn pi_installed_runner_compacts_before_queued_continuation() {
 
 #[cfg(unix)]
 #[test]
+fn pi_receiver_waits_for_payload_on_nonblocking_accepted_socket() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    // Accepted sockets inherit the listener's nonblocking flag on macOS.
+    receiver.set_nonblocking(true).unwrap();
+    let extension = std::thread::spawn(move || -> std::io::Result<String> {
+        std::thread::sleep(Duration::from_millis(50));
+        sender
+            .write_all(b"{\"generation\":\"generation-1\",\"session_id\":\"assigned-session\",\"session_file\":\"/private/task/session.jsonl\",\"event\":{\"type\":\"session_start\",\"reason\":\"startup\"}}\n")
+            ?;
+        let mut ack = String::new();
+        BufReader::new(sender).read_line(&mut ack)?;
+        Ok(ack)
+    });
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    let received = receive_event(receiver, &mut gate, &mut writer);
+    let ack = extension.join().unwrap();
+    assert!(received.is_ok(), "{received:?}");
+    let ack: serde_json::Value = serde_json::from_str(&ack.unwrap()).unwrap();
+    assert_eq!(ack, json!({"ok":true,"input_sequence":null}));
+    assert_eq!(gate.session_id(), Some("assigned-session"));
+    assert_eq!(
+        std::fs::read_to_string(evidence.path())
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn pi_receiver_acknowledges_durable_input_and_settlement() {
     use fluent::native_agent::pi::{PiEventGate, receive_event};
     use std::io::{BufRead, BufReader, Write};

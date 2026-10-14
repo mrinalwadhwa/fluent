@@ -204,6 +204,7 @@ pub fn receive_event(
     gate: &mut PiEventGate,
     evidence: &mut File,
 ) -> Result<Completion> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(8)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(8)))?;
     let mut line = String::new();
