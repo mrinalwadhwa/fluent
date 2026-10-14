@@ -1529,6 +1529,111 @@ fn native_terminal_controls_assigned_invocation() {
 
 #[cfg(unix)]
 #[test]
+fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
+    use fluent::native_agent::codex::relay_codex_websockets;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_path = evidence.path().to_path_buf();
+    let evidence_file = evidence.reopen().unwrap();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        for id in 1..=4 {
+            let request: serde_json::Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "plugin/list");
+            assert_eq!(request["id"], id);
+            socket
+                .send(Message::Text(
+                    json!({"id":id,"result":{"plugins":[{"description":"x".repeat(512 * 1024)}]}})
+                        .to_string(),
+                ))
+                .unwrap();
+        }
+        let turn: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(turn["method"], "turn/start");
+        for event in [
+            json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}),
+        ] {
+            socket.send(Message::Text(event.to_string())).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            evidence_file,
+            |_| Ok(()),
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for id in 1..=4 {
+        tui.send(Message::Text(
+            json!({"id":id,"method":"plugin/list","params":{}}).to_string(),
+        ))
+        .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(
+            response["result"]["plugins"][0]["description"]
+                .as_str()
+                .unwrap()
+                .len(),
+            512 * 1024
+        );
+    }
+    tui.send(Message::Text(
+        json!({"id":5,"method":"turn/start","params":{"threadId":"assigned-thread","input":[{"text":"review candidate"}]}})
+            .to_string(),
+    ))
+    .unwrap();
+    for method in ["turn/started", "turn/completed"] {
+        let event: serde_json::Value =
+            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(event["method"], method);
+    }
+    let _ = tui.get_ref().shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    let _ = relay.join().unwrap();
+    let transcript = std::fs::read_to_string(evidence_path).unwrap();
+    assert!(
+        transcript.len() < 64 * 1024,
+        "opaque responses filled canonical evidence"
+    );
+    let records: Vec<serde_json::Value> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.iter().any(|record| {
+        native_input_event(record)
+            && record["execution_generation"] == "generation-1"
+            && record["event"].to_string().contains("review candidate")
+    }));
+    assert!(records.iter().any(|record| {
+        record["event"]["method"] == "turn/completed" && record["input_sequence"] == 1
+    }));
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_relay_records_which_peer_exits_before_first_turn() {
     use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::os::unix::net::UnixStream;

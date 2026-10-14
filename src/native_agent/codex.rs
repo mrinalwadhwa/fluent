@@ -1204,30 +1204,35 @@ where
                         event["method"].as_str(),
                         input_sequence,
                     )?;
-                    let params = &event["params"];
-                    let conversation_id = params["threadId"]
-                        .as_str()
-                        .or_else(|| params["thread"]["id"].as_str())
-                        .unwrap_or(thread_id);
-                    let record = CodexEvidenceRecord {
-                        format: "fluent-native-agent-event",
-                        schema_version: 1,
-                        provider: "codex",
-                        execution_generation: generation,
-                        assigned_conversation_id: thread_id,
-                        conversation_id,
-                        turn_id: params["turn"]["id"]
+                    // JSON-RPC responses can include large UI catalogs such as
+                    // plugin/list. They do not supply turn evidence; the gate
+                    // has already checked input errors and completion above.
+                    if event.get("id").is_none() {
+                        let params = &event["params"];
+                        let conversation_id = params["threadId"]
                             .as_str()
-                            .or_else(|| params["turnId"].as_str()),
-                        input_sequence,
-                        event: &event,
-                    };
-                    let mut evidence = response_evidence
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
-                    serde_json::to_writer(&mut *evidence, &record)?;
-                    evidence.write_all(b"\n")?;
-                    evidence.flush()?;
+                            .or_else(|| params["thread"]["id"].as_str())
+                            .unwrap_or(thread_id);
+                        let record = CodexEvidenceRecord {
+                            format: "fluent-native-agent-event",
+                            schema_version: 1,
+                            provider: "codex",
+                            execution_generation: generation,
+                            assigned_conversation_id: thread_id,
+                            conversation_id,
+                            turn_id: params["turn"]["id"]
+                                .as_str()
+                                .or_else(|| params["turnId"].as_str()),
+                            input_sequence,
+                            event: &event,
+                        };
+                        let mut evidence = response_evidence
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
+                        serde_json::to_writer(&mut *evidence, &record)?;
+                        evidence.write_all(b"\n")?;
+                        evidence.flush()?;
+                    }
                     response_display
                         .push(line)
                         .context("queue Codex TUI protocol frame")?;
