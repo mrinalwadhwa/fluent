@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
@@ -13,8 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
@@ -602,6 +601,87 @@ fn send_required_tui_frame(client: &mut WebSocket<UnixStream>, text: String) -> 
     }
 }
 
+struct DisplaySpool {
+    state: Mutex<DisplaySpoolState>,
+    ready: Condvar,
+}
+
+struct DisplaySpoolState {
+    file: File,
+    read_offset: u64,
+    write_offset: u64,
+    closed: bool,
+}
+
+impl DisplaySpool {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            state: Mutex::new(DisplaySpoolState {
+                file: tempfile::tempfile().context("create native Codex display spool")?,
+                read_offset: 0,
+                write_offset: 0,
+                closed: false,
+            }),
+            ready: Condvar::new(),
+        })
+    }
+
+    fn push(&self, text: String) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+        ensure!(!state.closed, "Codex display spool closed");
+        let bytes = text.as_bytes();
+        let length = u64::try_from(bytes.len()).context("Codex display frame too large")?;
+        let offset = state.write_offset;
+        state.file.seek(SeekFrom::Start(offset))?;
+        state.file.write_all(&length.to_le_bytes())?;
+        state.file.write_all(bytes)?;
+        state.write_offset = offset + 8 + length;
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    fn pop(&self) -> Result<Option<String>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+        loop {
+            if state.read_offset < state.write_offset {
+                let offset = state.read_offset;
+                state.file.seek(SeekFrom::Start(offset))?;
+                let mut length = [0; 8];
+                state.file.read_exact(&mut length)?;
+                let length = usize::try_from(u64::from_le_bytes(length))
+                    .context("Codex display frame exceeds address space")?;
+                let mut bytes = vec![0; length];
+                state.file.read_exact(&mut bytes)?;
+                state.read_offset = offset + 8 + length as u64;
+                return Ok(Some(String::from_utf8(bytes)?));
+            }
+            if state.closed {
+                return Ok(None);
+            }
+            state = self
+                .ready
+                .wait(state)
+                .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+        }
+    }
+
+    fn close(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+        state.closed = true;
+        self.ready.notify_all();
+        Ok(())
+    }
+}
+
 /// Relay framed app-server messages. Unix app-server sockets use WebSocket
 /// HTTP Upgrade, while the older stream fixture intentionally covers JSONL
 /// framing only. This path is the one used by managed Task launch.
@@ -823,16 +903,17 @@ where
     let gate = Arc::new(Mutex::new(CodexRelayGate::with_admission(
         generation, thread_id, admission,
     )));
-    // These frames include responses to TUI protocol requests. Losing one can
-    // leave the TUI waiting forever before it submits the assigned prompt.
-    let (display_tx, display_rx) = sync_channel::<String>(32);
+    // Keep protocol frames in order without making evidence capture wait for
+    // the TUI. The temporary file bounds the relay's memory under backpressure.
+    let display_spool = Arc::new(DisplaySpool::new()?);
     std::thread::scope(|scope| {
         let display_client = Arc::clone(&client);
         let display_trace = Arc::clone(&trace);
         let display_gate = Arc::clone(&gate);
+        let display_queue = Arc::clone(&display_spool);
         let display = scope.spawn(move || -> Result<()> {
             let result = (|| {
-                while let Ok(text) = display_rx.recv() {
+                while let Some(text) = display_queue.pop()? {
                     let mut client = display_client
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
@@ -865,7 +946,7 @@ where
         let upstream_server = Arc::clone(&server);
         let request_gate = Arc::clone(&gate);
         let request_trace = Arc::clone(&trace);
-        let bootstrap_display = display_tx.clone();
+        let bootstrap_display = Arc::clone(&display_spool);
         let upstream = scope.spawn(move || -> Result<()> {
             let mut handoff = handoff.map(|handoff| (handoff, false, false, false));
             let result = (|| {
@@ -957,8 +1038,8 @@ where
                                 .context("Codex TUI bootstrap request omitted its id")?;
                             let mut reply = reply.clone();
                             reply["id"] = id.clone();
-                            bootstrap_display.try_send(reply.to_string())
-                                .map_err(|error| anyhow::anyhow!("Codex TUI bootstrap response could not drain: {error}"))?;
+                            bootstrap_display.push(reply.to_string())
+                                .context("queue Codex TUI bootstrap response")?;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
                             continue;
                         }
@@ -966,16 +1047,16 @@ where
                             && request["params"]["includeTurns"] == true
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
-                            bootstrap_display.try_send(reply.to_string())
-                                .map_err(|error| anyhow::anyhow!("Codex TUI display-only read could not drain: {error}"))?;
+                            bootstrap_display.push(reply.to_string())
+                                .context("queue Codex TUI display-only read")?;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
                         if responses.fresh && *resumed && method == "thread/turns/list"
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_page(&responses.thread, &request, thread_id)?;
-                            bootstrap_display.try_send(reply.to_string())
-                                .map_err(|error| anyhow::anyhow!("Codex TUI display-only page could not drain: {error}"))?;
+                            bootstrap_display.push(reply.to_string())
+                                .context("queue Codex TUI display-only page")?;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
@@ -1001,6 +1082,7 @@ where
         let downstream_server = Arc::clone(&server);
         let response_gate = Arc::clone(&gate);
         let response_trace = Arc::clone(&trace);
+        let response_display = Arc::clone(&display_spool);
         let downstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 loop {
@@ -1122,35 +1204,11 @@ where
                     serde_json::to_writer(&mut evidence, &record)?;
                     evidence.write_all(b"\n")?;
                     evidence.flush()?;
+                    response_display
+                        .push(line)
+                        .context("queue Codex TUI protocol frame")?;
                     if completion != Completion::Ignored {
                         on_completion(completion)?;
-                    }
-                    match display_tx.try_send(line) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
-                            trace_relay(
-                                &response_trace,
-                                generation,
-                                thread_id,
-                                "app-to-tui",
-                                "backpressure",
-                                event["method"].as_str(),
-                                input_sequence,
-                            )?;
-                            anyhow::bail!("Codex TUI WebSocket protocol backpressure");
-                        }
-                        Err(TrySendError::Disconnected(_)) => {
-                            trace_relay(
-                                &response_trace,
-                                generation,
-                                thread_id,
-                                "app-to-tui",
-                                "sender-disconnected",
-                                event["method"].as_str(),
-                                input_sequence,
-                            )?;
-                            anyhow::bail!("Codex TUI WebSocket protocol sender disconnected");
-                        }
                     }
                 }
             })();
@@ -1158,15 +1216,16 @@ where
             let _ = downstream_abort_server.shutdown(Shutdown::Both);
             result
         });
-        let upstream = upstream
-            .join()
-            .map_err(|_| anyhow::anyhow!("Codex WebSocket request relay panicked"))?;
-        let downstream = downstream
-            .join()
-            .map_err(|_| anyhow::anyhow!("Codex WebSocket event relay panicked"))?;
+        let upstream = upstream.join();
+        let downstream = downstream.join();
+        display_spool.close()?;
         let display = display
             .join()
             .map_err(|_| anyhow::anyhow!("Codex WebSocket display relay panicked"))?;
+        let upstream =
+            upstream.map_err(|_| anyhow::anyhow!("Codex WebSocket request relay panicked"))?;
+        let downstream =
+            downstream.map_err(|_| anyhow::anyhow!("Codex WebSocket event relay panicked"))?;
         display.and(downstream).and(upstream)
     })
 }
@@ -2430,6 +2489,83 @@ mod tests {
                 .unwrap()
                 .contains("Codex TUI WebSocket protocol send failed")
         );
+    }
+
+    #[test]
+    fn websocket_relay_retains_frames_while_tui_temporarily_stalls() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+        let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+        let (completed, received) = mpsc::channel();
+        let evidence_path = workspace.path().join("evidence.jsonl");
+        let evidence = File::create(&evidence_path).unwrap();
+        let relay = std::thread::spawn(move || {
+            let client = tungstenite::accept(relay_client).unwrap();
+            let server = tungstenite::client("ws://localhost/", relay_server)
+                .unwrap()
+                .0;
+            relay_codex_websockets(
+                client,
+                server,
+                "generation-1",
+                "assigned-thread",
+                Arc::new(NativeAdmission::new()),
+                evidence,
+                |completion| completed.send(completion).map_err(anyhow::Error::new),
+            )
+        });
+        let provider = std::thread::spawn(move || {
+            let mut socket = tungstenite::accept(provider_stream).unwrap();
+            let request: Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "turn/start");
+            socket
+                .send(Message::Text(
+                    json!({"id":1,"result":{"turn":{"id":"turn-1"}}}).to_string(),
+                ))
+                .unwrap();
+            socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+            for index in 0..96 {
+                socket.send(Message::Text(json!({"method":"item/updated","params":{"threadId":"assigned-thread","turnId":"turn-1","index":index,"text":"x".repeat(16384)}}).to_string())).unwrap();
+            }
+            socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}).to_string())).unwrap();
+            socket
+        });
+        let mut tui = tungstenite::client("ws://localhost/", tui_stream)
+            .unwrap()
+            .0;
+        tui.send(Message::Text(json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}}).to_string())).unwrap();
+        // Do not read display frames until the canonical completion arrives.
+        assert!(matches!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Completion::Accepted {
+                input_sequence: 1,
+                ..
+            }
+        ));
+        let methods: Vec<String> = (0..99)
+            .map(|_| {
+                let event: Value =
+                    serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+                event["method"].as_str().unwrap_or("response").to_owned()
+            })
+            .collect();
+        assert_eq!(methods[1], "turn/started");
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "item/updated")
+                .count(),
+            96
+        );
+        assert_eq!(methods.last().unwrap(), "turn/completed");
+        assert_eq!(
+            fs::read_to_string(evidence_path).unwrap().lines().count(),
+            99
+        );
+        drop(tui);
+        drop(provider.join().unwrap());
+        let _ = relay.join().unwrap();
     }
 
     fn neighboring_daemon_socket(daemon: &CodexDaemonResources) -> PathBuf {
