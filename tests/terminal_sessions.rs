@@ -13,6 +13,47 @@ fn terminal_policy_membership_requires_distinct_valid_grants() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn terminal_policy_probe_tolerates_exited_pane_only() {
+    use fluent::terminal_sessions::pane_policy_probe_valid;
+
+    assert!(pane_policy_probe_valid(0, 1, true));
+    assert!(pane_policy_probe_valid(-1, -1, false));
+    for (own, outside) in [(1, 1), (0, 0), (-1, 1), (0, -1)] {
+        assert!(!pane_policy_probe_valid(own, outside, true));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires host process inventory"]
+fn terminal_policy_inventory_distinguishes_exited_and_ungranted_panes() {
+    use fluent::terminal_sessions::policy_members_for_test;
+
+    let socket_dir = tempfile::Builder::new()
+        .prefix("fluent-policy-test-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    std::fs::File::create(socket_dir.path().join("owner")).unwrap();
+    let socket = socket_dir.path().join("socket");
+
+    let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let exited_pid = exited.id();
+    exited.wait().unwrap();
+    policy_members_for_test(&socket, &[exited_pid]).unwrap();
+
+    let mut live = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let live_pid = live.id();
+    let result = policy_members_for_test(&socket, &[live_pid]);
+    live.kill().unwrap();
+    live.wait().unwrap();
+    assert!(result.is_err(), "ungranted live pane was accepted");
+}
+
 #[test]
 fn terminal_is_bound_before_attachment() {
     let root = tempfile::tempdir().unwrap();

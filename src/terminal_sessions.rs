@@ -1071,17 +1071,26 @@ fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
     let owned = CString::new(owner.as_os_str().as_encoded_bytes())?;
     let outside = CString::new(b"/private/tmp".as_slice())?;
     let operation = c"file-write-data";
-    let matches = |pid: u32| -> Result<bool> {
+    let probe = |pid: u32| -> Result<(i32, i32)> {
         let pid = i32::try_from(pid)?;
         // SANDBOX_FILTER_PATH is 1. sandbox_check returns zero for an allow.
         let own = unsafe { sandbox_check(pid, operation.as_ptr(), 1, owned.as_ptr()) };
         let peer = unsafe { sandbox_check(pid, operation.as_ptr(), 1, outside.as_ptr()) };
-        Ok(policy_grants_owner_only(own, peer))
+        Ok((own, peer))
     };
     for pane in panes {
+        let (own, peer) = probe(*pane)?;
+        // A provider can exit after tmux reports its pane but before this
+        // query. A dead process has no policy to inspect. Keep requiring the
+        // grant whenever the pane is still live.
+        let live = if policy_grants_owner_only(own, peer) {
+            true
+        } else {
+            !live_pids(&[*pane])?.is_empty()
+        };
         ensure!(
-            matches(*pane)?,
-            "terminal pane does not have its generation-specific sandbox grant"
+            pane_policy_probe_valid(own, peer, live),
+            "terminal pane {pane} does not have its generation-specific sandbox grant (owner={own}, outside={peer})"
         );
     }
     let output = Command::new("/bin/ps").args(["-axo", "pid="]).output()?;
@@ -1092,7 +1101,8 @@ fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
     let mut members = Vec::new();
     for line in String::from_utf8(output.stdout)?.lines() {
         let pid: u32 = line.trim().parse()?;
-        if matches(pid)? {
+        let (own, peer) = probe(pid)?;
+        if policy_grants_owner_only(own, peer) {
             members.push(pid);
         }
     }
@@ -1105,6 +1115,12 @@ fn policy_members(socket: &Path, panes: &[u32]) -> Result<Vec<u32>> {
 #[doc(hidden)]
 pub fn policy_grants_owner_only(own: i32, outside: i32) -> bool {
     own == 0 && outside == 1
+}
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn pane_policy_probe_valid(own: i32, outside: i32, live: bool) -> bool {
+    !live || policy_grants_owner_only(own, outside)
 }
 
 #[cfg(all(target_os = "macos", feature = "test-support"))]

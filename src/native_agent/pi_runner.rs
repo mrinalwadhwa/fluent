@@ -240,6 +240,16 @@ fn wait_for_pi_completion(
     }
 }
 
+fn settle_pi_result(run: Result<()>, stop: Result<()>) -> Result<()> {
+    match (run, stop) {
+        (Err(run_error), Err(stop_error)) => Err(anyhow::anyhow!(
+            "{run_error:#}; native Pi terminal settlement also failed: {stop_error:#}"
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
 pub fn run(task: PiNativeTask<'_>) -> Result<()> {
     let artifact = &task.identity.artifact_dir;
     fs::create_dir_all(artifact)?;
@@ -327,8 +337,7 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
         } else {
             terminal.stop()
         };
-        stop?;
-        result?;
+        settle_pi_result(result, stop)?;
         evidence.sync_all()?;
         ensure!(
             session_id(&session_file)? == gate.session_id().unwrap_or_default(),
@@ -353,6 +362,18 @@ pub fn run(task: PiNativeTask<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_run_failure_survives_terminal_settlement_failure() {
+        let error = settle_pi_result(
+            Err(anyhow::anyhow!("Pi extension stopped reporting")),
+            Err(anyhow::anyhow!("pane grant query failed")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("Pi extension stopped reporting"));
+        assert!(error.contains("pane grant query failed"));
+    }
 
     #[test]
     fn owner_expires_after_extension_stops_reporting() {
