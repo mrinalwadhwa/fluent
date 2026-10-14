@@ -4735,6 +4735,7 @@ fn preflight_write_sandbox_profile(
         workspace_path,
         &project_root.join(&task_artifact.path),
         writer_cache.root(),
+        claude_home,
     )?;
     #[cfg(not(test))]
     if let Some(worker) = codex_worker {
@@ -12413,6 +12414,110 @@ mod tests {
                 PathBuf::from(home).join(".cargo").display()
             );
             assert!(!profile.contains(&user_cargo_write));
+        }
+    }
+
+    #[test]
+    fn writer_sandbox_restores_native_claude_home_after_source_denial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = &tmp.path().join("source");
+        fs::create_dir_all(project_root).unwrap();
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        crate::git::run(
+            project_root,
+            &["init", "-q"],
+            "initialize native Claude sandbox fixture",
+        )
+        .unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &item.attempts[0].tasks[0];
+        let claude_home = project_root.join(".fluent/work/artifacts/work-1/attempt-1/claude-home");
+        fs::create_dir_all(&claude_home).unwrap();
+        let writer_cache = crate::writer_cache::preflight_writer_dependency_cache(
+            project_root,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(project_root));
+        let profile = preflight_write_sandbox_profile(
+            task,
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            false,
+            CoderKind::Claude,
+            None,
+            Some(&claude_home),
+            &writer_cache,
+        )
+        .unwrap()
+        .unwrap();
+        let profile_text = fs::read_to_string(&profile.path).unwrap();
+        let source_denial = format!(
+            "(deny file-write* (subpath \"{}\"))",
+            project_root.join(".fluent/work").display()
+        );
+        let home_grant = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            claude_home.display()
+        );
+        assert!(
+            profile_text.contains(&source_denial),
+            "source denial absent"
+        );
+        assert!(
+            profile_text.contains(&home_grant),
+            "Claude home grant absent"
+        );
+        assert!(
+            profile_text.rfind(&home_grant).unwrap() > profile_text.rfind(&source_denial).unwrap(),
+            "Claude must create claude-home/tmp/claude-<uid> after source writes are denied"
+        );
+        let socket_dir = tmp.path().join("terminal-socket");
+        fs::create_dir(&socket_dir).unwrap();
+        let terminal_profile =
+            crate::os::profile_with_terminal_sockets(&profile, &socket_dir, &[]).unwrap();
+        let terminal_rules = fs::read_to_string(&terminal_profile.path).unwrap();
+        assert!(
+            terminal_rules.rfind(&home_grant).unwrap()
+                > terminal_rules.rfind(&source_denial).unwrap()
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let sandbox_usable = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+                .status()
+                .unwrap()
+                .success();
+            if sandbox_usable {
+                let temp = claude_home.join("tmp");
+                fs::create_dir(&temp).unwrap();
+                let owned = temp.join(format!("claude-{}", unsafe { libc::geteuid() }));
+                let sibling = claude_home.with_file_name("other-claude-home");
+                let probe = |path: &Path| {
+                    std::process::Command::new("/usr/bin/sandbox-exec")
+                        .arg("-f")
+                        .arg(&terminal_profile.path)
+                        .arg("/bin/mkdir")
+                        .arg(path)
+                        .output()
+                        .unwrap()
+                };
+                let owned_result = probe(&owned);
+                assert!(
+                    owned_result.status.success(),
+                    "confined Claude could not create its internal temp: {}",
+                    String::from_utf8_lossy(&owned_result.stderr)
+                );
+                assert!(!probe(&sibling).status.success());
+            }
         }
     }
 

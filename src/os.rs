@@ -162,6 +162,7 @@ pub(crate) fn deny_writer_source_entries(
     candidate: &Path,
     task_artifact: &Path,
     writer_cache: &Path,
+    claude_home: Option<&Path>,
 ) -> Result<()> {
     let physical_source = std::fs::canonicalize(source)?;
     // The Writer profile is rendered before the worktree is created. Resolve
@@ -204,6 +205,16 @@ pub(crate) fn deny_writer_source_entries(
         writer_cache == expected_cache,
         "Writer cache grant must name the exact current Attempt"
     );
+    if let Some(home) = claude_home {
+        let expected_home = task_artifact
+            .parent()
+            .context("Writer Task artifact has no Attempt directory")?
+            .join("claude-home");
+        anyhow::ensure!(
+            home == expected_home,
+            "Writer Claude home grant must name the exact current Attempt"
+        );
+    }
     if physical_source == physical_candidate {
         return Ok(());
     }
@@ -251,6 +262,15 @@ pub(crate) fn deny_writer_source_entries(
                         writer_cache,
                         "allow",
                     );
+                    if let Some(home) = claude_home {
+                        append_writer_source_rule(
+                            &mut content,
+                            source,
+                            &physical_source,
+                            home,
+                            "allow",
+                        );
+                    }
                 } else {
                     append_writer_source_rule(
                         &mut content,
@@ -1709,7 +1729,20 @@ mod tests {
             &[],
         )
         .unwrap();
-        deny_writer_source_entries(&profile, &source, &candidate, &artifact, &cache).unwrap();
+        let other_home = source.join(".fluent/work/artifacts/work/other-attempt/claude-home");
+        assert!(
+            deny_writer_source_entries(
+                &profile,
+                &source,
+                &candidate,
+                &artifact,
+                &cache,
+                Some(&other_home),
+            )
+            .is_err(),
+            "a Writer cannot grant a different Attempt's Claude home"
+        );
+        deny_writer_source_entries(&profile, &source, &candidate, &artifact, &cache, None).unwrap();
         let content = std::fs::read_to_string(&profile.path).unwrap();
         let denial = format!(
             "(deny file-write* (subpath {}))",
