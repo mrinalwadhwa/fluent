@@ -34,3 +34,13 @@ the observation must interrupt that provider rather than an earlier setup
 child. Wait for `<barrier>.ready` before reading the complete receipt. Match a
 PID written by the payload with the receipt PID, then verify cancellation and
 lock release before dropping any failure-cleanup guard.
+
+When a Task reuses an artifact area, preparation may write a new launch
+generation while the prior child's receipt remains. To prove that the new
+generation stopped before spawn, compare the execution record's generation
+with a strictly parsed receipt. A well-formed receipt for a different
+generation can remain as historical evidence; a current-generation or
+malformed receipt blocks recovery. Bind the retained receipt bytes in the
+recovery audit and test both the public retry and a changed receipt after
+approval. `no_change_completion_retry_resumes_saved_prelaunch_failure` and
+`no_change_completion_retry_binds_retained_receipt` exercise those boundaries.
