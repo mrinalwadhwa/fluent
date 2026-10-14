@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1336,6 +1337,36 @@ fn tmux_server_has_sessions(socket: &Path) -> Result<bool> {
     bail!("checking managed terminal sessions failed: {error}")
 }
 
+fn close_tmux_server(socket: &Path) -> Result<()> {
+    close_tmux_server_with(socket, &find_tmux()?)
+}
+
+fn close_tmux_server_with(socket: &Path, tmux: &Path) -> Result<()> {
+    if !socket.exists() {
+        return Ok(());
+    }
+    let output = Command::new(tmux)
+        .env_remove("TMUX")
+        .arg("-S")
+        .arg(socket)
+        .arg("kill-server")
+        .output()?;
+    if !output.status.success() {
+        match UnixStream::connect(socket) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) => {}
+            _ => bail!(
+                "closing managed terminal server failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }
+    }
+    Ok(())
+}
+
 fn check_pane_query_failure(error: &str, has_sessions: Option<bool>) -> Result<()> {
     if error.contains("no sessions")
         || (error.contains("no current target") && has_sessions == Some(false))
@@ -1441,7 +1472,11 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
         record.leader_pid,
         &resource.pane_sessions,
         &resource.owner_marker,
-    )
+    )?;
+    // The foreground launcher can release its execution identity while an
+    // attached tmux client still keeps the server alive. Close the owned
+    // socket explicitly so control attachments receive EOF at settlement.
+    close_tmux_server(&resource.socket)
 }
 
 /// Release only the resource receipt owned by the settled execution generation.
@@ -1624,6 +1659,25 @@ mod control_client_tests {
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn settlement_closes_the_owned_tmux_socket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("socket");
+        let script = root.path().join("tmux");
+        std::fs::write(&socket, b"fixture socket").unwrap();
+        std::fs::write(
+            &script,
+            b"#!/bin/sh\n[ \"$1\" = -S ] && [ \"$3\" = kill-server ] || exit 1\nrm \"$2\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        close_tmux_server_with(&socket, &script).unwrap();
+        assert!(!socket.exists());
+    }
 
     #[test]
     fn diagnostic_capture_names_the_managed_pane() {
