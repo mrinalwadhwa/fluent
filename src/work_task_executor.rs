@@ -2120,6 +2120,7 @@ fn run_review_task_with_coder(
         &review_path,
         &review_inspection_path,
         &transcript,
+        native_review && reviewer_coder == CoderKind::Claude,
         &candidate_workspace,
         &candidate_commit,
         &role,
@@ -2224,6 +2225,7 @@ fn finalize_review_outcome(
     review_path: &Path,
     review_inspection_path: &Path,
     transcript_path: &Path,
+    native_claude_review: bool,
     candidate_workspace: &Path,
     candidate_commit: &str,
     role: &str,
@@ -2336,10 +2338,17 @@ fn finalize_review_outcome(
             .with_context(|| format!("reading Review Task report {}", review_path.display()))?;
         let inspection_artifact =
             if crate::review::extract_verdict(&review_source) == crate::review::Verdict::Pass {
+                let inspection_transcript = if native_claude_review {
+                    // Claude's native hook stream records lifecycle events. Its
+                    // provider transcript carries the tool inputs and results.
+                    transcript_path.with_file_name("claude-session.jsonl")
+                } else {
+                    transcript_path.to_path_buf()
+                };
                 crate::review_inspection::validate(
                     review_inspection_path,
                     candidate_workspace,
-                    transcript_path,
+                    &inspection_transcript,
                     candidate_commit,
                     role,
                 )?;
@@ -13817,6 +13826,7 @@ mod tests {
             &tmp.path().join("does-not-exist-review.md"),
             &tmp.path().join("does-not-exist-review-inspection.json"),
             &tmp.path().join("does-not-exist-transcript.jsonl"),
+            false,
             &tmp.path().join("candidate-workspace"),
             "abc123",
             "architecture",
@@ -15669,6 +15679,14 @@ mod tests {
 
     impl ReviewCompletionFixture {
         fn new() -> Self {
+            Self::new_with_mode(crate::work_model::TerminalMode::Headless)
+        }
+
+        fn new_native_claude() -> Self {
+            Self::new_with_mode(crate::work_model::TerminalMode::Native)
+        }
+
+        fn new_with_mode(terminal_mode: crate::work_model::TerminalMode) -> Self {
             let tmp = tempfile::TempDir::new().unwrap();
             let project_root = tmp.path().join("project");
             fs::create_dir_all(project_root.join("src")).unwrap();
@@ -15708,6 +15726,7 @@ mod tests {
                 ..Default::default()
             };
             item.add_initial_attempt("attempt-1").unwrap();
+            item.attempts[0].terminal_mode = terminal_mode;
             let task = &mut item.attempts[0].tasks[0];
             task.id = "attempt-1-review-architecture".to_string();
             task.kind = TaskKind::Review;
@@ -15805,6 +15824,7 @@ mod tests {
             &review_path,
             &inspection_path,
             &fixture.artifact_dir.join("transcript.jsonl"),
+            false,
             &fixture.project_root,
             &fixture.candidate_commit,
             "architecture",
@@ -15825,6 +15845,78 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with("/review-inspection.json"))
         );
+    }
+
+    #[test]
+    fn native_claude_review_validates_provider_transcript_at_completion() {
+        let fixture = ReviewCompletionFixture::new_native_claude();
+        fixture.write_valid_passing_artifacts();
+        fs::write(
+            fixture.artifact_dir.join("transcript.jsonl"),
+            "{\"event\":\"Stop\",\"session_id\":\"claude-session\"}\n",
+        )
+        .unwrap();
+        let inspected = fixture
+            .project_root
+            .join("src/lib.rs")
+            .display()
+            .to_string();
+        fs::write(
+            fixture.artifact_dir.join("claude-session.jsonl"),
+            format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Read\",\"input\":{{\"file_path\":\"{inspected}\"}}}}]}}}}\n{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"source\"}}]}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let resolver = ContentResolver::new(Some(&fixture.project_root));
+        finalize_review_outcome(
+            &fixture.config(&resolver),
+            Ok(()),
+            Ok(()),
+            &fixture.artifact_dir.join("review.md"),
+            &fixture
+                .artifact_dir
+                .join(crate::review_inspection::REVIEW_INSPECTION_FILE),
+            &fixture.artifact_dir.join("transcript.jsonl"),
+            true,
+            &fixture.project_root,
+            &fixture.candidate_commit,
+            "architecture",
+            &|_, _| {},
+        )
+        .unwrap();
+
+        let stored = fixture.store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Complete);
+    }
+
+    #[test]
+    fn native_claude_review_rejects_hook_only_inspection() {
+        let fixture = ReviewCompletionFixture::new_native_claude();
+        fixture.write_valid_passing_artifacts();
+        let resolver = ContentResolver::new(Some(&fixture.project_root));
+
+        let error = finalize_review_outcome(
+            &fixture.config(&resolver),
+            Ok(()),
+            Ok(()),
+            &fixture.artifact_dir.join("review.md"),
+            &fixture
+                .artifact_dir
+                .join(crate::review_inspection::REVIEW_INSPECTION_FILE),
+            &fixture.artifact_dir.join("transcript.jsonl"),
+            true,
+            &fixture.project_root,
+            &fixture.candidate_commit,
+            "architecture",
+            &|_, _| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("claude-session.jsonl"));
+        let stored = fixture.store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Failed);
     }
 
     #[test]
@@ -15849,6 +15941,7 @@ mod tests {
             &review_path,
             &inspection_path,
             &fixture.artifact_dir.join("transcript.jsonl"),
+            false,
             &fixture.project_root,
             &fixture.candidate_commit,
             "architecture",
@@ -15883,6 +15976,7 @@ mod tests {
                 &review_path,
                 &inspection_path,
                 &fixture.artifact_dir.join("transcript.jsonl"),
+                false,
                 &fixture.project_root,
                 &fixture.candidate_commit,
                 "architecture",
