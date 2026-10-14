@@ -2556,6 +2556,118 @@ set outcome [wait]
 exit [lindex $outcome 3]
 "#;
 
+const HOST_NATIVE_RACE_CONTROL: &str = r#"
+set timeout 60
+spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+    set timeout 15
+    expect {
+        "›" {}
+        eof { exit 1 }
+        timeout { exit 1 }
+    }
+    send -- $env(FLUENT_NATIVE_RACE_TEXT)
+    # Let the installed composer finish its paste burst before Enter races
+    # with completion. Otherwise the burst can become a multiline draft.
+    after 300
+} else {
+    set timeout 1
+    expect { eof { exit 1 } timeout {} }
+}
+set ready [open $env(FLUENT_NATIVE_RACE_READY) w]
+puts $ready "attached"
+close $ready
+while {![file exists $env(FLUENT_NATIVE_RACE_RELEASE)]} { after 25 }
+if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+    set result [catch {send -- "\r"} error]
+} else {
+    set result [catch {send -- "$env(FLUENT_NATIVE_RACE_TEXT)\r"} error]
+}
+set attempt [open $env(FLUENT_NATIVE_RACE_ATTEMPT) w]
+puts $attempt "$result $error"
+close $attempt
+# Keep this attachment on the Writer terminal through settlement. Detaching
+# here would make EOF mean only that the operator left the terminal.
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+
+#[test]
+fn host_codex_race_submits_prepared_input_at_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let root = tempfile::tempdir().unwrap();
+    let terminal = root.path().join("fake-terminal");
+    let ready = root.path().join("race.ready");
+    let release = root.path().join("race.release");
+    let attempt = root.path().join("race.attempt");
+    let capture = root.path().join("capture.txt");
+    let expect_log = root.path().join("expect.log");
+    std::fs::write(
+        &terminal,
+        r#"#!/usr/bin/env python3
+import os, select, sys, termios, tty
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    print('›', flush=True)
+    marker = os.environ['FLUENT_NATIVE_RACE_TEXT'].encode()
+    data = bytearray()
+    while marker not in data:
+        data.extend(os.read(fd, 1))
+    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'w') as out:
+        out.write('before' if not os.path.exists(os.environ['FLUENT_NATIVE_RACE_RELEASE']) else 'after')
+    while not data.endswith(b'\r'):
+        data.extend(os.read(fd, 1))
+    if select.select([fd], [], [], 0.5)[0]:
+        data.extend(os.read(fd, 16))
+    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'a') as out:
+        out.write('\n' + repr(bytes(data)))
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = std::process::Command::new("expect")
+        .args(["-c", HOST_NATIVE_RACE_CONTROL])
+        .env("FLUENT_NATIVE_BINARY", &terminal)
+        .env("FLUENT_NATIVE_SOURCE", root.path())
+        .env("FLUENT_NATIVE_SESSION", "fixture")
+        .env("FLUENT_NATIVE_PROVIDER", "codex")
+        .env("FLUENT_NATIVE_RACE_READY", &ready)
+        .env("FLUENT_NATIVE_RACE_RELEASE", &release)
+        .env("FLUENT_NATIVE_RACE_ATTEMPT", &attempt)
+        .env("FLUENT_NATIVE_RACE_TEXT", "race-marker")
+        .env("FLUENT_NATIVE_CAPTURE", &capture)
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(&expect_log).unwrap(),
+        ))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !ready.exists() || !capture.exists() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&release, b"send").unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    let capture = std::fs::read_to_string(capture).unwrap();
+    assert!(
+        capture.starts_with("before\n"),
+        "{capture}; expect: {}",
+        std::fs::read_to_string(expect_log).unwrap()
+    );
+    assert!(capture.contains("b'race-marker\\r'"), "{capture}");
+    assert!(std::fs::read_to_string(attempt).unwrap().starts_with("0 "));
+}
+
 #[test]
 fn host_codex_attachment_queues_both_inputs() {
     use std::os::unix::fs::PermissionsExt;
@@ -2942,29 +3054,23 @@ fn host_native_agent_acceptance() {
         // release one input when its provider reports the settling boundary.
         // The input may be admitted to this generation or rejected; it must
         // never become input for the following Reviewer.
-        const RACE_CONTROL: &str = r#"
-set timeout 60
-spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
-expect -timeout 1 { eof { exit 1 } timeout {} }
-set ready [open $env(FLUENT_NATIVE_RACE_READY) w]
-puts $ready "attached"
-close $ready
-while {![file exists $env(FLUENT_NATIVE_RACE_RELEASE)]} { after 25 }
-set result [catch {send -- "$env(FLUENT_NATIVE_RACE_TEXT)\r"} error]
-set attempt [open $env(FLUENT_NATIVE_RACE_ATTEMPT) w]
-puts $attempt "$result $error"
-close $attempt
-if {!$result} { after 250; catch {send -- "\002d"} }
-expect eof
-set outcome [wait]
-exit [lindex $outcome 3]
-"#;
+        let boundary = match provider {
+            "codex" => "turn/completed",
+            "claude" => "\"Stop\"",
+            "pi" => "agent_before_settle",
+            _ => unreachable!(),
+        };
+        let previous_boundaries = fs::read_to_string(artifact.join("transcript.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(boundary))
+            .count();
         let race_marker = format!("native-{provider}-settlement-probe");
         let race_ready = runtime.join("race.ready");
         let race_release = runtime.join("race.release");
         let race_attempt = runtime.join("race.attempt");
         let mut race = Command::new("expect")
-            .args(["-c", RACE_CONTROL])
+            .args(["-c", HOST_NATIVE_RACE_CONTROL])
             .env("FLUENT_NATIVE_BINARY", binary)
             .env("FLUENT_NATIVE_SOURCE", &project)
             .env("FLUENT_NATIVE_SESSION", &session)
@@ -3002,17 +3108,6 @@ exit [lindex $outcome 3]
             );
             std::thread::sleep(Duration::from_millis(25));
         }
-        let boundary = match provider {
-            "codex" => "turn/completed",
-            "claude" => "\"Stop\"",
-            "pi" => "agent_before_settle",
-            _ => unreachable!(),
-        };
-        let previous_boundaries = fs::read_to_string(artifact.join("transcript.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains(boundary))
-            .count();
         let before_race_sequence = loop {
             assert!(
                 Instant::now() < deadline,
@@ -3044,27 +3139,45 @@ exit [lindex $outcome 3]
             .execution_generation
             .clone();
         fs::write(&race_release, b"send").unwrap();
-        let race_deadline = Instant::now() + Duration::from_secs(20);
-        while race.try_wait().unwrap().is_none() {
+        let race_deadline = Instant::now() + Duration::from_secs(60);
+        let race_status = loop {
+            if let Some(status) = race.try_wait().unwrap() {
+                break status;
+            }
             if Instant::now() >= race_deadline {
                 race.kill().unwrap();
                 let _ = race.wait();
                 panic!("{provider} race attachment did not close");
             }
             std::thread::sleep(Duration::from_millis(25));
-        }
+        };
+        assert!(
+            race_status.success(),
+            "{provider} race attachment failed; inspect {}",
+            runtime.join("race.attach.log").display()
+        );
         assert!(
             race_attempt.is_file(),
             "{provider} settlement input was never attempted"
         );
-        // Sample before waiting for Task completion, so an input that vanishes
-        // while this generation is still open still needs a native receipt.
-        let closed_after_attempt = race_generation_closed_after_attempt(
-            &race_attempt,
-            &fluent::terminal_sessions::list(&project).unwrap(),
-            &session,
-            &race_generation,
-        );
+        // The attachment stays connected until EOF from this Writer terminal.
+        // The descriptor can lag that EOF briefly, so observe its generation
+        // closing before waiting for Task completion or a following worker.
+        let closure_deadline = Instant::now() + Duration::from_secs(2);
+        let closed_after_attempt = loop {
+            if race_generation_closed_after_attempt(
+                &race_attempt,
+                &fluent::terminal_sessions::list(&project).unwrap(),
+                &session,
+                &race_generation,
+            ) {
+                break true;
+            }
+            if Instant::now() >= closure_deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
         let status = loop {
             if let Some(status) = child.child.try_wait().unwrap() {
                 break status;
