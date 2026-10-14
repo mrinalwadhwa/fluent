@@ -18,14 +18,21 @@ fn race_generation_closed_after_attempt(
 ) -> bool {
     // A PTY send can succeed after its native input owner has closed. In that
     // ordering no provider callback exists to record admission or rejection.
+    // The generation was captured from the live attachment before settlement;
+    // its registry entry may be gone by the time the send result is recorded.
     let attempted = std::fs::read_to_string(attempt)
         .is_ok_and(|result| result.starts_with("0 ") || result.starts_with("1 "));
     attempted
-        && descriptors.iter().any(|descriptor| {
-            descriptor.session_id == session
-                && descriptor.execution_generation == generation
-                && descriptor.lifecycle == fluent::terminal_sessions::TerminalLifecycle::Ended
-        })
+        && match descriptors
+            .iter()
+            .find(|descriptor| descriptor.session_id == session)
+        {
+            Some(descriptor) => {
+                descriptor.execution_generation == generation
+                    && descriptor.lifecycle == fluent::terminal_sessions::TerminalLifecycle::Ended
+            }
+            None => true,
+        }
 }
 
 #[test]
@@ -88,12 +95,6 @@ fn completion_race_accepts_closure_after_send_attempt() {
         "writer-session",
         "reviewer-generation"
     ));
-    assert!(!race_generation_closed_after_attempt(
-        &attempt,
-        &descriptors,
-        "reviewer-session",
-        "writer-generation"
-    ));
     descriptors[0].lifecycle = TerminalLifecycle::Running;
     assert!(!race_generation_closed_after_attempt(
         &attempt,
@@ -103,6 +104,24 @@ fn completion_race_accepts_closure_after_send_attempt() {
     ));
     descriptors[0].lifecycle = TerminalLifecycle::Ended;
     std::fs::write(&attempt, "1 attachment closed").unwrap();
+    assert!(race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    let mut reviewer = descriptors[0].clone();
+    reviewer.session_id = "reviewer-session".into();
+    reviewer.execution_generation = "reviewer-generation".into();
+    reviewer.lifecycle = TerminalLifecycle::Running;
+    descriptors.clear();
+    assert!(race_generation_closed_after_attempt(
+        &attempt,
+        &descriptors,
+        "writer-session",
+        "writer-generation"
+    ));
+    descriptors.push(reviewer);
     assert!(race_generation_closed_after_attempt(
         &attempt,
         &descriptors,
@@ -3126,19 +3145,19 @@ fn host_native_agent_acceptance() {
             std::thread::sleep(Duration::from_millis(25));
         }
         let control_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        let race_generation = loop {
             if let Ok(mut control_probe) = fluent::terminal_sessions::resolve(&project, &session)
                 && control_probe.acquire_control().unwrap()
                     == fluent::terminal_sessions::ControlOutcome::Occupied
             {
-                break;
+                break control_probe.descriptor().execution_generation.clone();
             }
             assert!(
                 Instant::now() < control_deadline && race.try_wait().unwrap().is_none(),
                 "{provider} race attachment did not acquire Control"
             );
             std::thread::sleep(Duration::from_millis(25));
-        }
+        };
         let before_race_sequence = loop {
             assert!(
                 Instant::now() < deadline,
@@ -3162,13 +3181,6 @@ fn host_native_agent_acceptance() {
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        let race_generation = fluent::terminal_sessions::list(&project)
-            .unwrap()
-            .iter()
-            .find(|entry| entry.session_id == session)
-            .expect("race attachment has no terminal generation")
-            .execution_generation
-            .clone();
         fs::write(&race_release, b"send").unwrap();
         let race_deadline = Instant::now() + Duration::from_secs(60);
         let race_status = loop {
