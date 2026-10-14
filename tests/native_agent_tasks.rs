@@ -2378,6 +2378,77 @@ fn host_fixture_child_guard_reaps_on_panic() {
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
 }
 
+const HOST_NATIVE_ATTACH: &str = r#"
+set timeout 20
+if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
+    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
+} else {
+    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION)
+}
+
+if {[info exists env(FLUENT_NATIVE_FIXTURE_READY)]} {
+    expect "fixture-ready"
+}
+after 300
+if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
+    send -- "Please retain result.txt and continue."
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+        send -- "\t"
+    } else {
+        send -- "\r"
+    }
+    after 300
+    send -- "The final file must have exactly the requested line."
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
+        send -- "\033\r"
+    } elseif {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+        send -- "\t"
+    } else {
+        send -- "\r"
+    }
+    after 300
+}
+send -- "\002d"
+expect eof
+set outcome [wait]
+exit [lindex $outcome 3]
+"#;
+
+#[test]
+fn host_codex_attachment_queues_both_inputs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let capture = root.path().join("input.bin");
+    let terminal = root.path().join("fake-terminal");
+    std::fs::write(
+        &terminal,
+        "#!/usr/bin/env python3\nimport os, sys, termios, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    data = bytearray()\n    while not data.endswith(b'\\x02d'):\n        data.extend(os.read(fd, 1))\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = std::process::Command::new("expect")
+        .args(["-c", HOST_NATIVE_ATTACH])
+        .env("FLUENT_NATIVE_BINARY", &terminal)
+        .env("FLUENT_NATIVE_SOURCE", root.path())
+        .env("FLUENT_NATIVE_SESSION", "fixture")
+        .env("FLUENT_NATIVE_CONTROL", "1")
+        .env("FLUENT_NATIVE_PROVIDER", "codex")
+        .env("FLUENT_NATIVE_FIXTURE_READY", "1")
+        .env("FLUENT_NATIVE_CAPTURE", &capture)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        std::fs::read(capture).unwrap(),
+        b"Please retain result.txt and continue.\tThe final file must have exactly the requested line.\t\x02d"
+    );
+}
+
 /// Run only from the separately authorized host check. The fixture stays in
 /// its output directory so the provider transcript and candidate can be
 /// inspected together after the test exits.
@@ -2409,32 +2480,6 @@ fn host_native_agent_acceptance() {
         std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap());
     fs::create_dir_all(&output_root).unwrap();
     let binary = env!("CARGO_BIN_EXE_fluent");
-    const ATTACH: &str = r#"
-set timeout 20
-if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
-    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
-} else {
-    spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION)
-}
-
-
-after 300
-if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
-    send -- "Please retain result.txt and continue.\r"
-    after 300
-    send -- "The final file must have exactly the requested line."
-    if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
-        send -- "\033\r"
-    } else {
-        send -- "\r"
-    }
-    after 300
-}
-send -- "\002d"
-expect eof
-set outcome [wait]
-exit [lindex $outcome 3]
-"#;
     for (provider, model_var, effort_var) in [
         (
             "codex",
@@ -2723,7 +2768,7 @@ exit [lindex $outcome 3]
         ] {
             let log = File::create(runtime.join(format!("{label}.log"))).unwrap();
             let status = Command::new("expect")
-                .args(["-c", ATTACH])
+                .args(["-c", HOST_NATIVE_ATTACH])
                 .env("FLUENT_NATIVE_BINARY", binary)
                 .env("FLUENT_NATIVE_SOURCE", &project)
                 .env("FLUENT_NATIVE_SESSION", &session)
@@ -3012,6 +3057,47 @@ exit [lindex $outcome 3]
                 .is_some_and(|sequence| sequence >= 3),
             "{provider} did not admit both attached inputs"
         );
+        if provider == "codex" {
+            let conversation = records
+                .iter()
+                .find(|record| record["execution_generation"] == writer_generation)
+                .and_then(|record| record["assigned_conversation_id"].as_str())
+                .expect("Codex Writer has no assigned conversation");
+            let attached_sequences: Vec<_> = [
+                "Please retain result.txt and continue.",
+                "The final file must have exactly the requested line.",
+            ]
+            .into_iter()
+            .map(|message| {
+                records
+                    .iter()
+                    .find(|record| {
+                        record["execution_generation"] == writer_generation
+                            && record["assigned_conversation_id"] == conversation
+                            && native_input_event(record)
+                            && record["event"].to_string().contains(message)
+                    })
+                    .and_then(|record| record["input_sequence"].as_u64())
+                    .unwrap_or_else(|| panic!("Codex did not admit attached input: {message}"))
+            })
+            .collect();
+            assert!(
+                attached_sequences[0] < attached_sequences[1],
+                "Codex attached inputs were not admitted in order"
+            );
+            assert!(
+                records.iter().any(|record| {
+                    record["execution_generation"] == writer_generation
+                        && record["assigned_conversation_id"] == conversation
+                        && record["event"]["method"] == "turn/completed"
+                        && record["event"]["params"]["turn"]["status"] == "completed"
+                        && record["input_sequence"]
+                            .as_u64()
+                            .is_some_and(|sequence| sequence >= attached_sequences[1])
+                }),
+                "Codex settled before consuming both attached inputs"
+            );
+        }
         let shown = Command::new(binary)
             .args(["work-item", "show", &work])
             .current_dir(&project)
