@@ -339,6 +339,70 @@ fn startup_signals(snapshot: Option<&str>) -> Vec<&'static str> {
     signals
 }
 
+fn failure_signals(output: Option<&str>) -> Vec<&'static str> {
+    let Some(output) = output else {
+        return Vec::new();
+    };
+    let mut signals = Vec::new();
+    if output.contains("Resource temporarily unavailable") || output.contains("os error 35") {
+        signals.push("process_resource_unavailable");
+    }
+    signals
+}
+
+fn session_tail(path: &Path, private_home: &Path) -> Option<String> {
+    if !path
+        .canonicalize()
+        .ok()?
+        .starts_with(private_home.canonicalize().ok()?)
+    {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    Some(String::from_utf8_lossy(&tail).into_owned())
+}
+
+fn record_runtime_diagnostic(
+    artifact: &Path,
+    generation: &str,
+    terminal: &TerminalSession,
+    gate: &ClaudeHookGate,
+    private_home: &Path,
+    reason: &str,
+) -> Result<Vec<&'static str>> {
+    let snapshot = terminal.capture_pane_snapshot().ok();
+    let tail = gate
+        .transcript_path()
+        .and_then(|path| session_tail(path, private_home));
+    let mut signals = failure_signals(snapshot.as_deref());
+    for signal in failure_signals(tail.as_deref()) {
+        if !signals.contains(&signal) {
+            signals.push(signal);
+        }
+    }
+    let mut file = File::create(artifact.join("native-claude-runtime-diagnostic.json"))?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({
+            "execution_generation": generation,
+            "reason": reason,
+            "session_started": gate.session_id().is_some(),
+            "last_input_sequence": gate.last_sequence(),
+            "pane_snapshot_available": snapshot.is_some(),
+            "session_tail_available": tail.is_some(),
+            "recognized_output": startup_signals(snapshot.as_deref()),
+            "failure_signals": signals,
+        }),
+    )?;
+    file.sync_all()?;
+    Ok(signals)
+}
+
 fn record_startup_diagnostic(
     artifact: &Path,
     generation: &str,
@@ -631,22 +695,53 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
                         }
                         Ok(Completion::Ignored) => {}
                         Err(error) => {
-                            break Err(error);
+                            let signals = record_runtime_diagnostic(
+                                artifact,
+                                &generation,
+                                &terminal,
+                                &gate,
+                                task.private_home,
+                                "hook_rejected",
+                            )?;
+                            break Err(error.context(format!(
+                                "native Claude hook rejected; signals={signals:?}; inspect {}",
+                                artifact
+                                    .join("native-claude-runtime-diagnostic.json")
+                                    .display()
+                            )));
                         }
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if !terminal.is_live()? {
-                        if gate.session_id().is_none() {
+                        let (diagnostic, signals) = if gate.session_id().is_none() {
                             record_startup_diagnostic(
                                 artifact,
                                 &generation,
                                 &terminal,
                                 "terminal_exit_before_session_start",
                             )?;
-                        }
+                            (
+                                artifact.join("native-claude-startup-diagnostic.json"),
+                                Vec::new(),
+                            )
+                        } else {
+                            let signals = record_runtime_diagnostic(
+                                artifact,
+                                &generation,
+                                &terminal,
+                                &gate,
+                                task.private_home,
+                                "terminal_exit_after_session_start",
+                            )?;
+                            (
+                                artifact.join("native-claude-runtime-diagnostic.json"),
+                                signals,
+                            )
+                        };
                         break Err(anyhow::anyhow!(
-                            "native Claude terminal ended without completion"
+                            "native Claude terminal ended without completion; signals={signals:?}; inspect {}",
+                            diagnostic.display()
                         ));
                     }
                     if gate.session_id().is_none() && Instant::now() > deadline {
@@ -838,6 +933,28 @@ mod tests {
             vec!["api_key_confirmation"]
         );
         assert!(startup_signals(Some("private prompt and credential text")).is_empty());
+    }
+
+    #[test]
+    fn claude_failure_diagnostic_identifies_resource_exhaustion_without_private_text() {
+        assert_eq!(
+            super::failure_signals(Some(
+                "Could not launch shell: Resource temporarily unavailable (os error 35)\nprivate prompt"
+            )),
+            vec!["process_resource_unavailable"]
+        );
+        assert!(super::failure_signals(Some("private prompt and credential text")).is_empty());
+
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let session = home.path().join("session.jsonl");
+        std::fs::write(&session, "tool failed: os error 35\nprivate prompt").unwrap();
+        let tail = super::session_tail(&session, home.path()).unwrap();
+        assert_eq!(
+            super::failure_signals(Some(&tail)),
+            vec!["process_resource_unavailable"]
+        );
+        assert!(super::session_tail(&session, outside.path()).is_none());
     }
 
     #[test]
