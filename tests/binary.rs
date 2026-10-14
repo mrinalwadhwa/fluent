@@ -1863,13 +1863,10 @@ PY
     );
 }
 
-#[test]
-fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
+fn no_change_completion_saved_prelaunch_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
     use fluent::work_model::{AttemptStatus, PauseKind};
-    let tmp = TempDir::new().unwrap();
-    let fixture = writer_recovery_fixture(&tmp);
+    let fixture = writer_recovery_fixture(tmp);
     let store = WorkModelStore::new(&fixture.project);
-    let old_audit = fs::read(&fixture.audit).unwrap();
     store
         .mutate_work_item(&fixture.work, |item| {
             let attempt = &mut item.attempts[0];
@@ -1936,6 +1933,15 @@ fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
             "launch_generation": "0123456789abcdef0123456789abcdef"
         }),
     );
+    fixture
+}
+
+#[test]
+fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_saved_prelaunch_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    let old_audit = fs::read(&fixture.audit).unwrap();
     fluent_cmd()
         .current_dir(&fixture.project)
         .args([
@@ -2354,7 +2360,19 @@ fn no_change_completion_retry_rejects_invalid_authority() {
             _ => {}
         }
         let before = snapshot_tree(&fixture.project.join(".fluent/work"));
-        no_change_completion_approve(&fixture).assert().failure();
+        let failed_check = match defect {
+            "candidate" => "candidate changed or is dirty",
+            "baseline" => "host baseline differs from the current candidate",
+            "cancel" => "durable cancellation request",
+            "owner" => "execution ownership remains live or unverifiable",
+            "evidence" => "retained completion retry evidence changed",
+            "assignment" => "assignment source Task does not own the bound candidate",
+            _ => unreachable!(),
+        };
+        no_change_completion_approve(&fixture)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(failed_check));
         let after = snapshot_tree(&fixture.project.join(".fluent/work"));
         let before_protected = before
             .iter()
@@ -2391,7 +2409,12 @@ fn no_change_completion_retry_rejects_invalid_authority() {
         })
         .unwrap();
     let before = snapshot_tree(&fixture.project.join(".fluent/work"));
-    no_change_completion_approve(&fixture).assert().failure();
+    no_change_completion_approve(&fixture)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Attempt is not paused for Writer-completion recovery",
+        ));
     let after = snapshot_tree(&fixture.project.join(".fluent/work"));
     assert_eq!(
         after
@@ -2460,7 +2483,10 @@ fn no_change_completion_retry_rejects_invalid_authority() {
             "Retry only if this generation never launched",
         ])
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains(
+            "no proof that this generation stopped before provider launch",
+        ));
     let after = snapshot_tree(&fixture.project.join(".fluent/work"));
     assert_eq!(
         after
@@ -2604,6 +2630,33 @@ fn no_change_completion_retry_guidance_is_read_only() {
         .assert()
         .failure();
     assert_eq!(snapshot_tree(&work_root), changed);
+
+    let saved_tmp = TempDir::new().unwrap();
+    let saved = no_change_completion_saved_prelaunch_fixture(&saved_tmp);
+    let saved_root = saved.project.join(".fluent/work");
+    let saved_before = snapshot_tree(&saved_root);
+    let shown = read_work_show_json(&saved.project, &saved.work);
+    assert_eq!(shown["attempts"][0]["status"], "needs-user");
+    assert!(
+        shown["next-action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("repair-writer-completion"),
+        "{shown}"
+    );
+    fluent_cmd()
+        .current_dir(&saved.project)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repair-writer-completion"));
+    fluent_cmd()
+        .current_dir(&saved.project)
+        .args(["attempt", "run", &saved.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("repair-writer-completion"));
+    assert_eq!(snapshot_tree(&saved_root), saved_before);
 }
 
 #[test]
