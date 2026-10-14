@@ -38,6 +38,12 @@ exercise compilation, linking, or executable mapping. Required host proof must
 fail when real confinement is unavailable; a hermetic profile test or nested
 sandbox return supplies no enforcement evidence.
 
+For a real confinement probe, put a retained assignment input outside writable
+roots. Verify that the worker can read it, cannot write it, and leaves its bytes
+unchanged. Prepare the private dependency cache through the production Writer
+launch boundary before probing allowed cache writes; cache preflight only
+identifies its future path and does not create it.
+
 Related: [[attempt-scoped-cargo-cache-shared-with-final-tester]],
 [[strict-sandbox-capability-selection]], [[canonicalize-confinement-paths]],
 [[sandbox-tests-assert-invariant-in-both-host-branches]].
