@@ -118,7 +118,7 @@ fn transcript_records_successful_inspection(
         )
     })?;
     let mut claude_tool_inputs = BTreeMap::<String, serde_json::Value>::new();
-    let mut pi_tool_inputs = BTreeMap::<String, serde_json::Value>::new();
+    let mut pi_tool_inputs = BTreeMap::<(bool, String), serde_json::Value>::new();
 
     for line in source.lines() {
         if line.trim().is_empty() {
@@ -193,20 +193,25 @@ fn transcript_records_successful_inspection(
             }
         }
 
-        if value.get("type").and_then(|value| value.as_str()) == Some("tool_execution_start") {
-            if let Some(id) = value.get("toolCallId").and_then(|value| value.as_str()) {
-                pi_tool_inputs.insert(id.to_string(), value["args"].clone());
+        let native_pi = value.get("format").and_then(|value| value.as_str())
+            == Some("fluent-native-agent-event")
+            && value.get("provider").and_then(|value| value.as_str()) == Some("pi")
+            && value.get("schema_version").and_then(|value| value.as_u64()) == Some(1);
+        let pi_event = if native_pi { &value["event"] } else { &value };
+        if pi_event.get("type").and_then(|value| value.as_str()) == Some("tool_execution_start") {
+            if let Some(id) = pi_event.get("toolCallId").and_then(|value| value.as_str()) {
+                pi_tool_inputs.insert((native_pi, id.to_string()), pi_event["args"].clone());
             }
         }
 
-        if value.get("type").and_then(|value| value.as_str()) == Some("tool_execution_end")
-            && value.get("isError").and_then(|value| value.as_bool()) == Some(false)
+        if pi_event.get("type").and_then(|value| value.as_str()) == Some("tool_execution_end")
+            && pi_event.get("isError").and_then(|value| value.as_bool()) == Some(false)
         {
-            let Some(tool_call_id) = value.get("toolCallId").and_then(|value| value.as_str())
+            let Some(tool_call_id) = pi_event.get("toolCallId").and_then(|value| value.as_str())
             else {
                 continue;
             };
-            let Some(input) = pi_tool_inputs.get(tool_call_id) else {
+            let Some(input) = pi_tool_inputs.get(&(native_pi, tool_call_id.to_string())) else {
                 continue;
             };
             if value_names_any_candidate_path(
@@ -941,5 +946,49 @@ mod tests {
         )
         .unwrap();
         validate(&artifact, workspace.path(), &transcript, &commit, "tests").unwrap();
+    }
+
+    #[test]
+    fn accepts_successful_native_pi_inspection() {
+        let (workspace, commit) = committed_workspace();
+        let artifact = write_inspection(
+            workspace.path(),
+            &commit,
+            "tests",
+            "src/lib.rs",
+            "Checked the candidate's test surface.",
+        );
+        let inspected = workspace.path().join("src/lib.rs").display().to_string();
+        let transcript = workspace.path().join("transcript.jsonl");
+        let envelope = |event| {
+            serde_json::json!({
+                "format": "fluent-native-agent-event",
+                "schema_version": 1,
+                "provider": "pi",
+                "event": event,
+            })
+            .to_string()
+        };
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                envelope(serde_json::json!({"type":"tool_execution_start","toolCallId":"tool-1","toolName":"read","args":{"path":inspected}})),
+                envelope(serde_json::json!({"type":"tool_execution_end","toolCallId":"tool-1","toolName":"read","result":{},"isError":false})),
+            ),
+        )
+        .unwrap();
+        validate(&artifact, workspace.path(), &transcript, &commit, "tests").unwrap();
+
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                envelope(serde_json::json!({"type":"tool_execution_start","toolCallId":"tool-1","toolName":"read","args":{"path":inspected}})),
+                envelope(serde_json::json!({"type":"tool_execution_end","toolCallId":"tool-1","toolName":"read","result":{},"isError":true})),
+            ),
+        )
+        .unwrap();
+        assert!(validate(&artifact, workspace.path(), &transcript, &commit, "tests").is_err());
     }
 }

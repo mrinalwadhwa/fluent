@@ -15920,6 +15920,57 @@ mod tests {
     }
 
     #[test]
+    fn native_pi_review_completes_with_nested_tool_inspection() {
+        let fixture =
+            ReviewCompletionFixture::new_with_mode(crate::work_model::TerminalMode::Native);
+        fixture.write_valid_passing_artifacts();
+        let inspected = fixture
+            .project_root
+            .join("src/lib.rs")
+            .display()
+            .to_string();
+        let envelope = |event| {
+            serde_json::json!({
+                "format": "fluent-native-agent-event",
+                "schema_version": 1,
+                "provider": "pi",
+                "event": event,
+            })
+            .to_string()
+        };
+        fs::write(
+            fixture.artifact_dir.join("transcript.jsonl"),
+            format!(
+                "{}\n{}\n",
+                envelope(serde_json::json!({"type":"tool_execution_start","toolCallId":"tool-1","toolName":"read","args":{"path":inspected}})),
+                envelope(serde_json::json!({"type":"tool_execution_end","toolCallId":"tool-1","toolName":"read","result":{},"isError":false})),
+            ),
+        )
+        .unwrap();
+
+        let resolver = ContentResolver::new(Some(&fixture.project_root));
+        finalize_review_outcome(
+            &fixture.config(&resolver),
+            Ok(()),
+            Ok(()),
+            &fixture.artifact_dir.join("review.md"),
+            &fixture
+                .artifact_dir
+                .join(crate::review_inspection::REVIEW_INSPECTION_FILE),
+            &fixture.artifact_dir.join("transcript.jsonl"),
+            false,
+            &fixture.project_root,
+            &fixture.candidate_commit,
+            "architecture",
+            &|_, _| {},
+        )
+        .unwrap();
+
+        let stored = fixture.store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Complete);
+    }
+
+    #[test]
     fn passing_review_without_successful_inspection_fails_closed() {
         let fixture = ReviewCompletionFixture::new();
         fixture.write_valid_passing_artifacts();
