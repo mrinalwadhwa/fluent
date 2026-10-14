@@ -252,7 +252,7 @@ fn command_line(command: &Command) -> Result<String> {
 }
 
 /// Trust only the workspace Fluent has already confined for this invocation.
-fn prepare_private_home(home: &Path, workspace: &Path) -> Result<()> {
+fn prepare_private_home(home: &Path, workspace: &Path, api_key: Option<&str>) -> Result<()> {
     let config = home.join(".claude.json");
     let mut value: Value = match fs::symlink_metadata(&config) {
         Ok(metadata) => {
@@ -283,7 +283,32 @@ fn prepare_private_home(home: &Path, workspace: &Path) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("native Claude project is not an object"))?;
         project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
     }
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        // Claude asks for confirmation before it starts a session when a new
+        // API key arrives through the environment. Approve only the credential
+        // already assigned to this private Task home.
+        let responses = root
+            .entry("customApiKeyResponses")
+            .or_insert_with(|| serde_json::json!({"approved": [], "rejected": []}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("native Claude API key responses are not an object"))?;
+        let approved = responses
+            .entry("approved")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("native Claude approved keys are not an array"))?;
+        approved.clear();
+        approved.push(Value::String(key.into()));
+        let rejected = responses
+            .entry("rejected")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("native Claude rejected keys are not an array"))?;
+        rejected.retain(|value| value.as_str() != Some(key));
+    }
     crate::atomic_write::atomic_write(&config, &serde_json::to_vec(&value)?)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -300,6 +325,9 @@ fn startup_signals(snapshot: Option<&str>) -> Vec<&'static str> {
     }
     if snapshot.contains("Bypass Permissions mode") {
         signals.push("bypass_confirmation");
+    }
+    if snapshot.contains("API key") && snapshot.contains("want to use") {
+        signals.push("api_key_confirmation");
     }
     signals
 }
@@ -503,7 +531,11 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
     listener.set_nonblocking(true)?;
     let artifact = &task.identity.artifact_dir;
     fs::create_dir_all(artifact)?;
-    prepare_private_home(task.private_home, task.workspace)?;
+    prepare_private_home(
+        task.private_home,
+        task.workspace,
+        std::env::var("ANTHROPIC_API_KEY").ok().as_deref(),
+    )?;
     let generation_file = sockets.path().join("generation");
     let settings = install_hooks(task.private_home, &socket, &generation_file)?;
     let coder = SandboxedClaudeCode {
@@ -649,6 +681,7 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{copy_session_tail, install_hooks, prepare_private_home, startup_signals};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn private_claude_startup_skips_only_owned_workspace_prompts() {
@@ -661,7 +694,7 @@ mod tests {
             serde_json::json!({"projects": {other.path().to_str().unwrap(): {"hasTrustDialogAccepted": false}}, "existing": true}).to_string(),
         )
         .unwrap();
-        prepare_private_home(home.path(), workspace.path()).unwrap();
+        prepare_private_home(home.path(), workspace.path(), None).unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
         assert_eq!(value["hasCompletedOnboarding"], true);
@@ -691,7 +724,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let logical = home.path().join("logical-workspace");
         std::os::unix::fs::symlink(project.path(), &logical).unwrap();
-        prepare_private_home(home.path(), &logical).unwrap();
+        prepare_private_home(home.path(), &logical, None).unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.path().join(".claude.json")).unwrap())
                 .unwrap();
@@ -706,6 +739,35 @@ mod tests {
     }
 
     #[test]
+    fn private_claude_approves_only_the_assigned_api_key() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let config = home.path().join(".claude.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"customApiKeyResponses": {
+                "approved": ["previous-key"], "rejected": ["other-key"]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        prepare_private_home(home.path(), workspace.path(), Some("assigned-key")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(
+            value["customApiKeyResponses"],
+            serde_json::json!({
+                "approved": ["assigned-key"],
+                "rejected": ["other-key"]
+            })
+        );
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn claude_startup_diagnostic_keeps_only_known_signals() {
         assert_eq!(
             startup_signals(Some("Quick safety check: Is this a project you trust?")),
@@ -716,6 +778,10 @@ mod tests {
                 "WARNING: Claude Code running in Bypass Permissions mode"
             )),
             vec!["bypass_confirmation"]
+        );
+        assert_eq!(
+            startup_signals(Some("Do you want to use this API key?")),
+            vec!["api_key_confirmation"]
         );
         assert!(startup_signals(Some("private prompt and credential text")).is_empty());
     }
