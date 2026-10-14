@@ -4621,6 +4621,22 @@ pub fn usage_limit_tool_env_for_test(project: &Path, task: &Task) -> Result<Vec<
     usage_limit_writer_tool_env(&cache)
 }
 
+/// Prepare the exact Attempt cache through the Writer launch boundary for a host probe.
+#[cfg(feature = "test-support")]
+pub fn usage_limit_prepare_writer_cache_for_test(project: &Path, task: &Task) -> Result<()> {
+    let project = fs::canonicalize(project)?;
+    let cache = crate::writer_cache::preflight_writer_dependency_cache(
+        &project,
+        &task.work_item_id,
+        task.attempt_id.as_deref().context("missing Attempt")?,
+    )?;
+    crate::writer_cache::prepare_writer_dependency_cache_for_launch(
+        &cache,
+        &WorkModelStore::new(&project),
+        crate::writer_cache::canonical_cargo_home_from_env().as_deref(),
+    )
+}
+
 /// Render the production retry boundary for the separate trusted-host probe.
 #[cfg(feature = "test-support")]
 pub fn usage_limit_profile_for_test(

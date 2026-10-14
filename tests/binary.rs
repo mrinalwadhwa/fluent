@@ -2981,6 +2981,19 @@ fn no_change_completion_retry_real_confinement() {
             path.canonicalize().unwrap().display()
         )));
     }
+    fluent::work_task_executor::usage_limit_prepare_writer_cache_for_test(&fixture.project, task)
+        .unwrap();
+    let cache_env =
+        fluent::work_task_executor::usage_limit_tool_env_for_test(&fixture.project, task).unwrap();
+    let private_cache = PathBuf::from(
+        cache_env
+            .iter()
+            .find(|(key, _)| key == "CARGO_HOME")
+            .unwrap()
+            .1
+            .clone(),
+    );
+    assert!(private_cache.is_dir(), "Writer cache was not prepared");
     if !mandatory {
         return;
     }
@@ -2993,16 +3006,6 @@ fn no_change_completion_retry_real_confinement() {
             .output()
     })
     .expect("mandatory real confinement probe must succeed");
-    let cache_env =
-        fluent::work_task_executor::usage_limit_tool_env_for_test(&fixture.project, task).unwrap();
-    let private_cache = PathBuf::from(
-        cache_env
-            .iter()
-            .find(|(key, _)| key == "CARGO_HOME")
-            .unwrap()
-            .1
-            .clone(),
-    );
     let unrelated = tmp.path().join("unrelated-operator-file");
     fs::write(&unrelated, b"operator-owned").unwrap();
     let before = protected
