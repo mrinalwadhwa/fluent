@@ -38,6 +38,8 @@ commands:
       export FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN
       FLUENT_LANDING_RECOVERY_OLD_BIN="$(bash tests/fixtures/build-landing-recovery-old-reader.sh)"
       export FLUENT_LANDING_RECOVERY_OLD_BIN
+      FLUENT_NO_CHANGE_COMPLETION_OLD_BIN="$(bash tests/fixtures/build-no-change-completion-old-reader.sh)"
+      export FLUENT_NO_CHANGE_COMPLETION_OLD_BIN
       cargo build
       production_bin="$(pwd)/target/debug/fluent-production"
       cp target/debug/fluent "$production_bin"

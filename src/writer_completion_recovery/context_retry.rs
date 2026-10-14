@@ -27,6 +27,22 @@ pub(super) fn repair(
             retry.resolution == resolution,
             "completion retry authorization changed"
         );
+        if retry.source == contracts::RetrySource::InvalidCompletion
+            && (attempt.cancellation_requested()
+                || attempt
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == retry.task_id)
+                    .is_some_and(|task| {
+                        matches!(
+                            task.status,
+                            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+                        )
+                    }))
+        {
+            contracts::validate_retained_files(root, &retry)?;
+            return Ok(Some(result(&retry, true)?));
+        }
         contracts::validate_pending(root, &observed, &retry, false, false)?;
         store.mutate_work_item_from_external_with_recovery_check(
             work,
@@ -70,7 +86,7 @@ pub(super) fn repair(
             attempt.completed_at = None;
             attempt.artifacts.push(reference.clone());
             let record = attempt.record_recovery_operation(
-                &contracts::request(&retry, contracts::APPROVE)
+                &contracts::request(&retry, contracts::approve_kind(&retry))
                     .map_err(|e| invalid(attempt_id, e))?,
                 Some(format!("fluent attempt run {work} {attempt_id}")),
             )?;
@@ -129,12 +145,9 @@ fn result(retry: &contracts::Retry, replay: bool) -> Result<WriterCompletionReco
         .unwrap();
     Ok(WriterCompletionRecovery {
         task_id: task.id.clone(),
-        candidate_commit: task
-            .writer_correction_assignment
-            .as_ref()
-            .unwrap()
-            .source_candidate_commit
-            .clone(),
+        candidate_commit: contracts::request(retry, contracts::approve_kind(retry))?
+            .candidate_commit
+            .context("completion retry has no candidate")?,
         audit_artifact: contracts::audit_ref(retry)?.path,
         superseded_task_ids: retry.before.tasks[index + 1..]
             .iter()
@@ -235,7 +248,7 @@ pub(crate) fn before_spawn(
         .with_file_name("launch.json");
     if marker.try_exists()? {
         anyhow::ensure!(
-            handoff_correction,
+            handoff_correction && retry.source == contracts::RetrySource::RepairedContext,
             "this completion retry already attempted a provider launch"
         );
         let correction = marker.with_file_name("handoff-correction-launch.json");

@@ -32,6 +32,7 @@ pub const WORK_MODEL_WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// readable, but the explicit `work-item upgrade` command rewrites them using
 /// this version after checking every record.
 pub const WORK_MODEL_RECORD_SCHEMA_VERSION: u32 = 12;
+const NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION: u32 = 13;
 pub const WORK_MODEL_UPGRADE_SCHEMA_VERSION: u32 = 1;
 pub const MIN_ADDITIONAL_WRITE_ROUNDS: usize = 1;
 pub const MAX_ADDITIONAL_WRITE_ROUNDS: usize = 3;
@@ -7717,6 +7718,18 @@ impl RecoveryOperationRequest {
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryOperationResult {
     Applied,
+    /// Preserve no-change completion authority across older split-record writers.
+    CompletionRetry,
+}
+
+impl RecoveryOperationResult {
+    fn for_kind(kind: &str) -> Self {
+        if kind.starts_with("writer-completion-no-change-") {
+            Self::CompletionRetry
+        } else {
+            Self::Applied
+        }
+    }
 }
 
 /// One append-only audit record for a public recovery operation.
@@ -7772,7 +7785,7 @@ impl RecoveryOperationRecord {
             authorization: request.authorization.clone(),
             authorization_digest: request.authorization_digest(),
             input_digest: request.input_digest.clone(),
-            result: RecoveryOperationResult::Applied,
+            result: RecoveryOperationResult::for_kind(&request.operation_kind),
             next_status: attempt.status.clone(),
             next_pause_kind: attempt.pause_kind.clone(),
             next_action,
@@ -7794,6 +7807,7 @@ impl RecoveryOperationRecord {
             && self.authorization == request.authorization
             && self.authorization_digest == request.authorization_digest()
             && self.input_digest == request.input_digest
+            && self.result == RecoveryOperationResult::for_kind(&request.operation_kind)
     }
 
     fn validate(&self, work_item_id: &str, attempt_id: &str) -> Result<(), String> {
@@ -7807,6 +7821,7 @@ impl RecoveryOperationRecord {
             || self.operation_kind.trim().is_empty()
             || self.work_item_id != work_item_id
             || self.attempt_id != attempt_id
+            || self.result != RecoveryOperationResult::for_kind(&self.operation_kind)
         {
             return Err("recovery operation identity is invalid".to_string());
         }
@@ -10119,9 +10134,13 @@ const WORK_MODEL_WRITER_ENVELOPE_FORMAT: &str = "fluent-work-item-writer";
 // Fence both installation source lineages: neither predecessor preserves the
 // union of revision audits, assignments, and separately authorized retries.
 const WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 10;
+const NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 11;
 
 fn is_supported_writer_envelope_schema(version: u32) -> bool {
-    matches!(version, 1..=WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION)
+    matches!(
+        version,
+        1..=NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION
+    )
 }
 
 /// Fence readers that deserialize the existing writer field as Option<String>.
@@ -10247,9 +10266,10 @@ impl WorkItemTransaction {
     // Source journals lack either managed revision files or retry authority.
     // Preserve their modeled formats, but publish the combined format separately.
     const SCHEMA_VERSION: u32 = 12;
+    const NO_CHANGE_COMPLETION_SCHEMA_VERSION: u32 = 13;
 
     fn is_supported_schema(version: u32) -> bool {
-        matches!(version, 1..=Self::SCHEMA_VERSION)
+        matches!(version, 1..=Self::NO_CHANGE_COMPLETION_SCHEMA_VERSION)
     }
 
     /// Keep the base and operation list mandatory when retry authority exists.
@@ -10358,15 +10378,39 @@ struct TaskRecord {
     task: Task,
 }
 
+fn attempt_has_no_change_completion_authority(attempt: &Attempt) -> bool {
+    attempt.recovery_operations.iter().any(|operation| {
+        operation
+            .operation_kind
+            .starts_with("writer-completion-no-change-")
+    })
+}
+
+fn has_no_change_completion_authority(work_item: &WorkItem) -> bool {
+    work_item
+        .attempts
+        .iter()
+        .any(attempt_has_no_change_completion_authority)
+}
+
 impl From<&WorkItem> for WorkItemRecord {
     fn from(work_item: &WorkItem) -> Self {
+        let no_change_authority = has_no_change_completion_authority(work_item);
         Self {
-            schema_version: WORK_MODEL_RECORD_SCHEMA_VERSION,
+            schema_version: if no_change_authority {
+                NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
+            } else {
+                WORK_MODEL_RECORD_SCHEMA_VERSION
+            },
             id: work_item.id.clone(),
             title: work_item.title.clone(),
             model_writer_version: Some(StoredModelWriterVersion::Envelope {
                 format: WORK_MODEL_WRITER_ENVELOPE_FORMAT.to_string(),
-                schema_version: WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION,
+                schema_version: if no_change_authority {
+                    NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION
+                } else {
+                    WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION
+                },
                 version: WORK_MODEL_WRITER_VERSION.to_string(),
             }),
             storage_revision: work_item.storage_revision.get().unwrap_or(0),
@@ -10423,7 +10467,11 @@ impl From<WorkItemRecord> for WorkItem {
 impl AttemptRecord {
     fn from_attempt(attempt: &Attempt, order: usize) -> Self {
         Self {
-            schema_version: WORK_MODEL_RECORD_SCHEMA_VERSION,
+            schema_version: if attempt_has_no_change_completion_authority(attempt) {
+                NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
+            } else {
+                WORK_MODEL_RECORD_SCHEMA_VERSION
+            },
             id: attempt.id.clone(),
             work_item_id: attempt.work_item_id.clone(),
             kind: attempt.kind.clone(),
@@ -10950,17 +10998,22 @@ impl WorkModelStore {
 
         let mut upgraded = item.clone();
         let artifact_migrations = Self::plan_work_artifact_migrations(&mut upgraded);
+        let current_schema = if has_no_change_completion_authority(&item) {
+            NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
+        } else {
+            WORK_MODEL_RECORD_SCHEMA_VERSION
+        };
         let legacy_attempts = versions
             .attempts
             .iter()
-            .filter(|(_, version)| *version != WORK_MODEL_RECORD_SCHEMA_VERSION)
+            .filter(|(_, version)| *version != current_schema)
             .map(|(attempt_id, version)| WorkModelAttemptUpgrade {
                 attempt_id: attempt_id.clone(),
                 from_record_schema_version: *version,
-                to_record_schema_version: WORK_MODEL_RECORD_SCHEMA_VERSION,
+                to_record_schema_version: current_schema,
             })
             .collect::<Vec<_>>();
-        let needs_upgrade = stored.schema_version != WORK_MODEL_RECORD_SCHEMA_VERSION
+        let needs_upgrade = stored.schema_version != current_schema
             || !matches!(
                 stored.model_writer_version,
                 Some(StoredModelWriterVersion::Envelope { .. })
@@ -10995,7 +11048,7 @@ impl WorkModelStore {
             from_model_writer_version: item.model_writer_version.clone(),
             to_model_writer_version: WORK_MODEL_WRITER_VERSION.to_string(),
             from_record_schema_version: stored.schema_version,
-            to_record_schema_version: WORK_MODEL_RECORD_SCHEMA_VERSION,
+            to_record_schema_version: current_schema,
             attempts: legacy_attempts.clone(),
             artifact_migrations: artifact_migrations.clone(),
             upgraded_at: now_iso8601(),
@@ -11661,7 +11714,11 @@ impl WorkModelStore {
         };
         self.validate_managed_files(managed_files)?;
         let transaction = WorkItemTransaction {
-            schema_version: WorkItemTransaction::SCHEMA_VERSION,
+            schema_version: if has_no_change_completion_authority(work_item) {
+                WorkItemTransaction::NO_CHANGE_COMPLETION_SCHEMA_VERSION
+            } else {
+                WorkItemTransaction::SCHEMA_VERSION
+            },
             id: work_item.id.clone(),
             base_revision,
             target_revision,
@@ -11698,10 +11755,13 @@ impl WorkModelStore {
         if !transaction.context_retry_publications.is_empty() {
             if work_item.attempts.iter().any(|a| {
                 a.recovery_operations.iter().any(|r| {
-                    r.operation_kind == crate::recovery_contracts::context_retry::START
-                        && transaction
-                            .context_retry_publications
-                            .contains(&r.operation_id)
+                    matches!(
+                        r.operation_kind.as_str(),
+                        crate::recovery_contracts::context_retry::START
+                            | crate::recovery_contracts::context_retry::COMPLETION_START
+                    ) && transaction
+                        .context_retry_publications
+                        .contains(&r.operation_id)
                 })
             }) {
                 crate::recovery_contracts::context_retry::test_interrupt("start-journal");
@@ -12383,11 +12443,10 @@ impl WorkModelStore {
             {
                 crate::assignment_context_recovery::test_interrupt("attempt");
             }
-            if attempt
-                .recovery_operations
-                .last()
-                .is_some_and(|r| r.operation_kind.starts_with("writer-completion-context-"))
-            {
+            if attempt.recovery_operations.last().is_some_and(|r| {
+                r.operation_kind.starts_with("writer-completion-context-")
+                    || r.operation_kind.starts_with("writer-completion-no-change-")
+            }) {
                 crate::recovery_contracts::context_retry::test_interrupt("attempt");
             }
             attempt_files.insert(attempt_path);
@@ -12414,7 +12473,8 @@ impl WorkModelStore {
                     crate::assignment_context_recovery::test_interrupt("task");
                 }
                 if attempt.recovery_operations.last().is_some_and(|r| {
-                    r.operation_kind.starts_with("writer-completion-context-")
+                    (r.operation_kind.starts_with("writer-completion-context-")
+                        || r.operation_kind.starts_with("writer-completion-no-change-"))
                         && r.task_id.as_deref() == Some(task.id.as_str())
                 }) {
                     crate::recovery_contracts::context_retry::test_interrupt("task");
@@ -13249,7 +13309,7 @@ fn ensure_supported_record_schema(
     record_kind: &'static str,
     version: u32,
 ) -> Result<(), WorkModelStorageError> {
-    if version <= WORK_MODEL_RECORD_SCHEMA_VERSION {
+    if version <= NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION {
         return Ok(());
     }
     Err(WorkModelStorageError::InvalidModel {
@@ -13257,7 +13317,7 @@ fn ensure_supported_record_schema(
         source: WorkModelError::UnsupportedStoredRecordVersion {
             record_kind,
             found: version,
-            supported: WORK_MODEL_RECORD_SCHEMA_VERSION,
+            supported: NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION,
         },
     })
 }

@@ -11103,3 +11103,71 @@ an interrupted revision, including through an otherwise-readable outer envelope.
 The current coordinator SHALL retain supported predecessor records and recover
 the complete current transaction without discarding earlier authority.
 Test: tests/binary.rs (combined_installation_old_readers_preserve_authority)
+## No-change Writer completion retry
+
+### B1
+
+WHEN an unchanged Writer leaves an invalid completion or no-change handoff, or
+an earlier approved retry fails before provider launch, THE SYSTEM SHALL let an
+operator approve one retry of the same Task through `repair-writer-completion`
+and require a separate resume.
+Test: tests/binary.rs (no_change_completion_retry_resumes_initial_pause)
+Test: tests/binary.rs (no_change_completion_retry_resumes_saved_prelaunch_failure)
+
+### B2
+
+WHEN the current clean candidate came from a later completed Writer than a
+carried finding, THE SYSTEM SHALL bind that candidate to the host-owned Writer
+baseline while preserving the finding's earlier assignment lineage.
+Test: tests/binary.rs (no_change_completion_retry_keeps_carried_assignment)
+
+### B3
+
+WHEN Fluent prepares the retry, THE SYSTEM SHALL retain the original failure
+files, create fresh outputs, and carry only authoritative earlier completion
+claims; invalid result text supplies no passing credit.
+Test: tests/binary.rs (no_change_completion_retry_rebuilds_without_credit)
+
+### B4
+
+IF the candidate, baseline, assignment, retained evidence, owner, cancellation,
+or launch generation fails validation, THEN THE SYSTEM SHALL reject recovery
+before changing protected Work or artifacts.
+Test: tests/binary.rs (no_change_completion_retry_rejects_invalid_authority)
+
+### B5
+
+WHEN the operator repeats the same approval, including after interrupted
+publication or a later stop, THE SYSTEM SHALL preserve its audit, operation,
+Task, fresh output directory, and later state.
+Test: tests/binary.rs (no_change_completion_retry_replays_publication)
+Test: tests/binary.rs (no_change_completion_retry_preserves_later_stop)
+
+### B6
+
+WHEN foreground, queued, or direct Task execution reaches the retry, THE SYSTEM
+SHALL apply the same admission and spawn checks and permit one provider launch.
+Test: tests/binary.rs (no_change_completion_retry_queues_same_task)
+Test: tests/binary.rs (no_change_completion_retry_rechecks_spawn)
+
+### B7
+
+WHEN status, show, or a resume refusal reports this failure, THE SYSTEM SHALL
+name the eligible public action or the blocker without changing saved state.
+Test: tests/binary.rs (no_change_completion_retry_guidance_is_read_only)
+
+### B8
+
+WHEN the retry launches, THE SYSTEM SHALL permit writes to its fresh outputs,
+workspace, and private caches while protecting retained evidence and unrelated
+operator files.
+Test: tests/binary.rs (no_change_completion_retry_profile_rejects_changed_inputs)
+Test: tests/binary.rs (no_change_completion_retry_real_confinement)
+
+### B9
+
+WHEN Fluent reads or publishes retry authority, THE SYSTEM SHALL retain older
+supported history and prevent the pinned predecessor from mutating new records
+or pending transactions, including after older envelopes are restored.
+Test: tests/binary.rs (no_change_completion_retry_reads_supported_predecessor)
+Test: tests/binary.rs (no_change_completion_retry_older_reader_refuses_mutation)

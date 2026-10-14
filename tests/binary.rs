@@ -1717,6 +1717,1343 @@ fn output_free_retry_command(fixture: &CombinedRecoveryFixture) -> LoggedCommand
 }
 
 #[test]
+fn no_change_completion_retry_resumes_initial_pause() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = writer_recovery_fixture_with_authority(&tmp, false);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            let attempt = &mut item.attempts[0];
+            let source = attempt.tasks[0].clone();
+            let task = attempt
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap();
+            task.writer_correction_assignment = Some(WriterCorrectionAssignment {
+                schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
+                work_item_id: fixture.work.clone(),
+                attempt_id: "attempt-1".into(),
+                writer_task_id: task.id.clone(),
+                source_task_id: source.id,
+                source_candidate_commit: fixture.candidate.clone(),
+                source_task_inputs: vec![],
+                evidence: vec![],
+                findings: vec![],
+                origin: WriterCorrectionAssignmentOrigin::Captured,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let failed = before.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    let original_area = fixture
+        .project
+        .join(&failed.artifact_area.as_ref().unwrap().path);
+    let malformed = br#"{"verification":[{"command":"true","result":"pass: 26 passed"}]}"#;
+    fs::write(original_area.join("writer-completion.json"), malformed).unwrap();
+    fs::write(
+        original_area.join("no-change.json"),
+        br#"{"verification":[{"command":"true","result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        original_area.join("write-baseline-commit"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    let host_baseline = store
+        .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+        .unwrap()
+        .with_extension("write-baseline");
+    fs::write(host_baseline, &fixture.candidate).unwrap();
+    let old_matrix = fs::read(original_area.join("writer-completion.json")).unwrap();
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &fixture.work,
+            "attempt-1",
+            "--resolution",
+            &fixture.resolution,
+        ])
+        .assert()
+        .success();
+    let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let retry = approved.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    assert_eq!(
+        approved.attempts[0].tasks.len(),
+        before.attempts[0].tasks.len()
+    );
+    assert_ne!(retry.artifact_area, failed.artifact_area);
+    assert_eq!(
+        fs::read(original_area.join("writer-completion.json")).unwrap(),
+        old_matrix
+    );
+    let retry_area = fixture
+        .project
+        .join(&retry.artifact_area.as_ref().unwrap().path);
+    assert!(!retry_area.join("writer-completion.json").exists());
+    let provider = tmp.path().join("completion-retry-provider");
+    write_mock_claude(
+        &provider,
+        r#"#!/bin/bash
+set -eu
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+area = Path(os.environ['RETRY_AREA'])
+matrix = json.loads((area / 'writer-completion.json').read_text())
+assert all(row['state'] == 'pending' for row in matrix['rows']
+           if row.get('responsibility', 'writer') == 'writer')
+for row in matrix['rows']:
+    if row.get('responsibility', 'writer') == 'writer':
+        row['state'] = 'complete'
+        row['implementation-evidence'] = ['candidate.txt: retained implementation']
+        row['verification'] = [{'command': 'true', 'result': 'pass'}]
+(area / 'writer-completion.json').write_text(json.dumps(matrix))
+(area / 'no-change.json').write_text(json.dumps({
+    'schema_version': 1,
+    'declaration_path': os.environ['RETRY_AREA_REL'] + '/no-change.json',
+    'reason': 'The existing candidate already contains this implementation.',
+    'verification': [{'command': 'true', 'result': 'pass'}]
+}))
+(area / 'provider-launched').write_text('launched')
+PY
+"#,
+    );
+    let run = fluent_cmd()
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(&provider))
+        .env("RETRY_AREA", &retry_area)
+        .env(
+            "RETRY_AREA_REL",
+            &retry.artifact_area.as_ref().unwrap().path,
+        )
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .output()
+        .unwrap();
+    assert!(
+        retry_area.join("provider-launched").is_file(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed = store.read_work_item_snapshot(&fixture.work).unwrap();
+    assert_eq!(
+        completed.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == fixture.task_id)
+            .unwrap()
+            .status,
+        TaskStatus::Complete
+    );
+    assert_eq!(
+        fs::read(original_area.join("writer-completion.json")).unwrap(),
+        old_matrix
+    );
+}
+
+#[test]
+fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
+    use fluent::work_model::{AttemptStatus, PauseKind};
+    let tmp = TempDir::new().unwrap();
+    let fixture = writer_recovery_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    let old_audit = fs::read(&fixture.audit).unwrap();
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            let attempt = &mut item.attempts[0];
+            attempt.status = AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(PauseKind::RoundCap);
+            let source_id = attempt.tasks[0].id.clone();
+            let task = attempt
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap();
+            task.writer_correction_assignment = Some(WriterCorrectionAssignment {
+                schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
+                work_item_id: fixture.work.clone(),
+                attempt_id: "attempt-1".into(),
+                writer_task_id: task.id.clone(),
+                source_task_id: source_id,
+                source_candidate_commit: fixture.candidate.clone(),
+                source_task_inputs: vec![],
+                evidence: vec![],
+                findings: vec![],
+                origin: WriterCorrectionAssignmentOrigin::Captured,
+            });
+            task.status = TaskStatus::Failed;
+            task.started_at = Some("2026-10-13T22:00:00Z".into());
+            task.completed_at = Some("2026-10-13T22:00:01Z".into());
+            Ok(())
+        })
+        .unwrap();
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        br#"{"verification":[{"result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("no-change.json"),
+        br#"{"verification":[{"result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("transcript.jsonl"),
+        b"historical provider activity\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("write-baseline-commit"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    fs::write(
+        store
+            .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+            .unwrap()
+            .with_extension("write-baseline"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    write_json_path(
+        &fixture.area.join("execution.json"),
+        &serde_json::json!({
+            "schema_version": 2, "state": "launching", "owner_pid": 2147483647u32,
+            "leader_pid": 0, "process_group_id": 0,
+            "started_at": "2026-10-13T22:00:00Z", "heartbeat_at": "2026-10-13T22:00:00Z",
+            "launch_generation": "0123456789abcdef0123456789abcdef"
+        }),
+    );
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &fixture.work,
+            "attempt-1",
+            "--resolution",
+            "Retry the unchanged Writer after its saved preparation failure",
+        ])
+        .assert()
+        .success();
+    let after = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let retry = after.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    assert_eq!(retry.status, TaskStatus::Planned);
+    assert_ne!(
+        retry.artifact_area.as_ref().unwrap().path,
+        format!(
+            ".fluent/work/artifacts/{}/attempt-1/{}",
+            fixture.work, fixture.task_id
+        )
+    );
+    assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+    assert_eq!(git_head(&fixture.workspace), fixture.candidate);
+    let fresh = fixture
+        .project
+        .join(&retry.artifact_area.as_ref().unwrap().path);
+    let provider = tmp.path().join("saved-retry-provider");
+    write_mock_claude(
+        &provider,
+        r#"#!/bin/bash
+set -eu
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+area = Path(os.environ['RETRY_AREA'])
+matrix = json.loads((area / 'writer-completion.json').read_text())
+assert all(row['state'] == 'pending' for row in matrix['rows']
+           if row.get('responsibility', 'writer') == 'writer')
+for row in matrix['rows']:
+    if row.get('responsibility', 'writer') == 'writer':
+        row['state'] = 'complete'
+        row['implementation-evidence'] = ['candidate.txt: retained implementation']
+        row['verification'] = [{'command': 'true', 'result': 'pass'}]
+(area / 'writer-completion.json').write_text(json.dumps(matrix))
+(area / 'no-change.json').write_text(json.dumps({
+    'schema_version': 1,
+    'declaration_path': os.environ['RETRY_AREA_REL'] + '/no-change.json',
+    'reason': 'The existing candidate already contains this implementation.',
+    'verification': [{'command': 'true', 'result': 'pass'}]
+}))
+(area / 'provider-launched').write_text('launched')
+PY
+"#,
+    );
+    let run = fluent_cmd()
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(&provider))
+        .env("RETRY_AREA", &fresh)
+        .env(
+            "RETRY_AREA_REL",
+            &retry.artifact_area.as_ref().unwrap().path,
+        )
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .output()
+        .unwrap();
+    assert!(
+        fresh.join("provider-launched").is_file(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let completed = store.read_work_item_snapshot(&fixture.work).unwrap();
+    assert_eq!(
+        completed.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == fixture.task_id)
+            .unwrap()
+            .status,
+        TaskStatus::Complete
+    );
+    assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+}
+
+#[test]
+fn no_change_completion_retry_keeps_carried_assignment() {
+    use fluent::work_model::{AttemptStatus, PauseKind};
+    let tmp = TempDir::new().unwrap();
+    let fixture = writer_recovery_fixture_with_authority(&tmp, false);
+    let store = WorkModelStore::new(&fixture.project);
+    let candidate_a = fixture.candidate.clone();
+    commit_file(
+        &fixture.workspace,
+        "later.txt",
+        "later candidate\n",
+        "Add later candidate",
+    );
+    let candidate_b = git_head(&fixture.workspace);
+    let mut item = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let contract = item.attempts[0].writer_completion_contract.clone().unwrap();
+    let source = item.attempts[0].tasks[0].clone();
+    let second = &mut item.attempts[0].tasks[1];
+    let carried = WriterCorrectionAssignment {
+        schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
+        work_item_id: fixture.work.clone(),
+        attempt_id: "attempt-1".into(),
+        writer_task_id: second.id.clone(),
+        source_task_id: source.id.clone(),
+        source_candidate_commit: candidate_a.clone(),
+        source_task_inputs: vec![],
+        evidence: vec![],
+        findings: vec![],
+        origin: WriterCorrectionAssignmentOrigin::Captured,
+    };
+    second.writer_correction_assignment = Some(carried.clone());
+    second.status = TaskStatus::Complete;
+    second.output = Some(TaskOutput {
+        base_commit: Some(candidate_a.clone()),
+        commit: candidate_b.clone(),
+        ..source.output.clone().unwrap()
+    });
+    let mut completed = WriterCompletionMatrix::skeleton(&contract, &second.id, &[], None).unwrap();
+    completed.rows[0].state = WriterCompletionState::Complete;
+    completed.rows[0].implementation_evidence = vec!["later.txt: completed candidate".into()];
+    completed.rows[0].verification = vec![WriterVerificationClaim {
+        command: "true".into(),
+        result: WriterVerificationResult::Pass,
+    }];
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        serde_json::to_vec_pretty(&completed).unwrap(),
+    )
+    .unwrap();
+    let third_id = item.add_next_write_round("attempt-1", vec![]).unwrap();
+    let third = item.attempts[0].tasks.last_mut().unwrap();
+    let mut third_assignment = carried.clone();
+    third_assignment.writer_task_id = third_id.clone();
+    third.writer_correction_assignment = Some(third_assignment.clone());
+    third.status = TaskStatus::NeedsUser;
+    let third_area = fixture
+        .project
+        .join(&third.artifact_area.as_ref().unwrap().path);
+    fs::create_dir_all(&third_area).unwrap();
+    fs::write(
+        third_area.join("writer-completion.json"),
+        br#"{"verification":[{"result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(third_area.join("write-baseline-commit"), &candidate_b).unwrap();
+    item.attempts[0].status = AttemptStatus::NeedsUser;
+    item.attempts[0].pause_kind = Some(PauseKind::WriterCompletion);
+    store.write_work_item(&item).unwrap();
+    fs::write(
+        store
+            .work_task_path(&fixture.work, "attempt-1", &third_id)
+            .unwrap()
+            .with_extension("write-baseline"),
+        &candidate_b,
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &fixture.work,
+            "attempt-1",
+            "--resolution",
+            "Retry the unchanged Writer while keeping its earlier finding",
+        ])
+        .assert()
+        .success();
+    let after = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let retry = after.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == third_id)
+        .unwrap();
+    assert_eq!(retry.writer_correction_assignment, Some(third_assignment));
+    assert_eq!(retry.status, TaskStatus::Planned);
+    assert_eq!(
+        after.attempts[0].current_candidate_commit(),
+        Some(candidate_b.as_str())
+    );
+    assert_ne!(
+        retry
+            .writer_correction_assignment
+            .as_ref()
+            .unwrap()
+            .source_candidate_commit,
+        candidate_b
+    );
+}
+
+fn no_change_completion_pause_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
+    let fixture = writer_recovery_fixture_with_authority(tmp, false);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            let source = item.attempts[0].tasks[0].clone();
+            let task = item.attempts[0]
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap();
+            task.writer_correction_assignment = Some(WriterCorrectionAssignment {
+                schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
+                work_item_id: fixture.work.clone(),
+                attempt_id: "attempt-1".into(),
+                writer_task_id: task.id.clone(),
+                source_task_id: source.id,
+                source_candidate_commit: fixture.candidate.clone(),
+                source_task_inputs: vec![],
+                evidence: vec![],
+                findings: vec![],
+                origin: WriterCorrectionAssignmentOrigin::Captured,
+            });
+            Ok(())
+        })
+        .unwrap();
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        br#"{"verification":[{"result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("no-change.json"),
+        br#"{"verification":[{"result":"pass: 26 passed"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("write-baseline-commit"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    fs::write(
+        store
+            .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+            .unwrap()
+            .with_extension("write-baseline"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    fixture
+}
+
+#[test]
+fn no_change_completion_retry_rebuilds_without_credit() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            let contract = item.attempts[0]
+                .writer_completion_contract
+                .as_mut()
+                .unwrap();
+            contract.requirements.push(WriterCompletionRequirement {
+                responsibility: Some(CompletionResponsibility::Writer),
+                id: "plan:remaining".into(),
+                kind: WriterCompletionRequirementKind::Plan,
+                source: "plan.md#remaining".into(),
+                requirement: "Complete remaining work".into(),
+                verification_refs: vec!["`true`".into()],
+                command: None,
+            });
+            contract.requirements.push(WriterCompletionRequirement {
+                responsibility: Some(CompletionResponsibility::Host),
+                id: "plan:host".into(),
+                kind: WriterCompletionRequirementKind::Plan,
+                source: "plan.md#host".into(),
+                requirement: "Run the host check".into(),
+                verification_refs: vec!["`true`".into()],
+                command: Some(fluent::work_model::PlanCommand {
+                    applicability: Default::default(),
+                    command: "true".into(),
+                    working_directory: ".".into(),
+                    environment: Default::default(),
+                    source_row: "plan:host".into(),
+                }),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let item = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let source = &item.attempts[0].tasks[0];
+    let contract = item.attempts[0]
+        .writer_completion_contract
+        .as_ref()
+        .unwrap();
+    let mut source_matrix =
+        WriterCompletionMatrix::skeleton(contract, &source.id, &[], None).unwrap();
+    source_matrix.rows[0].state = WriterCompletionState::Complete;
+    source_matrix.rows[0].implementation_evidence = vec!["candidate.txt: accepted source".into()];
+    source_matrix.rows[0].verification = vec![WriterVerificationClaim {
+        command: "true".into(),
+        result: WriterVerificationResult::Pass,
+    }];
+    fs::write(
+        fixture
+            .project
+            .join(&source.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json"),
+        serde_json::to_vec_pretty(&source_matrix).unwrap(),
+    )
+    .unwrap();
+    let old = fs::read(fixture.area.join("writer-completion.json")).unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+    let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let task = approved.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    let fresh = fixture
+        .project
+        .join(&task.artifact_area.as_ref().unwrap().path);
+    let bin = tmp.path().join("matrix-observer-provider");
+    write_mock_claude(
+        &bin,
+        "#!/bin/bash\nset -eu\ncp \"$RETRY_AREA/writer-completion.json\" \"$RETRY_AREA/observed.json\"\nexit 73\n",
+    );
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(&bin))
+        .env("RETRY_AREA", &fresh)
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .failure();
+    let observed: WriterCompletionMatrix =
+        serde_json::from_slice(&fs::read(fresh.join("observed.json")).unwrap()).unwrap();
+    assert_eq!(observed.rows[0].state, WriterCompletionState::Complete);
+    assert_eq!(observed.rows[1].state, WriterCompletionState::Pending);
+    assert_eq!(observed.rows[2].state, WriterCompletionState::Pending);
+    assert_eq!(
+        fs::read(fixture.area.join("writer-completion.json")).unwrap(),
+        old
+    );
+}
+
+fn no_change_completion_approve(fixture: &WriterRecoveryFixture) -> LoggedCommand {
+    let mut command = fluent_cmd();
+    command.current_dir(&fixture.project).args([
+        "attempt",
+        "repair-writer-completion",
+        &fixture.work,
+        "attempt-1",
+        "--resolution",
+        &fixture.resolution,
+    ]);
+    command
+}
+
+#[test]
+fn no_change_completion_retry_rejects_invalid_authority() {
+    for defect in [
+        "candidate",
+        "baseline",
+        "cancel",
+        "owner",
+        "evidence",
+        "assignment",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let fixture = no_change_completion_pause_fixture(&tmp);
+        let store = WorkModelStore::new(&fixture.project);
+        let mut owner = None;
+        if defect == "evidence" {
+            no_change_completion_approve(&fixture).assert().success();
+            fs::write(
+                fixture.area.join("no-change.json"),
+                "changed original handoff",
+            )
+            .unwrap();
+        }
+        match defect {
+            "candidate" => fs::write(fixture.workspace.join("dirty.txt"), "drift").unwrap(),
+            "baseline" => fs::write(
+                store
+                    .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+                    .unwrap()
+                    .with_extension("write-baseline"),
+                "wrong candidate",
+            )
+            .unwrap(),
+            "cancel" => {
+                fluent_cmd()
+                    .current_dir(&fixture.project)
+                    .args(["attempt", "cancel", &fixture.work, "attempt-1"])
+                    .assert()
+                    .success();
+            }
+            "owner" => {
+                owner = Some(
+                    fluent::lease::acquire_blocking(&fluent::lease::task_lock_path(
+                        &fixture.project,
+                        &fixture.work,
+                        &fixture.task_id,
+                    ))
+                    .unwrap(),
+                );
+            }
+            "assignment" => {
+                let path = store
+                    .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+                    .unwrap();
+                let mut task = read_json_path(&path);
+                task["writer_correction_assignment"]["source_candidate_commit"] =
+                    "stale assignment candidate".into();
+                write_json_path(&path, &task);
+            }
+            _ => {}
+        }
+        let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+        no_change_completion_approve(&fixture).assert().failure();
+        let after = snapshot_tree(&fixture.project.join(".fluent/work"));
+        let before_protected = before
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>();
+        let after_protected = after
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>();
+        assert!(
+            after_protected == before_protected,
+            "{defect}: changed paths: {:?}",
+            after
+                .iter()
+                .filter(|entry| !before.contains(entry) && !entry.path.starts_with("locks/"))
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>()
+        );
+        drop(owner);
+    }
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            item.attempts[0]
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap()
+                .status = TaskStatus::Failed;
+            item.attempts[0].pause_kind = Some(fluent::work_model::PauseKind::RoundCap);
+            Ok(())
+        })
+        .unwrap();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    no_change_completion_approve(&fixture).assert().failure();
+    let after = snapshot_tree(&fixture.project.join(".fluent/work"));
+    assert_eq!(
+        after
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>()
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let fixture = writer_recovery_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            let attempt = &mut item.attempts[0];
+            attempt.status = fluent::work_model::AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(fluent::work_model::PauseKind::RoundCap);
+            attempt
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap()
+                .status = TaskStatus::Failed;
+            Ok(())
+        })
+        .unwrap();
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        b"invalid result",
+    )
+    .unwrap();
+    fs::write(
+        fixture.area.join("write-baseline-commit"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    fs::write(
+        store
+            .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+            .unwrap()
+            .with_extension("write-baseline"),
+        &fixture.candidate,
+    )
+    .unwrap();
+    write_json_path(
+        &fixture.area.join("execution.json"),
+        &serde_json::json!({
+            "schema_version": 2, "state": "running", "owner_pid": 2147483647u32,
+            "leader_pid": 42, "process_group_id": 42,
+            "started_at": "2026-10-13T22:00:00Z", "heartbeat_at": "2026-10-13T22:00:00Z",
+            "launch_generation": "0123456789abcdef0123456789abcdef"
+        }),
+    );
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &fixture.work,
+            "attempt-1",
+            "--resolution",
+            "Retry only if this generation never launched",
+        ])
+        .assert()
+        .failure();
+    let after = snapshot_tree(&fixture.project.join(".fluent/work"));
+    assert_eq!(
+        after
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .filter(|entry| !entry.path.starts_with("locks/"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn no_change_completion_retry_replays_publication() {
+    for phase in ["audit", "journal", "children", "attempt", "task"] {
+        let tmp = TempDir::new().unwrap();
+        let fixture = no_change_completion_pause_fixture(&tmp);
+        no_change_completion_approve(&fixture)
+            .env("FLUENT_TEST_CONTEXT_RETRY_INTERRUPT", phase)
+            .assert()
+            .code(86);
+        let interrupted = snapshot_tree(&fixture.project.join(".fluent/work"));
+        fluent_cmd()
+            .current_dir(&fixture.project)
+            .args([
+                "attempt",
+                "repair-writer-completion",
+                &fixture.work,
+                "attempt-1",
+                "--resolution",
+                "A different approval decision",
+            ])
+            .assert()
+            .failure();
+        assert_eq!(
+            snapshot_tree(&fixture.project.join(".fluent/work")),
+            interrupted,
+            "{phase}"
+        );
+        no_change_completion_approve(&fixture).assert().success();
+        let store = WorkModelStore::new(&fixture.project);
+        let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+        let area = approved.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == fixture.task_id)
+            .unwrap()
+            .artifact_area
+            .clone();
+        let protected = snapshot_tree(&fixture.project.join(".fluent/work"));
+        no_change_completion_approve(&fixture).assert().success();
+        assert_eq!(
+            snapshot_tree(&fixture.project.join(".fluent/work")),
+            protected,
+            "{phase}"
+        );
+        assert_eq!(
+            store
+                .read_work_item_snapshot(&fixture.work)
+                .unwrap()
+                .attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.id == fixture.task_id)
+                .unwrap()
+                .artifact_area,
+            area
+        );
+    }
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    no_change_completion_approve(&fixture)
+        .env("FLUENT_TEST_CONTEXT_RETRY_INTERRUPT", "task")
+        .assert()
+        .code(86);
+    let path = fixture.area.join("no-change.json");
+    let original = fs::read(&path).unwrap();
+    fs::write(&path, b"changed after interruption").unwrap();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    no_change_completion_approve(&fixture).assert().failure();
+    assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
+    fs::write(path, original).unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+}
+
+#[test]
+fn no_change_completion_retry_preserves_later_stop() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    no_change_completion_approve(&fixture).assert().success();
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["attempt", "cancel", &fixture.work, "attempt-1"])
+        .assert()
+        .success();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    no_change_completion_approve(&fixture).assert().success();
+    assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
+}
+
+#[test]
+fn no_change_completion_retry_guidance_is_read_only() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    let work_root = fixture.project.join(".fluent/work");
+    let before = snapshot_tree(&work_root);
+    let show = read_work_show_json(&fixture.project, &fixture.work);
+    assert!(
+        show["next-action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("repair-writer-completion")
+    );
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("repair-writer-completion"));
+    assert_eq!(snapshot_tree(&work_root), before);
+    no_change_completion_approve(&fixture).assert().success();
+    let authorized = snapshot_tree(&work_root);
+    let show = read_work_show_json(&fixture.project, &fixture.work);
+    assert!(
+        show["next-action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("attempt run")
+    );
+    assert_eq!(snapshot_tree(&work_root), authorized);
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        "tampered handoff",
+    )
+    .unwrap();
+    let changed = snapshot_tree(&work_root);
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .failure();
+    assert_eq!(snapshot_tree(&work_root), changed);
+}
+
+#[test]
+fn no_change_completion_retry_queues_same_task() {
+    struct RetryRunner {
+        bin: PathBuf,
+        marker: PathBuf,
+    }
+    impl fluent::scheduler::AttemptRunner for RetryRunner {
+        fn run(
+            &self,
+            project: &Path,
+            work: &str,
+            attempt: &str,
+            _: bool,
+        ) -> anyhow::Result<fluent::scheduler::AttemptOutcome> {
+            let ledger = fluent::queue::read_ledger(project, work)?.unwrap();
+            fluent_cmd()
+                .current_dir(project)
+                .env("PATH", mock_path(&self.bin))
+                .env("RETRY_MARKER", &self.marker)
+                .args([
+                    "attempt",
+                    "run",
+                    work,
+                    attempt,
+                    "--dispatch-id",
+                    &ledger.active().unwrap().dispatch_id,
+                    "--no-sandbox",
+                ])
+                .assert()
+                .failure();
+            fluent::scheduler::classify_attempt_outcome(project, work, attempt)
+        }
+    }
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    no_change_completion_approve(&fixture).assert().success();
+    let approved = WorkModelStore::new(&fixture.project)
+        .read_work_item_snapshot(&fixture.work)
+        .unwrap();
+    for _ in 0..2 {
+        fluent_cmd()
+            .current_dir(&fixture.project)
+            .args(["queue", "resume", &fixture.work, "--attempt", "attempt-1"])
+            .assert()
+            .success();
+    }
+    let dispatch = fluent::scheduler::pick_next_queued(&fixture.project)
+        .unwrap()
+        .unwrap();
+    let marker = tmp.path().join("queued-provider-launches");
+    let bin = tmp.path().join("queued-retry-provider");
+    write_mock_claude(
+        &bin,
+        "#!/bin/bash\nset -eu\nprintf x >> \"$RETRY_MARKER\"\n",
+    );
+    fluent::scheduler::dispatch_one(
+        &fixture.project,
+        &dispatch,
+        &RetryRunner {
+            bin,
+            marker: marker.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(fs::read(&marker).unwrap(), b"x");
+    let after = WorkModelStore::new(&fixture.project)
+        .read_work_item_snapshot(&fixture.work)
+        .unwrap();
+    assert_eq!(
+        after.attempts[0].tasks.len(),
+        approved.attempts[0].tasks.len()
+    );
+    assert_eq!(
+        after.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == fixture.task_id)
+            .unwrap()
+            .writer_correction_assignment,
+        approved.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == fixture.task_id)
+            .unwrap()
+            .writer_correction_assignment
+    );
+}
+
+#[test]
+fn no_change_completion_retry_rechecks_spawn() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    no_change_completion_approve(&fixture).assert().success();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "task",
+            "run",
+            &fixture.work,
+            "attempt-1",
+            &fixture.task_id,
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("explicit Attempt resume"));
+    assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
+    let bin = tmp.path().join("reserved-retry-provider");
+    write_mock_claude(&bin, "#!/bin/bash\nexit 73\n");
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(&bin))
+        .env("FLUENT_TEST_CONTEXT_RETRY_INTERRUPT", "start-journal")
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .code(86);
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["work-item", "upgrade", &fixture.work])
+        .assert()
+        .success();
+    let item = WorkModelStore::new(&fixture.project)
+        .read_work_item_snapshot(&fixture.work)
+        .unwrap();
+    let task = item.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    let transcript = fixture
+        .project
+        .join(&task.artifact_area.as_ref().unwrap().path)
+        .join("transcript.jsonl");
+    let marker = tmp.path().join("spawned-child");
+    let spawn = || {
+        let mut command = Command::new("/bin/bash");
+        command
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "printf launched > \"$1\"",
+                "probe",
+            ])
+            .arg(&marker);
+        fluent::execution::spawn(&mut command, &transcript)
+    };
+    let original = fs::read(fixture.area.join("no-change.json")).unwrap();
+    fs::write(fixture.area.join("no-change.json"), b"changed evidence").unwrap();
+    assert!(format!("{:#}", spawn().unwrap_err()).contains("evidence changed"));
+    assert!(!marker.exists());
+    fs::write(fixture.area.join("no-change.json"), original).unwrap();
+    let mut child = spawn().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read(&marker).unwrap(), b"launched");
+    assert!(format!("{:#}", spawn().unwrap_err()).contains("already attempted a provider launch"));
+}
+
+fn no_change_completion_old_reader() -> PathBuf {
+    writer_assignment_old_reader(
+        "FLUENT_NO_CHANGE_COMPLETION_OLD_BIN",
+        "a0f943e3a4147d8064813b54e987b59f93dbc89e",
+    )
+}
+
+#[test]
+fn no_change_completion_retry_reads_supported_predecessor() {
+    let old = no_change_completion_old_reader();
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let work = "supported-completion-predecessor";
+    for args in [
+        vec![
+            "work-item",
+            "create",
+            work,
+            "--title",
+            "Read predecessor work",
+        ],
+        vec!["attempt", "create", work, "attempt-1"],
+    ] {
+        let output = Command::new(&old)
+            .current_dir(&project)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["work-item", "show", work])
+        .assert()
+        .success();
+    let item = WorkModelStore::new(&project)
+        .read_work_item_snapshot(work)
+        .unwrap();
+    assert_eq!(item.attempts[0].id, "attempt-1");
+}
+
+#[test]
+fn no_change_completion_retry_older_reader_refuses_mutation() {
+    let old = no_change_completion_old_reader();
+    for case in ["published", "pending", "restored-envelope"] {
+        let tmp = TempDir::new().unwrap();
+        let fixture = no_change_completion_pause_fixture(&tmp);
+        if case == "pending" {
+            no_change_completion_approve(&fixture)
+                .env("FLUENT_TEST_CONTEXT_RETRY_INTERRUPT", "task")
+                .assert()
+                .code(86);
+        } else {
+            no_change_completion_approve(&fixture).assert().success();
+        }
+        if case == "restored-envelope" {
+            let root = fixture.project.join(".fluent/work");
+            let item = root.join(format!("items/{}.json", fixture.work));
+            let attempt = root.join(format!("attempts/{}/attempt-1.json", fixture.work));
+            let mut outer = read_json_path(&item);
+            outer["schema_version"] = 12.into();
+            outer["model_writer_version"]["schema_version"] = 10.into();
+            write_json_path(&item, &outer);
+            let mut child = read_json_path(&attempt);
+            child["schema_version"] = 12.into();
+            write_json_path(&attempt, &child);
+        }
+        let work_root = fixture.project.join(".fluent/work");
+        let before = snapshot_tree(&work_root);
+        let output = Command::new(&old)
+            .current_dir(&fixture.project)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .args(["work-item", "upgrade", &fixture.work])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(snapshot_tree(&work_root), before, "{case}");
+    }
+}
+
+#[test]
+fn no_change_completion_retry_profile_rejects_changed_inputs() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            item.attempts[0].coder_mapping.write.coder = fluent::coder::CoderKind::Codex;
+            Ok(())
+        })
+        .unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+    let item = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let task = item.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    let bin = tmp.path().join("profile-provider");
+    write_mock_codex(&bin, "#!/bin/bash\nexit 0\n");
+    unsafe {
+        std::env::set_var("PATH", mock_path(&bin));
+        std::env::set_var("FLUENT_TEST_HERMETIC_PROVIDERS", "1");
+        std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass");
+    }
+    let worker =
+        fluent::codex_worker::CodexWorkerEnvironment::prepare_for_project(&fixture.project)
+            .unwrap();
+    for path in [
+        fixture.area.join("writer-completion.json"),
+        fixture.area.join("no-change.json"),
+    ] {
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, b"changed input").unwrap();
+        let rejected = fluent::work_task_executor::usage_limit_profile_for_test(
+            &fixture.project,
+            task,
+            &worker,
+        );
+        fs::write(&path, original).unwrap();
+        assert!(
+            rejected.is_err(),
+            "changed input received profile access: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn no_change_completion_retry_real_confinement() {
+    let mandatory =
+        std::env::var_os("FLUENT_NO_CHANGE_COMPLETION_REQUIRE_REAL_CONFINEMENT").is_some();
+    let output_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/output");
+    fs::create_dir_all(&output_root).unwrap();
+    let tmp = TempDir::new_in(&output_root).unwrap();
+    let fixture = no_change_completion_pause_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    store
+        .mutate_work_item(&fixture.work, |item| {
+            item.attempts[0].coder_mapping.write.coder = fluent::coder::CoderKind::Codex;
+            Ok(())
+        })
+        .unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+    let item = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let task = item.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == fixture.task_id)
+        .unwrap();
+    let fresh = fixture
+        .project
+        .join(&task.artifact_area.as_ref().unwrap().path);
+    fs::create_dir_all(&fresh).unwrap();
+    if mandatory {
+        unsafe {
+            std::env::remove_var("FLUENT_TEST_HERMETIC_PROVIDERS");
+            std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+        }
+    } else {
+        let bin = tmp.path().join("profile-provider");
+        write_mock_codex(&bin, "#!/bin/bash\nexit 0\n");
+        unsafe {
+            std::env::set_var("PATH", mock_path(&bin));
+            std::env::set_var("FLUENT_TEST_HERMETIC_PROVIDERS", "1");
+            std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass");
+        }
+    }
+    let worker =
+        fluent::codex_worker::CodexWorkerEnvironment::prepare_for_project(&fixture.project)
+            .unwrap();
+    let profile =
+        fluent::work_task_executor::usage_limit_profile_for_test(&fixture.project, task, &worker)
+            .unwrap();
+    let rendered = fs::read_to_string(&profile.path).unwrap();
+    let audit = item.attempts[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.producer_id == "writer-completion-no-change-retry")
+        .unwrap();
+    let protected = [
+        fixture.area.join("writer-completion.json"),
+        fixture.area.join("no-change.json"),
+        fixture.project.join(&audit.path),
+        store
+            .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+            .unwrap(),
+    ];
+    for path in &protected {
+        let path = path.canonicalize().unwrap();
+        for ancestor in path.ancestors() {
+            assert!(!rendered.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                ancestor.display()
+            )));
+        }
+    }
+    for path in [
+        fixture.workspace.clone(),
+        fresh.clone(),
+        worker.home().to_path_buf(),
+    ] {
+        assert!(rendered.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            path.canonicalize().unwrap().display()
+        )));
+    }
+    if !mandatory {
+        return;
+    }
+    fluent::os::preflight_profile_with(&profile, |path| {
+        Command::new("/usr/bin/sandbox-exec")
+            .current_dir(&fixture.workspace)
+            .arg("-f")
+            .arg(path)
+            .arg("/usr/bin/true")
+            .output()
+    })
+    .expect("mandatory real confinement probe must succeed");
+    let cache_env =
+        fluent::work_task_executor::usage_limit_tool_env_for_test(&fixture.project, task).unwrap();
+    let private_cache = PathBuf::from(
+        cache_env
+            .iter()
+            .find(|(key, _)| key == "CARGO_HOME")
+            .unwrap()
+            .1
+            .clone(),
+    );
+    let unrelated = tmp.path().join("unrelated-operator-file");
+    fs::write(&unrelated, b"operator-owned").unwrap();
+    let before = protected
+        .iter()
+        .map(|path| fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .current_dir(&fixture.workspace)
+        .arg("-f")
+        .arg(&profile.path)
+        .envs(cache_env)
+        .arg("/bin/bash")
+        .arg("--noprofile")
+        .arg("--norc")
+        .arg("-c")
+        .arg(
+            r#"set -eu
+printf fresh > "$1"
+printf cache > "$2"
+printf workspace > "$3"
+shift 3
+for target in "$@"; do
+  if (: >> "$target") 2>/dev/null; then exit 71; fi
+done"#,
+        )
+        .arg("probe")
+        .arg(fresh.join("probe.txt"))
+        .arg(private_cache.join("probe.txt"))
+        .arg(fixture.workspace.join("probe.txt"))
+        .args(&protected)
+        .arg(&unrelated)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(fresh.join("probe.txt")).unwrap(), b"fresh");
+    assert_eq!(fs::read(private_cache.join("probe.txt")).unwrap(), b"cache");
+    assert_eq!(
+        fs::read(fixture.workspace.join("probe.txt")).unwrap(),
+        b"workspace"
+    );
+    for (path, bytes) in protected.iter().zip(before) {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(fs::read(unrelated).unwrap(), b"operator-owned");
+}
+
+#[test]
 fn writer_completion_context_repaired_retry_keeps_assignment() {
     let tmp = TempDir::new().unwrap();
     let fixture = output_free_context_fixture(&tmp);

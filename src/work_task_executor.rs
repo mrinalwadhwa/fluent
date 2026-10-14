@@ -785,7 +785,9 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             .any(|a| {
                 matches!(
                     a.producer_id.as_str(),
-                    "usage-limit-writer-approval" | "writer-completion-context-retry"
+                    "usage-limit-writer-approval"
+                        | "writer-completion-context-retry"
+                        | "writer-completion-no-change-retry"
                 )
             })
     {
@@ -1164,12 +1166,13 @@ fn run_write_task_with_coder(
         return Err(error);
     }
     let mut retries = 0;
-    while !plan
-        .task
-        .input_artifacts
-        .iter()
-        .any(|a| a.producer_id == crate::recovery_contracts::context_retry::APPROVE)
-        && should_retry_coder_error(&run_result)
+    while !plan.task.input_artifacts.iter().any(|a| {
+        matches!(
+            a.producer_id.as_str(),
+            crate::recovery_contracts::context_retry::APPROVE
+                | crate::recovery_contracts::context_retry::COMPLETION_APPROVE
+        )
+    }) && should_retry_coder_error(&run_result)
         && retries < max_task_retries()
     {
         retries += 1;
@@ -4085,6 +4088,35 @@ fn resolve_writer_readable_inputs(
             inputs.push(resolve_input_artifact_path(project_root, &artifact.path)?);
         }
     }
+    if let Some(attempt) = item
+        .attempts
+        .iter()
+        .find(|attempt| Some(attempt.id.as_str()) == task.attempt_id.as_deref())
+        && let Some(retry) =
+            crate::recovery_contracts::context_retry::current(project_root, attempt)?
+        && retry.source == crate::recovery_contracts::context_retry::RetrySource::InvalidCompletion
+        && retry.task_id == task.id
+    {
+        crate::recovery_contracts::context_retry::validate_retained_files(project_root, &retry)?;
+        let audit = crate::recovery_contracts::context_retry::audit_ref(&retry)?;
+        inputs.push(resolve_input_artifact_path(project_root, &audit.path)?);
+        let original = crate::recovery_contracts::context_retry::failed_task(&retry)?;
+        let original_area = &original
+            .artifact_area
+            .as_ref()
+            .context("retry lost original artifact area")?
+            .path;
+        for path in retry.files.keys() {
+            if path.starts_with(&format!("{original_area}/"))
+                && (path.ends_with("writer-completion.json")
+                    || path.ends_with("no-change.json")
+                    || path.ends_with("transcript.jsonl")
+                    || path.ends_with("execution.json"))
+            {
+                inputs.push(resolve_input_artifact_path(project_root, path)?);
+            }
+        }
+    }
     if let Some(assignment) = &task.writer_correction_assignment {
         crate::recovery_contracts::validate_writer_continuation_lineage(project_root, item, task)?;
         for input in assignment
@@ -4506,7 +4538,9 @@ fn preflight_write_sandbox_profile(
     } else if task.input_artifacts.iter().any(|a| {
         matches!(
             a.producer_id.as_str(),
-            "usage-limit-writer-approval" | "writer-completion-context-retry"
+            "usage-limit-writer-approval"
+                | "writer-completion-context-retry"
+                | "writer-completion-no-change-retry"
         )
     }) {
         let worker = codex_worker.context("usage-limit retry requires its private Codex home")?;
@@ -4781,7 +4815,9 @@ fn run_task_coder_with_coder_with_feedback(
     if task.input_artifacts.iter().any(|artifact| {
         matches!(
             artifact.producer_id.as_str(),
-            "usage-limit-writer-approval" | "writer-completion-context-retry"
+            "usage-limit-writer-approval"
+                | "writer-completion-context-retry"
+                | "writer-completion-no-change-retry"
         )
     }) {
         launch_env.extend(usage_limit_writer_tool_env(writer_cache)?);

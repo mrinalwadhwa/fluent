@@ -2,6 +2,29 @@
   "schema-version": 1,
   "cases": [
     {
+      "id": "unchanged-writer-invalid-completion-retry",
+      "incident": "A Writer retained candidate B and an assignment from candidate A, then submitted explanatory result text in its completion and no-change handoffs. Its first approved repair failed during preparation before a new provider launch.",
+      "scope": "attempt",
+      "work-item-id": "replay-no-change-completion",
+      "attempt-id": "attempt-1",
+      "pause-kind": "round-cap",
+      "operation-kind": "writer-completion-no-change-retry",
+      "public-command": "fluent attempt repair-writer-completion replay-no-change-completion attempt-1 --resolution \"<decision>\"",
+      "candidate-commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "stale-candidate-commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "task-id": "attempt-1-write-39",
+      "input-digest": "sha256:replay-retained-invalid-completion",
+      "authorization": "Retry this Writer once with fresh outputs while retaining the original failure.",
+      "preserved-history": [
+        "original-assignment-from-candidate-a",
+        "completed-candidate-b",
+        "invalid-completion-and-no-change-handoffs",
+        "earlier-provider-generation",
+        "unlaunched-preparation-generation",
+        "outstanding-host-review-tester-learning"
+      ]
+    },
+    {
       "id": "approach-revision-round-cap",
       "incident": "A failed review reached the Writer round cap after Architecture passed, so an operator approved a replacement Approach for one remaining round.",
       "scope": "attempt",

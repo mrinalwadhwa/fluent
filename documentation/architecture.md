@@ -312,6 +312,21 @@ Tester, and Learner remain separate gates. Repeated authorization reuses the
 recorded Task and operation; changed source evidence, contract, assignment,
 candidate, or ownership rejects stale authority.
 
+The same public command repairs an unchanged Writer whose completion or
+no-change handoff contains an invalid result, including a saved failed retry
+that stopped during preparation before its provider launched. Approval retains
+the original failure files and Task snapshot, binds their bytes and the
+host-owned write baseline, and gives the same Task a fresh artifact directory.
+The current candidate comes from the latest completed Writer and clean managed
+worktree; a carried correction assignment keeps its earlier source candidate
+and finding lineage. Accepted claims in a prior valid Writer matrix may carry
+into the fresh matrix, but invalid result text grants no credit. Run `fluent
+attempt run <work-item-id> <attempt-id>` or `fluent queue resume <work-item-id>
+--attempt <attempt-id>` after approval. Resume, direct Task admission,
+reservation, and provider spawn recheck the bound evidence and allow one launch.
+A later cancellation or ambiguous launch record blocks reuse. The retry does
+not satisfy host checks, reviews, the final Tester, or Learning.
+
 `ordinary_review_tasks` in `recovery_contracts::review_coverage` establishes
 ordinary coverage from completed Review Tasks, their candidate contexts, and
 their saved verdicts. Attempt advancement and completed Approach-recovery resume
@@ -1691,6 +1706,13 @@ publication list cannot hide a new retry operation. Readers require its base
 digest and exact operation difference before any generic journal reconciliation.
 Neither context repair nor retry approval changes verification credit. Observation
 commands derive context recovery, completion repair, then resume in that order.
+An `InvalidCompletion` retry source uses the same audited publication and launch
+checks but requires the original malformed handoff and host-owned baseline. It
+does not acquire assignment-context repair authority. Its recovery operations
+carry a result discriminator that the pinned predecessor cannot deserialize,
+even if older outer Work and Attempt envelopes are restored. New authority uses
+Work and Attempt record schema 13, writer envelope schema 11, and transaction
+schema 13; ordinary records retain their predecessor formats.
 
 Context recovery selects the latest completed Writer even when completed
 targeted Reviews follow it; every Task must still be settled. If carried-finding
