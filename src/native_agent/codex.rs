@@ -1705,16 +1705,6 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(150));
                 }
             }
-            // Probe while the Child still reserves the group number. A zero
-            // probe after reaping could address a different group's identity.
-            let group_probe = if group_identity_ok {
-                Some(signal_group(self.group, 0))
-            } else {
-                None
-            };
-            if matches!(group_probe, Some(Ok(()))) {
-                errors.push("owned app-server fixture group survived cleanup".into());
-            }
             let deadline = Instant::now() + Duration::from_secs(2);
             let mut reaped = false;
             let mut needed_leader_kill = false;
@@ -1758,10 +1748,29 @@ mod tests {
             }
             if !reaped {
                 errors.push("app-server fixture leader remains owned and unreaped".into());
+                errors.extend(permission_errors);
                 anyhow::bail!("{}", errors.join("; "));
             }
             let stderr = child.stderr.take();
             self.child = None;
+            // All group signals ran while the leader reserved its group ID.
+            // A zero probe is read-only; after reaping, give reparented
+            // descendants time to leave before deciding the group survived.
+            let group_probe = if group_identity_ok {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let probe = signal_group(self.group, 0);
+                    if probe.is_err() || Instant::now() >= deadline {
+                        break Some(probe);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            } else {
+                None
+            };
+            if matches!(group_probe, Some(Ok(()))) {
+                errors.push("owned app-server fixture group survived cleanup".into());
+            }
             // macOS may return EPERM when TERM has already left only an
             // unreaped zombie. Retain failures if the group survived or the
             // leader needed a separate kill after the group signals.
@@ -2015,6 +2024,38 @@ mod tests {
         let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         fixture.finish().unwrap();
+        assert!(fixture.child.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_server_fixture_waits_for_group_probe_to_clear() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut fixture = OwnedAppServerFixture::spawn(&mut command).unwrap();
+        let mut probes = 0;
+        fixture
+            .finish_with(
+                |_, signal| {
+                    if signal == 0 {
+                        probes += 1;
+                        if probes == 1 {
+                            Ok(())
+                        } else {
+                            Err(io::Error::from_raw_os_error(libc::ESRCH))
+                        }
+                    } else {
+                        Ok(())
+                    }
+                },
+                |child| child.kill(),
+            )
+            .unwrap();
+        assert_eq!(probes, 2);
         assert!(fixture.child.is_none());
     }
 
