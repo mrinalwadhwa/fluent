@@ -1367,6 +1367,20 @@ fn close_tmux_server_with(socket: &Path, tmux: &Path) -> Result<()> {
     Ok(())
 }
 
+fn wait_for_control_client(registry: &Path) -> Result<()> {
+    let control = registry.join("terminal-control.lock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match lease::try_acquire(&control)? {
+            LeaseAttempt::Acquired(_) => return Ok(()),
+            LeaseAttempt::Contended if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            LeaseAttempt::Contended => bail!("managed terminal control attachment did not close"),
+        }
+    }
+}
+
 fn check_pane_query_failure(error: &str, has_sessions: Option<bool>) -> Result<()> {
     if error.contains("no sessions")
         || (error.contains("no current target") && has_sessions == Some(false))
@@ -1388,9 +1402,9 @@ fn descriptor_publishes_resource(
 
 /// Settle pane descendants before the existing execution owner signals its
 /// server group. The resource receipt lives outside worker-writable artifacts.
-pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Result<()> {
+pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Result<bool> {
     let Some(owner) = &record.attempt_owner else {
-        return Ok(());
+        return Ok(false);
     };
     let task = path
         .parent()
@@ -1414,7 +1428,7 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
     let resource_path = registry.join("resource.json");
     let metadata = match std::fs::symlink_metadata(&resource_path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
     let expected = owner
@@ -1475,8 +1489,10 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
     )?;
     // The foreground launcher can release its execution identity while an
     // attached tmux client still keeps the server alive. Close the owned
-    // socket explicitly so control attachments receive EOF at settlement.
-    close_tmux_server(&resource.socket)
+    // socket and wait for its writable client before Task advancement.
+    close_tmux_server(&resource.socket)?;
+    wait_for_control_client(&registry)?;
+    Ok(true)
 }
 
 /// Release only the resource receipt owned by the settled execution generation.
@@ -1659,6 +1675,24 @@ mod control_client_tests {
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn settlement_waits_for_control_client_to_release_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let control = root.path().join("terminal-control.lock");
+        let lease = match lease::try_acquire(&control).unwrap() {
+            LeaseAttempt::Acquired(lease) => lease,
+            LeaseAttempt::Contended => panic!("fixture control lease was occupied"),
+        };
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(lease);
+        });
+        let started = Instant::now();
+        wait_for_control_client(root.path()).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(75));
+        release.join().unwrap();
+    }
 
     #[test]
     fn settlement_closes_the_owned_tmux_socket() {

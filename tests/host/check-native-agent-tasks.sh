@@ -79,7 +79,7 @@ printf '%s\n' "$candidate" > "$host_output/candidate.txt"
 set +e
 cargo nextest run --offline --features test-support --test terminal_sessions \
   --no-tests fail --run-ignored only --success-output immediate \
-  -E 'test(managed_terminal_pane_starts_in_assigned_workspace)' \
+  -E 'test(managed_terminal_pane_starts_in_assigned_workspace) | test(managed_terminal_settlement_closes_attached_client)' \
   > "$host_output/terminal-cwd.log" 2>&1
 terminal_status=$?
 set -e

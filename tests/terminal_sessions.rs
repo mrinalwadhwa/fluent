@@ -499,6 +499,111 @@ fn managed_terminal_pane_starts_in_assigned_workspace() {
     assert_eq!(observed.trim(), workspace.to_str().unwrap());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires a real tmux pane under the macOS worker sandbox"]
+fn managed_terminal_settlement_closes_attached_client() {
+    use fluent::work_model::{WorkItem, WorkModelStore};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    for finish in [true, false] {
+        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        let source = root.path().canonicalize().unwrap();
+        let workspace = source.join("workspace");
+        let home = workspace.join("private-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut item = WorkItem::planned("work-1", "Terminal settlement fixture");
+        item.add_initial_attempt("attempt-1").unwrap();
+        WorkModelStore::new(&source)
+            .create_work_item(&item)
+            .unwrap();
+        let identity = TerminalIdentity {
+            source_root: source.clone(),
+            work_item_id: "work-1".into(),
+            attempt_id: "attempt-1".into(),
+            task_id: "attempt-1-write-1".into(),
+            role: "writer".into(),
+            provider: "fixture".into(),
+            artifact_dir: source.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1"),
+        };
+        std::fs::create_dir_all(&identity.artifact_dir).unwrap();
+        let resolver = fluent::content::ContentResolver::new(Some(&source));
+        let profile = fluent::os::render_profile_common_only(
+            &resolver,
+            home.to_str().unwrap(),
+            &[workspace.clone(), identity.artifact_dir.clone()],
+            &[],
+        )
+        .unwrap();
+        let environment = vec![
+            ("PATH".into(), std::env::var_os("PATH").unwrap()),
+            ("HOME".into(), home.into_os_string()),
+            ("TERM".into(), "xterm-256color".into()),
+        ];
+        let mut session =
+            TerminalSession::start_managed(identity, &profile, &workspace, "/bin/sh", &environment)
+                .unwrap();
+        let socket = session.socket_path().unwrap().to_path_buf();
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let mut attached = Command::new("/usr/bin/script")
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(assert_cmd::cargo::cargo_bin("fluent"))
+            .args([
+                "terminal",
+                "attach",
+                &session.descriptor().session_id,
+                "--source",
+            ])
+            .arg(&source)
+            .arg("--control")
+            .env("TERM", "xterm-256color")
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(output.reopen().unwrap()))
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let clients = Command::new("tmux")
+                .arg("-S")
+                .arg(&socket)
+                .args(["list-clients", "-F", "#{client_tty}"])
+                .output()
+                .unwrap();
+            if clients.status.success() && !clients.stdout.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "managed client did not attach");
+            assert!(
+                attached.try_wait().unwrap().is_none(),
+                "attachment exited early"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if finish {
+            session.finish().unwrap();
+        } else {
+            session.stop().unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = attached.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "attachment failed: {}",
+                    String::from_utf8_lossy(&std::fs::read(output.path()).unwrap())
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "attachment did not receive EOF");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
 #[test]
 fn host_managed_terminal_acceptance() {
     if std::env::var_os("FLUENT_TEST_REAL_TERMINAL_HOST").is_none() {
