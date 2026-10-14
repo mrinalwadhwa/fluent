@@ -753,6 +753,31 @@ fn fresh_thread_display_read(start: &Value, request: &Value, assigned: &str) -> 
     Ok(json!({"id": request["id"], "result": {"thread": thread}}))
 }
 
+// A paginated TUI asks for the first page even when the provider has only
+// created an in-memory thread. It has no rollout to page through yet.
+fn fresh_thread_display_page(start: &Value, request: &Value, assigned: &str) -> Result<Value> {
+    ensure!(
+        request["params"]["threadId"] == assigned,
+        "Codex TUI paged another thread"
+    );
+    ensure!(
+        request["params"]["cursor"].is_null(),
+        "Codex TUI requested a later page of an empty thread"
+    );
+    let thread = &start["result"]["thread"];
+    ensure!(
+        thread["id"] == assigned,
+        "Codex start response changed thread identity"
+    );
+    ensure!(
+        thread["turns"].as_array().is_some_and(Vec::is_empty),
+        "Codex fresh thread has nonempty history"
+    );
+    Ok(json!({"id": request["id"], "result": {
+        "data": [], "nextCursor": null, "backwardsCursor": null
+    }}))
+}
+
 /// The TUI opens a new connection to Fluent, but the app-server connection
 /// that started its empty thread must remain loaded. Codex cannot resume that
 /// thread by id until its first real turn creates a rollout. Complete the
@@ -943,6 +968,14 @@ where
                             let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
                             bootstrap_display.try_send(reply.to_string())
                                 .map_err(|error| anyhow::anyhow!("Codex TUI display-only read could not drain: {error}"))?;
+                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
+                            continue;
+                        }
+                        if responses.fresh && *resumed && method == "thread/turns/list"
+                            && next_sequence == 0 {
+                            let reply = fresh_thread_display_page(&responses.thread, &request, thread_id)?;
+                            bootstrap_display.try_send(reply.to_string())
+                                .map_err(|error| anyhow::anyhow!("Codex TUI display-only page could not drain: {error}"))?;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
@@ -1876,7 +1909,7 @@ mod tests {
                     && event["outcome"] == "forwarded"
                     && event["input_sequence"] == 0
             }),
-            "empty Codex thread requested a paginated history page"
+            "empty Codex thread attempted provider history pagination"
         );
         ensure!(
             !events.iter().skip(resume + 1).any(|event| {
@@ -2094,7 +2127,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn installed_handoff_allows_metadata_read_but_rejects_history_lookup() {
+    fn installed_handoff_allows_display_history_but_rejects_provider_lookup() {
         let event = |method, outcome, include_turns: Option<bool>| {
             json!({"method":method,"outcome":outcome,"include_turns":include_turns,"input_sequence":0}).to_string()
         };
@@ -2103,6 +2136,7 @@ mod tests {
             event("thread/resume", "bootstrap-replied", None),
             event("thread/read", "forwarded", Some(false)),
             event("thread/read", "ui-only-replied", None),
+            event("thread/turns/list", "ui-only-replied", None),
         ]
         .join("\n")
             + "\n";
@@ -2113,6 +2147,13 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("provider history lookup")
+        );
+        let bad = format!("{trace}{}\n", event("thread/turns/list", "forwarded", None));
+        assert!(
+            installed_handoff_trace_ready(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("provider history pagination")
         );
     }
 
@@ -2164,6 +2205,24 @@ mod tests {
         let mut materialized = start;
         materialized["result"]["thread"]["turns"] = json!([{"id":"real-turn"}]);
         assert!(fresh_thread_display_read(&materialized, &read, "assigned").is_err());
+    }
+
+    #[test]
+    fn empty_thread_display_page_requires_first_page_of_assigned_thread() {
+        let start =
+            json!({"result":{"thread":{"id":"assigned","turns":[],"historyMode":"legacy"}}});
+        let page = json!({"id":9,"params":{"threadId":"assigned","limit":20}});
+        assert_eq!(
+            fresh_thread_display_page(&start, &page, "assigned").unwrap(),
+            json!({"id":9,"result":{"data":[],"nextCursor":null,"backwardsCursor":null}})
+        );
+        assert!(fresh_thread_display_page(&start, &page, "other").is_err());
+        let mut later = page.clone();
+        later["params"]["cursor"] = json!("older-page");
+        assert!(fresh_thread_display_page(&start, &later, "assigned").is_err());
+        let mut materialized = start;
+        materialized["result"]["thread"]["turns"] = json!([{"id":"real-turn"}]);
+        assert!(fresh_thread_display_page(&materialized, &page, "assigned").is_err());
     }
 
     #[test]
@@ -3051,7 +3110,7 @@ mod tests {
             assert_eq!(turn["params"]["threadId"], "assigned-thread");
             socket
                 .send(Message::Text(
-                    json!({"id":4,"result":{"turn":{"id":"turn-1"}}}).to_string(),
+                    json!({"id":5,"result":{"turn":{"id":"turn-1"}}}).to_string(),
                 ))
                 .unwrap();
             socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
@@ -3132,6 +3191,16 @@ mod tests {
             request(
                 &mut tui,
                 4,
+                "thread/turns/list",
+                json!({"threadId":"assigned-thread","limit":20})
+            )
+            .unwrap()["result"],
+            json!({"data":[],"nextCursor":null,"backwardsCursor":null})
+        );
+        assert_eq!(
+            request(
+                &mut tui,
+                5,
                 "turn/start",
                 json!({"threadId":"assigned-thread","input":[]})
             )
@@ -3163,11 +3232,9 @@ mod tests {
                 .unwrap()
                 .contains("ui-only-replied")
         );
-        assert!(
-            !fs::read_to_string(evidence_path)
-                .unwrap()
-                .contains("thread/read")
-        );
+        let evidence = fs::read_to_string(evidence_path).unwrap();
+        assert!(!evidence.contains("thread/read"));
+        assert!(!evidence.contains("thread/turns/list"));
     }
 
     #[test]
