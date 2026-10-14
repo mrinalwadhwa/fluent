@@ -251,6 +251,78 @@ fn command_line(command: &Command) -> Result<String> {
     Ok(words.join(" "))
 }
 
+/// Trust only the workspace Fluent has already confined for this invocation.
+fn prepare_private_home(home: &Path, workspace: &Path) -> Result<()> {
+    let config = home.join(".claude.json");
+    let mut value: Value = match fs::symlink_metadata(&config) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file(),
+                "native Claude config is not a regular file"
+            );
+            serde_json::from_slice(&fs::read(&config)?)?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("native Claude config is not an object"))?;
+    root.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+    let projects = root
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("native Claude projects are not an object"))?;
+    let workspace = workspace.canonicalize()?.to_string_lossy().into_owned();
+    let project = projects
+        .entry(workspace)
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("native Claude project is not an object"))?;
+    project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    crate::atomic_write::atomic_write(&config, &serde_json::to_vec(&value)?)?;
+    Ok(())
+}
+
+fn startup_signals(snapshot: Option<&str>) -> Vec<&'static str> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut signals = Vec::new();
+    if snapshot.contains("Let's get started") {
+        signals.push("onboarding");
+    }
+    if snapshot.contains("Quick safety check") {
+        signals.push("workspace_trust");
+    }
+    if snapshot.contains("Bypass Permissions mode") {
+        signals.push("bypass_confirmation");
+    }
+    signals
+}
+
+fn record_startup_diagnostic(
+    artifact: &Path,
+    generation: &str,
+    terminal: &TerminalSession,
+    reason: &str,
+) -> Result<()> {
+    let snapshot = terminal.capture_pane_snapshot().ok();
+    let mut file = File::create(artifact.join("native-claude-startup-diagnostic.json"))?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({
+            "execution_generation": generation,
+            "reason": reason,
+            "pane_snapshot_available": snapshot.is_some(),
+            "recognized_output": startup_signals(snapshot.as_deref()),
+        }),
+    )?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Hook commands block the provider action when the owner cannot admit or
 /// record it. Every event carries the terminal's owned generation.
 fn install_hooks(home: &Path, socket: &Path, generation_file: &Path) -> Result<std::path::PathBuf> {
@@ -296,7 +368,10 @@ except Exception as error:
     let settings = home.join("fluent-native-settings.json");
     fs::write(
         &settings,
-        serde_json::to_vec(&serde_json::json!({"hooks":hooks}))?,
+        serde_json::to_vec(&serde_json::json!({
+            "skipDangerousModePermissionPrompt": true,
+            "hooks": hooks,
+        }))?,
     )?;
     Ok(settings)
 }
@@ -426,6 +501,7 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
     listener.set_nonblocking(true)?;
     let artifact = &task.identity.artifact_dir;
     fs::create_dir_all(artifact)?;
+    prepare_private_home(task.private_home, task.workspace)?;
     let generation_file = sockets.path().join("generation");
     let settings = install_hooks(task.private_home, &socket, &generation_file)?;
     let coder = SandboxedClaudeCode {
@@ -507,11 +583,25 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if !terminal.is_live()? {
+                        if gate.session_id().is_none() {
+                            record_startup_diagnostic(
+                                artifact,
+                                &generation,
+                                &terminal,
+                                "terminal_exit_before_session_start",
+                            )?;
+                        }
                         break Err(anyhow::anyhow!(
                             "native Claude terminal ended without completion"
                         ));
                     }
                     if gate.session_id().is_none() && Instant::now() > deadline {
+                        record_startup_diagnostic(
+                            artifact,
+                            &generation,
+                            &terminal,
+                            "session_start_timeout",
+                        )?;
                         break Err(anyhow::anyhow!(
                             "native Claude emitted no SessionStart hook"
                         ));
@@ -556,7 +646,56 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_session_tail;
+    use super::{copy_session_tail, install_hooks, prepare_private_home, startup_signals};
+
+    #[test]
+    fn private_claude_startup_skips_only_owned_workspace_prompts() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let config = home.path().join(".claude.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"projects": {other.path().to_str().unwrap(): {"hasTrustDialogAccepted": false}}, "existing": true}).to_string(),
+        )
+        .unwrap();
+        prepare_private_home(home.path(), workspace.path()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(value["hasCompletedOnboarding"], true);
+        assert_eq!(value["existing"], true);
+        assert_eq!(
+            value["projects"][workspace.path().canonicalize().unwrap().to_str().unwrap()]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            value["projects"][other.path().to_str().unwrap()]["hasTrustDialogAccepted"],
+            false
+        );
+
+        let socket = home.path().join("hooks.sock");
+        let generation = home.path().join("generation");
+        let settings = install_hooks(home.path(), &socket, &generation).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(settings).unwrap()).unwrap();
+        assert_eq!(value["skipDangerousModePermissionPrompt"], true);
+        assert!(value["hooks"]["SessionStart"].is_array());
+    }
+
+    #[test]
+    fn claude_startup_diagnostic_keeps_only_known_signals() {
+        assert_eq!(
+            startup_signals(Some("Quick safety check: Is this a project you trust?")),
+            vec!["workspace_trust"]
+        );
+        assert_eq!(
+            startup_signals(Some(
+                "WARNING: Claude Code running in Bypass Permissions mode"
+            )),
+            vec!["bypass_confirmation"]
+        );
+        assert!(startup_signals(Some("private prompt and credential text")).is_empty());
+    }
 
     #[test]
     fn claude_usage_keeps_only_current_invocation_bytes() {
