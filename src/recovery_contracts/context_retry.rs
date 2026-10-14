@@ -372,7 +372,11 @@ fn inspect_invalid_completion(
                 && record.launch_generation.is_some()
                 && record.state == crate::execution::ExecutionState::Launching
                 && record.leader_pid == 0
-                && crate::execution::receipt_absent(&execution_path)?,
+                && record.process_group_id == 0
+                && crate::execution::receipt_absent_or_prior_generation(
+                    &execution_path,
+                    record.launch_generation.as_deref().unwrap(),
+                )?,
             "failed completion retry has no proof that this generation stopped before provider launch"
         );
     } else {

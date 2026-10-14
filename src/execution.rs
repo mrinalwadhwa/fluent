@@ -64,6 +64,50 @@ pub(crate) fn receipt_absent(path: &Path) -> Result<bool> {
     }
 }
 
+/// A prior child may leave its receipt in the Task area when preparation
+/// writes a new launch generation and fails before spawning that child.
+/// Accept only a well-formed receipt for a different generation; an invalid
+/// receipt cannot establish which launch it belongs to.
+pub(crate) fn receipt_absent_or_prior_generation(path: &Path, current: &str) -> Result<bool> {
+    if !valid_launch_generation(current) {
+        return Ok(false);
+    }
+    let receipt = receipt_path(path);
+    let metadata = match std::fs::symlink_metadata(&receipt) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Ok(metadata) => metadata,
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&receipt)?;
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(false);
+    };
+    let Some(rest) = text.strip_prefix("2 ") else {
+        return Ok(false);
+    };
+    let Some((generation, pid_line)) = rest.split_once(' ') else {
+        return Ok(false);
+    };
+    let Some(pid) = pid_line.strip_suffix('\n') else {
+        return Ok(false);
+    };
+    Ok(generation != current
+        && valid_launch_generation(generation)
+        && pid.len() == 10
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && pid.parse::<u32>().is_ok_and(|pid| pid > 0))
+}
+
+fn valid_launch_generation(generation: &str) -> bool {
+    generation.len() == 32
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn new_generation() -> Result<String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;

@@ -1933,6 +1933,11 @@ fn no_change_completion_saved_prelaunch_fixture(tmp: &TempDir) -> WriterRecovery
             "launch_generation": "0123456789abcdef0123456789abcdef"
         }),
     );
+    fs::write(
+        fixture.area.join("execution-receipt"),
+        b"2 fedcba9876543210fedcba9876543210 0000075536\n",
+    )
+    .unwrap();
     fixture
 }
 
@@ -1942,6 +1947,7 @@ fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
     let fixture = no_change_completion_saved_prelaunch_fixture(&tmp);
     let store = WorkModelStore::new(&fixture.project);
     let old_audit = fs::read(&fixture.audit).unwrap();
+    let old_receipt = fs::read(fixture.area.join("execution-receipt")).unwrap();
     fluent_cmd()
         .current_dir(&fixture.project)
         .args([
@@ -1969,6 +1975,10 @@ fn no_change_completion_retry_resumes_saved_prelaunch_failure() {
         )
     );
     assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+    assert_eq!(
+        fs::read(fixture.area.join("execution-receipt")).unwrap(),
+        old_receipt
+    );
     assert_eq!(git_head(&fixture.workspace), fixture.candidate);
     let fresh = fixture
         .project
@@ -2028,6 +2038,92 @@ PY
         TaskStatus::Complete
     );
     assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+    assert_eq!(
+        fs::read(fixture.area.join("execution-receipt")).unwrap(),
+        old_receipt
+    );
+}
+
+#[test]
+fn no_change_completion_retry_rejects_current_or_invalid_receipt() {
+    for (receipt, current_generation) in [
+        ("2 0123456789abcdef0123456789abcdef 0000075536\n", None),
+        ("2 stale-generation 0000075536\n", None),
+        ("2 fedcba9876543210fedcba9876543210 0000000000\n", None),
+        (
+            "2 fedcba9876543210fedcba9876543210 0000075536\n",
+            Some("invalid-generation"),
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let fixture = no_change_completion_saved_prelaunch_fixture(&tmp);
+        fs::write(fixture.area.join("execution-receipt"), receipt).unwrap();
+        if let Some(generation) = current_generation {
+            let path = fixture.area.join("execution.json");
+            let mut record = read_json_path(&path);
+            record["launch_generation"] = generation.into();
+            write_json_path(&path, &record);
+        }
+        let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+        fluent_cmd()
+            .current_dir(&fixture.project)
+            .args([
+                "attempt",
+                "repair-writer-completion",
+                &fixture.work,
+                "attempt-1",
+                "--resolution",
+                "Retry only after proving this generation did not launch",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no proof that this generation stopped before provider launch",
+            ));
+        assert_eq!(
+            snapshot_tree(&fixture.project.join(".fluent/work"))
+                .into_iter()
+                .filter(|entry| !entry.path.starts_with("locks/"))
+                .collect::<Vec<_>>(),
+            before
+                .into_iter()
+                .filter(|entry| !entry.path.starts_with("locks/"))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn no_change_completion_retry_binds_retained_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = no_change_completion_saved_prelaunch_fixture(&tmp);
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &fixture.work,
+            "attempt-1",
+            "--resolution",
+            "Retry the unchanged Writer with its retained receipt",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        fixture.area.join("execution-receipt"),
+        b"2 abcdef0123456789abcdef0123456789 0000075536\n",
+    )
+    .unwrap();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "retained completion retry evidence changed",
+        ));
+    assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
 }
 
 #[test]
