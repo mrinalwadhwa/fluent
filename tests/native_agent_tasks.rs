@@ -2401,11 +2401,13 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1" && $env(FLUENT_NATIVE_PROVIDER) eq "codex
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     send -- "Please retain result.txt and continue."
-    # Codex Enter steers an active turn. Tab queues a local follow-up, so
-    # Fluent may settle before the attached input reaches its relay.
+    # Codex treats a rapid text burst followed immediately by Enter as a
+    # multiline paste. Wait for its composer to flush the burst before submit.
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} { after 300 }
     send -- "\r"
     after 300
     send -- "The final file must have exactly the requested line."
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} { after 300 }
     if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
         send -- "\033\r"
     } else {
@@ -2425,11 +2427,12 @@ fn host_codex_attachment_queues_both_inputs() {
 
     let root = tempfile::tempdir().unwrap();
     let capture = root.path().join("input.bin");
+    let submissions = root.path().join("submissions.txt");
     let early = root.path().join("early-input");
     let terminal = root.path().join("fake-terminal");
     std::fs::write(
         &terminal,
-        "#!/usr/bin/env python3\nimport os, select, sys, termios, time, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    time.sleep(1)\n    if select.select([fd], [], [], 0)[0]:\n        open(os.environ['FLUENT_NATIVE_EARLY'], 'w').close()\n    print('›', flush=True)\n    data = bytearray()\n    while not data.endswith(b'\\x02d'):\n        data.extend(os.read(fd, 1))\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
+        "#!/usr/bin/env python3\nimport os, select, sys, termios, time, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    time.sleep(1)\n    if select.select([fd], [], [], 0)[0]:\n        open(os.environ['FLUENT_NATIVE_EARLY'], 'w').close()\n    print('›', flush=True)\n    data = bytearray()\n    draft = bytearray()\n    submitted = []\n    last_text = None\n    while not data.endswith(b'\\x02d'):\n        byte = os.read(fd, 1)\n        data.extend(byte)\n        now = time.monotonic()\n        if byte == b'\\r':\n            if last_text is not None and now - last_text >= 0.2:\n                submitted.append(draft.decode())\n                draft.clear()\n            else:\n                draft.extend(b'\\n')\n        elif byte not in (b'\\x02',) and not data.endswith(b'\\x02d'):\n            draft.extend(byte)\n            last_text = now\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\n    with open(os.environ['FLUENT_NATIVE_SUBMISSIONS'], 'w') as out:\n        out.write('\\n'.join(submitted))\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
     )
     .unwrap();
     std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2442,6 +2445,7 @@ fn host_codex_attachment_queues_both_inputs() {
         .env("FLUENT_NATIVE_PROVIDER", "codex")
         .env("FLUENT_NATIVE_FIXTURE_READY", "1")
         .env("FLUENT_NATIVE_CAPTURE", &capture)
+        .env("FLUENT_NATIVE_SUBMISSIONS", &submissions)
         .env("FLUENT_NATIVE_EARLY", &early)
         .output()
         .unwrap();
@@ -2457,6 +2461,10 @@ fn host_codex_attachment_queues_both_inputs() {
     assert!(
         !early.exists(),
         "attached input preceded the Codex composer"
+    );
+    assert_eq!(
+        std::fs::read_to_string(submissions).unwrap(),
+        "Please retain result.txt and continue.\nThe final file must have exactly the requested line."
     );
 }
 
