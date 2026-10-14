@@ -2389,6 +2389,15 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
 if {[info exists env(FLUENT_NATIVE_FIXTURE_READY)]} {
     expect "fixture-ready"
 }
+if {$env(FLUENT_NATIVE_CONTROL) eq "1" && $env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+    # The attached tmux client can be running before the Codex composer exists.
+    # Wait for its rendered prompt before queuing input for the assigned turn.
+    expect {
+        "›" {}
+        eof { exit 1 }
+        timeout { exit 1 }
+    }
+}
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     send -- "Please retain result.txt and continue."
@@ -2420,10 +2429,11 @@ fn host_codex_attachment_queues_both_inputs() {
 
     let root = tempfile::tempdir().unwrap();
     let capture = root.path().join("input.bin");
+    let early = root.path().join("early-input");
     let terminal = root.path().join("fake-terminal");
     std::fs::write(
         &terminal,
-        "#!/usr/bin/env python3\nimport os, sys, termios, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    data = bytearray()\n    while not data.endswith(b'\\x02d'):\n        data.extend(os.read(fd, 1))\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
+        "#!/usr/bin/env python3\nimport os, select, sys, termios, time, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    time.sleep(1)\n    if select.select([fd], [], [], 0)[0]:\n        open(os.environ['FLUENT_NATIVE_EARLY'], 'w').close()\n    print('›', flush=True)\n    data = bytearray()\n    while not data.endswith(b'\\x02d'):\n        data.extend(os.read(fd, 1))\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
     )
     .unwrap();
     std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2436,6 +2446,7 @@ fn host_codex_attachment_queues_both_inputs() {
         .env("FLUENT_NATIVE_PROVIDER", "codex")
         .env("FLUENT_NATIVE_FIXTURE_READY", "1")
         .env("FLUENT_NATIVE_CAPTURE", &capture)
+        .env("FLUENT_NATIVE_EARLY", &early)
         .output()
         .unwrap();
     assert!(
@@ -2446,6 +2457,10 @@ fn host_codex_attachment_queues_both_inputs() {
     assert_eq!(
         std::fs::read(capture).unwrap(),
         b"Please retain result.txt and continue.\tThe final file must have exactly the requested line.\t\x02d"
+    );
+    assert!(
+        !early.exists(),
+        "attached input preceded the Codex composer"
     );
 }
 
