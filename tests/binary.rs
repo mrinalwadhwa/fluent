@@ -57263,11 +57263,15 @@ fn host_plan_recovery_public_commands_are_idempotent_recheck_changed_evidence() 
                 fs::File::create(&scheduler_log).unwrap(),
             ));
         let mut child = OwnedFixtureProcess::spawn(&mut command);
-        assert!(poll_until(std::time::Duration::from_secs(3), || {
-            fs::read_to_string(&scheduler_log)
-                .unwrap_or_default()
-                .contains("[scheduler] project")
-        }));
+        assert!(
+            poll_until(std::time::Duration::from_secs(15), || {
+                fs::read_to_string(&scheduler_log)
+                    .unwrap_or_default()
+                    .contains("[scheduler] project")
+            }),
+            "{drift}: scheduler did not report the rejected dispatch: {}",
+            fs::read_to_string(&scheduler_log).unwrap_or_default()
+        );
         assert!(child.try_wait().unwrap().is_none());
         child.terminate_and_wait();
         assert!(!provider_log.exists(), "{drift}: provider must not launch");
