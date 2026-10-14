@@ -253,6 +253,14 @@ fn command_line(command: &Command) -> Result<String> {
 
 /// Trust only the workspace Fluent has already confined for this invocation.
 fn prepare_private_home(home: &Path, workspace: &Path, api_key: Option<&str>) -> Result<()> {
+    let temp = home.join("tmp");
+    match fs::symlink_metadata(&temp) {
+        Ok(metadata) => ensure!(metadata.is_dir(), "native Claude temp is not a directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&temp)?,
+        Err(error) => return Err(error.into()),
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))?;
     let config = home.join(".claude.json");
     let mut value: Value = match fs::symlink_metadata(&config) {
         Ok(metadata) => {
@@ -307,7 +315,6 @@ fn prepare_private_home(home: &Path, workspace: &Path, api_key: Option<&str>) ->
         rejected.retain(|value| value.as_str() != Some(key));
     }
     crate::atomic_write::atomic_write(&config, &serde_json::to_vec(&value)?)?;
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
@@ -407,6 +414,14 @@ except Exception as error:
 }
 
 fn environment(task: &ClaudeNativeTask<'_>) -> Vec<(OsString, OsString)> {
+    managed_environment(task.private_home, task.workspace, task.launch_env)
+}
+
+fn managed_environment(
+    private_home: &Path,
+    workspace: &Path,
+    launch_env: &[(String, String)],
+) -> Vec<(OsString, OsString)> {
     let mut values: Vec<_> = [
         "PATH",
         "USER",
@@ -425,17 +440,18 @@ fn environment(task: &ClaudeNativeTask<'_>) -> Vec<(OsString, OsString)> {
     .iter()
     .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
     .collect();
-    values.push(("HOME".into(), task.private_home.as_os_str().to_owned()));
+    values.push(("HOME".into(), private_home.as_os_str().to_owned()));
     values.push((
         "CLAUDE_CONFIG_DIR".into(),
-        task.private_home.as_os_str().to_owned(),
+        private_home.as_os_str().to_owned(),
     ));
-    values.push(("PWD".into(), task.workspace.as_os_str().to_owned()));
+    values.push(("PWD".into(), workspace.as_os_str().to_owned()));
     values.extend(
-        task.launch_env
+        launch_env
             .iter()
             .map(|(key, value)| (key.into(), value.into())),
     );
+    values.push(("TMPDIR".into(), private_home.join("tmp").into_os_string()));
     values
 }
 
@@ -680,7 +696,10 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_session_tail, install_hooks, prepare_private_home, startup_signals};
+    use super::{
+        copy_session_tail, install_hooks, managed_environment, prepare_private_home,
+        startup_signals,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -764,6 +783,24 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn native_claude_uses_private_temp_under_its_granted_home() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        prepare_private_home(home.path(), workspace.path(), None).unwrap();
+        let env = managed_environment(
+            home.path(),
+            workspace.path(),
+            &[("TMPDIR".into(), "/private/tmp".into())],
+        );
+        let temp = home.path().join("tmp");
+        assert!(temp.is_dir());
+        assert_eq!(
+            env.iter().rev().find(|(key, _)| key == "TMPDIR").unwrap().1,
+            temp
         );
     }
 
