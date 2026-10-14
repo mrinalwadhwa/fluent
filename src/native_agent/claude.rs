@@ -531,6 +531,7 @@ pub fn receive_hook(
     generation: &str,
     evidence: &mut File,
 ) -> Result<Completion> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(8)))?;
     stream.set_write_timeout(Some(Duration::from_secs(8)))?;
     let mut line = String::new();
@@ -796,10 +797,43 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_session_tail, install_hooks, managed_environment, prepare_private_home,
-        startup_signals,
+        ClaudeHookGate, copy_session_tail, install_hooks, managed_environment,
+        prepare_private_home, receive_hook, startup_signals,
     };
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    #[test]
+    fn claude_hook_waits_for_payload_on_nonblocking_accepted_socket() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        // Accepted sockets inherit the listener's nonblocking flag on macOS.
+        // Set it explicitly to test that receiver state without binding a socket.
+        receiver.set_nonblocking(true).unwrap();
+        let hook = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            sender
+                .write_all(b"{\"generation\":\"generation-1\",\"event\":{\"hook_event_name\":\"SessionStart\",\"session_id\":\"assigned-session\",\"source\":\"startup\"}}\n")
+                .unwrap();
+            let mut ack = String::new();
+            BufReader::new(sender).read_line(&mut ack).unwrap();
+            ack
+        });
+        let evidence = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = evidence.reopen().unwrap();
+        let mut gate = ClaudeHookGate::new("generation-1", Some("assigned-session"));
+        receive_hook(receiver, &mut gate, "generation-1", &mut writer).unwrap();
+        assert_eq!(hook.join().unwrap(), "ok\n");
+        assert_eq!(gate.session_id(), Some("assigned-session"));
+        assert_eq!(
+            std::fs::read_to_string(evidence.path())
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn private_claude_startup_skips_only_owned_workspace_prompts() {
