@@ -1280,6 +1280,37 @@ fn native_claude_hooks_correlate_prompt_and_session() {
     assert!(failed.observe("generation-1", &json!({"hook_event_name":"StopFailure","session_id":"assigned-session","prompt_id":"prompt-1","error":"rate_limit"})).is_err());
 }
 
+#[test]
+fn native_claude_hooks_account_for_reused_prompt_ids() {
+    use fluent::native_agent::claude::ClaudeHookGate;
+
+    let mut gate = ClaudeHookGate::new("generation-1", Some("assigned-session"));
+    gate.observe("generation-1", &json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"startup"})).unwrap();
+    let first = json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"same-prompt","prompt":"first attached input"});
+    let second = json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"same-prompt","prompt":"second attached input"});
+    gate.observe("generation-1", &first).unwrap();
+    assert_eq!(gate.event_sequence(), 1);
+    gate.observe("generation-1", &second).unwrap();
+    assert_eq!(gate.last_sequence(), 2);
+    assert_eq!(gate.event_sequence(), 2);
+
+    let stop = json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"same-prompt","last_assistant_message":"done","background_tasks":[],"session_crons":[]});
+    assert_eq!(
+        gate.observe("generation-1", &stop).unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(gate.event_sequence(), 1);
+    assert_eq!(
+        gate.observe("generation-1", &stop).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "same-prompt".into(),
+            input_sequence: 2,
+        }
+    );
+    assert_eq!(gate.event_sequence(), 2);
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_jsonl_relay_controls_assigned_invocation() {

@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail, ensure};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -21,8 +21,9 @@ pub struct ClaudeHookGate {
     expected_session: Option<String>,
     session_id: Option<String>,
     admission: NativeAdmission,
-    prompts: HashMap<String, u64>,
+    prompts: HashMap<String, VecDeque<u64>>,
     last_sequence: u64,
+    event_sequence: u64,
     settled: bool,
     transcript_path: Option<PathBuf>,
 }
@@ -36,6 +37,7 @@ impl ClaudeHookGate {
             admission: NativeAdmission::new(),
             prompts: HashMap::new(),
             last_sequence: 0,
+            event_sequence: 0,
             settled: false,
             transcript_path: None,
         }
@@ -47,6 +49,10 @@ impl ClaudeHookGate {
 
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence
+    }
+
+    pub fn event_sequence(&self) -> u64 {
+        self.event_sequence
     }
 
     pub fn transcript_path(&self) -> Option<&Path> {
@@ -85,6 +91,7 @@ impl ClaudeHookGate {
         let kind = event["hook_event_name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Claude hook has no event kind"))?;
+        self.event_sequence = self.last_sequence;
         match kind {
             "SessionStart" => {
                 let source = event["source"].as_str().unwrap_or_default();
@@ -103,13 +110,13 @@ impl ClaudeHookGate {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("Claude input has no prompt identity"))?;
-                ensure!(
-                    !self.prompts.contains_key(prompt_id),
-                    "Claude reused a prompt identity"
-                );
                 let sequence = self.admission.admit()?;
-                self.prompts.insert(prompt_id.into(), sequence);
+                self.prompts
+                    .entry(prompt_id.into())
+                    .or_default()
+                    .push_back(sequence);
                 self.last_sequence = sequence;
+                self.event_sequence = sequence;
             }
             "Stop" => {
                 ensure!(
@@ -120,9 +127,15 @@ impl ClaudeHookGate {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("Claude Stop has no prompt identity"))?;
-                let Some(&sequence) = self.prompts.get(prompt_id) else {
+                let Some(&sequence) = self
+                    .prompts
+                    .get(prompt_id)
+                    .and_then(|pending| pending.front())
+                else {
+                    self.event_sequence = 0;
                     return Ok(Completion::Ignored);
                 };
+                self.event_sequence = sequence;
                 if event["background_tasks"]
                     .as_array()
                     .is_some_and(|items| !items.is_empty())
@@ -138,6 +151,10 @@ impl ClaudeHookGate {
                         .is_some_and(|message| !message.trim().is_empty()),
                     "Claude Stop omitted its final assistant message"
                 );
+                self.prompts
+                    .get_mut(prompt_id)
+                    .expect("prompt has a pending completion")
+                    .pop_front();
                 if self.admission.settle_if_current(sequence)? {
                     self.settled = true;
                     return Ok(Completion::Accepted {
@@ -577,7 +594,7 @@ pub fn receive_hook(
             "assigned_conversation_id":gate.session_id(),
             "conversation_id":event["session_id"],
             "turn_id":event["prompt_id"],
-            "input_sequence":gate.last_sequence(), "event":event,
+            "input_sequence":gate.event_sequence(), "event":event,
         }),
     )?;
     evidence.write_all(b"\n")?;
