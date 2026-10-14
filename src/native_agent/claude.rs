@@ -451,7 +451,11 @@ fn managed_environment(
             .iter()
             .map(|(key, value)| (key.into(), value.into())),
     );
-    values.push(("TMPDIR".into(), private_home.join("tmp").into_os_string()));
+    let temp = private_home.join("tmp");
+    values.push(("TMPDIR".into(), temp.as_os_str().to_owned()));
+    // Claude uses its own internal temp setting on macOS and otherwise
+    // creates /tmp/claude-<uid> before its SessionStart hook can run.
+    values.push(("CLAUDE_CODE_TMPDIR".into(), temp.into_os_string()));
     values
 }
 
@@ -787,19 +791,32 @@ mod tests {
     }
 
     #[test]
-    fn native_claude_uses_private_temp_under_its_granted_home() {
+    fn native_claude_redirects_internal_temp_away_from_shared_tmp() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         prepare_private_home(home.path(), workspace.path(), None).unwrap();
         let env = managed_environment(
             home.path(),
             workspace.path(),
-            &[("TMPDIR".into(), "/private/tmp".into())],
+            &[
+                ("TMPDIR".into(), "/private/tmp".into()),
+                ("CLAUDE_CODE_TMPDIR".into(), "/tmp".into()),
+            ],
         );
         let temp = home.path().join("tmp");
         assert!(temp.is_dir());
         assert_eq!(
             env.iter().rev().find(|(key, _)| key == "TMPDIR").unwrap().1,
+            temp
+        );
+        // The installed CLI otherwise tries to create /tmp/claude-<uid>
+        // before SessionStart, even when TMPDIR points to the private home.
+        assert_eq!(
+            env.iter()
+                .rev()
+                .find(|(key, _)| key == "CLAUDE_CODE_TMPDIR")
+                .unwrap()
+                .1,
             temp
         );
     }
