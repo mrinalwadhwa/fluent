@@ -763,6 +763,15 @@ contract. Record one start and one launch marker while holding the model lock.
 Do not reuse quota, authentication, round-extension, or generic failure recovery
 authority to admit this case.
 
+When failed preparation reserved a new launch generation in a reused Task
+area, a well-formed receipt for a different generation remains historical
+evidence. Admit the completion retry only if the current launching record has
+no leader or process group and the receipt cannot belong to its generation.
+Reject a matching or malformed receipt because launch outcome remains
+ambiguous. Preserve the earlier receipt and bind its bytes in the retry audit;
+resume rejects a changed receipt. See
+[[local-execution-identity-requires-receipt]].
+
 Retain the base aggregate in retry journals and accept only exact base or target
 children, while revalidating the pinned files before replay. The immediate
 combined predecessor at `43022b29fa437ade211fef3fff66798c5d940ef9` must reject
