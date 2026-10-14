@@ -253,6 +253,19 @@ fn find_tmux() -> Result<PathBuf> {
     bail!("tmux is required for managed terminal sessions")
 }
 
+fn capture_pane_command(socket: &Path) -> Result<Command> {
+    let mut command = Command::new(find_tmux()?);
+    command.env_remove("TMUX").arg("-S").arg(socket).args([
+        "capture-pane",
+        "-p",
+        "-S",
+        "-80",
+        "-t",
+        "fluent:0.0",
+    ]);
+    Ok(command)
+}
+
 fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<()> {
     ensure!(stored.descriptor == *requested, "terminal identity changed");
     let published: StoredTerminal = serde_json::from_slice(&std::fs::read(&stored.registry_path)?)?;
@@ -674,11 +687,7 @@ impl TerminalSession {
             .socket
             .as_ref()
             .context("terminal has no tmux socket")?;
-        let output = Command::new(find_tmux()?)
-            .env_remove("TMUX")
-            .arg("-S")
-            .arg(socket)
-            .args(["capture-pane", "-p", "-S", "-80"])
+        let output = capture_pane_command(socket)?
             .output()
             .context("capturing terminal pane before settlement")?;
         ensure!(
@@ -1615,6 +1624,29 @@ mod control_client_tests {
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_capture_names_the_managed_pane() {
+        let socket = Path::new("/private/tmp/fluent-test/socket");
+        let command = capture_pane_command(socket).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-S",
+                "/private/tmp/fluent-test/socket",
+                "capture-pane",
+                "-p",
+                "-S",
+                "-80",
+                "-t",
+                "fluent:0.0"
+            ]
+        );
+    }
 
     #[test]
     fn unpublished_exited_server_still_settles_owner_handle_descendant() {

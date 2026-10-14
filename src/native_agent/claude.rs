@@ -274,13 +274,15 @@ fn prepare_private_home(home: &Path, workspace: &Path) -> Result<()> {
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("native Claude projects are not an object"))?;
-    let workspace = workspace.canonicalize()?.to_string_lossy().into_owned();
-    let project = projects
-        .entry(workspace)
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("native Claude project is not an object"))?;
-    project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    let canonical = workspace.canonicalize()?;
+    for path in [workspace, canonical.as_path()] {
+        let project = projects
+            .entry(path.to_string_lossy().into_owned())
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("native Claude project is not an object"))?;
+        project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    }
     crate::atomic_write::atomic_write(&config, &serde_json::to_vec(&value)?)?;
     Ok(())
 }
@@ -680,6 +682,28 @@ mod tests {
             serde_json::from_slice(&std::fs::read(settings).unwrap()).unwrap();
         assert_eq!(value["skipDangerousModePermissionPrompt"], true);
         assert!(value["hooks"]["SessionStart"].is_array());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_claude_trusts_the_workspace_path_given_to_the_terminal() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let logical = home.path().join("logical-workspace");
+        std::os::unix::fs::symlink(project.path(), &logical).unwrap();
+        prepare_private_home(home.path(), &logical).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.path().join(".claude.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["projects"][logical.to_str().unwrap()]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            value["projects"][project.path().canonicalize().unwrap().to_str().unwrap()]
+                ["hasTrustDialogAccepted"],
+            true
+        );
     }
 
     #[test]
