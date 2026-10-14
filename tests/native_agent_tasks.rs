@@ -1753,7 +1753,7 @@ fn codex_relay_records_app_server_exit_before_first_turn() {
 #[cfg(unix)]
 #[test]
 fn codex_websocket_backpressure_recovers_required_frame_once() {
-    use fluent::native_agent::codex::relay_codex_websockets;
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::io::{self, Write};
     use std::net::Shutdown;
     use std::os::fd::AsRawFd;
@@ -1778,22 +1778,32 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     };
     assert_eq!(configured, 0);
 
-    struct SignalEvidence(Option<mpsc::Sender<()>>);
+    struct SignalResponseTrace {
+        bytes: Vec<u8>,
+        signal: Option<mpsc::Sender<()>>,
+    }
 
-    impl Write for SignalEvidence {
+    impl Write for SignalResponseTrace {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
             Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            if let Some(signal) = self.0.take() {
+            let event: serde_json::Value = serde_json::from_slice(&self.bytes)?;
+            self.bytes.clear();
+            if event["direction"] == "app-to-tui"
+                && event["outcome"] == "received"
+                && event["method"] == "<other>"
+                && let Some(signal) = self.signal.take()
+            {
                 signal.send(()).unwrap();
             }
             Ok(())
         }
     }
 
-    let (written_tx, written_rx) = mpsc::channel();
+    let (response_tx, response_rx) = mpsc::channel();
     let provider = std::thread::spawn(move || {
         let mut socket = tungstenite::accept(provider_stream).unwrap();
         socket
@@ -1829,14 +1839,18 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     let relay = std::thread::spawn(move || {
         let client = tungstenite::accept(relay_client).unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
-        relay_codex_websockets(
+        relay_codex_websockets_with_trace(
             client,
             server,
             "generation-1",
             "assigned-thread",
             Arc::new(NativeAdmission::new()),
-            SignalEvidence(Some(written_tx)),
+            std::io::sink(),
             move |completion| completed_tx.send(completion).map_err(anyhow::Error::new),
+            SignalResponseTrace {
+                bytes: Vec::new(),
+                signal: Some(response_tx),
+            },
         )
     });
     let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
@@ -1848,9 +1862,9 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
             .to_string(),
     ))
     .unwrap();
-    // The relay has serialized the complete response and is about to enqueue
-    // it for the display writer; pause this peer past its socket write timeout.
-    written_rx.recv_timeout(Duration::from_secs(4)).unwrap();
+    // The relay received the complete response and is about to enqueue it
+    // for display; pause this peer past its socket write timeout.
+    response_rx.recv_timeout(Duration::from_secs(4)).unwrap();
     std::thread::sleep(Duration::from_millis(700));
     let response: serde_json::Value =
         serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
