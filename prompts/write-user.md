@@ -1,5 +1,13 @@
 Work on this Work Item: {{work_item_id}} - {{work_item_title}}.
 
+{{#if has_task_assignment}}
+## Saved Task assignment
+
+Follow the instructions saved on this Writer Task:
+
+{{task_assignment}}
+
+{{/if}}
 {{#if is_corrective}}
 ## Corrective execution context
 
@@ -55,11 +63,19 @@ The script must:
 
 First, understand what this Work Item asks for:
 
-1. Read Brief at {{brief_path}} — what to change and why.
-2. Read Behaviors at {{behaviors_path}} — EARS statements describing observable changes in behavior.
-3. Read Approach at {{approach_path}} — technical direction on how to make the changes.
-4. Read Plan at {{plan_path}} — series of incremental steps; each one makes new changes in behavior observable and verifiable.
-5. Read the expertise indexes:
+{{#if has_brief_path}}
+- Read Brief at {{brief_path}} — what to change and why.
+{{/if}}
+{{#if has_behaviors_path}}
+- Read Behaviors at {{behaviors_path}} — EARS statements describing observable changes in behavior.
+{{/if}}
+{{#if has_approach_path}}
+- Read Approach at {{approach_path}} — technical direction on how to make the changes.
+{{/if}}
+{{#if has_plan_path}}
+- Read Plan at {{plan_path}} — series of incremental steps; each one makes new changes in behavior observable and verifiable.
+{{/if}}
+- Read the expertise indexes:
    - {{general_expertise_index}} — general, project-agnostic principles (architecture, testing,
      documentation, tooling). Load individual files on demand in Phase 3, by relevance to each step.
 {{#if has_project_expertise_index}}
@@ -127,8 +143,12 @@ progress.md contains an authoritative `## Required completion` section Fluent ma
 {{/if}}
 {{#if has_progress_md}}
 1. Read progress.md at {{progress_md_path}}.
-{{else}}
+{{/if}}
+{{#if create_progress_from_plan}}
 1. Create progress.md at {{progress_md_path}}: identify the steps in plan.md and turn them into a `- [ ]` to-do checklist.
+{{/if}}
+{{#if create_progress_from_assignment}}
+1. Create progress.md at {{progress_md_path}}: turn the saved Task assignment into a `- [ ]` to-do checklist.
 {{/if}}
 {{#if has_prior_reviews_with_required_progress}}
 2. Ensure progress.md has a separate `## Review follow-ups` section outside `## Required completion`.
@@ -144,16 +164,21 @@ progress.md contains an authoritative `## Required completion` section Fluent ma
 2. Find the first `- [ ]` item — that is your next step.
 {{/if}}
 
-## Phase 3 — Implement each planned step
+## Phase 3 — Implement each step
 
 Work through every `- [ ]` item in progress.md, one at a time. For each item:
 
 ### A. Understand the step
 
+{{#if has_plan_path}}
 1. Refer to sections related to this step in plan.md and behaviors.md.
 2. Find approach.md sections related to this step. Note any recommended names, file paths, structural ideas, and constraints.
 3. Consult the indexes and read expertise files relevant to this step (architecture, testing, docs, etc.), including any patterns they reference.
 4. Identify any tests the plan names for this step. Check the codebase for their presence; record missing tests in the matrix evidence or a mutable progress section before making code changes.
+{{else}}
+1. Use the saved Task assignment above to identify the requested result and any constraints.
+2. Consult the expertise indexes for relevant project conventions and test patterns.
+{{/if}}
 
 ### B. Implement test-first
 

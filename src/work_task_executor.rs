@@ -5634,6 +5634,10 @@ fn build_write_task_prompt_with_workspace(
     let behaviors_path = planning.behaviors();
     let approach_path = planning.approach();
     let plan_path = planning.plan();
+    let has_brief_path = if brief_path.is_empty() { "" } else { "yes" };
+    let has_behaviors_path = if behaviors_path.is_empty() { "" } else { "yes" };
+    let has_approach_path = if approach_path.is_empty() { "" } else { "yes" };
+    let has_plan_path = if plan_path.is_empty() { "" } else { "yes" };
     let general_expertise_index = project_root
         .map(|root| {
             general_expertise_dir(root)
@@ -5676,6 +5680,16 @@ fn build_write_task_prompt_with_workspace(
         };
     let has_no_prior_reviews_value = if has_prior_reviews { "" } else { "yes" };
     let has_progress_md_value = if has_progress_md { "yes" } else { "" };
+    let create_progress_from_plan_value = if !has_progress_md && !plan_path.is_empty() {
+        "yes"
+    } else {
+        ""
+    };
+    let create_progress_from_assignment_value = if !has_progress_md && plan_path.is_empty() {
+        "yes"
+    } else {
+        ""
+    };
     let has_project_expertise_index_value = if has_project_expertise_index {
         "yes"
     } else {
@@ -5687,6 +5701,13 @@ fn build_write_task_prompt_with_workspace(
     } else {
         "yes"
     };
+    let task_assignment = task.instructions.as_deref().unwrap_or_default();
+    let has_task_assignment_value =
+        if task_assignment.trim().is_empty() || task_assignment == corrective_context {
+            ""
+        } else {
+            "yes"
+        };
 
     let template = ContentResolver::new(workspace_path)
         .resolve_content("prompts/write-user.md")
@@ -5712,13 +5733,19 @@ fn build_write_task_prompt_with_workspace(
             ),
             ("role", &task.role),
             ("brief_path", &brief_path),
+            ("has_brief_path", has_brief_path),
             ("behaviors_path", &behaviors_path),
+            ("has_behaviors_path", has_behaviors_path),
             ("approach_path", &approach_path),
+            ("has_approach_path", has_approach_path),
             ("plan_path", &plan_path),
+            ("has_plan_path", has_plan_path),
             ("prior_reviews_list", &prior_reviews_list),
             ("work_item_inputs_list", &work_item_inputs_list),
             ("progress_md_path", &progress_md_path),
             ("task_json", &task_json),
+            ("task_assignment", task_assignment),
+            ("has_task_assignment", has_task_assignment_value),
             ("is_followup_writer", is_followup_writer_value),
             ("no_change_declaration_path", &no_change_declaration_path),
             ("is_corrective", is_corrective_value),
@@ -5738,6 +5765,11 @@ fn build_write_task_prompt_with_workspace(
             ),
             ("has_no_prior_reviews", has_no_prior_reviews_value),
             ("has_progress_md", has_progress_md_value),
+            ("create_progress_from_plan", create_progress_from_plan_value),
+            (
+                "create_progress_from_assignment",
+                create_progress_from_assignment_value,
+            ),
             ("has_required_progress", has_required_progress_value),
             (
                 "has_matrix_backed_required_progress",
@@ -20106,6 +20138,34 @@ while time.monotonic() < deadline:
         assert!(
             prompt.contains(&expected),
             "prompt should reference the general expertise INDEX path; got prompt:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn write_task_prompt_includes_saved_instruction_only_assignment() {
+        let mut item = WorkItem {
+            id: "instruction-only".to_string(),
+            title: "Write the required result".to_string(),
+            instructions: Some("Create result.txt containing exactly native-codex\\n".to_string()),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &item.attempts[0].tasks[0];
+        assert_eq!(task.instructions, item.instructions);
+
+        let prompt =
+            build_write_task_prompt_with_workspace(&item, "attempt-1", &task.id, &[], None, None);
+        assert!(
+            prompt.contains("Create result.txt containing exactly native-codex\\n"),
+            "the first Writer prompt must include the saved Task assignment"
+        );
+        assert!(
+            !prompt.contains("Read Brief at  —"),
+            "an instruction-only Work Item must not point to a missing brief"
+        );
+        assert!(
+            !prompt.contains("identify the steps in plan.md"),
+            "an instruction-only Work Item must not require a missing plan"
         );
     }
 
