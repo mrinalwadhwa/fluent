@@ -20,6 +20,7 @@ schedules a Writer on the existing Attempt.
 
 - [Recover mutable Writer assignment context](#recover-mutable-writer-assignment-context)
 - [Recover a committed Writer with a malformed matrix](#recover-a-committed-writer-with-a-malformed-matrix)
+- [Retry an unchanged Writer after invalid completion](#retry-an-unchanged-writer-after-invalid-completion)
 - [Recover an output-free failed Writer](#recover-an-output-free-failed-writer)
 - [Recover a usage-limit-interrupted Writer](#recover-a-usage-limit-interrupted-writer)
 - [Diagnose a reported process leak](#diagnose-a-reported-process-leak)
@@ -716,11 +717,44 @@ same Task. Pending host, review, Tester, and Learner rows do not authorize a
 Writer. Once Writer work is complete, attach host evidence through the action
 shown by `work-item show` before resuming review.
 
+## Retry an unchanged Writer after invalid completion
+
+An unchanged candidate can pause at its first invalid Writer completion
+handoff, or after a previously approved completion retry fails before provider
+launch. Inspect `fluent status` or `fluent work-item show <work-item>` and the
+saved Task artifacts. If the assignment context is current and Fluent offers
+completion repair, authorize that same Task's retry directly, then resume it
+separately:
+
+```sh
+fluent attempt repair-writer-completion <work-item> <attempt> --resolution "<retry decision>"
+fluent attempt run <work-item> <attempt>
+```
+
+For scheduler-owned Work, use `fluent queue resume <work-item> --attempt
+<attempt>` after approval. The first invalid handoff must belong to a settled
+Writer with no output and an unchanged, clean candidate; its saved matrix or
+no-change declaration must be invalid. A saved pre-launch failure must have
+the earlier completion-recovery assignment and a native execution record
+proving that the provider did not launch. Both cases require the same candidate,
+valid assignment and retained source evidence, settled owners, and an
+uncanceled Attempt. A generic failed Task, changed inputs, or uncertain launch
+outcome does not qualify. The approval keeps the original failure files, Task
+snapshot, assignment, and accepted evidence, and gives the retry fresh output
+files. It does not grant passing credit from the invalid handoff. Repeating the
+same approval reuses its Task and cannot override a later stop; the retry still
+needs the ordinary host, review, Tester, and Learner gates.
+
+Use `recover-assignment-context` first only when the assignment context itself
+is stale and Fluent offers that action. Inspect status again after repairing
+that context; context repair alone never authorizes a retry.
+
 ## Recover an output-free failed Writer
 
-For an output-free failed Writer, recovery requires the original saved assignment,
-its completion-recovery authority, the same clean candidate and workspace, and a
-native execution record proving setup stopped before provider launch. Every owner
+For an output-free failed Writer whose assignment context is stale, recovery
+requires the original saved assignment, its completion-recovery authority, the
+same clean candidate and workspace, and a native execution record proving
+setup stopped before provider launch. Every owner
 must be settled. A later Writer may remain only as an unstarted reservation with
 no artifacts. Log messages, a missing candidate, or a quota pause alone do not
 prove this case.

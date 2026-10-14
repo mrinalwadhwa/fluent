@@ -11006,11 +11006,22 @@ impl WorkModelStore {
         let legacy_attempts = versions
             .attempts
             .iter()
-            .filter(|(_, version)| *version != current_schema)
-            .map(|(attempt_id, version)| WorkModelAttemptUpgrade {
-                attempt_id: attempt_id.clone(),
-                from_record_schema_version: *version,
-                to_record_schema_version: current_schema,
+            .filter_map(|(attempt_id, version)| {
+                let attempt = item
+                    .attempts
+                    .iter()
+                    .find(|attempt| attempt.id == *attempt_id)
+                    .expect("loaded Attempt matches its persisted record");
+                let target_schema = if attempt_has_no_change_completion_authority(attempt) {
+                    NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
+                } else {
+                    WORK_MODEL_RECORD_SCHEMA_VERSION
+                };
+                (*version != target_schema).then(|| WorkModelAttemptUpgrade {
+                    attempt_id: attempt_id.clone(),
+                    from_record_schema_version: *version,
+                    to_record_schema_version: target_schema,
+                })
             })
             .collect::<Vec<_>>();
         let needs_upgrade = stored.schema_version != current_schema
@@ -21037,6 +21048,59 @@ random banner prose that must be ignored
         assert!(repeated.operation_id.is_none());
         assert!(repeated.audit_path.is_none());
         assert_eq!(store.read_work_item("legacy-upgrade").unwrap(), upgraded);
+    }
+
+    #[test]
+    fn explicit_model_upgrade_uses_each_attempt_schema() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("mixed-upgrade", "Mixed schema upgrade");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts.push(Attempt {
+            id: "attempt-2".to_string(),
+            work_item_id: item.id.clone(),
+            status: AttemptStatus::Planned,
+            recovery_operations: vec![RecoveryOperationRecord {
+                schema_version: RECOVERY_OPERATION_SCHEMA_VERSION,
+                operation_id: "completion-authority".to_string(),
+                operation_kind: "writer-completion-no-change-approve".to_string(),
+                work_item_id: item.id.clone(),
+                attempt_id: "attempt-2".to_string(),
+                candidate_commit: None,
+                task_id: None,
+                evidence_digest: None,
+                workspace_path: None,
+                authorization: None,
+                authorization_digest: None,
+                input_digest: None,
+                result: RecoveryOperationResult::for_kind("writer-completion-no-change-approve"),
+                next_status: AttemptStatus::Planned,
+                next_pause_kind: None,
+                next_action: None,
+                created_at: now_iso8601(),
+                completed_at: now_iso8601(),
+            }],
+            ..Attempt::default()
+        });
+        store.create_work_item(&item).unwrap();
+
+        let attempt_path = store.work_attempt_path(&item.id, "attempt-2").unwrap();
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&attempt_path).unwrap()).unwrap();
+        stored["schema_version"] = serde_json::json!(WORK_MODEL_RECORD_SCHEMA_VERSION);
+        fs::write(&attempt_path, to_json_pretty(&stored).unwrap()).unwrap();
+
+        let first = store.upgrade_work_item(&item.id).unwrap();
+        assert!(!first.already_current);
+        assert_eq!(first.upgraded_attempts.len(), 1);
+        assert_eq!(first.upgraded_attempts[0].attempt_id, "attempt-2");
+        assert_eq!(
+            first.upgraded_attempts[0].to_record_schema_version,
+            NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
+        );
+        let second = store.upgrade_work_item(&item.id).unwrap();
+        assert!(second.already_current);
+        assert!(second.operation_id.is_none());
     }
 
     #[test]
