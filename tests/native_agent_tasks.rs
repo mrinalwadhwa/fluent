@@ -1297,11 +1297,6 @@ fn native_claude_hooks_account_for_reused_prompt_ids() {
     let stop = json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"same-prompt","last_assistant_message":"done","background_tasks":[],"session_crons":[]});
     assert_eq!(
         gate.observe("generation-1", &stop).unwrap(),
-        Completion::Ignored
-    );
-    assert_eq!(gate.event_sequence(), 1);
-    assert_eq!(
-        gate.observe("generation-1", &stop).unwrap(),
         Completion::Accepted {
             generation: "generation-1".into(),
             turn_id: "same-prompt".into(),
@@ -1309,6 +1304,32 @@ fn native_claude_hooks_account_for_reused_prompt_ids() {
         }
     );
     assert_eq!(gate.event_sequence(), 2);
+    assert_eq!(
+        gate.observe("generation-1", &stop).unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(gate.event_sequence(), 0);
+}
+
+#[test]
+fn native_claude_settles_coalesced_attached_inputs() {
+    use fluent::native_agent::claude::ClaudeHookGate;
+
+    let mut gate = ClaudeHookGate::new("generation-1", Some("assigned-session"));
+    gate.observe("generation-1", &json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"startup"})).unwrap();
+    for prompt in ["initial", "attached steering", "attached follow-up"] {
+        gate.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"same-prompt","prompt":prompt})).unwrap();
+    }
+    let stop = json!({"hook_event_name":"Stop","session_id":"assigned-session","prompt_id":"same-prompt","last_assistant_message":"final answer","background_tasks":[],"session_crons":[]});
+    assert_eq!(
+        gate.observe("generation-1", &stop).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "same-prompt".into(),
+            input_sequence: 3,
+        }
+    );
+    assert!(gate.observe("generation-1", &json!({"hook_event_name":"UserPromptSubmit","session_id":"assigned-session","prompt_id":"same-prompt","prompt":"too late"})).is_err());
 }
 
 #[cfg(unix)]

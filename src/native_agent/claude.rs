@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail, ensure};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -21,7 +21,7 @@ pub struct ClaudeHookGate {
     expected_session: Option<String>,
     session_id: Option<String>,
     admission: NativeAdmission,
-    prompts: HashMap<String, VecDeque<u64>>,
+    prompts: HashMap<String, u64>,
     last_sequence: u64,
     event_sequence: u64,
     settled: bool,
@@ -111,10 +111,7 @@ impl ClaudeHookGate {
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("Claude input has no prompt identity"))?;
                 let sequence = self.admission.admit()?;
-                self.prompts
-                    .entry(prompt_id.into())
-                    .or_default()
-                    .push_back(sequence);
+                self.prompts.insert(prompt_id.into(), sequence);
                 self.last_sequence = sequence;
                 self.event_sequence = sequence;
             }
@@ -127,11 +124,7 @@ impl ClaudeHookGate {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("Claude Stop has no prompt identity"))?;
-                let Some(&sequence) = self
-                    .prompts
-                    .get(prompt_id)
-                    .and_then(|pending| pending.front())
-                else {
+                let Some(&sequence) = self.prompts.get(prompt_id) else {
                     self.event_sequence = 0;
                     return Ok(Completion::Ignored);
                 };
@@ -151,10 +144,10 @@ impl ClaudeHookGate {
                         .is_some_and(|message| !message.trim().is_empty()),
                     "Claude Stop omitted its final assistant message"
                 );
-                self.prompts
-                    .get_mut(prompt_id)
-                    .expect("prompt has a pending completion")
-                    .pop_front();
+                // Claude can accept several attached inputs with one prompt ID
+                // and emit one Stop after processing them together. That Stop
+                // covers the latest admitted input for this prompt.
+                self.prompts.remove(prompt_id);
                 if self.admission.settle_if_current(sequence)? {
                     self.settled = true;
                     return Ok(Completion::Accepted {
