@@ -1409,8 +1409,13 @@ fn native_terminal_controls_assigned_invocation() {
             serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(turn["method"], "turn/start");
         assert_eq!(turn["params"]["threadId"], "assigned-thread");
+        let steering: serde_json::Value =
+            serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(steering["method"], "turn/steer");
+        assert_eq!(steering["params"]["threadId"], "assigned-thread");
         for event in [
             json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}),
+            json!({"id":3,"result":{}}),
             json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}),
         ] {
             socket.send(Message::Text(event.to_string())).unwrap();
@@ -1453,13 +1458,22 @@ fn native_terminal_controls_assigned_invocation() {
     ))
     .unwrap();
     tui.send(Message::Text(
-        json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+        json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[{"text":"first attached input"}]}})
             .to_string(),
     ))
     .unwrap();
-    for method in ["turn/started", "turn/completed"] {
+    tui.send(Message::Text(
+        json!({"id":3,"method":"turn/steer","params":{"threadId":"assigned-thread","input":[{"text":"second attached input"}]}})
+            .to_string(),
+    ))
+    .unwrap();
+    for method in ["turn/started", "response", "turn/completed"] {
         let event: serde_json::Value =
             serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        if method == "response" {
+            assert_eq!(event["id"], 3);
+            continue;
+        }
         assert_eq!(event["method"], method);
     }
     assert_eq!(
@@ -1467,17 +1481,17 @@ fn native_terminal_controls_assigned_invocation() {
         Completion::Accepted {
             generation: "generation-1".into(),
             turn_id: "turn-1".into(),
-            input_sequence: 1,
+            input_sequence: 2,
         }
     );
     tui.send(Message::Text(
-        json!({"id":3,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+        json!({"id":4,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
             .to_string(),
     ))
     .unwrap();
     let rejection: serde_json::Value =
         serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
-    assert_eq!(rejection["id"], 3);
+    assert_eq!(rejection["id"], 4);
     assert!(
         rejection["error"]["message"]
             .as_str()
@@ -1489,9 +1503,25 @@ fn native_terminal_controls_assigned_invocation() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(evidence.len(), 2);
-    assert_eq!(evidence[0]["event"]["method"], "turn/started");
-    assert_eq!(evidence[1]["event"]["method"], "turn/completed");
+    let inputs: Vec<_> = evidence
+        .iter()
+        .filter(|record| native_input_event(record))
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0]["input_sequence"], 1);
+    assert_eq!(inputs[1]["input_sequence"], 2);
+    for (record, marker) in inputs
+        .into_iter()
+        .zip(["first attached input", "second attached input"])
+    {
+        assert_eq!(record["execution_generation"], "generation-1");
+        assert_eq!(record["assigned_conversation_id"], "assigned-thread");
+        assert_eq!(record["conversation_id"], "assigned-thread");
+        assert!(record["event"].to_string().contains(marker));
+    }
+    assert!(evidence.iter().any(
+        |record| record["event"]["method"] == "turn/completed" && record["input_sequence"] == 2
+    ));
     let _ = tui.get_ref().shutdown(Shutdown::Both);
     provider.join().unwrap();
     let _ = relay.join().unwrap();

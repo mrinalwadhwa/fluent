@@ -869,7 +869,7 @@ fn relay_codex_websockets_with_handoff<W, F, T>(
     generation: &str,
     thread_id: &str,
     admission: Arc<NativeAdmission>,
-    mut evidence: W,
+    evidence: W,
     mut on_completion: F,
     trace: T,
     handoff: Option<CodexHandoff>,
@@ -903,6 +903,7 @@ where
     let gate = Arc::new(Mutex::new(CodexRelayGate::with_admission(
         generation, thread_id, admission,
     )));
+    let evidence = Arc::new(Mutex::new(evidence));
     // Keep protocol frames in order without making evidence capture wait for
     // the TUI. The temporary file bounds the relay's memory under backpressure.
     let display_spool = Arc::new(DisplaySpool::new()?);
@@ -945,6 +946,7 @@ where
         let upstream_client = Arc::clone(&client);
         let upstream_server = Arc::clone(&server);
         let request_gate = Arc::clone(&gate);
+        let request_evidence = Arc::clone(&evidence);
         let request_trace = Arc::clone(&trace);
         let bootstrap_display = Arc::clone(&display_spool);
         let upstream = scope.spawn(move || -> Result<()> {
@@ -1061,6 +1063,24 @@ where
                             continue;
                         }
                     }
+                    if let Ok(Some(input_sequence)) = admitted {
+                        let record = CodexEvidenceRecord {
+                            format: "fluent-native-agent-event",
+                            schema_version: 1,
+                            provider: "codex",
+                            execution_generation: generation,
+                            assigned_conversation_id: thread_id,
+                            conversation_id: thread_id,
+                            turn_id: request["params"]["turnId"].as_str(),
+                            input_sequence,
+                            event: &request,
+                        };
+                        let mut evidence = request_evidence.lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
+                        serde_json::to_writer(&mut *evidence, &record)?;
+                        evidence.write_all(b"\n")?;
+                        evidence.flush()?;
+                    }
                     let forwarded = upstream_server.lock()
                         .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?
                         .send(Message::Text(line));
@@ -1081,6 +1101,7 @@ where
         });
         let downstream_server = Arc::clone(&server);
         let response_gate = Arc::clone(&gate);
+        let response_evidence = Arc::clone(&evidence);
         let response_trace = Arc::clone(&trace);
         let response_display = Arc::clone(&display_spool);
         let downstream = scope.spawn(move || -> Result<()> {
@@ -1201,7 +1222,10 @@ where
                         input_sequence,
                         event: &event,
                     };
-                    serde_json::to_writer(&mut evidence, &record)?;
+                    let mut evidence = response_evidence
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("native Codex evidence lock poisoned"))?;
+                    serde_json::to_writer(&mut *evidence, &record)?;
                     evidence.write_all(b"\n")?;
                     evidence.flush()?;
                     response_display
