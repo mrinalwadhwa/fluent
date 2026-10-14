@@ -2401,17 +2401,13 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1" && $env(FLUENT_NATIVE_PROVIDER) eq "codex
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     send -- "Please retain result.txt and continue."
-    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
-        send -- "\t"
-    } else {
-        send -- "\r"
-    }
+    # Codex Enter steers an active turn. Tab queues a local follow-up, so
+    # Fluent may settle before the attached input reaches its relay.
+    send -- "\r"
     after 300
     send -- "The final file must have exactly the requested line."
     if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
         send -- "\033\r"
-    } elseif {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
-        send -- "\t"
     } else {
         send -- "\r"
     }
@@ -2456,7 +2452,7 @@ fn host_codex_attachment_queues_both_inputs() {
     );
     assert_eq!(
         std::fs::read(capture).unwrap(),
-        b"Please retain result.txt and continue.\tThe final file must have exactly the requested line.\t\x02d"
+        b"Please retain result.txt and continue.\rThe final file must have exactly the requested line.\r\x02d"
     );
     assert!(
         !early.exists(),
