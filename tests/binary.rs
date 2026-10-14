@@ -2046,13 +2046,27 @@ PY
 
 #[test]
 fn no_change_completion_retry_rejects_current_or_invalid_receipt() {
-    for (receipt, current_generation) in [
-        ("2 0123456789abcdef0123456789abcdef 0000075536\n", None),
-        ("2 stale-generation 0000075536\n", None),
-        ("2 fedcba9876543210fedcba9876543210 0000000000\n", None),
+    for (receipt, current_generation, process_group_id) in [
+        (
+            "2 0123456789abcdef0123456789abcdef 0000075536\n",
+            None,
+            None,
+        ),
+        ("2 stale-generation 0000075536\n", None, None),
+        (
+            "2 fedcba9876543210fedcba9876543210 0000000000\n",
+            None,
+            None,
+        ),
         (
             "2 fedcba9876543210fedcba9876543210 0000075536\n",
             Some("invalid-generation"),
+            None,
+        ),
+        (
+            "2 fedcba9876543210fedcba9876543210 0000075536\n",
+            None,
+            Some(75536),
         ),
     ] {
         let tmp = TempDir::new().unwrap();
@@ -2062,6 +2076,12 @@ fn no_change_completion_retry_rejects_current_or_invalid_receipt() {
             let path = fixture.area.join("execution.json");
             let mut record = read_json_path(&path);
             record["launch_generation"] = generation.into();
+            write_json_path(&path, &record);
+        }
+        if let Some(process_group_id) = process_group_id {
+            let path = fixture.area.join("execution.json");
+            let mut record = read_json_path(&path);
+            record["process_group_id"] = process_group_id.into();
             write_json_path(&path, &record);
         }
         let before = snapshot_tree(&fixture.project.join(".fluent/work"));
