@@ -2607,6 +2607,26 @@ set outcome [wait]
 exit [lindex $outcome 3]
 "#;
 
+fn host_native_race_command(provider: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("expect");
+    command
+        .args(["-c", HOST_NATIVE_RACE_CONTROL])
+        .env("FLUENT_NATIVE_PROVIDER", provider);
+    command
+}
+
+#[test]
+fn host_native_race_passes_provider_to_expect() {
+    for provider in ["codex", "claude", "pi"] {
+        let command = host_native_race_command(provider);
+        let configured = command
+            .get_envs()
+            .find(|(key, _)| *key == "FLUENT_NATIVE_PROVIDER")
+            .and_then(|(_, value)| value);
+        assert_eq!(configured, Some(std::ffi::OsStr::new(provider)));
+    }
+}
+
 #[test]
 fn host_codex_race_submits_prepared_input_at_boundary() {
     use std::os::unix::fs::PermissionsExt;
@@ -2646,12 +2666,10 @@ finally:
     )
     .unwrap();
     std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut child = std::process::Command::new("expect")
-        .args(["-c", HOST_NATIVE_RACE_CONTROL])
+    let mut child = host_native_race_command("codex")
         .env("FLUENT_NATIVE_BINARY", &terminal)
         .env("FLUENT_NATIVE_SOURCE", root.path())
         .env("FLUENT_NATIVE_SESSION", "fixture")
-        .env("FLUENT_NATIVE_PROVIDER", "codex")
         .env("FLUENT_NATIVE_RACE_READY", &ready)
         .env("FLUENT_NATIVE_RACE_RELEASE", &release)
         .env("FLUENT_NATIVE_RACE_ATTEMPT", &attempt)
@@ -3083,8 +3101,7 @@ fn host_native_agent_acceptance() {
         let race_ready = runtime.join("race.ready");
         let race_release = runtime.join("race.release");
         let race_attempt = runtime.join("race.attempt");
-        let mut race = Command::new("expect")
-            .args(["-c", HOST_NATIVE_RACE_CONTROL])
+        let mut race = host_native_race_command(provider)
             .env("FLUENT_NATIVE_BINARY", binary)
             .env("FLUENT_NATIVE_SOURCE", &project)
             .env("FLUENT_NATIVE_SESSION", &session)
