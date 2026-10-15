@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -653,78 +654,74 @@ struct DisplaySpool {
 }
 
 struct DisplaySpoolState {
-    file: File,
-    read_offset: u64,
-    write_offset: u64,
+    frames: VecDeque<String>,
+    queued_bytes: usize,
     closed: bool,
 }
 
 impl DisplaySpool {
-    fn new() -> Result<Self> {
-        Ok(Self {
+    const MAX_QUEUED_BYTES: usize = 12 * 1024 * 1024;
+
+    fn new() -> Self {
+        Self {
             state: Mutex::new(DisplaySpoolState {
-                file: tempfile::tempfile().context("create native Codex display spool")?,
-                read_offset: 0,
-                write_offset: 0,
+                frames: VecDeque::new(),
+                queued_bytes: 0,
                 closed: false,
             }),
             ready: Condvar::new(),
-        })
+        }
     }
 
-    fn push(&self, text: String) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
-        ensure!(!state.closed, "Codex display spool closed");
-        let bytes = text.as_bytes();
-        let length = u64::try_from(bytes.len()).context("Codex display frame too large")?;
-        let offset = state.write_offset;
-        state.file.seek(SeekFrom::Start(offset))?;
-        state.file.write_all(&length.to_le_bytes())?;
-        state.file.write_all(bytes)?;
-        state.write_offset = offset + 8 + length;
+    // A display that cannot keep up loses its connection. Provider evidence
+    // and completion continue through the independent downstream reader.
+    fn push(&self, text: String) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return false;
+        }
+        if text.len() > Self::MAX_QUEUED_BYTES - state.queued_bytes {
+            state.frames.clear();
+            state.queued_bytes = 0;
+            state.closed = true;
+            self.ready.notify_all();
+            return false;
+        }
+        state.queued_bytes += text.len();
+        state.frames.push_back(text);
         self.ready.notify_one();
-        Ok(())
+        true
     }
 
-    fn pop(&self) -> Result<Option<String>> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+    fn pop(&self) -> Option<String> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         loop {
-            if state.read_offset < state.write_offset {
-                let offset = state.read_offset;
-                state.file.seek(SeekFrom::Start(offset))?;
-                let mut length = [0; 8];
-                state.file.read_exact(&mut length)?;
-                let length = usize::try_from(u64::from_le_bytes(length))
-                    .context("Codex display frame exceeds address space")?;
-                let mut bytes = vec![0; length];
-                state.file.read_exact(&mut bytes)?;
-                state.read_offset = offset + 8 + length as u64;
-                return Ok(Some(String::from_utf8(bytes)?));
+            if let Some(frame) = state.frames.pop_front() {
+                state.queued_bytes -= frame.len();
+                return Some(frame);
             }
             if state.closed {
-                return Ok(None);
+                return None;
             }
             state = self
                 .ready
                 .wait(state)
-                .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+                .unwrap_or_else(|error| error.into_inner());
         }
     }
 
-    fn close(&self) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Codex display spool poisoned"))?;
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.closed = true;
         self.ready.notify_all();
-        Ok(())
+    }
+
+    fn detach(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.frames.clear();
+        state.queued_bytes = 0;
+        state.closed = true;
+        self.ready.notify_all();
     }
 }
 
@@ -931,7 +928,7 @@ where
     let downstream_abort_client = client.get_ref().try_clone()?;
     let downstream_abort_server = server.get_ref().try_clone()?;
     let display_abort_client = client.get_ref().try_clone()?;
-    let display_abort_server = server.get_ref().try_clone()?;
+    let overflow_abort_client = client.get_ref().try_clone()?;
     client
         .get_ref()
         .set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -951,16 +948,18 @@ where
     )));
     let evidence = Arc::new(Mutex::new(evidence));
     // Keep protocol frames in order without making evidence capture wait for
-    // the TUI. The temporary file bounds the relay's memory under backpressure.
-    let display_spool = Arc::new(DisplaySpool::new()?);
+    // the TUI. Disconnect a display that exceeds the bounded queue.
+    let display_spool = Arc::new(DisplaySpool::new());
+    let display_detached = Arc::new(AtomicBool::new(false));
     std::thread::scope(|scope| {
         let display_client = Arc::clone(&client);
         let display_trace = Arc::clone(&trace);
         let display_gate = Arc::clone(&gate);
         let display_queue = Arc::clone(&display_spool);
+        let display_detached_for_worker = Arc::clone(&display_detached);
         let display = scope.spawn(move || -> Result<()> {
             let result = (|| {
-                while let Some(text) = display_queue.pop()? {
+                while let Some(text) = display_queue.pop() {
                     let mut client = display_client
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
@@ -969,7 +968,7 @@ where
                             .lock()
                             .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
                             .input_sequence;
-                        trace_relay(
+                        let _ = trace_relay(
                             &display_trace,
                             generation,
                             thread_id,
@@ -977,17 +976,19 @@ where
                             "send-error",
                             None,
                             sequence,
-                        )?;
+                        );
                         return Err(error);
                     }
                 }
                 Ok(())
             })();
             if result.is_err() {
+                display_detached_for_worker.store(true, Ordering::Release);
+                display_queue.detach();
                 let _ = display_abort_client.shutdown(Shutdown::Both);
-                let _ = display_abort_server.shutdown(Shutdown::Both);
             }
-            result
+            // Display errors cannot invalidate provider evidence or completion.
+            Ok(())
         });
         let upstream_client = Arc::clone(&client);
         let upstream_server = Arc::clone(&server);
@@ -995,12 +996,16 @@ where
         let request_evidence = Arc::clone(&evidence);
         let request_trace = Arc::clone(&trace);
         let bootstrap_display = Arc::clone(&display_spool);
+        let request_display_detached = Arc::clone(&display_detached);
         let upstream = scope.spawn(move || -> Result<()> {
             let mut handoff = handoff.map(|handoff| (handoff, false, false, false));
             let result = (|| {
                 loop {
                     let line = match read_socket(&upstream_client) {
                         Err(error) => {
+                            if request_display_detached.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
                             let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "read-error", None, sequence)?;
                             return Err(error).context("reading native Codex TUI requests");
@@ -1080,8 +1085,10 @@ where
                                 .context("Codex TUI bootstrap request omitted its id")?;
                             let mut reply = reply.clone();
                             reply["id"] = id.clone();
-                            bootstrap_display.push(reply.to_string())
-                                .context("queue Codex TUI bootstrap response")?;
+                            if !bootstrap_display.push(reply.to_string()) {
+                                request_display_detached.store(true, Ordering::Release);
+                                let _ = client_abort.shutdown(Shutdown::Both);
+                            }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
                             continue;
                         }
@@ -1089,16 +1096,20 @@ where
                             && request["params"]["includeTurns"] == true
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
-                            bootstrap_display.push(reply.to_string())
-                                .context("queue Codex TUI display-only read")?;
+                            if !bootstrap_display.push(reply.to_string()) {
+                                request_display_detached.store(true, Ordering::Release);
+                                let _ = client_abort.shutdown(Shutdown::Both);
+                            }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
                         if responses.fresh && *resumed && method == "thread/turns/list"
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_page(&responses.thread, &request, thread_id)?;
-                            bootstrap_display.push(reply.to_string())
-                                .context("queue Codex TUI display-only page")?;
+                            if !bootstrap_display.push(reply.to_string()) {
+                                request_display_detached.store(true, Ordering::Release);
+                                let _ = client_abort.shutdown(Shutdown::Both);
+                            }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
                             continue;
                         }
@@ -1136,7 +1147,9 @@ where
                 }
             })();
             let _ = client_abort.shutdown(Shutdown::Both);
-            let _ = server_abort.shutdown(Shutdown::Both);
+            if result.is_err() || !request_display_detached.load(Ordering::Acquire) {
+                let _ = server_abort.shutdown(Shutdown::Both);
+            }
             result
         });
         let downstream_server = Arc::clone(&server);
@@ -1144,6 +1157,7 @@ where
         let response_evidence = Arc::clone(&evidence);
         let response_trace = Arc::clone(&trace);
         let response_display = Arc::clone(&display_spool);
+        let response_display_detached = Arc::clone(&display_detached);
         let downstream = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 loop {
@@ -1267,9 +1281,20 @@ where
                         evidence.write_all(b"\n")?;
                         evidence.flush()?;
                     }
-                    response_display
-                        .push(line)
-                        .context("queue Codex TUI protocol frame")?;
+                    if !response_display.push(line)
+                        && !response_display_detached.swap(true, Ordering::AcqRel)
+                    {
+                        let _ = trace_relay(
+                            &response_trace,
+                            generation,
+                            thread_id,
+                            "app-to-tui",
+                            "display-detached",
+                            None,
+                            input_sequence,
+                        );
+                        let _ = overflow_abort_client.shutdown(Shutdown::Both);
+                    }
                     if completion != Completion::Ignored {
                         on_completion(completion)?;
                     }
@@ -1281,15 +1306,13 @@ where
         });
         let upstream = upstream.join();
         let downstream = downstream.join();
-        display_spool.close()?;
-        let display = display
-            .join()
-            .map_err(|_| anyhow::anyhow!("Codex WebSocket display relay panicked"))?;
+        display_spool.close();
+        let _ = display.join();
         let upstream =
             upstream.map_err(|_| anyhow::anyhow!("Codex WebSocket request relay panicked"))?;
         let downstream =
             downstream.map_err(|_| anyhow::anyhow!("Codex WebSocket event relay panicked"))?;
-        display.and(downstream).and(upstream)
+        downstream.and(upstream)
     })
 }
 
@@ -1721,6 +1744,15 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{self, Read};
+
+    #[test]
+    fn display_spool_disconnects_at_its_byte_limit() {
+        let spool = DisplaySpool::new();
+        assert!(spool.push("x".repeat(DisplaySpool::MAX_QUEUED_BYTES)));
+        assert!(!spool.push("y".into()));
+        assert!(spool.pop().is_none());
+        assert!(!spool.push("z".into()));
+    }
 
     #[test]
     fn bootstrap_evidence_records_selected_native_launch_method() {

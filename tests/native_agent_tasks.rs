@@ -2096,8 +2096,8 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
 
 #[cfg(unix)]
 #[test]
-fn codex_websocket_backpressure_fails_and_settles_workers() {
-    use fluent::native_agent::codex::relay_codex_websockets;
+fn codex_websocket_backpressure_preserves_evidence_and_completion() {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::os::unix::net::UnixStream;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
@@ -2105,42 +2105,76 @@ fn codex_websocket_backpressure_fails_and_settles_workers() {
 
     let (tui_stream, relay_client) = UnixStream::pair().unwrap();
     let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let evidence_path = directory.path().join("evidence.jsonl");
+    let evidence = std::fs::File::create(&evidence_path).unwrap();
+    let trace_path = directory.path().join("relay-trace.jsonl");
+    let trace = std::fs::File::create(&trace_path).unwrap();
     let (done_tx, done_rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = mpsc::channel();
     let relay = std::thread::spawn(move || {
         let client = tungstenite::accept(relay_client).unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
-        let result = relay_codex_websockets(
+        let result = relay_codex_websockets_with_trace(
             client,
             server,
             "generation-1",
             "assigned-thread",
             Arc::new(NativeAdmission::new()),
-            std::io::sink(),
-            |_| Ok(()),
+            evidence,
+            |completion| completion_tx.send(completion).map_err(anyhow::Error::new),
+            trace,
         );
         done_tx
-            .send(result.map_err(|error| error.to_string()))
+            .send(result.map_err(|error| format!("{error:#}")))
             .unwrap();
     });
     let provider = std::thread::spawn(move || {
         let mut socket = tungstenite::accept(provider_stream).unwrap();
-        let frame = json!({"method":"account/updated","params":{"data":"x".repeat(256 * 1024)}})
-            .to_string();
+        let request = socket.read().unwrap().into_text().unwrap();
+        assert!(request.contains("turn/start"));
+        socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+        let frame = json!({"method":"item/updated","params":{"threadId":"assigned-thread","turnId":"turn-1","data":"x".repeat(256 * 1024)}}).to_string();
         for _ in 0..96 {
-            if socket.send(Message::Text(frame.clone())).is_err() {
-                break;
-            }
+            socket.send(Message::Text(frame.clone())).unwrap();
         }
+        socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}).to_string())).unwrap();
+        socket.close(None).unwrap();
     });
-    let (tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
     tui.get_ref()
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
-    // Keep the TUI socket open without reading required app-server frames.
-    let failure = done_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("relay did not settle after TUI backpressure");
-    assert!(failure.unwrap_err().contains("Codex TUI"));
+    // Keep the TUI socket open without reading app-server frames.
+    assert!(matches!(
+        completion_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        Completion::Accepted { .. }
+    ));
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("relay did not settle after provider completion");
+    assert!(
+        result.is_ok(),
+        "display backpressure failed the Task: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(evidence_path)
+            .unwrap()
+            .lines()
+            .count(),
+        99
+    );
+    let diagnostics = std::fs::read_to_string(trace_path).unwrap();
+    assert!(
+        diagnostics.contains("\"outcome\":\"display-detached\"")
+            || diagnostics.contains("\"outcome\":\"send-error\""),
+        "slow display was never detached"
+    );
     let _ = tui.get_ref().shutdown(std::net::Shutdown::Both);
     provider.join().unwrap();
     relay.join().unwrap();
