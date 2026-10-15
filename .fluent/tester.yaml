@@ -40,12 +40,11 @@ commands:
       export FLUENT_LANDING_RECOVERY_OLD_BIN
       FLUENT_NO_CHANGE_COMPLETION_OLD_BIN="$(bash tests/fixtures/build-no-change-completion-old-reader.sh)"
       export FLUENT_NO_CHANGE_COMPLETION_OLD_BIN
-      cargo build
-      production_bin="$(pwd)/target/debug/fluent-production"
-      cp target/debug/fluent "$production_bin"
+      cargo build --bin fluent --target-dir target/production
+      production_bin="$(pwd)/target/production/debug/fluent"
       export FLUENT_PRODUCTION_BIN="$production_bin"
-      cargo build --features test-support
-      export FLUENT_BIN_OVERRIDE="$(pwd)/target/debug/fluent"
+      cargo build --features test-support --bin fluent --target-dir target/test-support
+      export FLUENT_BIN_OVERRIDE="$(pwd)/target/test-support/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
       FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --message-format libtest-json 2>&1
@@ -54,8 +53,8 @@ commands:
   - command: |
       unset FLUENT_MAX_TOTAL_WRITE_ROUNDS
       export FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass
-      cargo build --features test-support
-      export FLUENT_BIN_OVERRIDE="$(pwd)/target/debug/fluent"
+      cargo build --features test-support --bin fluent --target-dir target/test-support
+      export FLUENT_BIN_OVERRIDE="$(pwd)/target/test-support/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
       bash -c '
