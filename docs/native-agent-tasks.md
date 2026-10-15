@@ -1,10 +1,16 @@
 # Native agent Tasks
 
 Select `--terminal-mode native` when creating an Attempt to run assigned agent
-Tasks in the provider's foreground interface. Existing Attempts and new Attempts
-without this option use headless execution. Resolve the provider, model, and
-effort (Pi thinking level) before launch. Writer Tasks retain the Attempt's
-selected conversation across authorized continuations. Review, Learner, and
+Tasks in the provider's foreground interface. `--terminal-mode headless`
+explicitly selects headless execution. Either CLI option overrides configuration.
+Without a CLI option, Fluent reads `terminal.mode` from the project's
+`.fluent/config.yaml`, then the user's `~/.config/fluent/config.yaml`, and
+defaults to headless when neither sets a mode. Fluent saves the selected mode
+on the Attempt for subsequent Tasks and retries. Existing Attempts use their
+saved mode; only legacy Attempts without a saved mode resolve to headless.
+Resolve the provider, model, and effort (Pi thinking level) before launch.
+Writer Tasks retain the Attempt's selected conversation across authorized
+continuations. Review, Learner, and
 rebase Tasks launch new ephemeral conversations; Codex never resumes a Writer
 thread for these roles. Fluent still advances each Task through its normal
 review, Tester, Learner, and landing gates.
@@ -46,8 +52,10 @@ An interrupted invocation or missing evidence fails through the Task recovery
 path; the next Task cannot claim its completion.
 
 If Codex exits before its first turn, run
-`tests/host/check-native-codex-first-turn.sh` with the authorized host flag and
-resolved Codex model and effort. It stops after an assigned `turn/started` and
+`tests/host/check-native-codex-first-turn.sh` after setting
+`FLUENT_TEST_REAL_NATIVE_AGENT_HOST=1`, `FLUENT_NATIVE_CODEX_MODEL`, and
+`FLUENT_NATIVE_CODEX_EFFORT`. Set the latter two to the resolved Codex model and
+effort. The script stops after an assigned `turn/started` and
 cancels the disposable Task through the public owner. Inspect the fixture's
 `native-codex-relay-diagnostics.jsonl` for the first failing direction and
 `native-codex-client-diagnostics.jsonl` for the client exit status. These files
@@ -57,9 +65,13 @@ output signals from the native pane. This focused check does not replace the
 full real-provider acceptance check.
 
 Run `tests/host/check-native-agent-tasks.sh` only after host and provider-run
-authorization. It requires resolved model and effort variables, a local Pi
-endpoint matching the selected `local-openai` profile, and `expect` for terminal
-attachment. The script stores its fixture
+authorization. Set `FLUENT_TEST_REAL_NATIVE_AGENT_HOST=1` and the resolved
+`FLUENT_NATIVE_CODEX_MODEL`, `FLUENT_NATIVE_CODEX_EFFORT`,
+`FLUENT_NATIVE_CLAUDE_MODEL`, `FLUENT_NATIVE_CLAUDE_EFFORT`,
+`FLUENT_NATIVE_PI_MODEL`, and `FLUENT_NATIVE_PI_EFFORT`. Set
+`FLUENT_NATIVE_PI_ENDPOINT` to the local HTTP server with an explicit port for
+the selected `local-openai` profile. The script also requires `expect` for
+terminal attachment. It stores its fixture
 repos, Task logs, candidate, and provider versions under a host evidence
 directory. Review the candidate-bound host results through the targeted Tests
 Review and remaining domain reviews. The final Tester then runs the complete
