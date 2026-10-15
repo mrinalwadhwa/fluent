@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -515,6 +515,46 @@ fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
     ));
     values.push(("PWD".into(), task.workspace.as_os_str().to_owned()));
     values
+}
+
+fn provider_startup_log(socket_dir: &Path) -> PathBuf {
+    socket_dir.join("native-provider-stderr.log")
+}
+
+fn archive_provider_startup_log(log: &Path, artifact: &Path) -> Result<PathBuf> {
+    const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
+    let archived = artifact.join("native-provider-stderr.log");
+    let source = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(log)
+    {
+        Ok(source) => Some(source),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("open native Codex provider stderr"),
+    };
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&archived)
+        .context("create archived native Codex provider stderr")?;
+    if let Some(source) = source {
+        ensure!(
+            source.metadata()?.file_type().is_file(),
+            "native Codex provider stderr is not a regular file"
+        );
+        let copied = std::io::copy(&mut source.take(MAX_DIAGNOSTIC_BYTES + 1), &mut destination)
+            .context("archive native Codex provider stderr")?;
+        if copied > MAX_DIAGNOSTIC_BYTES {
+            destination.set_len(MAX_DIAGNOSTIC_BYTES)?;
+            destination.seek(SeekFrom::Start(MAX_DIAGNOSTIC_BYTES))?;
+            destination.write_all(b"\n[provider stderr truncated]\n")?;
+        }
+    } else {
+        destination.write_all(b"native Codex pane produced no provider output\n")?;
+    }
+    destination.sync_all()?;
+    Ok(archived)
 }
 
 fn write_bootstrap_evidence(
@@ -1406,7 +1446,10 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     let thread_file = sockets.path().join("assigned-thread");
     let generation_file = sockets.path().join("assigned-generation");
     let script_path = artifact.join("native-codex-pane.sh");
-    let provider_log = artifact.join("native-provider-stderr.log");
+    // Learner artifacts are host-owned and read-only to the provider. Redirect
+    // before app-server starts into the invocation's writable socket directory;
+    // the owner archives the log after the terminal has settled.
+    let provider_log = provider_startup_log(sockets.path());
     let client_exit = sockets.path().join("client-exit");
     // The pane starts its private server and waits until the owner has loaded
     // one assigned thread through the same app-server process.
@@ -1441,6 +1484,14 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         &[sockets.path().to_path_buf()],
         &[daemon_resources.socket.clone()],
         &[daemon_resources.lock.clone()],
+    )
+    .map_err(
+        |error| match archive_provider_startup_log(&provider_log, artifact) {
+            Ok(path) => error.context(format!("native Codex provider stderr: {}", path.display())),
+            Err(archive_error) => error.context(format!(
+                "native Codex provider stderr could not be archived: {archive_error:#}"
+            )),
+        },
     )?;
     let outcome = (|| -> Result<()> {
         let (thread_id, start_event, initialized, bootstrap_socket) = bootstrap(
@@ -1654,13 +1705,43 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     if outcome.is_err() {
         let _ = terminal.stop();
     }
-    outcome
+    let archived = archive_provider_startup_log(&provider_log, artifact);
+    match (outcome, archived) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(path)) => {
+            Err(error.context(format!("native Codex provider stderr: {}", path.display())))
+        }
+        (Err(error), Err(archive_error)) => Err(error.context(format!(
+            "native Codex provider stderr could not be archived: {archive_error:#}"
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{self, Read};
+
+    #[test]
+    fn provider_startup_log_uses_invocation_writable_directory() {
+        let invocation = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let log = provider_startup_log(invocation.path());
+        assert!(log.starts_with(invocation.path()));
+        assert!(!log.starts_with(artifact.path()));
+        fs::write(&log, "app-server startup failed\n").unwrap();
+        let archived = archive_provider_startup_log(&log, artifact.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(archived).unwrap(),
+            "app-server startup failed\n"
+        );
+
+        let linked_log = invocation.path().join("linked-provider.log");
+        std::os::unix::fs::symlink(&log, &linked_log).unwrap();
+        let second_artifact = tempfile::tempdir().unwrap();
+        assert!(archive_provider_startup_log(&linked_log, second_artifact.path()).is_err());
+    }
 
     #[cfg(unix)]
     struct OwnedAppServerFixture {
