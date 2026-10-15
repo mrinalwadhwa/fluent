@@ -6673,6 +6673,59 @@ pub fn ordinary_review_profile_for_test(
     .context("missing Review profile")
 }
 
+/// Exercise the Review validator with a captured native transcript.
+#[cfg(feature = "test-support")]
+pub fn native_review_inspection_for_test(
+    inspection: &Path,
+    workspace: &Path,
+    transcript: &Path,
+    commit: &str,
+) -> Result<()> {
+    crate::review_inspection::validate(inspection, workspace, transcript, commit, "tests")?;
+    Ok(())
+}
+
+/// Build the ordinary Review prompt around a captured native transcript.
+#[cfg(feature = "test-support")]
+pub fn native_review_prompt_for_test(project_root: &Path, transcript: &Path) -> Result<String> {
+    let mut item = WorkItem {
+        id: "work-1".into(),
+        title: "Native review evidence".into(),
+        ..Default::default()
+    };
+    item.add_initial_attempt("attempt-1")?;
+    let writer = &mut item.attempts[0].tasks[0];
+    let workspace = writer.workspace_access.writes[0].clone();
+    writer.status = TaskStatus::Complete;
+    writer.output = Some(crate::work_model::TaskOutput {
+        workspace_id: workspace.id,
+        workspace_path: workspace.path.clone(),
+        source_branch: "main".into(),
+        base_commit: None,
+        commit: "candidate".into(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.add_review_tasks("attempt-1", &["behaviors"])?;
+    let workspace = project_root.join(workspace.path);
+    fs::create_dir_all(&workspace)?;
+    let artifact_dir = project_root.join("review-evidence");
+    let review_path = artifact_dir.join("review.md");
+    let transcript = transcript.to_path_buf();
+    let prompts = build_work_review_prompts(WorkReviewPromptInput {
+        item: &item,
+        attempt_id: "attempt-1",
+        task_id: "attempt-1-review-behaviors",
+        project_root,
+        artifact_dir: &artifact_dir,
+        review_path: &review_path,
+        readable_workspaces: std::slice::from_ref(&workspace),
+        input_artifacts: std::slice::from_ref(&transcript),
+        review_only: false,
+    })?;
+    Ok(prompts.review_prompt)
+}
+
 #[cfg(feature = "test-support")]
 pub fn accepted_review_evidence_for_test(
     project_root: &Path,

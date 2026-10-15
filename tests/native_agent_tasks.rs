@@ -211,6 +211,33 @@ fn old_turn_cannot_complete_current_invocation() {
             .unwrap(),
         Completion::Ignored
     );
+    gate.admit_request(&json!({"id": 2, "method": "turn/start", "params": {"threadId": "assigned-thread", "input": []}})).unwrap();
+    let next_started = json!({"method": "turn/started", "params": {"threadId": "assigned-thread", "turn": {"id": "turn-2"}}});
+    let next_completed = json!({"method": "turn/completed", "params": {"threadId": "assigned-thread", "turn": {"id": "turn-2", "status": "completed"}}});
+    assert_eq!(
+        gate.observe_event_for_generation("generation-2", &next_started)
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event_for_generation("generation-2", &completed)
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event_for_generation("generation-2", &json!({"method": "turn/completed", "params": {"threadId": "other-thread", "turn": {"id": "turn-2", "status": "completed"}}}))
+            .unwrap(),
+        Completion::Ignored
+    );
+    assert_eq!(
+        gate.observe_event_for_generation("generation-2", &next_completed)
+            .unwrap(),
+        Completion::Accepted {
+            generation: "generation-2".into(),
+            turn_id: "turn-2".into(),
+            input_sequence: 2,
+        }
+    );
 }
 
 #[test]
@@ -908,6 +935,11 @@ fn attempt_retains_native_mode_across_resume() {
     use clap::Parser;
     use fluent::cli::{AttemptCommands, Cli, Commands};
 
+    if std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").as_deref() == Ok("1") {
+        run_host_native_task_continuation("writer-retry");
+        return;
+    }
+
     let cli = Cli::try_parse_from([
         "fluent",
         "attempt",
@@ -964,6 +996,33 @@ fn attempt_retains_native_mode_across_resume() {
     let mut loaded = store.read_work_item_snapshot("work-1").unwrap();
     reopen_attempt(&mut loaded.attempts[0]);
     assert_eq!(loaded.attempts[0].terminal_mode, TerminalMode::Native);
+
+    // A correction round creates a new Writer Task from the stored Attempt.
+    // The authorized host fixture also exercises the resulting Task launch.
+    store
+        .mutate_work_item("work-1", |item| {
+            let task = &mut item.attempts[0].tasks[0];
+            fluent::work_model::set_task_terminal(task, fluent::work_model::TaskStatus::Complete);
+            let workspace = &task.workspace_access.writes[0];
+            task.output = Some(fluent::work_model::TaskOutput {
+                workspace_id: workspace.id.clone(),
+                workspace_path: workspace.path.clone(),
+                source_branch: "main".into(),
+                base_commit: None,
+                commit: "first-candidate".into(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            item.add_next_write_round("attempt-1", vec![])
+        })
+        .unwrap();
+    let retried = store.read_work_item_snapshot("work-1").unwrap();
+    assert_eq!(retried.attempts[0].terminal_mode, TerminalMode::Native);
+    assert_eq!(retried.attempts[0].tasks[1].id, "attempt-1-write-2");
+    assert_eq!(
+        retried.attempts[0].tasks[1].status,
+        fluent::work_model::TaskStatus::Planned
+    );
 
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join(".fluent")).unwrap();
@@ -2577,6 +2636,105 @@ fn native_evidence_reaches_existing_consumers() {
     );
     assert_eq!(claude_rows.len(), 1);
     assert_eq!(claude_rows[0].output_tokens, 8);
+
+    // Feed the captured Codex events through the remaining production readers.
+    let project = tempfile::tempdir().unwrap();
+    let workspace = project.path().join("candidate");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(
+        workspace.join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "src/lib.rs"]);
+    git(&[
+        "-c",
+        "user.name=Native Fixture",
+        "-c",
+        "user.email=native@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Add fixture",
+    ]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let transcript = project
+        .path()
+        .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let command_event = json!({
+        "format": "fluent-native-agent-event",
+        "schema_version": 1,
+        "provider": "codex",
+        "execution_generation": "generation-1",
+        "assigned_conversation_id": "assigned-thread",
+        "conversation_id": "assigned-thread",
+        "turn_id": "turn-1",
+        "input_sequence": 1,
+        "event": {"method": "item/completed", "params": {
+            "threadId": "assigned-thread", "turnId": "turn-1",
+            "item": {"id": "command-1", "type": "commandExecution",
+                "command": format!("git show '{commit}:src/lib.rs'"),
+                "exitCode": 0, "aggregatedOutput": "pub fn answer() -> u8 { 42 }\n"}
+        }}
+    });
+    std::fs::write(
+        &transcript,
+        format!("{}\n{command_event}\n", lines.join("\n")),
+    )
+    .unwrap();
+    let inspection = workspace.join("review-inspection.json");
+    std::fs::write(
+        &inspection,
+        json!({
+            "schema-version": 1,
+            "candidate-commit": commit,
+            "role": "tests",
+            "inspections": [{"path": "src/lib.rs", "summary": "Checked the candidate source file."}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fluent::work_task_executor::native_review_inspection_for_test(
+        &inspection,
+        &workspace,
+        &transcript,
+        &commit,
+    )
+    .unwrap();
+    let prompt =
+        fluent::work_task_executor::native_review_prompt_for_test(project.path(), &transcript)
+            .unwrap();
+    assert!(prompt.contains("Writer transcript"));
+    assert!(prompt.contains(&transcript.display().to_string()));
+
+    let recovery = project.path().join("sessions/session-1/transcript.jsonl");
+    std::fs::create_dir_all(recovery.parent().unwrap()).unwrap();
+    std::fs::copy(&transcript, &recovery).unwrap();
+    let latest = fluent::transcript::find_latest_transcript(project.path()).unwrap();
+    assert_eq!(latest, recovery);
+    let mut reader = fluent::transcript::TranscriptReader::new(latest);
+    assert!(
+        reader
+            .read_new()
+            .iter()
+            .any(|event| matches!(event, Event::Text { text } if text == "Task answer"))
+    );
+    assert!(reader.read_new().is_empty());
 }
 
 #[test]
@@ -4714,6 +4872,10 @@ exit [lindex $outcome 3]
 #[test]
 #[ignore]
 fn host_native_task_continuation_reuses_saved_conversation() {
+    run_host_native_task_continuation("writer-continuation");
+}
+
+fn run_host_native_task_continuation(fixture_name: &str) {
     use fluent::work_model::WorkModelStore;
     use std::fs;
     use std::process::Command;
@@ -4723,7 +4885,7 @@ fn host_native_task_continuation_reuses_saved_conversation() {
         "1"
     );
     let root = std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap())
-        .join("writer-continuation");
+        .join(fixture_name);
     fs::create_dir(&root).unwrap();
     let binary = env!("CARGO_BIN_EXE_fluent");
     let run = |program: &str, args: &[&str]| {

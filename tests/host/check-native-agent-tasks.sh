@@ -112,7 +112,7 @@ unset FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC
 set +e
 cargo nextest run --offline --features test-support --test native_agent_tasks \
   --no-tests fail --run-ignored all --test-threads 1 --success-output immediate \
-  -E 'test(host_native_agent_acceptance) | test(attached_operator_does_not_hold_workflow_progression) | test(continuation_reuses_conversation_not_live_terminal_identity)' \
+  -E 'test(host_native_agent_acceptance) | test(attached_operator_does_not_hold_workflow_progression) | test(attempt_retains_native_mode_across_resume) | test(continuation_reuses_conversation_not_live_terminal_identity)' \
   > "$host_output/host-test.log" 2>&1
 host_status=$?
 set -e
