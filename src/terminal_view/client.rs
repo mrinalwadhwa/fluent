@@ -137,6 +137,21 @@ impl EmbeddedTerminal {
     pub fn reconnect(&mut self) -> Result<()> {
         self.connect()
     }
+    /// Transfer the existing authority after settling the embedded client.
+    /// The inherited client retains the same Control lease, if one was held.
+    pub fn fullscreen(&mut self) -> Result<i32> {
+        ensure!(!self.ended, "invocation ended");
+        self.client.take();
+        self.focused = false;
+        let result = self.attachment.lock().unwrap().run();
+        if self.attachment.lock().unwrap().validate_live().is_err() {
+            self.ended = true;
+            self.attachment.lock().unwrap().release_control();
+        } else if let Err(error) = self.connect() {
+            self.diagnostic = Some(format!("{error:#}; press t to reconnect"));
+        }
+        result
+    }
     pub fn frame(&self) -> &Frame {
         &self.frame
     }

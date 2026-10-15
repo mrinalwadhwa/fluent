@@ -3,105 +3,19 @@ mod layout;
 pub mod project;
 mod render;
 mod snapshot;
+pub mod terminal;
 mod transitions;
 
 use anyhow::Result;
 use app::{App, Effect};
 use crossterm::event::{self, Event as CEvent};
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::{Terminal, backend::CrosstermBackend};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use terminal::DashboardTerminal;
 
 use crate::work_status;
 
 const DATA_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    cleanup: TerminalCleanup,
-}
-
-struct TerminalCleanup {
-    raw: bool,
-    alternate: bool,
-    mouse: bool,
-}
-impl TerminalCleanup {
-    fn restore(&mut self) {
-        let mut stdout = io::stdout();
-        if self.mouse {
-            let _ = crossterm::execute!(stdout, crossterm::event::DisableMouseCapture);
-            self.mouse = false;
-        }
-        if self.alternate {
-            let _ = crossterm::execute!(stdout, LeaveAlternateScreen);
-            self.alternate = false;
-        }
-        if self.raw {
-            let _ = disable_raw_mode();
-            self.raw = false;
-        }
-    }
-}
-impl Drop for TerminalCleanup {
-    fn drop(&mut self) {
-        self.restore();
-    }
-}
-
-impl TerminalSession {
-    fn open() -> Result<Self> {
-        let mut cleanup = TerminalCleanup {
-            raw: false,
-            alternate: false,
-            mouse: false,
-        };
-        enable_raw_mode()?;
-        cleanup.raw = true;
-        let mut stdout = io::stdout();
-        cleanup.alternate = true;
-        cleanup.mouse = true;
-        if let Err(error) = crossterm::execute!(
-            stdout,
-            EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture
-        ) {
-            return Err(error.into());
-        }
-        Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(stdout))?,
-            cleanup,
-        })
-    }
-
-    fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()> {
-        if self.cleanup.mouse != enabled {
-            if enabled {
-                crossterm::execute!(
-                    self.terminal.backend_mut(),
-                    crossterm::event::EnableMouseCapture
-                )?;
-            } else {
-                crossterm::execute!(
-                    self.terminal.backend_mut(),
-                    crossterm::event::DisableMouseCapture
-                )?;
-            }
-            self.cleanup.mouse = enabled;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = self.terminal.show_cursor();
-    }
-}
 
 /// Launch the read-only Work operator console.
 pub fn run_dashboard(search_root: &Path) -> Result<()> {
@@ -113,7 +27,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
     let home = crate::scheduler_service::runtime_home(search_root)?;
     let (paths, discovery_errors) = project::discover_paths(search_root, explicit, &home);
     let snapshot = load_project_snapshot(&paths, discovery_errors);
-    let mut session = TerminalSession::open()?;
+    let mut session = DashboardTerminal::open()?;
     let mut app = App::new(snapshot);
     let size = session.terminal.size()?;
     app.resize(size.width, size.height);
@@ -159,10 +73,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                 }
             } else {
                 match event {
-                    CEvent::Key(key) => {
-                        if key.kind == crossterm::event::KeyEventKind::Release {
-                            continue;
-                        }
+                    CEvent::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
                         let previous = app.selected_key.clone();
                         let effect = app.handle_key(key.code, key.modifiers);
                         if let Some(terminal) = &mut embedded {
@@ -170,6 +81,15 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                                 Effect::ControlTerminal => terminal.acquire_control(),
                                 Effect::ObserveTerminal => terminal.observe_only(),
                                 Effect::LiteralEscape => terminal.send_literal_escape(),
+                                Effect::FullscreenTerminal => {
+                                    session.handoff(|| terminal.fullscreen()).and_then(|code| {
+                                        anyhow::ensure!(
+                                            code == 0,
+                                            "terminal attachment exited with {code}"
+                                        );
+                                        Ok(())
+                                    })
+                                }
                                 _ => Ok(()),
                             };
                             if let Err(error) = result {
@@ -180,15 +100,36 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         if effect == Effect::OpenTerminal
                             || embedded.is_some() && previous != app.selected_key
                         {
-                            match open_embedded(&app) {
-                                Ok(terminal) => {
-                                    app.set_terminal(terminal.display());
-                                    embedded = Some(terminal);
+                            let same_view = previous == app.selected_key && embedded.is_some();
+                            let result = if same_view {
+                                embedded.as_mut().unwrap().reconnect()
+                            } else {
+                                // An explicit selection releases the old client's authority.
+                                embedded.take();
+                                app.terminal = None;
+                                open_embedded(&app).map(|terminal| embedded = Some(terminal))
+                            };
+                            match result {
+                                Ok(()) => {
+                                    app.set_terminal(embedded.as_ref().unwrap().display());
                                 }
                                 Err(error) => {
                                     app.refresh_failed(format!("Terminal unavailable: {error:#}"));
                                 }
                             }
+                        }
+                        if effect == Effect::FullscreenTerminal {
+                            let (width, height) = session.size()?;
+                            app.resize(width, height);
+                            if let Some(terminal) = &mut embedded {
+                                let (columns, rows) = layout::terminal_size(app.size);
+                                if let Err(error) = terminal.resize(columns, rows) {
+                                    app.refresh_failed(format!("{error:#}"));
+                                }
+                                app.set_terminal(terminal.display());
+                            }
+                            refresh_projects(search_root, explicit, &home, &mut app);
+                            next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                         if let Effect::ToggleMouse(enabled) = effect {
                             session.set_mouse_enabled(enabled)?;

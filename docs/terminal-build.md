@@ -37,3 +37,18 @@ Ctrl-C does not cancel the Attempt. Press Ctrl-] to return to dashboard
 navigation while retaining Control; press `o` to release Control and observe.
 To send the reserved character literally, press Ctrl-], then `]`; this sends
 byte 0x1d and restores terminal focus. Paste is limited to 64 KiB per event.
+
+Press `f` from navigation with a terminal open to attach full-screen in the
+current Observe or Control mode. Fluent settles the embedded client before
+transferring the same lease to the inherited-terminal client. Use tmux's
+native detach (`Ctrl-b`, then `d`) to return. Fluent restores its modes,
+selection, and current dimensions after detach, worker exit, or failure.
+Use `F` to change the Work filter while a terminal is open.
+
+After a display disconnect, `t` creates a fresh parser and tmux client to
+request a complete repaint of the same invocation. An ended invocation keeps
+its final view and cannot regain Control; explicitly select another worker.
+Inside an outer tmux, the outer prefix still belongs to the outer server:
+use its send-prefix binding (normally `Ctrl-b Ctrl-b`) before `d` to detach
+the inner full-screen client. The required host acceptance checks this nested
+routing with real providers.

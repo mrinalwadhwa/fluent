@@ -740,6 +740,17 @@ fn terminal_controls_require_an_open_view() {
         app.handle_key(KeyCode::Char(']'), KeyModifiers::NONE),
         Effect::LiteralEscape
     );
+    let selected = app.selected_key.clone();
+    assert_eq!(
+        app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE),
+        Effect::FullscreenTerminal
+    );
+    app.resize(150, 40);
+    let mut refreshed = app.snapshot.clone();
+    refreshed.errors.push("attachment failed".into());
+    app.refresh(refreshed);
+    assert_eq!(app.selected_key, selected);
+    assert_eq!(app.size, (150, 40));
 }
 
 #[test]

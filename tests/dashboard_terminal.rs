@@ -203,6 +203,111 @@ fn observer_cannot_type_or_resize_worker() {
 }
 
 #[test]
+fn resize_preserves_terminal_screen_semantics() {
+    let mut screen = Screen::new(20, 6).unwrap();
+    screen.write("primary 界e\u{301}".as_bytes());
+    screen.write(b"\x1b[?1049h\x1b[2J\x1b[H");
+    screen.write("alternate 界".as_bytes());
+    screen.write(b"\x1b[3;4H\x1b[?25h");
+    screen.resize(30, 10).unwrap();
+    let frame = screen.snapshot().unwrap();
+    assert_eq!((frame.columns, frame.rows), (30, 10));
+    assert_eq!(frame.cursor, Some((3, 2)));
+    assert!(frame.text().contains("alternate 界"));
+    assert!(!frame.text().contains("primary"));
+    assert_eq!(frame.cells[10].width, 2);
+    assert_eq!(frame.cells[11].width, 0);
+    screen.write(b"\x1b[?1049l");
+    assert!(
+        screen
+            .snapshot()
+            .unwrap()
+            .text()
+            .contains("primary 界e\u{301}")
+    );
+    assert!(screen.resize(501, 10).is_err());
+}
+
+#[test]
+fn ended_view_does_not_follow_new_invocation_input() {
+    let root = tempfile::tempdir().unwrap();
+    let mut worker = fixture(root.path(), "end");
+    let mut view =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    view.acquire_control().unwrap();
+    let generation = view.descriptor().execution_generation.clone();
+    // End the real server, retain the frontend, and publish a replacement.
+    std::thread::scope(|scope| {
+        let stopped = scope.spawn(|| worker.stop());
+        wait_for(|| {
+            view.refresh();
+            view.ended()
+        });
+        stopped.join().unwrap().unwrap();
+    });
+    let final_frame = view.frame().text();
+    let mut replacement = fixture(root.path(), "end");
+    assert_ne!(replacement.descriptor().execution_generation, generation);
+    assert_eq!(view.descriptor().execution_generation, generation);
+    assert!(view.display().state.contains("Ended"));
+    assert!(view.send(Event::Paste("forbidden".into())).is_err());
+    assert!(view.acquire_control().is_err());
+    view.refresh();
+    assert_eq!(view.frame().text(), final_frame);
+    drop(view);
+    replacement.stop().unwrap();
+}
+
+#[test]
+fn fullscreen_return_restores_dashboard_after_exit_or_failure() {
+    let output = std::process::Command::new("python3")
+        .arg("tests/fixtures/dashboard-terminal-handoff.py")
+        .arg(std::env::current_exe().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn fullscreen_pty_child() {
+    if std::env::var_os("FLUENT_HANDOFF_PTY_CHILD").is_none() {
+        return;
+    }
+    use fluent::dashboard::terminal::DashboardTerminal;
+    let mut terminal = DashboardTerminal::open().unwrap();
+    terminal.set_mouse_enabled(false).unwrap();
+    for outcome in [0, 7, -1] {
+        assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+        let result = terminal.handoff(|| -> anyhow::Result<i32> {
+            assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
+            // Exercise inherited-terminal process exit and attachment failure.
+            if outcome < 0 {
+                return Err(anyhow::anyhow!("attachment failed"));
+            }
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", &format!("test -t 0 && exit {outcome}")])
+                .status()?;
+            Ok(status.code().unwrap())
+        });
+        if outcome < 0 {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), outcome);
+        }
+        assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+        assert!(!terminal.mouse_enabled());
+        assert_eq!(terminal.size().unwrap(), (100, 30));
+    }
+    drop(terminal);
+    assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
+}
+
+#[test]
 fn worker_control_sequences_are_inert() {
     let mut screen = Screen::new(40, 8).unwrap();
     screen.write(b"\x1b[2J\x1b[Hsafe\x1b[38;2;201;33;55m red\x1b[0m\x1b]52;c;c2VjcmV0\x07\x1b]2;host-title\x07");

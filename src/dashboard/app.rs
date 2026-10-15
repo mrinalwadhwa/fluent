@@ -16,6 +16,7 @@ pub enum Effect {
     ToggleMouse(bool),
     OpenTerminal,
     ControlTerminal,
+    FullscreenTerminal,
     ObserveTerminal,
     LiteralEscape,
 }
@@ -185,6 +186,7 @@ impl App {
         if self.terminal.is_some() && !self.help && !self.errors {
             match key {
                 KeyCode::Char('i') => return Effect::ControlTerminal,
+                KeyCode::Char('f') => return Effect::FullscreenTerminal,
                 KeyCode::Char('o') => return Effect::ObserveTerminal,
                 KeyCode::Char(']') => return Effect::LiteralEscape,
                 _ => {}

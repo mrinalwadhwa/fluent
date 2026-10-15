@@ -138,6 +138,8 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         "? or Esc close help"
     } else if app.errors {
         "j/k scroll  PgUp/PgDn page  e or Esc return  ? help  q quit"
+    } else if app.terminal.is_some() {
+        "i Control  Ctrl-] navigate  ] literal  o Observe  f full-screen  t reconnect  F filter  ? help"
     } else if app.pane == Pane::Detail && area.width < 100 {
         "Esc/Tab list  j/k scroll  ? help  q quit"
     } else if area.width < 100 {
@@ -384,7 +386,7 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let text = if app.project_mode() {
-        "j/k select; Enter expand; Tab details/list; Esc list; t terminal; f next filter; a history; e errors; r refresh; c copy; ? close; q quit"
+        "j/k select; Enter expand; Tab details/list; Esc list; t terminal/reconnect; i Control; Ctrl-] navigate; ] literal; o Observe; f full-screen (open view); F filter; a history; e errors; r refresh; c copy; ? close; q quit"
     } else if app.size.0 >= 100 {
         "j/k or arrows select; PgUp/PgDn list; a Current/All; e errors; r refresh; c copy; ? close; q quit"
     } else {
