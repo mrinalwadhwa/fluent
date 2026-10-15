@@ -4774,19 +4774,49 @@ fn host_native_task_continuation_reuses_saved_conversation() {
             item.add_next_write_round("attempt-1", vec![])
         })
         .unwrap();
-    run(
-        binary,
-        &["task", "run", work, "attempt-1", "attempt-1-write-2"],
-    );
+    let second_run = Command::new(binary)
+        .args(["task", "run", work, "attempt-1", "attempt-1-write-2"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    if !second_run.status.success() {
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&second_run.stdout),
+            String::from_utf8_lossy(&second_run.stderr)
+        );
+        assert!(
+            output.contains("Writer completion evidence is missing or invalid")
+                && output.contains("native handoff correction requires a new execution generation"),
+            "second native Writer failed before the expected post-turn handoff: {output}"
+        );
+    }
     let second = store.read_work_item(work).unwrap();
     let second_task = second.attempts[0]
         .tasks
         .iter()
         .find(|task| task.id == "attempt-1-write-2")
         .unwrap();
-    assert_eq!(second_task.status, fluent::work_model::TaskStatus::Complete);
+    if second_run.status.success() {
+        assert_eq!(second_task.status, fluent::work_model::TaskStatus::Complete);
+    }
     let second_area = root.join(second_task.artifact_area.as_ref().unwrap().path.as_str());
     let resumed = read_bootstrap(&second_area);
+    let completed_turn = fs::read_to_string(second_area.join("transcript.jsonl"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|record| {
+            record["provider"] == "codex"
+                && record["event"]["method"] == "turn/completed"
+                && record["event"]["params"]["turn"]["status"] == "completed"
+                && record["assigned_conversation_id"] == saved
+                && record["execution_generation"] == resumed["execution_generation"]
+        });
+    assert!(
+        completed_turn,
+        "resumed native Writer did not complete a turn"
+    );
     assert_eq!(initial["launch_method"], "thread/start");
     assert_eq!(resumed["launch_method"], "thread/resume");
     assert_eq!(initial["assigned_conversation_id"], saved);
