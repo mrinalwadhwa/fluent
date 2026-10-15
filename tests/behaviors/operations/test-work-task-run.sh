@@ -238,7 +238,10 @@ test_run_passes_task_context_to_coder_prompt() {
   assert_contains "$PROMPT" "Work Item: work-1 - Prompt contract" || RESULT=1
   assert_contains "$PROMPT" "Fluent Writer" || RESULT=1
   assert_contains "$PROMPT" "Phase 1" || RESULT=1
-  assert_contains "$PROMPT" "Read Brief at" || RESULT=1
+  if printf '%s' "$PROMPT" | grep -Fq "Read Brief at"; then
+    printf '    FAIL: instruction-only Work Item prompt refers to a missing brief\n'
+    RESULT=1
+  fi
   assert_contains "$PROMPT" "Phase 2" || RESULT=1
   assert_contains "$PROMPT" "progress.md" || RESULT=1
   assert_contains "$PROMPT" "Phase 3" || RESULT=1
