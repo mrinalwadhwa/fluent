@@ -685,6 +685,32 @@ fn project_app(sources: Vec<project::SourceSnapshot>) -> App {
 }
 
 #[test]
+fn embedded_terminal_keeps_project_context_visible() {
+    let mut app = project_app(vec![project_source(
+        "/project",
+        vec![row("agent-work", "executing")],
+    )]);
+    let mut screen = crate::terminal_view::Screen::new(77, 22).unwrap();
+    screen.write("native 界 agent".as_bytes());
+    app.terminal = Some(crate::terminal_view::Display {
+        frame: screen.snapshot().unwrap(),
+        identity: "agent-work / attempt-1 / writer / generation-1".into(),
+        state: "Observe".into(),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rendered = buffer_text(buffer);
+    assert!(rendered.contains("same-name"), "{rendered}");
+    assert_eq!(buffer[(68, 7)].symbol(), "界");
+    assert_eq!(buffer[(71, 7)].symbol(), "a");
+    assert_eq!(buffer[(75, 7)].symbol(), "t");
+    assert_eq!(buffer[(60, 7)].symbol(), "│");
+    assert!(rendered.contains("Observe"), "{rendered}");
+    assert!(rendered.contains("agent-work"), "{rendered}");
+}
+
+#[test]
 fn project_groups_disambiguate_sources() {
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("first/same-name");

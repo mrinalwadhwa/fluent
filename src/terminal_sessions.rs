@@ -805,6 +805,36 @@ impl Attachment {
     }
 
     pub fn run(&self) -> Result<i32> {
+        let mut command = self.client_command()?;
+        let status = spawn_attachment_client(&mut command, self.control.as_ref())
+            .context("attaching managed terminal")?
+            .wait()?;
+        Ok(status.code().unwrap_or(1))
+    }
+
+    /// Start an ordinary attachment client on the frontend's owned PTY.
+    /// The runtime revalidates admission and keeps Control in the child.
+    pub fn spawn_in_pty(&self, slave: &std::fs::File) -> Result<Child> {
+        let mut command = self.client_command()?;
+        command
+            .env("TERM", "xterm-256color")
+            .stdin(slave.try_clone()?)
+            .stdout(slave.try_clone()?)
+            .stderr(slave.try_clone()?);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0
+                    || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        spawn_attachment_client(&mut command, self.control.as_ref())
+    }
+
+    fn client_command(&self) -> Result<Command> {
         validate(&self.stored, &self.stored.descriptor)?;
         let socket = self
             .stored
@@ -819,12 +849,9 @@ impl Attachment {
             .arg("attach-session")
             .arg("-E");
         if self.control.is_none() {
-            command.arg("-r");
+            command.args(["-f", "read-only,ignore-size"]);
         }
-        let status = spawn_attachment_client(&mut command, self.control.as_ref())
-            .context("attaching managed terminal")?
-            .wait()?;
-        Ok(status.code().unwrap_or(1))
+        Ok(command)
     }
 
     pub fn detach(self) {}

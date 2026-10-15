@@ -4,6 +4,7 @@ use std::process::Command;
 use std::{env, fs};
 
 fn main() {
+    build_terminal_adapter();
     print_git_rerun_paths();
 
     let commit = Command::new("git")
@@ -20,6 +21,74 @@ fn main() {
 
     generate_bundled_skills();
     generate_skill_migrations();
+}
+
+fn build_terminal_adapter() {
+    let target = env::var("TARGET").unwrap();
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let native = root.join("target/terminal-deps/install").join(&target);
+    println!("cargo:rerun-if-changed=tools/terminal-deps.env");
+    println!("cargo:rerun-if-changed=src/terminal_view/ghostty.c");
+    println!("cargo:rerun-if-changed={}", native.display());
+    assert!(
+        native.join("lib/libghostty-vt.a").is_file(),
+        "Prepare the pinned terminal library first: bash scripts/prepare-terminal-deps.sh {target}"
+    );
+    let pin = |key: &str| {
+        include_str!("tools/terminal-deps.env")
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .unwrap()
+    };
+    let receipt = fs::read_to_string(native.join("fluent-inputs"))
+        .expect("Run bash scripts/prepare-terminal-deps.sh to prepare pinned inputs");
+    let library = fs::read(native.join("lib/libghostty-vt.a")).expect("read terminal library");
+    let expected = format!(
+        "{} {} {} {target}\n{:x}\n",
+        pin("GHOSTTY_REVISION"),
+        pin("GHOSTTY_SHA256"),
+        pin("ZIG_VERSION"),
+        Sha256::digest(library)
+    );
+    assert_eq!(
+        receipt, expected,
+        "Terminal inputs changed; rerun scripts/prepare-terminal-deps.sh {target}"
+    );
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let object = out.join("fluent-ghostty.o");
+    let clang_target = target.replace("aarch64", "arm64");
+    let status = Command::new("clang")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Werror",
+            "-target",
+            &clang_target,
+        ])
+        .arg("-I")
+        .arg(native.join("include"))
+        .args(["-c", "src/terminal_view/ghostty.c", "-o"])
+        .arg(&object)
+        .status()
+        .expect("compile terminal adapter");
+    assert!(status.success(), "compiling terminal adapter failed");
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfluent-ghostty.a"))
+            .arg(object)
+            .status()
+            .expect("archive terminal adapter")
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        native.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=static=fluent-ghostty");
+    println!("cargo:rustc-link-lib=static=ghostty-vt");
 }
 
 /// Embed exact historical bundle identities that may be adopted without a

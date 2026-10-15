@@ -118,16 +118,38 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
     let size = session.terminal.size()?;
     app.resize(size.width, size.height);
     let mut next_poll = Instant::now() + DATA_POLL_INTERVAL;
+    let mut embedded: Option<crate::terminal_view::EmbeddedTerminal> = None;
 
     loop {
+        if let Some(terminal) = &mut embedded {
+            if terminal.refresh() {
+                app.set_terminal(terminal.display());
+            }
+        }
         if app.take_dirty() {
             session.terminal.draw(|frame| render::draw(frame, &app))?;
         }
-        let timeout = next_poll.saturating_duration_since(Instant::now());
+        let timeout = next_poll
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(33));
         if event::poll(timeout)? {
             match event::read()? {
                 CEvent::Key(key) => {
+                    let previous = app.selected_key.clone();
                     let effect = app.handle_key(key.code, key.modifiers);
+                    if effect == Effect::OpenTerminal
+                        || embedded.is_some() && previous != app.selected_key
+                    {
+                        match open_embedded(&app) {
+                            Ok(terminal) => {
+                                app.set_terminal(terminal.display());
+                                embedded = Some(terminal);
+                            }
+                            Err(error) => {
+                                app.refresh_failed(format!("Terminal unavailable: {error:#}"));
+                            }
+                        }
+                    }
                     if let Effect::ToggleMouse(enabled) = effect {
                         session.set_mouse_enabled(enabled)?;
                     }
@@ -149,6 +171,33 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
         }
     }
     Ok(())
+}
+
+fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
+    use anyhow::Context;
+    let key = app
+        .selected_key
+        .as_ref()
+        .context("select an agent worker, then press t")?;
+    let worker = project::find_worker(&app.snapshot.sources, key)
+        .context("expand the Work Item and select an agent worker")?;
+    let descriptor = worker
+        .terminal
+        .as_ref()
+        .context(worker.unavailable_reason.clone())?;
+    let source = app
+        .snapshot
+        .sources
+        .iter()
+        .find(|source| source.id == key.source_id)
+        .context("source is unavailable")?;
+    let attachment = crate::terminal_sessions::resolve(&source.path, &descriptor.session_id)?;
+    anyhow::ensure!(
+        attachment.descriptor() == descriptor,
+        "invocation changed; refresh and select it again"
+    );
+    let (columns, rows) = layout::terminal_size(app.size);
+    crate::terminal_view::EmbeddedTerminal::observe(attachment, columns, rows)
 }
 
 fn load_project_snapshot(

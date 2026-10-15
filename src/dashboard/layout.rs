@@ -3,6 +3,29 @@ use super::snapshot::{DashboardRow, DashboardSnapshot};
 use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
 
+pub fn terminal_size(size: (u16, u16)) -> (u16, u16) {
+    let area = ratatui::layout::Rect::new(0, 0, size.0, size.1);
+    let body = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(5),
+        ratatui::layout::Constraint::Min(5),
+        ratatui::layout::Constraint::Length(1),
+    ])
+    .split(area)[1];
+    let pane = if size.0 >= 100 {
+        ratatui::layout::Layout::horizontal([
+            ratatui::layout::Constraint::Percentage(43),
+            ratatui::layout::Constraint::Percentage(57),
+        ])
+        .split(body)[1]
+    } else {
+        body
+    };
+    (
+        pane.width.saturating_sub(2).clamp(1, 500),
+        pane.height.saturating_sub(3).clamp(1, 200),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScrollBounds {
     pub list_height: u16,

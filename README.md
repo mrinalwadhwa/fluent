@@ -392,4 +392,6 @@ The list groups Work by checkout. Each group shows project name, local host, and
 
 A source that fails a later refresh keeps its last snapshot with a `STALE` label while other projects continue updating. Worker details use `unavailable` where Fluent has no recorded model, elapsed time, or provider wait. Agent-terminal availability comes from managed terminal descriptors; a headless worker has no interactive terminal.
 
+Select a native agent worker and press `t` to observe its terminal. Wide dashboards keep the project list beside the terminal. See [terminal source builds](docs/terminal-build.md) to prepare the pinned native library before compiling Fluent.
+
 The dashboard's source snapshot contract is version 1. A source identity is its canonical local checkout path; a Work row adds the Work Item ID, and a worker row adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records and does not scan transcripts or change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.

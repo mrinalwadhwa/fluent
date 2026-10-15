@@ -75,6 +75,7 @@ pub mod setup;
 pub mod skill_install;
 pub mod slack_collaboration;
 pub mod terminal_sessions;
+pub mod terminal_view;
 #[cfg(test)]
 pub(crate) mod test_lock_probe;
 pub mod tester;

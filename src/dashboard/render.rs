@@ -141,9 +141,9 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else if app.pane == Pane::Detail && area.width < 100 {
         "Esc/Tab list  j/k scroll  ? help  q quit"
     } else if area.width < 100 {
-        "j/k select Enter expand Tab detail f filter ? help q quit"
+        "j/k select Enter expand t terminal f filter ? help q quit"
     } else {
-        "j/k select  Enter expand  f filter  a history  e errors  r refresh  ? help  q quit"
+        "j/k select  Enter expand  t terminal  f filter  e errors  r refresh  ? help  q quit"
     };
     frame.render_widget(Paragraph::new(controls), chunks[2]);
 }
@@ -230,6 +230,10 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(display) = &app.terminal {
+        crate::terminal_view::draw(frame, area, display);
+        return;
+    }
     let values = app
         .selected_key
         .as_ref()
@@ -380,7 +384,7 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let text = if app.project_mode() {
-        "j/k select; Enter expand; Tab details/list; Esc list; f next filter; a history; e errors; r refresh; c copy; ? close; q quit"
+        "j/k select; Enter expand; Tab details/list; Esc list; t terminal; f next filter; a history; e errors; r refresh; c copy; ? close; q quit"
     } else if app.size.0 >= 100 {
         "j/k or arrows select; PgUp/PgDn list; a Current/All; e errors; r refresh; c copy; ? close; q quit"
     } else {

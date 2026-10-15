@@ -14,6 +14,7 @@ pub enum Effect {
     None,
     Refresh,
     ToggleMouse(bool),
+    OpenTerminal,
 }
 pub struct App {
     pub snapshot: DashboardSnapshot,
@@ -34,6 +35,7 @@ pub struct App {
     dirty: bool,
     quit: bool,
     pub stale_error: Option<String>,
+    pub terminal: Option<crate::terminal_view::Display>,
 }
 impl App {
     pub fn new(snapshot: DashboardSnapshot) -> Self {
@@ -56,6 +58,7 @@ impl App {
             dirty: true,
             quit: false,
             stale_error: None,
+            terminal: None,
         };
         if app.project_mode() {
             app.selected_key = project::initial_key(&app.snapshot.sources, app.filter);
@@ -90,6 +93,10 @@ impl App {
     }
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
+    }
+    pub fn set_terminal(&mut self, display: crate::terminal_view::Display) {
+        self.terminal = Some(display);
+        self.dirty = true;
     }
     pub fn resize(&mut self, width: u16, height: u16) {
         self.size = (width, height);
@@ -172,6 +179,10 @@ impl App {
         self.dirty = true;
     }
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Effect {
+        if self.project_mode() && key == KeyCode::Char('t') && !self.help && !self.errors {
+            self.pane = Pane::Detail;
+            return Effect::OpenTerminal;
+        }
         if (modifiers.contains(KeyModifiers::CONTROL) && key == KeyCode::Char('c'))
             || key == KeyCode::Char('q')
         {
