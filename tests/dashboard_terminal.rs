@@ -203,7 +203,7 @@ fn observer_cannot_type_or_resize_worker() {
 }
 
 #[test]
-fn resize_preserves_terminal_screen_semantics() {
+fn screen_resize_preserves_terminal_screen_semantics() {
     let mut screen = Screen::new(20, 6).unwrap();
     screen.write("primary 界e\u{301}".as_bytes());
     screen.write(b"\x1b[?1049h\x1b[2J\x1b[H");
@@ -226,6 +226,31 @@ fn resize_preserves_terminal_screen_semantics() {
             .contains("primary 界e\u{301}")
     );
     assert!(screen.resize(501, 10).is_err());
+}
+
+#[test]
+fn resize_preserves_terminal_screen_semantics() {
+    screen_resize_preserves_terminal_screen_semantics();
+    let root = tempfile::tempdir().unwrap();
+    let mut worker = fixture(root.path(), "resize");
+    let mut view =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    view.acquire_control().unwrap();
+    view.resize(73, 13).unwrap();
+    wait_for(|| {
+        view.refresh();
+        (view.frame().columns, view.frame().rows) == (73, 13)
+    });
+    let size = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(worker.socket_path().unwrap())
+        .args(["display-message", "-p", "#{pane_width}x#{pane_height}"])
+        .output()
+        .unwrap();
+    assert!(size.status.success());
+    assert_eq!(String::from_utf8(size.stdout).unwrap().trim(), "73x13");
+    drop(view);
+    worker.stop().unwrap();
 }
 
 #[test]
@@ -372,4 +397,69 @@ fn worker_escape_sequences_stay_inside_terminal_view() {
     }
     drop(terminal);
     worker.stop().unwrap();
+}
+
+#[test]
+fn display_flood_keeps_dashboard_responsive() {
+    let root = tempfile::tempdir().unwrap();
+    let store = fluent::work_model::WorkModelStore::new(root.path());
+    for id in ["first", "second"] {
+        store
+            .create_work_item(&fluent::work_model::WorkItem::planned(id, id))
+            .unwrap();
+    }
+    let mut worker = fixture(root.path(), "flood");
+    let mut view =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    let socket = worker.socket_path().unwrap();
+    let command = r"i=0; while [ $i -lt 20000 ]; do printf '\033[Hflood-%s 界\n' $i; i=$((i+1)); done; printf 'FLOOD-DONE\n'";
+    assert!(
+        std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["send-keys", "-l", command])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(socket)
+            .args(["send-keys", "Enter"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fluent::dashboard::test_support::navigate_and_refresh(root.path(), &mut view).unwrap();
+    // Reconnect discards parser state, asks tmux for a complete repaint, and
+    // does not silently substitute a later generation.
+    let descriptor = view.descriptor().clone();
+    view.reconnect().unwrap();
+    assert_eq!(view.descriptor(), &descriptor);
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("FLOOD-DONE")
+    });
+    assert!(view.frame().cells.len() <= 60 * 10);
+    drop(view);
+    worker.stop().unwrap();
+}
+
+#[test]
+fn display_projection_bounds_frames_and_reports_lost_sync() {
+    let mut screen = Screen::new(80, 24).unwrap();
+    let chunk = "\x1b[Hflood 界e\u{301}\r\n".repeat(1024);
+    for _ in 0..128 {
+        screen.write(chunk.as_bytes());
+        let frame = screen.snapshot().unwrap();
+        assert_eq!(frame.cells.len(), 80 * 24);
+        assert!(frame.cells.iter().all(|cell| cell.text().len() <= 128));
+    }
+    // A burst of terminal queries exceeds the bounded reply mailbox.
+    screen.write(b"\x1b[6n".repeat(2000).as_slice());
+    assert!(screen.snapshot().is_err());
+    let mut reconnected = Screen::new(80, 24).unwrap();
+    reconnected.write(b"\x1b[2J\x1b[Hrepainted");
+    assert!(reconnected.snapshot().unwrap().text().contains("repainted"));
 }

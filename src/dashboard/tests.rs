@@ -748,9 +748,13 @@ fn terminal_controls_require_an_open_view() {
     app.resize(150, 40);
     let mut refreshed = app.snapshot.clone();
     refreshed.errors.push("attachment failed".into());
+    refreshed.sources[0].work.clear();
     app.refresh(refreshed);
     assert_eq!(app.selected_key, selected);
     assert_eq!(app.size, (150, 40));
+    let filter = app.filter;
+    app.handle_key(KeyCode::Char('F'), KeyModifiers::SHIFT);
+    assert_ne!(app.filter, filter);
 }
 
 #[test]

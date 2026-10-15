@@ -13,6 +13,13 @@ setup_fixture() {
   local bin="$tmp/bin"
   mkdir -p "$root/scripts" "$root/documentation/releases" "$bin"
   cp "$PROJECT_DIR/scripts/release.sh" "$root/scripts/release.sh"
+  mkdir -p "$root/tools"
+  cp "$PROJECT_DIR/tools/ghostty-LICENSE" "$root/tools/ghostty-LICENSE"
+  cat > "$root/scripts/prepare-terminal-deps.sh" <<'PREPARE'
+#!/bin/sh
+printf 'prepare %s\n' "$1" >> "$FAKE_CARGO_LOG"
+test "${FAKE_PREPARE_FAIL_TARGET:-}" != "$1"
+PREPARE
   printf '[package]\nname = "fixture"\nversion = "9.8.7"\n' > "$root/Cargo.toml"
   printf '# Fixture release notes\n' > "$root/documentation/releases/v9.8.7.md"
 
@@ -135,8 +142,11 @@ test_publishes_both_mac_architectures_at_exact_commit_after_gates() {
   grep -Fq -- '--target aarch64-apple-darwin' "$tmp/cargo.log"
   grep -Fq -- '--target x86_64-apple-darwin' "$tmp/cargo.log"
 
+  grep -Fq 'ghostty-LICENSE' "$tmp/gh.log"
   local target checksum asset
   for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    grep -Fxq "prepare $target" "$tmp/cargo.log"
+    test "$(grep -n "prepare $target" "$tmp/cargo.log" | cut -d: -f1)" -lt "$(grep -n "build --release --target $target" "$tmp/cargo.log" | cut -d: -f1)"
     grep -Fq -- "fluent-${target}" "$tmp/gh.log"
     grep -Fq -- "fluent-${target}.sha256" "$tmp/gh.log"
     grep -Fq -- "--sign - --force $tmp/project/target/release-staging/fluent-${target}" \
@@ -151,6 +161,17 @@ test_publishes_both_mac_architectures_at_exact_commit_after_gates() {
       "$(shasum -a 256 "$asset" | awk '{print $1}')" ] || return 1
     [ "$(awk '{print $2}' "$checksum")" = "fluent-${target}" ] || return 1
   done
+}
+
+test_rejects_failed_native_preparation_before_publication() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  setup_fixture "$tmp"
+  if run_release "$tmp" FAKE_PREPARE_FAIL_TARGET=x86_64-apple-darwin > "$tmp/output" 2>&1; then
+    return 1
+  fi
+  [ ! -e "$tmp/gh.log" ]
 }
 
 test_rejects_failed_target_build_before_publication() {
@@ -285,4 +306,5 @@ run_test "rejects reused tag or failed release gate" \
 run_test "rejects missing release notes" \
   test_rejects_missing_release_notes
 
+run_test "rejects failed native preparation before publication" test_rejects_failed_native_preparation_before_publication
 summarize_and_exit

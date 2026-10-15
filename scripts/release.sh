@@ -68,7 +68,8 @@ fi
 
 readonly STAGING="$REPO_ROOT/target/release-staging"
 mkdir -p "$STAGING"
-declare -a RELEASE_ASSETS=()
+cp "$REPO_ROOT/tools/ghostty-LICENSE" "$STAGING/ghostty-LICENSE"
+declare -a RELEASE_ASSETS=("$STAGING/ghostty-LICENSE")
 
 for target in "${RELEASE_TARGETS[@]}"; do
   asset_name="fluent-${target}"
@@ -77,6 +78,7 @@ for target in "${RELEASE_TARGETS[@]}"; do
   staged_binary="$STAGING/$asset_name"
 
   printf 'Building release binary for %s ...\n' "$target"
+  bash "$REPO_ROOT/scripts/prepare-terminal-deps.sh" "$target"
   cargo build --release --target "$target" \
     --manifest-path "$REPO_ROOT/Cargo.toml"
 

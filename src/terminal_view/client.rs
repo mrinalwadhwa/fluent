@@ -139,16 +139,35 @@ impl EmbeddedTerminal {
     }
     /// Transfer the existing authority after settling the embedded client.
     /// The inherited client retains the same Control lease, if one was held.
-    pub fn fullscreen(&mut self) -> Result<i32> {
+    pub fn fullscreen(&mut self, columns: u16, rows: u16) -> Result<i32> {
         ensure!(!self.ended, "invocation ended");
         self.client.take();
         self.focused = false;
-        let result = self.attachment.lock().unwrap().run();
+        let result = {
+            let attachment = self.attachment.lock().unwrap();
+            (|| {
+                if attachment.has_control() {
+                    attachment.resize(columns, rows)?;
+                }
+                attachment.run()
+            })()
+        };
         if self.attachment.lock().unwrap().validate_live().is_err() {
             self.ended = true;
             self.attachment.lock().unwrap().release_control();
-        } else if let Err(error) = self.connect() {
-            self.diagnostic = Some(format!("{error:#}; press t to reconnect"));
+        } else {
+            let restore = (|| {
+                if self.has_control() {
+                    self.attachment
+                        .lock()
+                        .unwrap()
+                        .resize(self.size.0, self.size.1)?;
+                }
+                self.connect()
+            })();
+            if let Err(error) = restore {
+                self.diagnostic = Some(format!("{error:#}; press t to reconnect"));
+            }
         }
         result
     }
@@ -282,6 +301,10 @@ impl EmbeddedTerminal {
             let unavailable = self.attachment.lock().unwrap().validate_live().is_err();
             if unavailable {
                 self.client.take();
+                // Settling the reader can publish one last complete frame.
+                if let Some(frame) = self.latest.lock().unwrap().frame.take() {
+                    self.frame = frame;
+                }
                 self.focused = false;
                 self.ended = true;
                 self.attachment.lock().unwrap().release_control();

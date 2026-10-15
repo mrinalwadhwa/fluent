@@ -1,14 +1,10 @@
 use super::layout;
+pub(super) use super::model::{App, Pane};
 use super::project::{self, Filter, RowKey};
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pane {
-    List,
-    Detail,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     None,
@@ -19,27 +15,6 @@ pub enum Effect {
     FullscreenTerminal,
     ObserveTerminal,
     LiteralEscape,
-}
-pub struct App {
-    pub snapshot: DashboardSnapshot,
-    all_work: bool,
-    selected: Option<String>,
-    pub selected_key: Option<RowKey>,
-    pub filter: Filter,
-    pub expanded: BTreeSet<RowKey>,
-    selected_index: usize,
-    pub pane: Pane,
-    pub help: bool,
-    pub errors: bool,
-    pub error_scroll: u16,
-    pub copy_mode: bool,
-    pub list_scroll: u16,
-    pub detail_scroll: u16,
-    pub size: (u16, u16),
-    dirty: bool,
-    quit: bool,
-    pub stale_error: Option<String>,
-    pub terminal: Option<crate::terminal_view::Display>,
 }
 impl App {
     pub fn new(snapshot: DashboardSnapshot) -> Self {
@@ -71,27 +46,14 @@ impl App {
         }
         app
     }
-    pub fn selected_id(&self) -> Option<&str> {
-        self.selected_key
-            .as_ref()
-            .map(|key| key.work_item_id.as_str())
-            .or(self.selected.as_deref())
-    }
-    pub fn project_mode(&self) -> bool {
-        self.snapshot.project_view
-    }
-    pub fn project_keys(&self) -> Vec<RowKey> {
-        project::visible_keys(&self.snapshot.sources, self.filter, &self.expanded)
-    }
+
     pub fn select_key(&mut self, key: RowKey) {
         self.selected_key = Some(key);
         self.reconcile_project_selection();
         self.keep_selection_visible();
         self.dirty = true;
     }
-    pub fn all_work(&self) -> bool {
-        self.all_work
-    }
+
     pub fn should_quit(&self) -> bool {
         self.quit
     }
@@ -116,7 +78,11 @@ impl App {
         self.snapshot = snapshot;
         self.stale_error = None;
         if self.project_mode() {
-            self.reconcile_project_selection();
+            // Keep the displayed generation selected until explicit navigation,
+            // even when a source refresh removes its row.
+            if self.terminal.is_none() {
+                self.reconcile_project_selection();
+            }
         } else {
             self.reconcile_selection(prior);
         }
@@ -247,7 +213,7 @@ impl App {
                 };
                 self.dirty = true;
             }
-            KeyCode::Char('f') if self.project_mode() => {
+            KeyCode::Char('f') | KeyCode::Char('F') if self.project_mode() => {
                 self.filter = self.filter.next();
                 self.reconcile_project_selection();
                 self.clamp_scrolls();
@@ -405,19 +371,5 @@ impl App {
         self.list_scroll = self.list_scroll.min(bounds.list_max_scroll);
         self.detail_scroll = self.detail_scroll.min(bounds.detail_max_scroll);
         self.keep_selection_visible();
-    }
-
-    pub fn scroll_bounds(&self) -> layout::ScrollBounds {
-        if self.project_mode() {
-            layout::project_scroll_bounds(
-                &self.snapshot.sources,
-                self.filter,
-                &self.expanded,
-                self.selected_key.as_ref(),
-                self.size,
-            )
-        } else {
-            layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
-        }
     }
 }

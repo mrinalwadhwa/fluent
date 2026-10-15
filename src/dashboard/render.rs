@@ -1,6 +1,6 @@
 use super::{
-    app::{App, Pane},
     layout,
+    model::{App, Pane},
     snapshot::DashboardRow,
 };
 use ratatui::{

@@ -52,3 +52,22 @@ Inside an outer tmux, the outer prefix still belongs to the outer server:
 use its send-prefix binding (normally `Ctrl-b Ctrl-b`) before `d` to detach
 the inner full-screen client. The required host acceptance checks this nested
 routing with real providers.
+
+The display reader drains a nonblocking PTY independently of navigation and
+Work polling. It reads at most 8 KiB per iteration, publishes one replaceable
+frame at most every 33 ms, and retains no local scrollback. Viewports are
+limited to 500 columns by 200 rows; the input queue holds at most sixteen
+bounded events. Unsupported input, parser snapshot failures, and reply-buffer
+overflow show a diagnostic with a reconnect path. The runtime still owns
+worker execution and provider evidence.
+
+`scripts/release.sh` prepares the native library before each existing macOS
+release target and includes the Ghostty license with release assets. The
+operator acceptance command is `bash tests/host/check-dashboard-agent-terminal.sh`.
+It requires separate host/provider authorization, an external evidence directory,
+and disposable live native sources for each of Codex, Claude, and Pi (the
+required environment variables are listed at the script's start). It builds
+and identifies both release binaries, captures direct and nested dashboard
+sessions, and records concrete operator observations for every scenario.
+Incomplete scenarios fail the check; targeted Tests Review must inspect the
+captures and observations. Writer checks do not execute this host journey.

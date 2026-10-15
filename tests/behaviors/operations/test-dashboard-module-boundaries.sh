@@ -21,6 +21,7 @@ for import in \
 do
   cp "$ROOT/src/dashboard/app.rs" "$TMP/src/dashboard/app.rs"
   cp "$ROOT/src/dashboard/layout.rs" "$TMP/src/dashboard/layout.rs"
+  cp "$ROOT/src/dashboard/render.rs" "$TMP/src/dashboard/render.rs"
   printf '%s\n' "$import" >> "$TMP/src/dashboard/app.rs"
 
   if "$CHECK" "$TMP" >"$TMP/stdout" 2>"$TMP/stderr"; then
@@ -40,4 +41,15 @@ if "$CHECK" "$TMP" >"$TMP/stdout" 2>"$TMP/stderr"; then
 fi
 grep -Fq 'layout must not import app' "$TMP/stderr"
 
+for import in 'use super::app::App;' 'use super::{app::App};' 'use crate::dashboard::{app};'; do
+  cp "$ROOT/src/dashboard/app.rs" "$TMP/src/dashboard/app.rs"
+  cp "$ROOT/src/dashboard/layout.rs" "$TMP/src/dashboard/layout.rs"
+  cp "$ROOT/src/dashboard/render.rs" "$TMP/src/dashboard/render.rs"
+  printf '%s\n' "$import" >> "$TMP/src/dashboard/render.rs"
+  if "$CHECK" "$TMP" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    echo "dashboard module boundary check accepted render -> app" >&2
+    exit 1
+  fi
+  grep -Fq 'render must not import app' "$TMP/stderr"
+done
 echo "dashboard module boundary behavior tests passed"

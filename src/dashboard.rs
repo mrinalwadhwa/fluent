@@ -1,9 +1,12 @@
 mod app;
 mod layout;
+mod model;
 pub mod project;
 mod render;
 mod snapshot;
 pub mod terminal;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod transitions;
 
 use anyhow::Result;
@@ -82,13 +85,16 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                                 Effect::ObserveTerminal => terminal.observe_only(),
                                 Effect::LiteralEscape => terminal.send_literal_escape(),
                                 Effect::FullscreenTerminal => {
-                                    session.handoff(|| terminal.fullscreen()).and_then(|code| {
-                                        anyhow::ensure!(
-                                            code == 0,
-                                            "terminal attachment exited with {code}"
-                                        );
-                                        Ok(())
-                                    })
+                                    let (columns, rows) = session.size()?;
+                                    session
+                                        .handoff(|| terminal.fullscreen(columns, rows))
+                                        .and_then(|code| {
+                                            anyhow::ensure!(
+                                                code == 0,
+                                                "terminal attachment exited with {code}"
+                                            );
+                                            Ok(())
+                                        })
                                 }
                                 _ => Ok(()),
                             };

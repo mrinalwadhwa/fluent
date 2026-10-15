@@ -25,3 +25,14 @@ if grep -Eq '^[[:space:]]*use[[:space:]]+.*((super|crate::dashboard)::render|(su
   echo 'forbidden dashboard dependency cycle: app must not import render' >&2
   exit 1
 fi
+
+# Flatten grouped imports so multiline use declarations obey the same rule.
+for edge in 'app render' 'render app' 'layout app' 'layout render' 'model app' 'model render'; do
+  read -r source forbidden <<< "$edge"
+  file="$ROOT/src/dashboard/$source.rs"
+  [ -f "$file" ] || continue
+  if tr '\n' ' ' < "$file" | grep -Eq "(super|crate::dashboard)::($forbidden(::|;)|\\{[^}]*$forbidden)"; then
+    echo "forbidden dashboard dependency: $source must not import $forbidden" >&2
+    exit 1
+  fi
+done

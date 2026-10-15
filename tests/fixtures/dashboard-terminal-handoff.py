@@ -20,30 +20,34 @@ if pid == 0:
 output = bytearray()
 deadline = time.monotonic() + 15
 status = None
+eof = False
 try:
-    while time.monotonic() < deadline:
-        if select.select([master], [], [], 0.05)[0]:
+    # PTY EOF and waitpid become observable independently. Drain through EOF
+    # and reap through exit, instead of treating the first EOF as a timeout.
+    while time.monotonic() < deadline and (status is None or not eof):
+        if not eof and select.select([master], [], [], 0.01)[0]:
             try:
                 chunk = os.read(master, 65536)
             except OSError as error:
-                if error.errno == errno.EIO:
-                    break
-                raise
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
             if not chunk:
-                break
+                eof = True
             output.extend(chunk)
             if len(output) > 1024 * 1024:
                 raise AssertionError("unexpected terminal output flood")
-        done, result = os.waitpid(pid, os.WNOHANG)
-        if done:
-            status = result
-            break
+        if status is None:
+            done, result = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = result
+            elif eof:
+                time.sleep(0.01)
     if status is None:
-        done, status = os.waitpid(pid, os.WNOHANG)
-        if not done:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-            raise AssertionError("terminal handoff child did not settle")
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        raise AssertionError("terminal handoff child did not settle")
+    assert eof, "terminal handoff child left its PTY open"
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
     assert output.count(b"\x1b[?1049h") == 4, output
     assert output.count(b"\x1b[?1049l") == 4, output
