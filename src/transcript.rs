@@ -873,6 +873,37 @@ mod tests {
     }
 
     #[test]
+    fn native_evidence_reaches_recovery_reader() {
+        let tmp = TempDir::new().unwrap();
+        let session = tmp.path().join("sessions/session-1");
+        std::fs::create_dir_all(&session).unwrap();
+        let path = session.join("transcript.jsonl");
+        let event = serde_json::json!({
+            "format": "fluent-native-agent-event",
+            "schema_version": 1,
+            "provider": "codex",
+            "execution_generation": "generation-1",
+            "assigned_conversation_id": "assigned-thread",
+            "conversation_id": "assigned-thread",
+            "turn_id": "turn-1",
+            "input_sequence": 1,
+            "event": {"method": "item/completed", "params": {
+                "threadId": "assigned-thread", "turnId": "turn-1",
+                "item": {"id": "message-1", "type": "agentMessage", "text": "Recovered answer"}
+            }}
+        });
+        std::fs::write(&path, format!("{event}\n")).unwrap();
+
+        let latest = find_latest_transcript(tmp.path()).unwrap();
+        assert_eq!(latest, path);
+        let mut reader = TranscriptReader::new(latest);
+        assert!(
+            matches!(reader.read_new().as_slice(), [Event::Text { text }] if text == "Recovered answer")
+        );
+        assert!(reader.read_new().is_empty());
+    }
+
+    #[test]
     fn test_incremental_reader_idempotent() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("transcript.jsonl");

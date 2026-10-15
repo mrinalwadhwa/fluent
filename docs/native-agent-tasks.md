@@ -51,6 +51,15 @@ from the current invocation. Native Pi saves `pi-session.jsonl` for continuity.
 An interrupted invocation or missing evidence fails through the Task recovery
 path; the next Task cannot claim its completion.
 
+Native evidence consumer checks:
+
+| Consumer | Named test |
+| --- | --- |
+| Task validation | `src/review_inspection.rs::accepts_successful_native_codex_inspection_and_rejects_failed_command` |
+| Review prompt | `src/work_task_executor.rs::native_evidence_reaches_review_prompt` |
+| Usage accounting | `tests/native_agent_tasks.rs::native_evidence_reaches_existing_consumers` |
+| Recovery reader | `src/transcript.rs::native_evidence_reaches_recovery_reader` |
+
 If Codex exits before its first turn, run
 `tests/host/check-native-codex-first-turn.sh` after setting
 `FLUENT_TEST_REAL_NATIVE_AGENT_HOST=1`, `FLUENT_NATIVE_CODEX_MODEL`, and

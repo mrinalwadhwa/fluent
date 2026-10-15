@@ -20049,6 +20049,52 @@ while time.monotonic() < deadline:
     }
 
     #[test]
+    fn native_evidence_reaches_review_prompt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("work-6-work-1-attempt-1");
+        fs::create_dir_all(&workspace).unwrap();
+        let artifact_dir =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-review-behaviors");
+        let transcript = project_root
+            .join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1/transcript.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, serde_json::json!({
+            "format": "fluent-native-agent-event",
+            "schema_version": 1,
+            "provider": "codex",
+            "execution_generation": "generation-1",
+            "assigned_conversation_id": "assigned-thread",
+            "conversation_id": "assigned-thread",
+            "turn_id": "turn-1",
+            "input_sequence": 1,
+            "event": {"method": "item/completed", "params": {
+                "threadId": "assigned-thread", "turnId": "turn-1",
+                "item": {"id": "message-1", "type": "agentMessage", "text": "Native Writer answer"}
+            }}
+        }).to_string()).unwrap();
+        let item = review_item_with_role("behaviors");
+        let prompts = build_work_review_prompts(WorkReviewPromptInput {
+            item: &item,
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-review-behaviors",
+            project_root,
+            artifact_dir: &artifact_dir,
+            review_path: &artifact_dir.join("review.md"),
+            readable_workspaces: std::slice::from_ref(&workspace),
+            input_artifacts: std::slice::from_ref(&transcript),
+            review_only: false,
+        })
+        .unwrap();
+        assert!(
+            prompts
+                .review_prompt
+                .contains(&transcript.display().to_string())
+        );
+        assert!(prompts.review_prompt.contains("Writer transcript"));
+    }
+
+    #[test]
     fn work_review_prompt_includes_shell_safe_executable_diff_command() {
         let item = review_item();
         let tmp = tempfile::TempDir::new().unwrap();

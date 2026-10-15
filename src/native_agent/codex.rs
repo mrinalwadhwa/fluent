@@ -1035,12 +1035,6 @@ where
                         let admitted = gate.admit_request(&request);
                         (admitted, gate.input_sequence)
                     };
-                    if admitted.as_ref().is_ok_and(Option::is_none) {
-                        eprintln!("native Codex TUI request: {method}");
-                    }
-                    if admitted.as_ref().is_ok_and(Option::is_some) {
-                        eprintln!("native Codex TUI admitted input: {method}");
-                    }
                     if let Err(error) = admitted {
                         trace_relay(&request_trace, generation, thread_id, "tui-to-app", "rejected", Some(method), next_sequence)?;
                         if let Some(id) = request.get("id") {
@@ -1235,12 +1229,6 @@ where
                             return Err(error);
                         }
                     };
-                    if input_sequence == 0 {
-                        eprintln!(
-                            "native Codex app-server message before turn: {}",
-                            event["method"].as_str().unwrap_or("response")
-                        );
-                    }
                     trace_relay(
                         &response_trace,
                         generation,
@@ -1650,7 +1638,6 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     None,
                     0,
                 );
-                eprintln!("native Codex relay failed: {error:#}");
                 let _ = tx.send(Err(error));
             }
         });
@@ -2647,13 +2634,15 @@ mod tests {
         let (relay_server, provider_stream) = UnixStream::pair().unwrap();
         let (completed, received) = mpsc::channel();
         let evidence_path = workspace.path().join("evidence.jsonl");
+        let trace_path = workspace.path().join("relay-diagnostics.jsonl");
         let evidence = File::create(&evidence_path).unwrap();
+        let trace = File::create(&trace_path).unwrap();
         let relay = std::thread::spawn(move || {
             let client = tungstenite::accept(relay_client).unwrap();
             let server = tungstenite::client("ws://localhost/", relay_server)
                 .unwrap()
                 .0;
-            relay_codex_websockets(
+            relay_codex_websockets_with_trace(
                 client,
                 server,
                 "generation-1",
@@ -2661,6 +2650,7 @@ mod tests {
                 Arc::new(NativeAdmission::new()),
                 evidence,
                 |completion| completed.send(completion).map_err(anyhow::Error::new),
+                trace,
             )
         });
         let provider = std::thread::spawn(move || {
@@ -2715,6 +2705,11 @@ mod tests {
         drop(tui);
         drop(provider.join().unwrap());
         let _ = relay.join().unwrap();
+        let diagnostics = fs::read_to_string(trace_path).unwrap();
+        assert!(diagnostics.contains("\"direction\":\"tui-to-app\""));
+        assert!(diagnostics.contains("\"direction\":\"app-to-tui\""));
+        assert!(diagnostics.contains("\"method\":\"turn/start\""));
+        assert!(diagnostics.lines().count() <= 272);
     }
 
     fn neighboring_daemon_socket(daemon: &CodexDaemonResources) -> PathBuf {
