@@ -4870,9 +4870,25 @@ exit [lindex $outcome 3]
 /// Run two native Writer Tasks through Fluent's Task launcher. The second Task
 /// must resume the first Task's saved Codex conversation in a new terminal.
 #[test]
+fn native_continuation_fixtures_use_distinct_work_items() {
+    assert_eq!(
+        native_continuation_work_id("writer-retry"),
+        "native-writer-retry"
+    );
+    assert_eq!(
+        native_continuation_work_id("writer-continuation"),
+        "native-writer-continuation"
+    );
+}
+
+#[test]
 #[ignore]
 fn host_native_task_continuation_reuses_saved_conversation() {
     run_host_native_task_continuation("writer-continuation");
+}
+
+fn native_continuation_work_id(fixture_name: &str) -> String {
+    format!("native-{fixture_name}")
 }
 
 fn run_host_native_task_continuation(fixture_name: &str) {
@@ -4908,7 +4924,8 @@ fn run_host_native_task_continuation(fixture_name: &str) {
     fs::write(root.join("README.md"), "Native continuation fixture.\n").unwrap();
     run("git", &["add", "README.md"]);
     run("git", &["commit", "-m", "Add fixture"]);
-    let work = "native-writer-continuation";
+    let work_id = native_continuation_work_id(fixture_name);
+    let work = work_id.as_str();
     run(
         binary,
         &[
