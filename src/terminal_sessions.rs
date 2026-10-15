@@ -748,6 +748,28 @@ impl TerminalSession {
 }
 
 impl Attachment {
+    pub fn validate_live(&self) -> Result<()> {
+        validate(&self.stored, &self.stored.descriptor)
+    }
+
+    pub fn has_control(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// Release the frontend's lease after its writable client has settled.
+    /// A surviving client still holds its inherited descriptor independently.
+    pub fn release_control(&mut self) {
+        self.control.take();
+    }
+
+    pub fn validate_input(&self) -> Result<()> {
+        self.validate_live()?;
+        ensure!(
+            self.has_control(),
+            "Control is required to send terminal input"
+        );
+        Ok(())
+    }
     pub fn descriptor(&self) -> &TerminalDescriptor {
         &self.stored.descriptor
     }

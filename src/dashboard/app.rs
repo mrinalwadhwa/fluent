@@ -15,6 +15,9 @@ pub enum Effect {
     Refresh,
     ToggleMouse(bool),
     OpenTerminal,
+    ControlTerminal,
+    ObserveTerminal,
+    LiteralEscape,
 }
 pub struct App {
     pub snapshot: DashboardSnapshot,
@@ -179,6 +182,14 @@ impl App {
         self.dirty = true;
     }
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Effect {
+        if self.terminal.is_some() && !self.help && !self.errors {
+            match key {
+                KeyCode::Char('i') => return Effect::ControlTerminal,
+                KeyCode::Char('o') => return Effect::ObserveTerminal,
+                KeyCode::Char(']') => return Effect::LiteralEscape,
+                _ => {}
+            }
+        }
         if self.project_mode() && key == KeyCode::Char('t') && !self.help && !self.errors {
             self.pane = Pane::Detail;
             return Effect::OpenTerminal;

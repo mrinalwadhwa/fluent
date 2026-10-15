@@ -1,6 +1,7 @@
-use super::{Frame, Screen, screen::dimensions};
-use crate::terminal_sessions::Attachment;
+use super::{Frame, Input, Screen, input::MAX_PASTE_BYTES, releases_focus, screen::dimensions};
+use crate::terminal_sessions::{Attachment, ControlOutcome, TerminalDescriptor};
 use anyhow::{Context, Result, ensure};
+use crossterm::event::Event;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -8,6 +9,7 @@ use std::process::Child;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, SyncSender},
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,78 +17,21 @@ use std::time::{Duration, Instant};
 struct Update {
     frame: Option<Frame>,
     error: Option<String>,
+    closed: bool,
+}
+enum Command {
+    Input(Event),
+    LiteralEscape,
+    Resize(u16, u16),
 }
 
-/// A client owns only the display PTY. Dropping it detaches without cancelling
-/// the invocation; the execution runtime remains the authority for liveness.
-pub struct EmbeddedTerminal {
-    attachment: Attachment,
+struct Client {
     child: Child,
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
-    latest: Arc<Mutex<Update>>,
-    frame: Frame,
-    pub diagnostic: Option<String>,
+    commands: SyncSender<Command>,
 }
-impl EmbeddedTerminal {
-    pub fn observe(attachment: Attachment, columns: u16, rows: u16) -> Result<Self> {
-        dimensions(columns, rows)?;
-        let frame = Screen::new(columns, rows)?.snapshot()?;
-        let (master, slave) = open_pty(columns, rows)?;
-        let mut child = attachment.spawn_in_pty(&slave)?;
-        drop(slave);
-        let latest = Arc::new(Mutex::new(Update {
-            frame: None,
-            error: None,
-        }));
-        let stop = Arc::new(AtomicBool::new(false));
-        let reader = {
-            let latest = Arc::clone(&latest);
-            let stop = Arc::clone(&stop);
-            match thread::Builder::new()
-                .name("terminal-display".into())
-                .spawn(move || {
-                    if let Err(error) = drain(master, columns, rows, &stop, &latest) {
-                        latest.lock().unwrap().error = Some(format!("{error:#}"));
-                    }
-                }) {
-                Ok(reader) => reader,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error.into());
-                }
-            }
-        };
-        Ok(Self {
-            attachment,
-            child,
-            stop,
-            reader: Some(reader),
-            latest,
-            frame,
-            diagnostic: None,
-        })
-    }
-    pub fn frame(&self) -> &Frame {
-        &self.frame
-    }
-    pub fn descriptor(&self) -> &crate::terminal_sessions::TerminalDescriptor {
-        self.attachment.descriptor()
-    }
-    pub fn refresh(&mut self) -> bool {
-        let mut latest = self.latest.lock().unwrap();
-        let changed = latest.frame.is_some() || latest.error.is_some();
-        if let Some(frame) = latest.frame.take() {
-            self.frame = frame;
-        }
-        if let Some(error) = latest.error.take() {
-            self.diagnostic = Some(error);
-        }
-        changed
-    }
-}
-impl Drop for EmbeddedTerminal {
+impl Drop for Client {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
@@ -97,12 +42,246 @@ impl Drop for EmbeddedTerminal {
     }
 }
 
+/// Own only the display client. Execution ownership and Control admission stay
+/// with the runtime; input is revalidated again immediately before each write.
+pub struct EmbeddedTerminal {
+    attachment: Arc<Mutex<Attachment>>,
+    descriptor: TerminalDescriptor,
+    client: Option<Client>,
+    latest: Arc<Mutex<Update>>,
+    frame: Frame,
+    size: (u16, u16),
+    focused: bool,
+    ended: bool,
+    next_liveness: Instant,
+    pub diagnostic: Option<String>,
+}
+impl EmbeddedTerminal {
+    pub fn observe(attachment: Attachment, columns: u16, rows: u16) -> Result<Self> {
+        dimensions(columns, rows)?;
+        ensure!(
+            !attachment.has_control(),
+            "observation cannot inherit Control"
+        );
+        let descriptor = attachment.descriptor().clone();
+        let mut terminal = Self {
+            attachment: Arc::new(Mutex::new(attachment)),
+            descriptor,
+            client: None,
+            latest: Arc::new(Mutex::new(Update {
+                frame: None,
+                error: None,
+                closed: false,
+            })),
+            frame: Screen::new(columns, rows)?.snapshot()?,
+            size: (columns, rows),
+            focused: false,
+            ended: false,
+            next_liveness: Instant::now(),
+            diagnostic: None,
+        };
+        terminal.connect()?;
+        Ok(terminal)
+    }
+    fn connect(&mut self) -> Result<()> {
+        ensure!(!self.ended, "invocation ended; select another worker");
+        self.client.take();
+        *self.latest.lock().unwrap() = Update {
+            frame: None,
+            error: None,
+            closed: false,
+        };
+        let (master, slave) = open_pty(self.size.0, self.size.1)?;
+        let mut child = self.attachment.lock().unwrap().spawn_in_pty(&slave)?;
+        drop(slave);
+        let (tx, rx) = mpsc::sync_channel(16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_reader = Arc::clone(&stop);
+        let latest = Arc::clone(&self.latest);
+        let attachment = Arc::clone(&self.attachment);
+        let (columns, rows) = self.size;
+        let reader = match thread::Builder::new()
+            .name("terminal-display".into())
+            .spawn(move || {
+                let result = drain(
+                    master,
+                    columns,
+                    rows,
+                    &stop_reader,
+                    &latest,
+                    &rx,
+                    &attachment,
+                );
+                let mut latest = latest.lock().unwrap();
+                latest.closed = true;
+                if let Err(error) = result {
+                    latest.error = Some(format!("{error:#}; press t to reconnect"));
+                }
+            }) {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        self.client = Some(Client {
+            child,
+            stop,
+            reader: Some(reader),
+            commands: tx,
+        });
+        self.diagnostic = None;
+        Ok(())
+    }
+    pub fn reconnect(&mut self) -> Result<()> {
+        self.connect()
+    }
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+    pub fn descriptor(&self) -> &TerminalDescriptor {
+        &self.descriptor
+    }
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+    pub fn has_control(&self) -> bool {
+        self.attachment.lock().unwrap().has_control()
+    }
+    pub fn state_label(&self) -> String {
+        if self.ended {
+            return "Ended · input unavailable".into();
+        }
+        if let Some(reason) = &self.diagnostic {
+            return reason.clone();
+        }
+        if self.has_control() {
+            if self.focused {
+                "Control · Ctrl-] navigate"
+            } else {
+                "Control · navigation"
+            }
+        } else {
+            "Observe · i control"
+        }
+        .into()
+    }
+    pub fn acquire_control(&mut self) -> Result<()> {
+        ensure!(!self.ended, "invocation ended");
+        self.client.take();
+        let result = (|| {
+            let mut attachment = self.attachment.lock().unwrap();
+            ensure!(
+                attachment.acquire_control()? == ControlOutcome::Acquired,
+                "Control is occupied"
+            );
+            attachment.resize(self.size.0, self.size.1)
+        })();
+        if let Err(error) = result {
+            self.attachment.lock().unwrap().release_control();
+            let _ = self.connect();
+            return Err(error);
+        }
+        if let Err(error) = self.connect() {
+            self.attachment.lock().unwrap().release_control();
+            return Err(error);
+        }
+        self.focused = true;
+        Ok(())
+    }
+    pub fn observe_only(&mut self) -> Result<()> {
+        self.client.take();
+        self.focused = false;
+        self.attachment.lock().unwrap().release_control();
+        self.connect()
+    }
+    pub fn send(&mut self, event: Event) -> Result<()> {
+        ensure!(
+            self.focused && !self.ended,
+            "terminal input requires focused Control"
+        );
+        self.attachment.lock().unwrap().validate_input()?;
+        if releases_focus(&event) {
+            self.focused = false;
+            return Ok(());
+        }
+        if let Event::Paste(text) = &event {
+            ensure!(text.len() <= MAX_PASTE_BYTES, "paste exceeds 64 KiB");
+        }
+        self.enqueue(Command::Input(event))
+    }
+    pub fn send_literal_escape(&mut self) -> Result<()> {
+        ensure!(!self.ended, "invocation ended");
+        self.attachment.lock().unwrap().validate_input()?;
+        self.enqueue(Command::LiteralEscape)?;
+        self.focused = true;
+        Ok(())
+    }
+    fn enqueue(&self, command: Command) -> Result<()> {
+        self.client
+            .as_ref()
+            .context("display disconnected; press t to reconnect")?
+            .commands
+            .try_send(command)
+            .map_err(|_| {
+                anyhow::anyhow!("terminal input queue unavailable; input was not accepted")
+            })
+    }
+    pub fn resize(&mut self, columns: u16, rows: u16) -> Result<()> {
+        dimensions(columns, rows)?;
+        if self.size == (columns, rows) || self.ended {
+            return Ok(());
+        }
+        if self.has_control() {
+            self.attachment.lock().unwrap().resize(columns, rows)?;
+        }
+        self.enqueue(Command::Resize(columns, rows))?;
+        self.size = (columns, rows);
+        Ok(())
+    }
+    pub fn refresh(&mut self) -> bool {
+        let mut changed = false;
+        {
+            let mut latest = self.latest.lock().unwrap();
+            if let Some(frame) = latest.frame.take() {
+                self.frame = frame;
+                changed = true;
+            }
+            if let Some(error) = latest.error.take() {
+                self.diagnostic = Some(error);
+                self.focused = false;
+                changed = true;
+            }
+            if latest.closed && self.diagnostic.is_none() && !self.ended {
+                self.diagnostic = Some("Disconnected · t reconnect".into());
+                self.focused = false;
+                changed = true;
+            }
+        }
+        if !self.ended && Instant::now() >= self.next_liveness {
+            self.next_liveness = Instant::now() + Duration::from_millis(200);
+            let unavailable = self.attachment.lock().unwrap().validate_live().is_err();
+            if unavailable {
+                self.client.take();
+                self.focused = false;
+                self.ended = true;
+                self.attachment.lock().unwrap().release_control();
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 fn open_pty(columns: u16, rows: u16) -> Result<(File, File)> {
-    let mut master = -1;
-    let mut slave = -1;
+    let (mut master, mut slave) = (-1, -1);
     let mut size = libc::winsize {
-        ws_row: rows,
         ws_col: columns,
+        ws_row: rows,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -140,17 +319,25 @@ fn drain(
     rows: u16,
     stop: &AtomicBool,
     latest: &Mutex<Update>,
+    commands: &Receiver<Command>,
+    attachment: &Mutex<Attachment>,
 ) -> Result<()> {
     let mut screen = Screen::new(columns, rows)?;
-    let mut bytes = [0u8; 8192];
+    let mut bytes = [0; 8192];
     let mut next_frame = Instant::now();
     let mut dirty = false;
+    // Keep at most one input pending. Revalidate every partial write, including
+    // when a queued event outlives the invocation that originally admitted it.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut offset = 0;
     while !stop.load(Ordering::Relaxed) {
+        let mut active = false;
         match master.read(&mut bytes) {
             Ok(0) => break,
             Ok(n) => {
                 screen.write(&bytes[..n]);
                 dirty = true;
+                active = true;
                 let replies = screen.replies();
                 if !replies.is_empty() {
                     master
@@ -158,17 +345,63 @@ fn drain(
                         .context("terminal reply lost; reconnect to repaint")?;
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5))
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+            Err(e) => return Err(e.into()),
+        }
+        if pending.is_empty() {
+            if let Ok(command) = commands.try_recv() {
+                active = true;
+                match command {
+                    Command::Input(event) => {
+                        if let Input::Bytes(bytes) = screen.input(event)? {
+                            pending = bytes;
+                        }
+                    }
+                    Command::LiteralEscape => pending = vec![29],
+                    Command::Resize(c, r) => {
+                        let size = libc::winsize {
+                            ws_col: c,
+                            ws_row: r,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        ensure!(
+                            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) }
+                                == 0,
+                            "resizing client PTY failed"
+                        );
+                        screen.resize(c, r)?;
+                        dirty = true;
+                    }
+                }
             }
-            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-            Err(error) => return Err(error.into()),
+        }
+        if !pending.is_empty() {
+            let authority = attachment.lock().unwrap();
+            authority.validate_input()?;
+            match master.write(&pending[offset..]) {
+                Ok(0) => anyhow::bail!("terminal input closed"),
+                Ok(n) => {
+                    offset += n;
+                    active = true;
+                    if offset == pending.len() {
+                        pending.clear();
+                        offset = 0;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         if dirty && Instant::now() >= next_frame {
             let frame = screen.snapshot()?;
             latest.lock().unwrap().frame = Some(frame);
             dirty = false;
             next_frame = Instant::now() + Duration::from_millis(33);
+        }
+        if !active {
+            thread::sleep(Duration::from_millis(5));
         }
     }
     if dirty {

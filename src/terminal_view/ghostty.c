@@ -21,6 +21,84 @@ typedef struct {
     bool failed;
 } FluentVt;
 
+int fluent_vt_resize(FluentVt *vt, uint16_t columns, uint16_t rows) {
+    return ghostty_terminal_resize(vt->terminal, columns, rows, 8, 16);
+}
+
+int fluent_vt_key(FluentVt *vt, uint32_t special, uint32_t cp, uint16_t mods,
+                  int action, const char *text, size_t len, char *out, size_t cap, size_t *written) {
+    GhosttyKeyEncoder encoder = NULL;
+    GhosttyKeyEvent event = NULL;
+    if (ghostty_key_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return -1;
+    if (ghostty_key_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+        ghostty_key_encoder_free(encoder); return -1;
+    }
+    GhosttyKey key = GHOSTTY_KEY_UNIDENTIFIED;
+    static const GhosttyKey keys[] = {GHOSTTY_KEY_UNIDENTIFIED,
+        GHOSTTY_KEY_ENTER, GHOSTTY_KEY_ESCAPE, GHOSTTY_KEY_BACKSPACE, GHOSTTY_KEY_TAB,
+        GHOSTTY_KEY_ARROW_UP, GHOSTTY_KEY_ARROW_DOWN, GHOSTTY_KEY_ARROW_LEFT, GHOSTTY_KEY_ARROW_RIGHT,
+        GHOSTTY_KEY_HOME, GHOSTTY_KEY_END, GHOSTTY_KEY_PAGE_UP, GHOSTTY_KEY_PAGE_DOWN,
+        GHOSTTY_KEY_INSERT, GHOSTTY_KEY_DELETE};
+    if (special < sizeof(keys)/sizeof(keys[0])) key = keys[special];
+    else if (special >= 101 && special <= 125) key = GHOSTTY_KEY_F1 + special - 101;
+    if (!special) {
+        if (cp >= 'a' && cp <= 'z') key = GHOSTTY_KEY_A + cp - 'a';
+        else if (cp >= '0' && cp <= '9') key = GHOSTTY_KEY_DIGIT_0 + cp - '0';
+        else switch (cp) {
+            case ' ': key = GHOSTTY_KEY_SPACE; break;
+            case '[': key = GHOSTTY_KEY_BRACKET_LEFT; break;
+            case ']': key = GHOSTTY_KEY_BRACKET_RIGHT; break;
+            case '\\': key = GHOSTTY_KEY_BACKSLASH; break;
+            case '-': key = GHOSTTY_KEY_MINUS; break;
+            case '=': key = GHOSTTY_KEY_EQUAL; break;
+            case ';': key = GHOSTTY_KEY_SEMICOLON; break;
+            case '\'': key = GHOSTTY_KEY_QUOTE; break;
+            case ',': key = GHOSTTY_KEY_COMMA; break;
+            case '.': key = GHOSTTY_KEY_PERIOD; break;
+            case '/': key = GHOSTTY_KEY_SLASH; break;
+            case '`': key = GHOSTTY_KEY_BACKQUOTE; break;
+        }
+    }
+    ghostty_key_encoder_setopt_from_terminal(encoder, vt->terminal);
+    ghostty_key_event_set_action(event, action);
+    ghostty_key_event_set_key(event, key);
+    ghostty_key_event_set_mods(event, mods);
+    ghostty_key_event_set_unshifted_codepoint(event, cp);
+    ghostty_key_event_set_utf8(event, text, len);
+    int result = ghostty_key_encoder_encode(encoder, event, out, cap, written);
+    ghostty_key_event_free(event);
+    ghostty_key_encoder_free(encoder);
+    return result;
+}
+
+int fluent_vt_paste(FluentVt *vt, char *text, size_t len, char *out, size_t cap, size_t *written) {
+    GhosttyTerminalModeConfig mode = {.mode = GHOSTTY_MODE_BRACKETED_PASTE, .value = false};
+    if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode) != GHOSTTY_SUCCESS) return -1;
+    return ghostty_paste_encode(text, len, mode.value, out, cap, written);
+}
+
+int fluent_vt_mouse(FluentVt *vt, int action, int button, uint16_t mods,
+                    uint16_t x, uint16_t y, char *out, size_t cap, size_t *written) {
+    GhosttyMouseEncoder encoder = NULL;
+    GhosttyMouseEvent event = NULL;
+    if (ghostty_mouse_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return -1;
+    if (ghostty_mouse_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+        ghostty_mouse_encoder_free(encoder); return -1;
+    }
+    ghostty_mouse_encoder_setopt_from_terminal(encoder, vt->terminal);
+    ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
+        &(GhosttyMouseEncoderSize){.size=sizeof(GhosttyMouseEncoderSize),
+            .screen_width=4000, .screen_height=3200, .cell_width=8, .cell_height=16});
+    ghostty_mouse_event_set_action(event, action);
+    ghostty_mouse_event_set_button(event, button);
+    ghostty_mouse_event_set_mods(event, mods);
+    ghostty_mouse_event_set_position(event, (GhosttyMousePosition){.x=x*8.0f, .y=y*16.0f});
+    int result = ghostty_mouse_encoder_encode(encoder, event, out, cap, written);
+    ghostty_mouse_event_free(event);
+    ghostty_mouse_encoder_free(encoder);
+    return result;
+}
+
 static void reply(GhosttyTerminal terminal, void *userdata, const uint8_t *bytes, size_t len) {
     (void)terminal;
     FluentVt *vt = userdata;

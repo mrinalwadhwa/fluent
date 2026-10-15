@@ -4,6 +4,11 @@ use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
 
 pub fn terminal_size(size: (u16, u16)) -> (u16, u16) {
+    let content = terminal_content(size);
+    (content.width.clamp(1, 500), content.height.clamp(1, 200))
+}
+
+pub fn terminal_content(size: (u16, u16)) -> ratatui::layout::Rect {
     let area = ratatui::layout::Rect::new(0, 0, size.0, size.1);
     let body = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(5),
@@ -20,9 +25,11 @@ pub fn terminal_size(size: (u16, u16)) -> (u16, u16) {
     } else {
         body
     };
-    (
-        pane.width.saturating_sub(2).clamp(1, 500),
-        pane.height.saturating_sub(3).clamp(1, 200),
+    ratatui::layout::Rect::new(
+        pane.x + 1,
+        pane.y + 2,
+        pane.width.saturating_sub(2),
+        pane.height.saturating_sub(3),
     )
 }
 

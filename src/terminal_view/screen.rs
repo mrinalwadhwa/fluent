@@ -46,6 +46,7 @@ impl Frame {
 unsafe extern "C" {
     fn fluent_vt_new(columns: u16, rows: u16) -> *mut c_void;
     fn fluent_vt_free(vt: *mut c_void);
+    fn fluent_vt_resize(vt: *mut c_void, columns: u16, rows: u16) -> i32;
     fn fluent_vt_write(vt: *mut c_void, bytes: *const u8, len: usize);
     fn fluent_vt_replies(vt: *mut c_void, out: *mut u8) -> usize;
     fn fluent_vt_snapshot(
@@ -64,6 +65,19 @@ pub struct Screen {
     rows: u16,
 }
 impl Screen {
+    pub(super) fn raw(&self) -> *mut c_void {
+        self.vt.as_ptr()
+    }
+    pub fn resize(&mut self, columns: u16, rows: u16) -> Result<()> {
+        dimensions(columns, rows)?;
+        ensure!(
+            unsafe { fluent_vt_resize(self.raw(), columns, rows) } == 0,
+            "resizing terminal failed"
+        );
+        self.columns = columns;
+        self.rows = rows;
+        Ok(())
+    }
     pub fn new(columns: u16, rows: u16) -> Result<Self> {
         dimensions(columns, rows)?;
         let vt = NonNull::new(unsafe { fluent_vt_new(columns, rows) })

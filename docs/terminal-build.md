@@ -30,3 +30,10 @@ In the dashboard, expand a Work Item, select its native agent worker, and press
 `t` to observe its terminal beside the project list. Observe clients use tmux's
 `read-only,ignore-size` flags. Terminal output is interpreted inside Ghostty
 and projected as cells; it cannot set the dashboard title or clipboard.
+
+Press `i` to acquire Control. While the terminal has focus, Esc, Ctrl-C,
+keys, mouse events inside the viewport, and paste reach that invocation.
+Ctrl-C does not cancel the Attempt. Press Ctrl-] to return to dashboard
+navigation while retaining Control; press `o` to release Control and observe.
+To send the reserved character literally, press Ctrl-], then `]`; this sends
+byte 0x1d and restores terminal focus. Paste is limited to 64 KiB per event.

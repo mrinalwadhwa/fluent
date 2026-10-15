@@ -1,7 +1,9 @@
 //! Display managed invocation terminals without owning worker execution.
 mod client;
+mod input;
 mod screen;
 pub use client::EmbeddedTerminal;
+pub use input::{Input, releases_focus};
 pub use screen::{Cell, Frame, Screen};
 
 pub struct Display {
@@ -19,7 +21,7 @@ impl EmbeddedTerminal {
                 "{} / {} / {} / {} / {}",
                 d.provider, d.work_item_id, d.attempt_id, d.task_id, d.execution_generation
             ),
-            state: self.diagnostic.clone().unwrap_or_else(|| "Observe".into()),
+            state: self.state_label(),
         }
     }
 }

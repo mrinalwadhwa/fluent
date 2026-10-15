@@ -711,6 +711,38 @@ fn embedded_terminal_keeps_project_context_visible() {
 }
 
 #[test]
+fn terminal_controls_require_an_open_view() {
+    let mut app = project_app(vec![project_source(
+        "/project",
+        vec![row("work", "executing")],
+    )]);
+    assert_eq!(
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
+        Effect::None
+    );
+    app.set_terminal(crate::terminal_view::Display {
+        frame: crate::terminal_view::Screen::new(40, 8)
+            .unwrap()
+            .snapshot()
+            .unwrap(),
+        identity: "selected generation".into(),
+        state: "Observe".into(),
+    });
+    assert_eq!(
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
+        Effect::ControlTerminal
+    );
+    assert_eq!(
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::NONE),
+        Effect::ObserveTerminal
+    );
+    assert_eq!(
+        app.handle_key(KeyCode::Char(']'), KeyModifiers::NONE),
+        Effect::LiteralEscape
+    );
+}
+
+#[test]
 fn project_groups_disambiguate_sources() {
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("first/same-name");

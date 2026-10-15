@@ -133,33 +133,82 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(33));
         if event::poll(timeout)? {
-            match event::read()? {
-                CEvent::Key(key) => {
-                    let previous = app.selected_key.clone();
-                    let effect = app.handle_key(key.code, key.modifiers);
-                    if effect == Effect::OpenTerminal
-                        || embedded.is_some() && previous != app.selected_key
-                    {
-                        match open_embedded(&app) {
-                            Ok(terminal) => {
-                                app.set_terminal(terminal.display());
-                                embedded = Some(terminal);
+            let event = event::read()?;
+            let native = embedded.as_ref().is_some_and(|terminal| terminal.focused())
+                && matches!(event, CEvent::Key(_) | CEvent::Paste(_) | CEvent::Mouse(_));
+            if native {
+                let terminal = embedded.as_mut().unwrap();
+                let event = match event {
+                    CEvent::Mouse(mut mouse) => {
+                        let area = layout::terminal_content(app.size);
+                        if area.contains((mouse.column, mouse.row).into()) {
+                            mouse.column -= area.x;
+                            mouse.row -= area.y;
+                            Some(CEvent::Mouse(mouse))
+                        } else {
+                            None
+                        }
+                    }
+                    other => Some(other),
+                };
+                if let Some(event) = event {
+                    if let Err(error) = terminal.send(event) {
+                        app.refresh_failed(format!("{error:#}"));
+                    }
+                    app.set_terminal(terminal.display());
+                }
+            } else {
+                match event {
+                    CEvent::Key(key) => {
+                        if key.kind == crossterm::event::KeyEventKind::Release {
+                            continue;
+                        }
+                        let previous = app.selected_key.clone();
+                        let effect = app.handle_key(key.code, key.modifiers);
+                        if let Some(terminal) = &mut embedded {
+                            let result = match effect {
+                                Effect::ControlTerminal => terminal.acquire_control(),
+                                Effect::ObserveTerminal => terminal.observe_only(),
+                                Effect::LiteralEscape => terminal.send_literal_escape(),
+                                _ => Ok(()),
+                            };
+                            if let Err(error) = result {
+                                app.refresh_failed(format!("{error:#}"));
                             }
-                            Err(error) => {
-                                app.refresh_failed(format!("Terminal unavailable: {error:#}"));
+                            app.set_terminal(terminal.display());
+                        }
+                        if effect == Effect::OpenTerminal
+                            || embedded.is_some() && previous != app.selected_key
+                        {
+                            match open_embedded(&app) {
+                                Ok(terminal) => {
+                                    app.set_terminal(terminal.display());
+                                    embedded = Some(terminal);
+                                }
+                                Err(error) => {
+                                    app.refresh_failed(format!("Terminal unavailable: {error:#}"));
+                                }
+                            }
+                        }
+                        if let Effect::ToggleMouse(enabled) = effect {
+                            session.set_mouse_enabled(enabled)?;
+                        }
+                        if matches!(effect, Effect::Refresh) {
+                            refresh_projects(search_root, explicit, &home, &mut app);
+                            next_poll = Instant::now() + DATA_POLL_INTERVAL;
+                        }
+                    }
+                    CEvent::Resize(width, height) => {
+                        app.resize(width, height);
+                        if let Some(terminal) = &mut embedded {
+                            let (columns, rows) = layout::terminal_size(app.size);
+                            if let Err(error) = terminal.resize(columns, rows) {
+                                app.refresh_failed(format!("{error:#}"));
                             }
                         }
                     }
-                    if let Effect::ToggleMouse(enabled) = effect {
-                        session.set_mouse_enabled(enabled)?;
-                    }
-                    if matches!(effect, Effect::Refresh) {
-                        refresh_projects(search_root, explicit, &home, &mut app);
-                        next_poll = Instant::now() + DATA_POLL_INTERVAL;
-                    }
+                    _ => {}
                 }
-                CEvent::Resize(width, height) => app.resize(width, height),
-                _ => {}
             }
         }
         if poll_due(Instant::now(), next_poll) {
