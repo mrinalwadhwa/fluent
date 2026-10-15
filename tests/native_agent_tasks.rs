@@ -4052,7 +4052,7 @@ exit [lindex $outcome 3]
                 "Pi modeled input that its owner receiver could not admit"
             );
 
-            for (scenario, input) in [("abort", "\u{3}"), ("compact", "/compact\r")] {
+            for (scenario, input) in [("abort", "\u{1b}"), ("compact", "/compact\r")] {
                 let abort_work = format!("native-pi-{scenario}");
                 run(
                     binary,
