@@ -562,6 +562,7 @@ fn write_bootstrap_evidence(
     generation: &str,
     thread_id: &str,
     event: &Value,
+    session: CoderSession<'_>,
 ) -> Result<()> {
     let mut file = OpenOptions::new().append(true).create(true).open(path)?;
     serde_json::to_writer(
@@ -575,6 +576,11 @@ fn write_bootstrap_evidence(
             "conversation_id": thread_id,
             "turn_id": null,
             "input_sequence": 0,
+            "launch_method": if matches!(session, CoderSession::Resume(_)) {
+                "thread/resume"
+            } else {
+                "thread/start"
+            },
             "event": event,
         }),
     )?;
@@ -1504,7 +1510,13 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
         let generation = terminal.descriptor().execution_generation.clone();
         fs::write(&generation_file, &generation)?;
         let transcript = artifact.join("transcript.jsonl");
-        write_bootstrap_evidence(&transcript, &generation, &thread_id, &start_event)?;
+        write_bootstrap_evidence(
+            &transcript,
+            &generation,
+            &thread_id,
+            &start_event,
+            task.session,
+        )?;
         fs::write(&thread_file, &thread_id)?;
         let evidence = OpenOptions::new().append(true).open(&transcript)?;
         let admission = Arc::new(NativeAdmission::new());
@@ -1722,6 +1734,33 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{self, Read};
+
+    #[test]
+    fn bootstrap_evidence_records_selected_native_launch_method() {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        for (session, expected) in [
+            (CoderSession::FreshPersistent, "thread/start"),
+            (CoderSession::Resume("saved-thread"), "thread/resume"),
+        ] {
+            write_bootstrap_evidence(
+                output.path(),
+                "new-generation",
+                "saved-thread",
+                &json!({"result":{"thread":{"id":"saved-thread"}}}),
+                session,
+            )
+            .unwrap();
+            let last: Value = serde_json::from_str(
+                fs::read_to_string(output.path())
+                    .unwrap()
+                    .lines()
+                    .last()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(last["launch_method"], expected);
+        }
+    }
 
     #[test]
     fn provider_startup_log_uses_invocation_writable_directory() {

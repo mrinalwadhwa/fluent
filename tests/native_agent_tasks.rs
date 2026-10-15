@@ -869,6 +869,10 @@ fn pi_endpoint_override_preserves_effective_model() {
 #[cfg(feature = "test-support")]
 #[test]
 fn attached_operator_does_not_hold_workflow_progression() {
+    if std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").as_deref() == Ok("1") {
+        host_native_attached_attempt_progression();
+        return;
+    }
     use fluent::terminal_sessions::{ControlOutcome, TerminalIdentity, TerminalSession};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -2543,6 +2547,10 @@ fn native_evidence_reaches_existing_consumers() {
 
 #[test]
 fn continuation_reuses_conversation_not_live_terminal_identity() {
+    if std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").as_deref() == Ok("1") {
+        host_native_task_continuation_reuses_saved_conversation();
+        return;
+    }
     let make_record = |generation: &str| {
         json!({
             "format": "fluent-native-agent-event",
@@ -4466,6 +4474,7 @@ exit [lindex $outcome 3]
     }
     let mut saw_writer_complete = false;
     let mut saw_review = false;
+    let mut held_control_during_writer = false;
     while Instant::now() < deadline {
         let shown = Command::new(binary)
             .args(["work-item", "show", work])
@@ -4476,6 +4485,10 @@ exit [lindex $outcome 3]
             && let Ok(item) = serde_json::from_slice::<serde_json::Value>(&shown.stdout)
             && let Some(tasks) = item["attempts"][0]["tasks"].as_array()
         {
+            held_control_during_writer |= observer.try_wait().unwrap().is_none()
+                && tasks
+                    .iter()
+                    .any(|task| task["id"] == "attempt-1-write-1" && task["status"] == "executing");
             saw_writer_complete |= tasks
                 .iter()
                 .any(|task| task["id"] == "attempt-1-write-1" && task["status"] == "complete");
@@ -4494,6 +4507,10 @@ exit [lindex $outcome 3]
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(saw_writer_complete, "attached Writer did not complete");
+    assert!(
+        held_control_during_writer,
+        "Control was not held during the Writer Task"
+    );
     assert!(
         saw_review,
         "Attempt did not start Review after attached Writer settled"
@@ -4624,4 +4641,169 @@ exit [lindex $outcome 3]
         !rebase_area.join("codex-session").exists(),
         "non-Writer Codex Rebase retained a resumable session"
     );
+}
+
+/// Run two native Writer Tasks through Fluent's Task launcher. The second Task
+/// must resume the first Task's saved Codex conversation in a new terminal.
+#[test]
+#[ignore]
+fn host_native_task_continuation_reuses_saved_conversation() {
+    use fluent::work_model::WorkModelStore;
+    use std::fs;
+    use std::process::Command;
+
+    assert_eq!(
+        std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
+        "1"
+    );
+    let root = std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap())
+        .join("writer-continuation");
+    fs::create_dir(&root).unwrap();
+    let binary = env!("CARGO_BIN_EXE_fluent");
+    let run = |program: &str, args: &[&str]| {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {args:?} failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run("git", &["init", "-b", "main"]);
+    run("git", &["config", "user.name", "Native Fixture"]);
+    run("git", &["config", "user.email", NATIVE_FIXTURE_GIT_EMAIL]);
+    run("git", &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("README.md"), "Native continuation fixture.\n").unwrap();
+    run("git", &["add", "README.md"]);
+    run("git", &["commit", "-m", "Add fixture"]);
+    let work = "native-writer-continuation";
+    run(
+        binary,
+        &[
+            "work-item",
+            "create",
+            work,
+            "--title",
+            "Native continuation",
+            "--instructions",
+            "In the assigned candidate workspace, write stage.txt as `first` followed by a newline if it does not exist; otherwise replace it with `second` followed by a newline. Commit the change. Complete this Task without modifying any other product file.",
+        ],
+    );
+    let model = std::env::var("FLUENT_NATIVE_CODEX_MODEL").unwrap();
+    let effort = std::env::var("FLUENT_NATIVE_CODEX_EFFORT").unwrap();
+    run(
+        binary,
+        &[
+            "attempt",
+            "create",
+            work,
+            "attempt-1",
+            "--terminal-mode",
+            "native",
+            "--write-coder",
+            "codex",
+            "--write-model",
+            &model,
+            "--write-effort",
+            &effort,
+        ],
+    );
+    run(
+        binary,
+        &["task", "run", work, "attempt-1", "attempt-1-write-1"],
+    );
+    let store = WorkModelStore::new(&root);
+    let first = store.read_work_item(work).unwrap();
+    let first_area = root.join(
+        first.attempts[0].tasks[0]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path
+            .as_str(),
+    );
+    assert!(
+        first_area.join("codex-session").is_dir(),
+        "first native Writer did not save its Codex session"
+    );
+    let read_bootstrap = |area: &std::path::Path| -> serde_json::Value {
+        fs::read_to_string(area.join("transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|record| {
+                record["provider"] == "codex"
+                    && record["input_sequence"] == 0
+                    && record["assigned_conversation_id"].as_str().is_some()
+            })
+            .expect("native Task has no Codex bootstrap evidence")
+    };
+    let initial = read_bootstrap(&first_area);
+    let saved = initial["assigned_conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let commit = first.attempts[0].tasks[0]
+        .output
+        .as_ref()
+        .unwrap()
+        .commit
+        .clone();
+    // Task run deliberately stops before the Attempt loop records its Writer
+    // result. Recreate that loop's saved continuation record from real Task
+    // evidence, then launch the next Task through the normal Task command.
+    store
+        .mutate_work_item(work, |item| {
+            item.attempts[0]
+                .writer_runs
+                .push(fluent::work_model::WriterRun {
+                    task_id: "attempt-1-write-1".into(),
+                    outcome: fluent::work_model::WriterOutcome::Continue,
+                    kind: fluent::work_model::WriterRunKind::Initial,
+                    provider: "codex".into(),
+                    session_id: Some(saved.clone()),
+                    continuation: 0,
+                    checked_required: 0,
+                    completed_matrix: 0,
+                    candidate_commit: commit.clone(),
+                });
+            item.add_next_write_round("attempt-1", vec![])
+        })
+        .unwrap();
+    run(
+        binary,
+        &["task", "run", work, "attempt-1", "attempt-1-write-2"],
+    );
+    let second = store.read_work_item(work).unwrap();
+    let second_task = second.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.id == "attempt-1-write-2")
+        .unwrap();
+    assert_eq!(second_task.status, fluent::work_model::TaskStatus::Complete);
+    let second_area = root.join(second_task.artifact_area.as_ref().unwrap().path.as_str());
+    let resumed = read_bootstrap(&second_area);
+    assert_eq!(initial["launch_method"], "thread/start");
+    assert_eq!(resumed["launch_method"], "thread/resume");
+    assert_eq!(initial["assigned_conversation_id"], saved);
+    assert_eq!(resumed["assigned_conversation_id"], saved);
+    assert!(
+        initial["execution_generation"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert!(
+        resumed["execution_generation"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_ne!(
+        initial["execution_generation"],
+        resumed["execution_generation"]
+    );
+    assert_ne!(first.attempts[0].tasks[0].id, second_task.id);
 }
