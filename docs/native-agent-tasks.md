@@ -22,6 +22,16 @@ extension and writes its assigned session in a private agent directory. The
 terminal can be attached for interaction, but its display is not the Task
 evidence source.
 
+To steer an active Task, list its terminal sessions and attach with Control:
+
+```bash
+fluent terminal list --source <checkout>
+fluent terminal attach <session-id> --source <checkout> --control
+```
+
+Attaching without `--control` is read-only. The terminal session ends when its
+invocation settles; detaching does not hold up Task progression.
+
 For a fresh Codex Task, Fluent starts the assigned thread before opening the
 TUI and keeps that app-server connection subscribed. Codex does not create a
 resumable rollout until the first turn. The relay answers the TUI's initial
