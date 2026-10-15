@@ -574,6 +574,86 @@ fn pi_receiver_waits_for_payload_on_nonblocking_accepted_socket() {
 
 #[cfg(unix)]
 #[test]
+fn pi_receiver_retains_large_tool_result_before_acknowledging() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let (mut sender, receiver) = UnixStream::pair().unwrap();
+    sender
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let result = "x".repeat(6 * 1024 * 1024);
+    let payload = format!(
+        "{}\n",
+        json!({
+            "generation":"generation-1", "session_id":"assigned-session",
+            "session_file":"/private/task/session.jsonl",
+            "event":{"type":"tool_execution_end", "result":result}
+        })
+    );
+    let extension = std::thread::spawn(move || -> std::io::Result<String> {
+        sender.write_all(payload.as_bytes())?;
+        let mut ack = String::new();
+        BufReader::new(sender).read_line(&mut ack)?;
+        Ok(ack)
+    });
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    gate.observe(&json!({
+        "generation":"generation-1", "session_id":"assigned-session",
+        "session_file":"/private/task/session.jsonl",
+        "event":{"type":"session_start", "reason":"startup"}
+    }))
+    .unwrap();
+    let received = receive_event(receiver, &mut gate, &mut writer);
+    let ack = extension.join().unwrap();
+    assert!(received.is_ok(), "{received:?}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&ack.unwrap()).unwrap()["ok"],
+        true
+    );
+    let saved = std::fs::read_to_string(evidence.path()).unwrap();
+    assert!(saved.contains(&"x".repeat(6 * 1024 * 1024)));
+    let mut final_completion = Completion::Ignored;
+    for event in [
+        json!({"type":"input","text":"review","streamingBehavior":"followUp"}),
+        json!({"type":"input_entry","entry_id":"review-entry"}),
+        json!({"type":"agent_before_settle","outcome":"completed"}),
+        json!({"type":"agent_settled","aborted":false}),
+    ] {
+        let (mut client, receiver) = UnixStream::pair().unwrap();
+        let mut envelope = json!({
+            "generation":"generation-1", "session_id":"assigned-session",
+            "session_file":"/private/task/session.jsonl", "event":event
+        });
+        if event["type"] == "input_entry" {
+            envelope["input_sequence"] = json!(1);
+        }
+        client
+            .write_all(format!("{envelope}\n").as_bytes())
+            .unwrap();
+        final_completion = receive_event(receiver, &mut gate, &mut writer).unwrap();
+        let mut reply = String::new();
+        BufReader::new(client).read_line(&mut reply).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()["ok"],
+            true
+        );
+    }
+    assert!(matches!(
+        final_completion,
+        Completion::Accepted {
+            input_sequence: 1,
+            ..
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn pi_receiver_acknowledges_durable_input_and_settlement() {
     use fluent::native_agent::pi::{PiEventGate, receive_event};
     use std::io::{BufRead, BufReader, Write};

@@ -82,7 +82,7 @@ remediation is named, emit exactly one `Disposition: code-change` line.
 {{#if has_final_tester_evidence}}
 2. Read tester-results.json at {{tester_results_path}} — host-owned outcomes of the declared test commands for exact candidate commit {{candidate_commit}}. Treat this as the default executable evidence. If the file records a different candidate commit, report one blocking evidence mismatch.
 {{else}}
-2. For exact candidate commit {{candidate_commit}}, read the Writer's final verification summary in {{writer_transcript_path}}. Treat its focused commands as advisory evidence: inspect the changed tests and code yourself, and do not claim that the final canonical suite has run. If one concrete missing result prevents a decision, the tests reviewer may run one named harness-native check; other roles should report the evidence gap.
+2. For exact candidate commit {{candidate_commit}}, read the Writer's focused verification in {{writer_completion_matrix_path}} when that path is present. Otherwise inspect a bounded excerpt of the Writer transcript at {{writer_transcript_path}} for its final verification summary. Do not read the entire Writer transcript or print large tool results. Treat focused commands as advisory evidence: inspect the changed tests and code yourself, and do not claim that the final canonical suite has run. If one concrete missing result prevents a decision, the tests reviewer may run one named harness-native check; other roles should report the evidence gap.
 {{/if}}
 3. Read progress.md at {{progress_md_path}} — the Writer's per-step notes, including any recorded divergences from plan, approach, or behaviors, and any `Untestable:` justifications.
 

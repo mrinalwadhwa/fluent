@@ -20004,6 +20004,12 @@ while time.monotonic() < deadline:
         assert!(
             prompts
                 .review_prompt
+                .contains("Do not read the entire Writer transcript"),
+            "reviewers should use bounded evidence inspection"
+        );
+        assert!(
+            prompts
+                .review_prompt
                 .contains(&writer_matrix.display().to_string())
         );
         assert!(prompts.review_prompt.contains("advisory coverage map"));

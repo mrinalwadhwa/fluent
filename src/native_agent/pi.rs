@@ -204,15 +204,16 @@ pub fn receive_event(
     gate: &mut PiEventGate,
     evidence: &mut File,
 ) -> Result<Completion> {
+    const MAX_EVENT_BYTES: u64 = 16 * 1024 * 1024;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(8)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(8)))?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?)
-        .take(1024 * 1024)
+        .take(MAX_EVENT_BYTES)
         .read_line(&mut line)?;
     ensure!(
-        !line.is_empty() && line.len() < 1024 * 1024,
+        !line.is_empty() && line.len() < MAX_EVENT_BYTES as usize,
         "Pi event is empty or oversized"
     );
     let envelope: Value = serde_json::from_str(&line)?;
