@@ -16,6 +16,9 @@ use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
 
 use super::{Completion, NativeAdmission};
 
+// Tool result hooks can include the full output of a Review command.
+const MAX_CLAUDE_HOOK_BYTES: u64 = 16 * 1024 * 1024;
+
 pub struct ClaudeHookGate {
     generation: String,
     expected_session: Option<String>,
@@ -546,10 +549,10 @@ pub fn receive_hook(
     stream.set_write_timeout(Some(Duration::from_secs(8)))?;
     let mut line = String::new();
     BufReader::new(stream.try_clone()?)
-        .take(1024 * 1024)
+        .take(MAX_CLAUDE_HOOK_BYTES + 1)
         .read_line(&mut line)?;
     ensure!(
-        !line.is_empty() && line.len() < 1024 * 1024,
+        !line.is_empty() && line.len() as u64 <= MAX_CLAUDE_HOOK_BYTES,
         "Claude hook event is empty or oversized"
     );
     let envelope: Value = serde_json::from_str(&line)?;
@@ -842,6 +845,50 @@ mod tests {
                 .lines()
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn claude_hook_receives_large_tool_response_without_losing_result() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let mut gate = ClaudeHookGate::new("generation-1", None);
+        gate.observe(
+            "generation-1",
+            &serde_json::json!({"hook_event_name":"SessionStart","session_id":"assigned-session","source":"startup"}),
+        )
+        .unwrap();
+        let event = serde_json::json!({
+            "hook_event_name":"PostToolUse",
+            "session_id":"assigned-session",
+            "prompt_id":"prompt-1",
+            "tool_use_id":"tool-1",
+            "tool_name":"Bash",
+            "tool_response":"x".repeat(2 * 1024 * 1024),
+        });
+        let child = std::thread::spawn(move || {
+            serde_json::to_writer(
+                &mut sender,
+                &serde_json::json!({
+                    "generation":"generation-1", "event":event
+                }),
+            )
+            .unwrap();
+            sender.write_all(b"\n").unwrap();
+            let mut ack = String::new();
+            BufReader::new(sender).read_line(&mut ack).unwrap();
+            ack
+        });
+        let evidence = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = evidence.reopen().unwrap();
+        receive_hook(receiver, &mut gate, "generation-1", &mut writer).unwrap();
+        assert_eq!(child.join().unwrap(), "ok\n");
+        let record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(evidence.path()).unwrap()).unwrap();
+        assert_eq!(record["event"]["tool_use_id"], "tool-1");
+        assert_eq!(record["event"]["hook_event_name"], "PostToolUse");
+        assert_eq!(
+            record["event"]["tool_response"].as_str().unwrap().len(),
+            2 * 1024 * 1024
         );
     }
 
