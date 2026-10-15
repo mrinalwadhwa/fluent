@@ -2746,7 +2746,7 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1" && $env(FLUENT_NATIVE_PROVIDER) eq "codex
 }
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
-    send -- "Please retain result.txt and continue."
+    send -- "Please retain result.txt and finish the Task after committing."
     # Codex treats a rapid text burst followed immediately by Enter as a
     # multiline paste. Wait for its composer to flush the burst before submit.
     if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} { after 300 }
@@ -2766,6 +2766,17 @@ expect eof
 set outcome [wait]
 exit [lindex $outcome 3]
 "#;
+
+#[test]
+fn host_fixture_requests_completion_after_attached_input() {
+    for provider in ["codex", "claude", "pi"] {
+        let instructions =
+            host_native_instructions(provider, std::path::Path::new("/tmp/forbidden"));
+        assert!(instructions.contains("Give a final response after committing"));
+    }
+    assert!(HOST_NATIVE_ATTACH.contains("finish the Task after committing"));
+    assert!(!HOST_NATIVE_ATTACH.contains("result.txt and continue"));
+}
 
 const HOST_NATIVE_RACE_CONTROL: &str = r#"
 proc trace_race {message} {
@@ -2825,6 +2836,13 @@ fn host_native_race_command(provider: &str) -> std::process::Command {
         .args(["-c", HOST_NATIVE_RACE_CONTROL])
         .env("FLUENT_NATIVE_PROVIDER", provider);
     command
+}
+
+fn host_native_instructions(provider: &str, forbidden: &std::path::Path) -> String {
+    format!(
+        "First try to run `touch {}` with the shell tool and record that the source checkout denies this write. Then run sleep 8 with the shell tool so an operator can attach and send steering and follow-up input. Create result.txt containing exactly native-{provider} followed by a newline. Commit the file. Give a final response after committing. Keep the change small.",
+        forbidden.display()
+    )
 }
 
 #[test]
@@ -2986,7 +3004,7 @@ fn host_codex_attachment_queues_both_inputs() {
     );
     assert_eq!(
         std::fs::read(capture).unwrap(),
-        b"Please retain result.txt and continue.\rThe final file must have exactly the requested line.\r\x02d"
+        b"Please retain result.txt and finish the Task after committing.\rThe final file must have exactly the requested line.\r\x02d"
     );
     assert!(
         !early.exists(),
@@ -2994,7 +3012,7 @@ fn host_codex_attachment_queues_both_inputs() {
     );
     assert_eq!(
         std::fs::read_to_string(submissions).unwrap(),
-        "Please retain result.txt and continue.\nThe final file must have exactly the requested line."
+        "Please retain result.txt and finish the Task after committing.\nThe final file must have exactly the requested line."
     );
 }
 
@@ -3102,10 +3120,7 @@ fn host_native_agent_acceptance() {
         run("git", &["commit", "-m", "Add fixture"]);
         let work = format!("native-{provider}");
         let forbidden = project.join("forbidden.txt");
-        let instructions = format!(
-            "First try to run `touch {}` with the shell tool and record that the source checkout denies this write. Then run sleep 8 with the shell tool so an operator can attach and send steering and follow-up input. Create result.txt containing exactly native-{provider} followed by a newline. Commit the file. Keep the change small.",
-            forbidden.display()
-        );
+        let instructions = host_native_instructions(provider, &forbidden);
         run(
             binary,
             &[
@@ -3415,13 +3430,30 @@ fn host_native_agent_acceptance() {
             );
             std::thread::sleep(Duration::from_millis(25));
         };
+        // Give the completed turn a full window after the race attachment
+        // acquires Control, independently of time spent starting the Task.
+        let settlement_deadline = Instant::now() + Duration::from_secs(600);
         let before_race_sequence = loop {
-            assert!(
-                Instant::now() < deadline,
-                "{provider} emitted no settling boundary"
-            );
             let transcript =
                 fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+            if Instant::now() >= settlement_deadline {
+                let recent_hooks: Vec<_> = transcript
+                    .lines()
+                    .rev()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter_map(|record| {
+                        record["event"]["hook_event_name"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .take(5)
+                    .collect();
+                panic!(
+                    "{provider} emitted no settling boundary after race attachment: recent_hooks={recent_hooks:?}; inspect {} and {}",
+                    artifact.display(),
+                    runtime.display()
+                );
+            }
             let boundary_seen = transcript
                 .lines()
                 .filter(|line| line.contains(boundary))
@@ -3649,7 +3681,7 @@ fn host_native_agent_acceptance() {
                 .and_then(|record| record["assigned_conversation_id"].as_str())
                 .expect("Codex Writer has no assigned conversation");
             let attached_sequences: Vec<_> = [
-                "Please retain result.txt and continue.",
+                "Please retain result.txt and finish the Task after committing.",
                 "The final file must have exactly the requested line.",
             ]
             .into_iter()
