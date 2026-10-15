@@ -3235,6 +3235,40 @@ fn pi_host_pane_reads_generation_id_from_file() {
     assert_eq!(generation, "assigned-generation");
 }
 
+struct HostTaskClock {
+    deadline: std::time::Instant,
+}
+
+impl HostTaskClock {
+    fn new(started: std::time::Instant) -> Self {
+        Self {
+            deadline: started + std::time::Duration::from_secs(600),
+        }
+    }
+
+    fn begin_settlement(&mut self, control_attached: std::time::Instant) {
+        self.deadline = control_attached + std::time::Duration::from_secs(600);
+    }
+
+    fn expired(&self, now: std::time::Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
+#[test]
+fn host_task_completion_gets_full_window_after_control_attaches() {
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
+    let mut clock = HostTaskClock::new(started);
+    let control_attached = started + Duration::from_secs(300);
+    clock.begin_settlement(control_attached);
+
+    assert!(!clock.expired(started + Duration::from_secs(601)));
+    assert!(!clock.expired(control_attached + Duration::from_secs(599)));
+    assert!(clock.expired(control_attached + Duration::from_secs(600)));
+}
+
 /// Run only from the separately authorized host check. The fixture stays in
 /// its output directory so the provider transcript and candidate can be
 /// inspected together after the test exits.
@@ -3400,7 +3434,7 @@ fn host_native_agent_acceptance() {
             reap_timeout: Duration::from_secs(10),
             armed: true,
         };
-        let deadline = Instant::now() + Duration::from_secs(600);
+        let mut clock = HostTaskClock::new(Instant::now());
         let artifact = project.join(format!(
             ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1"
         ));
@@ -3457,7 +3491,7 @@ fn host_native_agent_acceptance() {
                 }
             }
             assert!(
-                Instant::now() < deadline,
+                !clock.expired(Instant::now()),
                 "{provider} native Task timed out waiting for {}: terminal={last_terminal:?}, max_input_sequence={last_sequence}, recent_protocol={last_protocol:?}, task_pid={}, task_alive=true, inspect {} and {}",
                 if last_terminal.is_none() {
                     "terminal descriptor"
@@ -3599,7 +3633,7 @@ fn host_native_agent_acceptance() {
             .unwrap();
         while !race_ready.exists() {
             assert!(
-                Instant::now() < deadline,
+                !clock.expired(Instant::now()),
                 "{provider} race attachment did not start"
             );
             assert!(
@@ -3624,11 +3658,11 @@ fn host_native_agent_acceptance() {
         };
         // Give the completed turn a full window after the race attachment
         // acquires Control, independently of time spent starting the Task.
-        let settlement_deadline = Instant::now() + Duration::from_secs(600);
+        clock.begin_settlement(Instant::now());
         let before_race_sequence = loop {
             let transcript =
                 fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
-            if Instant::now() >= settlement_deadline {
+            if clock.expired(Instant::now()) {
                 let recent_hooks: Vec<_> = transcript
                     .lines()
                     .rev()
@@ -3724,7 +3758,7 @@ fn host_native_agent_acceptance() {
             if let Some(status) = child.child.try_wait().unwrap() {
                 break status;
             }
-            if Instant::now() >= deadline {
+            if clock.expired(Instant::now()) {
                 child.child.kill().unwrap();
                 let _ = child.child.wait();
                 panic!(
