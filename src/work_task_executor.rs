@@ -3506,15 +3506,21 @@ fn acquire_task_provider_capacity(
 
 /// Whether a failed coder run should be retried through the generic retry
 /// budget. Auth failures, transcript-pump infrastructure failures, and
-/// supervision-sidecar failures are terminal for the Task and must not spawn another
-/// coder. The coder layer exclusively owns rate-limit retries, so its typed
-/// exhaustion result also bypasses this outer budget.
+/// supervision-sidecar failures are terminal for the Task and must not spawn
+/// another coder. Native Pi failures may follow partial side effects or lost
+/// evidence, so they also require inspection before another launch. The coder
+/// layer exclusively owns rate-limit retries, so its typed exhaustion result
+/// also bypasses this outer budget.
 fn should_retry_coder_error(result: &Result<()>) -> bool {
     result.is_err()
         && !is_auth_error(result)
         && !is_transcript_pump_error(result)
         && !is_supervision_sidecar_error(result)
         && !is_host_sandbox_preflight_error(result)
+        && !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<crate::native_agent::pi_runner::PiNativeTaskError>())
         && !result.as_ref().err().is_some_and(|error| {
             error
                 .downcast_ref::<crate::provider_readiness::ProviderReadinessError>()
@@ -3652,6 +3658,10 @@ fn classify_task_failure(error: &anyhow::Error) -> TaskFailure {
         TaskFailure::HostSandbox(host.message().to_string())
     } else if let Some(host) = error.downcast_ref::<crate::os::HostSandboxLaunchError>() {
         TaskFailure::HostSandbox(host.message().to_string())
+    } else if error.is::<crate::native_agent::pi_runner::PiNativeTaskError>() {
+        TaskFailure::ProviderUnavailable(format!(
+            "{error:#}. Inspect the native Pi Task artifacts before resuming this Task."
+        ))
     } else {
         TaskFailure::Generic
     }
@@ -3695,6 +3705,7 @@ fn provider_pause_error(
                 || error.is::<crate::coder::ClaudeNoProgressCleanupUnconfirmedError>()
                 || error.is::<crate::coder::CodexResponseLivenessExhaustedError>()
                 || error.is::<crate::coder::CodexResponseCleanupUnconfirmedError>()
+                || error.is::<crate::native_agent::pi_runner::PiNativeTaskError>()
             {
                 return Err(error);
             }
@@ -11753,6 +11764,26 @@ mod tests {
             !should_retry_coder_error(&sidecar),
             "a supervision-sidecar failure is terminal, never relaunches the coder"
         );
+    }
+
+    #[test]
+    fn native_pi_owner_failure_bypasses_task_retry() {
+        for detail in [
+            "native Pi receiver disappeared",
+            "native Pi extension stopped reporting to its Task owner",
+            "native Pi evidence write failed",
+        ] {
+            let error = anyhow::Error::new(crate::native_agent::pi_runner::PiNativeTaskError::new(
+                anyhow::anyhow!("{detail}"),
+            ));
+            let result = provider_pause_error(Err(error), CoderKind::Pi, None);
+            assert!(!should_retry_coder_error(&result));
+            let failure = classify_task_failure(result.as_ref().unwrap_err());
+            assert!(matches!(
+                failure,
+                TaskFailure::ProviderUnavailable(message) if message.contains(detail)
+            ));
+        }
     }
 
     #[test]

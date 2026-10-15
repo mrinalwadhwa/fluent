@@ -17,6 +17,30 @@ use crate::native_agent::pi::{
 };
 use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
 
+/// A native Pi invocation may have produced side effects before its owner
+/// loses the receiver, liveness signal, or durable evidence. The Task must
+/// pause for inspection instead of launching another generation in-process.
+#[derive(Debug)]
+pub struct PiNativeTaskError(anyhow::Error);
+
+impl PiNativeTaskError {
+    pub fn new(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for PiNativeTaskError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for PiNativeTaskError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 pub struct PiNativeTask<'a> {
     pub identity: TerminalIdentity,
     pub worker_profile: &'a crate::os::SandboxProfile,
@@ -251,6 +275,10 @@ fn settle_pi_result(run: Result<()>, stop: Result<()>) -> Result<()> {
 }
 
 pub fn run(task: PiNativeTask<'_>) -> Result<()> {
+    run_inner(task).map_err(|error| anyhow::Error::new(PiNativeTaskError::new(error)))
+}
+
+fn run_inner(task: PiNativeTask<'_>) -> Result<()> {
     let artifact = &task.identity.artifact_dir;
     fs::create_dir_all(artifact)?;
     let private_home_guard = tempfile::Builder::new()
