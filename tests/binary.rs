@@ -63484,7 +63484,7 @@ fn writer_assignment_old_reader_reaches_inner_fences() {
             .expect_err("the fixture must leave a real pending aggregate transaction");
         let journal_path = work_root.join("transactions/work-1.json");
         let journal = read_json_path(&journal_path);
-        assert_eq!(journal["schema_version"], serde_json::json!(13));
+        assert_eq!(journal["schema_version"], serde_json::json!(14));
         assert!(old_transaction_schema < journal["schema_version"].as_u64().unwrap() as u32);
         let record_path = work_root.join("items/work-1.json");
         let mut record = read_json_path(&record_path);
