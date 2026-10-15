@@ -2910,6 +2910,33 @@ fn host_codex_attachment_queues_both_inputs() {
     );
 }
 
+fn pi_pane_generation(pane: &str) -> (std::path::PathBuf, String) {
+    let generation_file = pane
+        .lines()
+        .find(|line| line.starts_with("export FLUENT_NATIVE_PI_GENERATION="))
+        .and_then(|line| line.split('\'').nth(1))
+        .map(std::path::PathBuf::from)
+        .expect("Pi pane omits owner generation file");
+    let generation =
+        std::fs::read_to_string(&generation_file).expect("Pi owner generation file is unreadable");
+    (generation_file, generation)
+}
+
+#[test]
+fn pi_host_pane_reads_generation_id_from_file() {
+    let runtime = tempfile::tempdir().unwrap();
+    let generation_file = runtime.path().join("generation");
+    std::fs::write(&generation_file, "assigned-generation").unwrap();
+    let pane = format!(
+        "export FLUENT_NATIVE_PI_GENERATION=$(cat '{}')\n",
+        generation_file.display()
+    );
+
+    let (path, generation) = pi_pane_generation(&pane);
+    assert_eq!(path, generation_file);
+    assert_eq!(generation, "assigned-generation");
+}
+
 /// Run only from the separately authorized host check. The fixture stays in
 /// its output directory so the provider transcript and candidate can be
 /// inspected together after the test exits.
@@ -3880,15 +3907,8 @@ fn host_native_agent_acceptance() {
                 std::thread::sleep(Duration::from_millis(100));
             }
             let pane = fs::read_to_string(failure_artifact.join("native-pi-pane.sh")).unwrap();
-            let generation = pane
-                .lines()
-                .find(|line| line.starts_with("export FLUENT_NATIVE_PI_GENERATION="))
-                .and_then(|line| line.split('\'').nth(1))
-                .expect("Pi pane omits owner generation file");
-            let socket = std::path::Path::new(generation)
-                .parent()
-                .unwrap()
-                .join("pi.sock");
+            let (generation_file, generation) = pi_pane_generation(&pane);
+            let socket = generation_file.parent().unwrap().join("pi.sock");
             let late_marker = "pi-input-after-receiver-loss";
             const LOST_RECEIVER_INPUT: &str = r#"
 set timeout 10
