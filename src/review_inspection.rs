@@ -131,30 +131,57 @@ fn transcript_records_successful_inspection(
             continue;
         };
 
-        if value.get("type").and_then(|value| value.as_str()) == Some("item.completed") {
-            let item = &value["item"];
-            let successful_command = item.get("type").and_then(|value| value.as_str())
+        let legacy_codex = value.get("type").and_then(|value| value.as_str())
+            == Some("item.completed")
+            && value["item"].get("type").and_then(|value| value.as_str())
                 == Some("command_execution")
-                && item.get("status").and_then(|value| value.as_str()) == Some("completed")
-                && item.get("exit_code").and_then(|value| value.as_i64()) == Some(0);
-            if successful_command {
-                let evidence = format!(
-                    "{}\n{}",
-                    item.get("command")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default(),
-                    item.get("aggregated_output")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                );
-                if text_names_any_candidate_path(
-                    &evidence,
-                    candidate_workspace,
-                    candidate_commit,
-                    inspected_paths,
-                ) {
-                    return Ok(true);
-                }
+            && value["item"].get("status").and_then(|value| value.as_str()) == Some("completed")
+            && value["item"]
+                .get("exit_code")
+                .and_then(|value| value.as_i64())
+                == Some(0);
+        let native_codex = value.get("format").and_then(|value| value.as_str())
+            == Some("fluent-native-agent-event")
+            && value.get("provider").and_then(|value| value.as_str()) == Some("codex")
+            && value.get("schema_version").and_then(|value| value.as_u64()) == Some(1)
+            && value["event"]
+                .get("method")
+                .and_then(|value| value.as_str())
+                == Some("item/completed")
+            && value["event"]["params"]["item"]
+                .get("type")
+                .and_then(|value| value.as_str())
+                == Some("commandExecution")
+            && value["event"]["params"]["item"]
+                .get("exitCode")
+                .and_then(|value| value.as_i64())
+                == Some(0);
+        if legacy_codex || native_codex {
+            let item = if native_codex {
+                &value["event"]["params"]["item"]
+            } else {
+                &value["item"]
+            };
+            let evidence = format!(
+                "{}\n{}",
+                item.get("command")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                item.get(if native_codex {
+                    "aggregatedOutput"
+                } else {
+                    "aggregated_output"
+                })
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+            );
+            if text_names_any_candidate_path(
+                &evidence,
+                candidate_workspace,
+                candidate_commit,
+                inspected_paths,
+            ) {
+                return Ok(true);
             }
         }
 
@@ -481,6 +508,51 @@ mod tests {
         .unwrap();
 
         validate(&artifact, workspace.path(), &transcript, &commit, "skills").unwrap();
+    }
+
+    #[test]
+    fn accepts_successful_native_codex_inspection_and_rejects_failed_command() {
+        let (workspace, commit) = committed_workspace();
+        let artifact = write_inspection(
+            workspace.path(),
+            &commit,
+            "tests",
+            "src/lib.rs",
+            "Checked the candidate source file.",
+        );
+        let transcript = workspace.path().join("transcript.jsonl");
+        let command = format!("git show '{commit}:src/lib.rs'");
+        let event = |exit_code| {
+            serde_json::json!({
+                "format": "fluent-native-agent-event",
+                "schema_version": 1,
+                "provider": "codex",
+                "event": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "commandExecution",
+                            "command": command,
+                            "exitCode": exit_code,
+                            "aggregatedOutput": "pub fn answer() -> u8 { 42 }\n",
+                        }
+                    }
+                }
+            })
+            .to_string()
+        };
+
+        fs::write(&transcript, format!("{}\n", event(0))).unwrap();
+        validate(&artifact, workspace.path(), &transcript, &commit, "tests").unwrap();
+
+        fs::write(&transcript, format!("{}\n", event(1))).unwrap();
+        let error =
+            validate(&artifact, workspace.path(), &transcript, &commit, "tests").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no successful provider tool result")
+        );
     }
 
     #[test]
