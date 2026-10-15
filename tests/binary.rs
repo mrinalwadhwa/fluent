@@ -5780,7 +5780,7 @@ fn carried_finding_evidence_compatibility_refuses_public_transaction() {
         let fixture = carried_finding_fixture(&tmp);
         let journal = interrupt_carried_finding_attachment(&fixture);
         let transaction = read_json_path(&journal);
-        assert_eq!(transaction["schema_version"], 13);
+        assert_eq!(transaction["schema_version"], 14);
         let root = fixture.project.join(".fluent/work");
         let path = root.join(format!("items/{}.json", fixture.work));
         let original = read_json_path(&path);
@@ -12495,7 +12495,7 @@ fn assignment_context_recovery_rejects_unmatched_pending_publication() {
             .join(".fluent/work/transactions/work-1.json");
         let journal_bytes = fs::read(&journal_path).unwrap();
         let mut journal = read_json_path(&journal_path);
-        assert_eq!(journal["schema_version"], 13);
+        assert_eq!(journal["schema_version"], 14);
         journal["assignment_context_base"]["attempts"][0]["status"] = "planned".into();
         write_json_path(&journal_path, &journal);
         let changed = snapshot_tree(&fixture.project_root);
@@ -63447,7 +63447,7 @@ fn writer_assignment_old_reader_reaches_inner_fences() {
         record["schema_version"] = serde_json::json!(old_record_schema);
         assert_eq!(
             record["model_writer_version"]["schema_version"],
-            serde_json::json!(11),
+            serde_json::json!(12),
             "the published case must retain the newer inner Writer envelope"
         );
         write_json_path(&record_path, &record);
@@ -63539,7 +63539,7 @@ fn writer_assignment_old_reader_refuses_published_records() {
             let work_root = project.join(".fluent/work");
             let record_path = work_root.join("items/work-1.json");
             let mut record = read_json_path(&record_path);
-            assert_eq!(record["schema_version"], serde_json::json!(13));
+            assert_eq!(record["schema_version"], serde_json::json!(14));
             if !envelope_is_current {
                 record["model_writer_version"]["schema_version"] =
                     serde_json::json!(old_envelope_schema);
@@ -65940,7 +65940,7 @@ fn usage_limit_writer_compatibility_refuses_public_pending_transaction() {
     let journal = fixture
         .project
         .join(format!(".fluent/work/transactions/{}.json", fixture.work));
-    assert_eq!(read_json_path(&journal)["schema_version"], 13);
+    assert_eq!(read_json_path(&journal)["schema_version"], 14);
     usage_limit_old_mutation_refuses(&binary, &fixture);
     fixture.approve();
     fixture.approve();

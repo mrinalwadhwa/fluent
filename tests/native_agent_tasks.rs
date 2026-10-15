@@ -991,7 +991,7 @@ fn attempt_retains_native_mode_across_resume() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(attempt_record["schema_version"], 13);
+    assert_eq!(attempt_record["schema_version"], 14);
     assert_eq!(attempt_record["terminal_mode"], "native");
     let mut loaded = store.read_work_item_snapshot("work-1").unwrap();
     reopen_attempt(&mut loaded.attempts[0]);
