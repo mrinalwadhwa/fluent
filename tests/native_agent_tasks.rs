@@ -3003,10 +3003,7 @@ fn host_native_agent_acceptance() {
         };
         run("git", &["init", "-b", "main"]);
         run("git", &["config", "user.name", "Native Fixture"]);
-        run(
-            "git",
-            &["config", "user.email", "native-fixture@example.invalid"],
-        );
+        run("git", &["config", "user.email", NATIVE_FIXTURE_GIT_EMAIL]);
         run("git", &["config", "commit.gpgsign", "false"]);
         fs::write(
             project.join("README.md"),
@@ -4183,6 +4180,8 @@ exit [lindex $outcome 3]
     }
 }
 
+const NATIVE_FIXTURE_GIT_EMAIL: &str = "native-fixture@example.com";
+
 fn install_native_fixture_tester(root: &std::path::Path) {
     use std::fs;
 
@@ -4213,6 +4212,11 @@ fn install_native_fixture_tester(root: &std::path::Path) {
 
 #[test]
 fn native_progression_fixture_declares_tester() {
+    assert!(
+        !NATIVE_FIXTURE_GIT_EMAIL.trim().is_empty()
+            && !NATIVE_FIXTURE_GIT_EMAIL.ends_with(".invalid"),
+        "native fixture commits must pass Fluent's metadata gate"
+    );
     let root = tempfile::tempdir().unwrap();
     install_native_fixture_tester(root.path());
     let output = std::process::Command::new(root.path().join(".fluent/extract-tester-results"))
@@ -4256,10 +4260,7 @@ fn host_native_attached_attempt_progression() {
     };
     run("git", &["init", "-b", "main"]);
     run("git", &["config", "user.name", "Native Fixture"]);
-    run(
-        "git",
-        &["config", "user.email", "native-fixture@example.invalid"],
-    );
+    run("git", &["config", "user.email", NATIVE_FIXTURE_GIT_EMAIL]);
     run("git", &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("README.md"), "Native progression fixture.\n").unwrap();
     install_native_fixture_tester(&root);
