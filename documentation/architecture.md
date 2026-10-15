@@ -3608,9 +3608,11 @@ The author escalates to `needs-user` only when genuinely stuck.
 
 ### Local
 
-The managed terminal runtime is ready for future native worker integration;
-ordinary worker execution does not yet start these sessions. When integrated,
-managed terminal sessions use one foreground tmux server per worker invocation.
+Worker execution defaults to headless. Native Attempts run assigned Tasks in
+managed terminal sessions: Native Codex connects its TUI through Fluent's
+private app-server relay, Native Claude uses its TUI with lifecycle hooks, and
+Native Pi uses its TUI with Fluent's owned extension. Each native worker
+invocation uses one foreground tmux server.
 `terminal_sessions` publishes a versioned descriptor under the source's
 host-owned `.fluent/work/terminal-sessions/` tree only after the server and
 session start. The descriptor names the source, Work Item, Attempt, Task, and

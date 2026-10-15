@@ -37,8 +37,9 @@ Native Pi requires a selected `local-openai` model in the operator's
 `PI_CODING_AGENT_DIR/models.json` or `~/.pi/agent/models.json`. Set
 `FLUENT_NATIVE_PI_ENDPOINT` only to replace that model's local server URL;
 the selected model's capabilities and limits remain in the private Task
-configuration. `FLUENT_NATIVE_PI_API_KEY` may replace its credential. Fluent
-rejects a missing or incompatible selected model. The owned Pi extension
+configuration. `FLUENT_NATIVE_PI_API_KEY` is read only when
+`FLUENT_NATIVE_PI_ENDPOINT` is set; it then replaces that model's credential.
+Fluent rejects a missing or incompatible selected model. The owned Pi extension
 returns `handled` when Fluent does not acknowledge input and shuts down its
 session when reporting fails. The owner also checks liveness and periodic
 heartbeats, then fails the Task through recovery if evidence is incomplete.

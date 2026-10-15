@@ -182,11 +182,13 @@ It does not cancel Attempts, start a replacement, or signal the displayed PID.
 If an Attempt does not finish, use its existing explicit cancellation or
 recovery path and retry the stop for the same service instance.
 
-The managed terminal runtime and `fluent terminal` commands are available for
-future native worker integration. Ordinary worker execution remains headless,
-so it does not yet create a session to list or attach. Use `fluent terminal
-explain --source <checkout> <work-item> <attempt> <task>` to see why a selected
-worker has no live agent terminal.
+Worker execution defaults to headless. Attempts created with
+`--terminal-mode native` run assigned Codex, Claude, and Pi Tasks through
+their native interfaces. Native Attempts create attachable terminal
+sessions for active worker invocations. See [Native agent Tasks](docs/native-agent-tasks.md)
+for setup and evidence details. Use `fluent terminal explain --source
+<checkout> <work-item> <attempt> <task>` to see why a selected worker has no
+live agent terminal.
 
 An older shared service may answer health without the instance identity and
 drain capability. The new client cannot stop that process safely. Stop it from
