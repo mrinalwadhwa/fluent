@@ -14387,8 +14387,14 @@ esac
             let calls = fs::read_to_string(&cargo_calls).unwrap();
             let calls: Vec<_> = calls.lines().collect();
             assert_eq!(calls.len(), 3, "{calls:?}");
-            assert_eq!(calls[0], "build");
-            assert_eq!(calls[1], "build --features test-support");
+            assert_eq!(
+                calls[0],
+                "build --bin fluent --target-dir target/production"
+            );
+            assert_eq!(
+                calls[1],
+                "build --features test-support --bin fluent --target-dir target/test-support"
+            );
             assert!(calls[2].starts_with("nextest run "), "{calls:?}");
             assert_eq!(
                 fs::read_to_string(reader_paths).unwrap(),
@@ -41582,10 +41588,13 @@ fn second_scheduler_run_reuses_live_coordinator() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     fs::create_dir_all(project.join(".fluent/work/items")).unwrap();
+    let binary = std::env::var_os("FLUENT_BIN_OVERRIDE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| assert_cmd::cargo::cargo_bin("fluent"));
 
     // Start a live coordinator that idles while holding its lease.
     let mut first = {
-        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        let mut command = std::process::Command::new(binary);
         command
             .current_dir(project)
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
