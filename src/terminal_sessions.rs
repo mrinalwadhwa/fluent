@@ -335,7 +335,12 @@ impl TerminalSession {
             attempt_id: identity.attempt_id.clone(),
         });
         execution::prepare_launch(&transcript, owner)?;
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // Keep the server off the caller's terminal so a later attachment can
+        // use that PTY. Attachment clients retain their own stdin configuration.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let mut child = match execution::spawn(&mut command, &transcript) {
             Ok(child) => child,
             Err(error) => {

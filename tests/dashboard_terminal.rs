@@ -416,6 +416,30 @@ fn fullscreen_pty_child() {
         return;
     }
     use fluent::dashboard::terminal::DashboardTerminal;
+
+    // Starting a managed server from this terminal must leave stdin available
+    // for the native attachment below. A tmux server that inherits this PTY
+    // rejects a later client attaching from the same terminal.
+    assert_eq!(unsafe { libc::isatty(libc::STDIN_FILENO) }, 1);
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("server-stdin");
+    let mut server = TerminalSession::start_fixture(
+        TerminalIdentity::fixture(root.path(), "server-stdin", "attempt-1", "writer"),
+        &format!(
+            "if test /dev/fd/0 -ef /dev/null; then printf detached; else printf inherited; fi > '{}'; exec sleep 30",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&marker).is_ok_and(|value| !value.is_empty())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    server.stop().unwrap();
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "detached");
+
     let mut terminal = DashboardTerminal::open().unwrap();
     terminal.set_mouse_enabled(false).unwrap();
     for outcome in [0, 7, -1] {
