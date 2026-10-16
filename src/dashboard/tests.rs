@@ -710,45 +710,155 @@ fn embedded_terminal_keeps_project_context_visible() {
     assert!(rendered.contains("agent-work"), "{rendered}");
 }
 
+const LONG_TERMINAL_IDENTITY: &str = "codex / 20261011-213742-dashboard-agent-terminals-embedded-agent-terminal / attempt-1 / attempt-1-write-22 / 0123456789abcdef0123456789abcdef";
+
+fn terminal_display() -> crate::terminal_view::Display {
+    let mut screen = crate::terminal_view::Screen::new(40, 8).unwrap();
+    screen.write(b"native prompt");
+    crate::terminal_view::Display {
+        frame: screen.snapshot().unwrap(),
+        identity: LONG_TERMINAL_IDENTITY.into(),
+        state: "Observe".into(),
+    }
+}
+
 #[test]
 fn narrow_terminal_focus_actions_reveal_control() {
-    for (key, effect) in [('i', Effect::ControlTerminal), (']', Effect::LiteralEscape)] {
+    for (width, height) in [(60, 15), (80, 24), (100, 24), (140, 30)] {
+        for (key, effect) in [('i', Effect::ControlTerminal), (']', Effect::LiteralEscape)] {
+            let mut app = project_app(vec![project_source(
+                "/project",
+                vec![row("work", "executing")],
+            )]);
+            app.resize(width, height);
+            assert_eq!(
+                app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
+                Effect::OpenTerminal
+            );
+            app.set_terminal(terminal_display());
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(app.pane, app::Pane::List);
+            assert_eq!(
+                app.handle_key(KeyCode::Char(key), KeyModifiers::NONE),
+                effect
+            );
+            app.terminal.as_mut().unwrap().state = "Control · Ctrl-] navigate".into();
+            let rendered = text(&app, width, height);
+            for expected in [
+                "Control · Ctrl-] navigate",
+                "attempt-1-write-22",
+                "0123456789abcdef0123456789abcdef",
+                "native prompt",
+            ] {
+                assert!(
+                    rendered.contains(expected),
+                    "{width}x{height}, {key}: missing {expected}: {rendered}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn undersized_terminal_rejects_focus_actions() {
+    for (width, height) in [(59, 24), (80, 14), (0, 0)] {
+        for key in ['i', ']'] {
+            let mut app = project_app(vec![project_source(
+                "/project",
+                vec![row("work", "executing")],
+            )]);
+            app.set_terminal(terminal_display());
+            app.resize(width, height);
+            assert_eq!(
+                app.handle_key(KeyCode::Char(key), KeyModifiers::NONE),
+                Effect::None,
+                "{key} must not focus a hidden terminal at {width}x{height}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hidden_terminal_rejects_native_input() {
+    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    let mut app = project_app(vec![project_source(
+        "/project",
+        vec![row("work", "executing")],
+    )]);
+    app.set_terminal(terminal_display());
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
+    for size in [(59, 24), (80, 14), (80, 24)] {
+        app.resize(size.0, size.1);
+        if size == (80, 24) {
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        }
+        for event in [
+            Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Event::Paste("hidden paste".into()),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 11,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ] {
+            assert!(
+                super::terminal_input_event(&app, event.clone()).is_none(),
+                "hidden input at {size:?}: {event:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wrapped_terminal_header_preserves_viewport_geometry() {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+    for (width, height) in [(60, 15), (80, 24), (100, 24), (140, 30)] {
         let mut app = project_app(vec![project_source(
             "/project",
             vec![row("work", "executing")],
         )]);
-        app.resize(80, 24);
-        assert_eq!(
-            app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
-            Effect::OpenTerminal
-        );
-        let display = crate::terminal_view::Display {
-            frame: crate::terminal_view::Screen::new(78, 16)
-                .unwrap()
-                .snapshot()
-                .unwrap(),
-            identity: "work / attempt-1 / writer / generation-1".into(),
-            state: "Observe".into(),
-        };
-        app.set_terminal(display);
-        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(app.pane, app::Pane::List);
-        assert_eq!(
-            app.handle_key(KeyCode::Char(key), KeyModifiers::NONE),
-            effect
-        );
-        app.terminal.as_mut().unwrap().state = "Control · Ctrl-] navigate".into();
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.resize(width, height);
+        app.set_terminal(terminal_display());
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
+        let area = layout::terminal_content(app.size, LONG_TERMINAL_IDENTITY);
+        let size = layout::terminal_size(app.size, LONG_TERMINAL_IDENTITY);
+        assert_eq!(size, (area.width, area.height));
+        let mut screen = crate::terminal_view::Screen::new(size.0, size.1).unwrap();
+        screen.write(format!("native prompt\x1b[{};{}HZ\x1b[2;3H", size.1, size.0).as_bytes());
+        app.terminal.as_mut().unwrap().frame = screen.snapshot().unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render::draw(frame, &app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer());
-        assert!(
-            rendered.contains("Control · Ctrl-] navigate"),
-            "{key}: {rendered}"
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "n");
+        assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "Z");
+        let header: String = (6..area.y)
+            .flat_map(|y| (area.x..area.right()).map(move |x| buffer[(x, y)].symbol()))
+            .collect();
+        let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(
+            compact(&header),
+            compact(LONG_TERMINAL_IDENTITY),
+            "{width}x{height}: {header}"
         );
-        assert!(
-            rendered.contains("work / attempt-1 / writer / generation-1"),
-            "{key}: {rendered}"
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            (area.x + 2, area.y + 1).into()
         );
+        let mouse = |column, row| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(super::terminal_input_event(&app, mouse(area.x, area.y - 1)).is_none());
+        assert_eq!(
+            super::terminal_input_event(&app, mouse(area.x + 2, area.y + 1)),
+            Some(mouse(2, 1))
+        );
+        assert!(super::terminal_input_event(&app, mouse(area.right(), area.y)).is_none());
     }
 }
 

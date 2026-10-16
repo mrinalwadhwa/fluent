@@ -47,6 +47,11 @@ legacy Ctrl-] character.
 To send the reserved character literally, press Ctrl-], then `]`; this sends
 byte 0x1d and restores terminal focus. Paste is limited to 64 KiB per event.
 
+The terminal header wraps long invocation identities so the Task and generation
+stay visible. Shrinking the dashboard below 60 columns or 15 rows returns input
+to dashboard navigation and preserves the worker's dimensions. After enlarging
+the window, press `i` to focus the terminal again; focus does not return on resize.
+
 Press `f` from navigation with a terminal open to attach full-screen in the
 current Observe or Control mode. Fluent settles the embedded client before
 transferring the same lease to the inherited-terminal client. Use tmux's

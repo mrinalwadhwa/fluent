@@ -39,6 +39,10 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
 
     loop {
         if let Some(terminal) = &mut embedded {
+            if terminal.focused() && !app.terminal_visible() {
+                terminal.release_focus();
+                app.set_terminal(terminal.display());
+            }
             if terminal.refresh() {
                 app.set_terminal(terminal.display());
             }
@@ -55,19 +59,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                 && matches!(event, CEvent::Key(_) | CEvent::Paste(_) | CEvent::Mouse(_));
             if native {
                 let terminal = embedded.as_mut().unwrap();
-                let event = match event {
-                    CEvent::Mouse(mut mouse) => {
-                        let area = layout::terminal_content(app.size);
-                        if area.contains((mouse.column, mouse.row).into()) {
-                            mouse.column -= area.x;
-                            mouse.row -= area.y;
-                            Some(CEvent::Mouse(mouse))
-                        } else {
-                            None
-                        }
-                    }
-                    other => Some(other),
-                };
+                let event = terminal_input_event(&app, event);
                 if let Some(event) = event {
                     if let Err(error) = terminal.send(event) {
                         app.refresh_failed(format!("{error:#}"));
@@ -126,14 +118,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         }
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
-                            app.resize(width, height);
-                            if let Some(terminal) = &mut embedded {
-                                let (columns, rows) = layout::terminal_size(app.size);
-                                if let Err(error) = terminal.resize(columns, rows) {
-                                    app.refresh_failed(format!("{error:#}"));
-                                }
-                                app.set_terminal(terminal.display());
-                            }
+                            resize_terminal(&mut app, embedded.as_mut(), width, height);
                             refresh_projects(search_root, explicit, &home, &mut app);
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -146,13 +131,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         }
                     }
                     CEvent::Resize(width, height) => {
-                        app.resize(width, height);
-                        if let Some(terminal) = &mut embedded {
-                            let (columns, rows) = layout::terminal_size(app.size);
-                            if let Err(error) = terminal.resize(columns, rows) {
-                                app.refresh_failed(format!("{error:#}"));
-                            }
-                        }
+                        resize_terminal(&mut app, embedded.as_mut(), width, height);
                     }
                     _ => {}
                 }
@@ -167,6 +146,47 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
         }
     }
     Ok(())
+}
+
+fn terminal_input_event(app: &App, event: CEvent) -> Option<CEvent> {
+    if !app.terminal_visible() {
+        return None;
+    }
+    match event {
+        CEvent::Mouse(mut mouse) => {
+            let area = layout::terminal_content(app.size, &app.terminal.as_ref()?.identity);
+            if !area.contains((mouse.column, mouse.row).into()) {
+                return None;
+            }
+            mouse.column -= area.x;
+            mouse.row -= area.y;
+            Some(CEvent::Mouse(mouse))
+        }
+        CEvent::Key(_) | CEvent::Paste(_) => Some(event),
+        _ => None,
+    }
+}
+
+fn resize_terminal(
+    app: &mut App,
+    terminal: Option<&mut crate::terminal_view::EmbeddedTerminal>,
+    width: u16,
+    height: u16,
+) {
+    app.resize(width, height);
+    if let Some(terminal) = terminal {
+        if !app.terminal_visible() {
+            terminal.release_focus();
+        }
+        if app.terminal_fits() {
+            let identity = crate::terminal_view::identity(terminal.descriptor());
+            let (columns, rows) = layout::terminal_size(app.size, &identity);
+            if let Err(error) = terminal.resize(columns, rows) {
+                app.refresh_failed(format!("{error:#}"));
+            }
+        }
+        app.set_terminal(terminal.display());
+    }
 }
 
 fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
@@ -192,7 +212,8 @@ fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
         attachment.descriptor() == descriptor,
         "invocation changed; refresh and select it again"
     );
-    let (columns, rows) = layout::terminal_size(app.size);
+    let (columns, rows) =
+        layout::terminal_size(app.size, &crate::terminal_view::identity(descriptor));
     crate::terminal_view::EmbeddedTerminal::observe(attachment, columns, rows)
 }
 

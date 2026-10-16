@@ -64,6 +64,20 @@ impl App {
         self.terminal = Some(display);
         self.dirty = true;
     }
+    pub fn terminal_fits(&self) -> bool {
+        self.size.0 >= 60
+            && self.size.1 >= 15
+            && self.terminal.as_ref().is_some_and(|display| {
+                layout::terminal_content(self.size, &display.identity).height > 0
+            })
+    }
+    pub fn terminal_visible(&self) -> bool {
+        self.project_mode()
+            && !self.help
+            && !self.errors
+            && self.terminal_fits()
+            && (self.size.0 >= 100 || self.pane == Pane::Detail)
+    }
     pub fn resize(&mut self, width: u16, height: u16) {
         self.size = (width, height);
         self.clamp_scrolls();
@@ -151,7 +165,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Effect {
         if self.terminal.is_some() && !self.help && !self.errors {
             match key {
-                KeyCode::Char('i' | ']') => {
+                KeyCode::Char('i' | ']') if self.terminal_fits() => {
                     self.pane = Pane::Detail;
                     self.dirty = true;
                     return if key == KeyCode::Char('i') {

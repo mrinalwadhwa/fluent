@@ -14,8 +14,18 @@ fn assert_visible_control(app: &App) -> Result<()> {
         rendered.contains("Control · Ctrl-] navigate"),
         "Control state hidden: {rendered}"
     );
+    let identity = &app.terminal.as_ref().unwrap().identity;
+    let content = layout::terminal_content(app.size, identity);
+    let header: String = (6..content.y)
+        .flat_map(|y| (content.x..content.right()).map(move |x| buffer[(x, y)].symbol()))
+        .collect();
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
     ensure!(
-        rendered.contains(&app.terminal.as_ref().unwrap().identity),
+        compact(&header) == compact(identity),
         "invocation identity hidden: {rendered}"
     );
     Ok(())
@@ -79,6 +89,46 @@ pub fn navigate_then_send_literal_escape(
     terminal.send_literal_escape()?;
     app.set_terminal(terminal.display());
     assert_visible_control(&app)
+}
+
+/// Exercise the production resize and input gates while the worker captures bytes.
+pub fn resize_control_and_resume(
+    root: &Path,
+    terminal: &mut crate::terminal_view::EmbeddedTerminal,
+) -> Result<()> {
+    let mut app = App::new(load_project_snapshot(&[root.to_owned()], Vec::new()));
+    app.resize(80, 24);
+    app.set_terminal(terminal.display());
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
+    ensure!(terminal.focused());
+    for (width, height) in [(59, 24), (80, 14)] {
+        resize_terminal(&mut app, Some(terminal), width, height);
+        ensure!(!terminal.focused(), "resize left hidden Control focused");
+        for event in [
+            CEvent::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )),
+            CEvent::Paste("hidden".into()),
+        ] {
+            ensure!(terminal_input_event(&app, event.clone()).is_none());
+            ensure!(
+                terminal.send(event).is_err(),
+                "hidden input reached the worker"
+            );
+        }
+        for key in ['i', ']'] {
+            ensure!(app.handle_key(KeyCode::Char(key), KeyModifiers::NONE) == Effect::None);
+        }
+        resize_terminal(&mut app, Some(terminal), 80, 24);
+        ensure!(!terminal.focused(), "resize silently restored input focus");
+        ensure!(app.handle_key(KeyCode::Char(']'), KeyModifiers::NONE) == Effect::LiteralEscape);
+        // This resume action contributes one literal Ctrl-] to the byte assertion.
+        terminal.send_literal_escape()?;
+        app.set_terminal(terminal.display());
+        assert_visible_control(&app)?;
+    }
+    Ok(())
 }
 
 pub fn navigate_and_refresh(

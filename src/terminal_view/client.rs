@@ -180,6 +180,9 @@ impl EmbeddedTerminal {
     pub fn focused(&self) -> bool {
         self.focused
     }
+    pub fn release_focus(&mut self) {
+        self.focused = false;
+    }
     pub fn ended(&self) -> bool {
         self.ended
     }
@@ -240,7 +243,7 @@ impl EmbeddedTerminal {
         );
         self.attachment.lock().unwrap().validate_input()?;
         if releases_focus(&event) {
-            self.focused = false;
+            self.release_focus();
             return Ok(());
         }
         if let Event::Paste(text) = &event {

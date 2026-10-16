@@ -3,12 +3,12 @@ use super::snapshot::{DashboardRow, DashboardSnapshot};
 use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
 
-pub fn terminal_size(size: (u16, u16)) -> (u16, u16) {
-    let content = terminal_content(size);
+pub fn terminal_size(size: (u16, u16), identity: &str) -> (u16, u16) {
+    let content = terminal_content(size, identity);
     (content.width.clamp(1, 500), content.height.clamp(1, 200))
 }
 
-pub fn terminal_content(size: (u16, u16)) -> ratatui::layout::Rect {
+pub fn terminal_content(size: (u16, u16), identity: &str) -> ratatui::layout::Rect {
     let area = ratatui::layout::Rect::new(0, 0, size.0, size.1);
     let body = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(5),
@@ -25,12 +25,7 @@ pub fn terminal_content(size: (u16, u16)) -> ratatui::layout::Rect {
     } else {
         body
     };
-    ratatui::layout::Rect::new(
-        pane.x + 1,
-        pane.y + 2,
-        pane.width.saturating_sub(2),
-        pane.height.saturating_sub(3),
-    )
+    crate::terminal_view::content_area(pane, identity)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -17,13 +17,57 @@ impl EmbeddedTerminal {
         let d = self.descriptor();
         Display {
             frame: self.frame().clone(),
-            identity: format!(
-                "{} / {} / {} / {} / {}",
-                d.provider, d.work_item_id, d.attempt_id, d.task_id, d.execution_generation
-            ),
+            identity: identity(d),
             state: self.state_label(),
         }
     }
+}
+
+pub(crate) fn identity(d: &crate::terminal_sessions::TerminalDescriptor) -> String {
+    format!(
+        "{} / {} / {} / {} / {}",
+        d.provider, d.work_item_id, d.attempt_id, d.task_id, d.execution_generation
+    )
+}
+
+/// Wrap identity fields without clipping long Work Item IDs or generations.
+pub(crate) fn identity_lines(identity: &str, width: u16) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for word in identity.split_whitespace() {
+        if !line.is_empty() {
+            if used + 1 + word.width() > width {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            } else {
+                line.push(' ');
+                used += 1;
+            }
+        }
+        for character in word.chars() {
+            let columns = character.width().unwrap_or(0);
+            if used + columns > width && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(character);
+            used += columns;
+        }
+    }
+    lines.push(line);
+    lines
+}
+
+/// Reserve the same identity rows for drawing, resizing, and mouse routing.
+pub(crate) fn content_area(area: ratatui::layout::Rect, identity: &str) -> ratatui::layout::Rect {
+    let inner = ratatui::widgets::Block::bordered().inner(area);
+    let rows = identity_lines(identity, inner.width)
+        .len()
+        .min(usize::from(inner.height)) as u16;
+    ratatui::layout::Rect::new(inner.x, inner.y + rows, inner.width, inner.height - rows)
 }
 
 pub fn draw(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, display: &Display) {
@@ -35,20 +79,20 @@ pub fn draw(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, display: &D
         .borders(Borders::ALL)
         .title(format!(" Terminal · {} ", display.state));
     let inner = block.inner(area);
+    let content = content_area(area, &display.identity);
     frame.render_widget(block, area);
     frame.render_widget(
-        Paragraph::new(display.identity.as_str()),
+        Paragraph::new(identity_lines(&display.identity, inner.width).join("\n")),
         ratatui::layout::Rect {
-            height: inner.height.min(1),
+            height: content.y - inner.y,
             ..inner
         },
     );
-    let top = inner.y + 1;
-    for y in 0..display.frame.rows.min(inner.height.saturating_sub(1)) {
-        for x in 0..display.frame.columns.min(inner.width) {
+    for y in 0..display.frame.rows.min(content.height) {
+        for x in 0..display.frame.columns.min(content.width) {
             let cell =
                 &display.frame.cells[y as usize * display.frame.columns as usize + x as usize];
-            if cell.width == 0 || x + u16::from(cell.width) > inner.width {
+            if cell.width == 0 || x + u16::from(cell.width) > content.width {
                 continue;
             }
             let [r, g, b] = cell.foreground;
@@ -74,8 +118,8 @@ pub fn draw(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, display: &D
                 }
             }
             frame.buffer_mut().set_stringn(
-                inner.x + x,
-                top + y,
+                content.x + x,
+                content.y + y,
                 cell.text(),
                 cell.width as usize,
                 style,
@@ -83,8 +127,8 @@ pub fn draw(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, display: &D
         }
     }
     if let Some((x, y)) = display.frame.cursor {
-        if x < inner.width && y < inner.height.saturating_sub(1) {
-            frame.set_cursor_position((inner.x + x, top + y));
+        if x < content.width && y < content.height {
+            frame.set_cursor_position((content.x + x, content.y + y));
         }
     }
 }

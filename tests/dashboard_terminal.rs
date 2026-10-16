@@ -250,7 +250,7 @@ fn terminal_control_input_pty_child() {
     // The final sentinel proves neither the reserved chord nor navigation
     // leaked to the worker before the explicit literal-chord action.
     let captured = root.path().join("native-input");
-    let expected = "\x1b\x03\x02dnative-界\x1dZ".as_bytes();
+    let expected = "\x1b\x03\x02dnative-界\x1d\x1d\x1dZ".as_bytes();
     selected
         .send(Event::Paste(format!(
             "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane",
@@ -277,6 +277,7 @@ fn terminal_control_input_pty_child() {
     )
     .unwrap();
     assert!(selected.focused());
+    fluent::dashboard::test_support::resize_control_and_resume(root.path(), &mut selected).unwrap();
     selected.send(read_pty_input("sentinel")).unwrap();
     wait_for(|| std::fs::metadata(&captured).unwrap().len() >= expected.len() as u64);
     assert_eq!(std::fs::read(captured).unwrap(), expected);
