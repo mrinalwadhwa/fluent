@@ -2180,6 +2180,135 @@ fn codex_relay_records_app_server_exit_before_first_turn() {
 
 #[cfg(unix)]
 #[test]
+fn codex_relay_reports_broken_pipe_without_payloads() {
+    assert_codex_display_transport_diagnostic(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_relay_reports_display_drain_timeout_without_payloads() {
+    assert_codex_display_transport_diagnostic(true);
+}
+
+#[cfg(unix)]
+fn assert_codex_display_transport_diagnostic(stall: bool) {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
+    use std::io::{self, Write};
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    struct TraceEvents {
+        bytes: Vec<u8>,
+        events: mpsc::Sender<serde_json::Value>,
+    }
+
+    impl Write for TraceEvents {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let event = serde_json::from_slice(&self.bytes)?;
+            self.bytes.clear();
+            self.events.send(event).unwrap();
+            Ok(())
+        }
+    }
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let buffer_size: libc::c_int = 4096;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                relay_client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer_size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let (events_tx, events_rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        socket.read().unwrap();
+        socket.send(Message::Text(json!({"id":1,"result":{"turn":{"id":"turn-1"},"private":"private-token".repeat(65536)}}).to_string())).unwrap();
+        socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+        socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}).to_string())).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+    });
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        if !stall {
+            // Keep the input side open so only the display send fails.
+            client.get_ref().shutdown(Shutdown::Write).unwrap();
+        }
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets_with_trace(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            io::sink(),
+            |completion| completion_tx.send(completion).map_err(anyhow::Error::new),
+            TraceEvents {
+                bytes: Vec::new(),
+                events: events_tx,
+            },
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.send(Message::Text(
+        json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
+    // Leave the TUI unread while canonical completion proceeds independently.
+    let completion = completion_rx.recv_timeout(Duration::from_secs(5));
+    let failure = loop {
+        let event = events_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!event.to_string().contains("private-token"));
+        if event["direction"] == "app-to-tui" && event["outcome"] == "send-error" {
+            break event;
+        }
+    };
+    release_tx.send(()).unwrap();
+    provider.join().unwrap();
+    let _ = relay.join().unwrap();
+    assert!(matches!(
+        completion.unwrap(),
+        Completion::Accepted {
+            input_sequence: 1,
+            ..
+        }
+    ));
+    assert_eq!(failure["transport_error"]["kind"], "io", "{failure}");
+    if stall {
+        assert!(
+            matches!(
+                failure["transport_error"]["io_kind"].as_str(),
+                Some("WouldBlock" | "TimedOut")
+            ),
+            "{failure}"
+        );
+    } else {
+        assert_eq!(failure["transport_error"]["io_kind"], "BrokenPipe");
+        assert_eq!(failure["transport_error"]["raw_os_error"], libc::EPIPE);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_websocket_backpressure_recovers_required_frame_once() {
     use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::io::{self, Write};

@@ -624,16 +624,16 @@ fn send_required_tui_frame(client: &mut WebSocket<UnixStream>, text: String) -> 
     loop {
         match result {
             Ok(()) => return Ok(()),
-            Err(tungstenite::Error::Io(ref error))
+            Err(tungstenite::Error::Io(error))
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
                 if Instant::now() >= deadline {
-                    anyhow::bail!(
-                        "Codex TUI WebSocket protocol send failed: required frame did not drain within {DRAIN_LIMIT:?}: {error}"
-                    );
+                    return Err(tungstenite::Error::Io(error)).with_context(|| format!(
+                        "Codex TUI WebSocket protocol send failed: required frame did not drain within {DRAIN_LIMIT:?}"
+                    ));
                 }
                 // tungstenite retains the frame after a stream write failure.
                 // Flush its buffered bytes; sending the message again would
@@ -809,8 +809,50 @@ where
     )
 }
 
-// Keep only protocol direction and method names. Request bodies, response
-// bodies, pane bytes, and provider errors can contain private credentials.
+// Keep only protocol labels and typed error categories. Request bodies,
+// response bodies, pane bytes, and error messages can contain credentials.
+#[derive(Default)]
+struct RelayTraceDetails<'a> {
+    include_turns: Option<bool>,
+    display_rejection: Option<&'a DisplaySpoolRejection>,
+    transport_error: Option<RelayTransportError>,
+}
+
+#[derive(serde::Serialize)]
+struct RelayTransportError {
+    kind: &'static str,
+    io_kind: Option<String>,
+    raw_os_error: Option<i32>,
+}
+
+impl RelayTransportError {
+    fn from_error(error: &anyhow::Error) -> Self {
+        use tungstenite::Error;
+        let mut details = Self {
+            kind: "other",
+            io_kind: None,
+            raw_os_error: None,
+        };
+        details.kind = match error.downcast_ref::<Error>() {
+            Some(Error::Io(error)) => {
+                // Format only the standard-library enum, never the I/O error.
+                details.io_kind = Some(format!("{:?}", error.kind()));
+                details.raw_os_error = error.raw_os_error();
+                "io"
+            }
+            Some(Error::ConnectionClosed) => "connection-closed",
+            Some(Error::AlreadyClosed) => "already-closed",
+            Some(Error::Protocol(_)) => "protocol",
+            Some(Error::Capacity(_)) => "capacity",
+            Some(Error::WriteBufferFull(_)) => "write-buffer-full",
+            Some(Error::Utf8) => "utf8",
+            Some(Error::AttackAttempt) => "attack-attempt",
+            _ => "other",
+        };
+        details
+    }
+}
+
 fn trace_relay<T: Write>(
     trace: &Mutex<(T, usize)>,
     generation: &str,
@@ -850,8 +892,35 @@ fn trace_relay_with_read_flag<T: Write>(
         outcome,
         method,
         input_sequence,
-        include_turns,
-        None,
+        RelayTraceDetails {
+            include_turns,
+            ..Default::default()
+        },
+    )
+}
+
+fn trace_relay_transport_error<T: Write>(
+    trace: &Mutex<(T, usize)>,
+    generation: &str,
+    thread_id: &str,
+    direction: &str,
+    outcome: &str,
+    method: Option<&str>,
+    input_sequence: u64,
+    error: &anyhow::Error,
+) -> Result<()> {
+    trace_relay_with_details(
+        trace,
+        generation,
+        thread_id,
+        direction,
+        outcome,
+        method,
+        input_sequence,
+        RelayTraceDetails {
+            transport_error: Some(RelayTransportError::from_error(error)),
+            ..Default::default()
+        },
     )
 }
 
@@ -863,8 +932,7 @@ fn trace_relay_with_details<T: Write>(
     outcome: &str,
     method: Option<&str>,
     input_sequence: u64,
-    include_turns: Option<bool>,
-    display_rejection: Option<&DisplaySpoolRejection>,
+    details: RelayTraceDetails<'_>,
 ) -> Result<()> {
     let mut trace = trace
         .lock()
@@ -887,8 +955,9 @@ fn trace_relay_with_details<T: Write>(
             "outcome": outcome,
             "method": safe_method.unwrap_or("<other>"),
             "input_sequence": input_sequence,
-            "include_turns": include_turns,
-            "display_rejection": display_rejection,
+            "include_turns": details.include_turns,
+            "display_rejection": details.display_rejection,
+            "transport_error": details.transport_error,
         }),
     )?;
     trace.0.write_all(b"\n")?;
@@ -1049,7 +1118,7 @@ where
                             .lock()
                             .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
                             .input_sequence;
-                        let _ = trace_relay(
+                        let _ = trace_relay_transport_error(
                             &display_trace,
                             generation,
                             thread_id,
@@ -1057,6 +1126,7 @@ where
                             "send-error",
                             None,
                             sequence,
+                            &error,
                         );
                         return Err(error);
                     }
@@ -1088,7 +1158,7 @@ where
                                 return Ok(());
                             }
                             let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
-                            trace_relay(&request_trace, generation, thread_id, "tui-to-app", "read-error", None, sequence)?;
+                            trace_relay_transport_error(&request_trace, generation, thread_id, "tui-to-app", "read-error", None, sequence, &error)?;
                             return Err(error).context("reading native Codex TUI requests");
                         }
                         Ok(SocketRead::Closed) => {
@@ -1170,7 +1240,8 @@ where
                                 request_display_detached.store(true, Ordering::Release);
                                 let _ = trace_relay_with_details(
                                     &request_trace, generation, thread_id, "app-to-tui", "display-detached",
-                                    Some(method), next_sequence, None, Some(&rejection),
+                                    Some(method), next_sequence,
+                                    RelayTraceDetails { display_rejection: Some(&rejection), ..Default::default() },
                                 );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
@@ -1185,7 +1256,8 @@ where
                                 request_display_detached.store(true, Ordering::Release);
                                 let _ = trace_relay_with_details(
                                     &request_trace, generation, thread_id, "app-to-tui", "display-detached",
-                                    Some(method), next_sequence, None, Some(&rejection),
+                                    Some(method), next_sequence,
+                                    RelayTraceDetails { display_rejection: Some(&rejection), ..Default::default() },
                                 );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
@@ -1199,7 +1271,8 @@ where
                                 request_display_detached.store(true, Ordering::Release);
                                 let _ = trace_relay_with_details(
                                     &request_trace, generation, thread_id, "app-to-tui", "display-detached",
-                                    Some(method), next_sequence, None, Some(&rejection),
+                                    Some(method), next_sequence,
+                                    RelayTraceDetails { display_rejection: Some(&rejection), ..Default::default() },
                                 );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
@@ -1229,7 +1302,8 @@ where
                         .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?
                         .send(Message::Text(line));
                     if let Err(error) = forwarded {
-                        trace_relay(&request_trace, generation, thread_id, "tui-to-app", "send-error", Some(method), next_sequence)?;
+                        let error = anyhow::Error::new(error);
+                        trace_relay_transport_error(&request_trace, generation, thread_id, "tui-to-app", "send-error", Some(method), next_sequence, &error)?;
                         return Err(error).with_context(|| format!("forwarding native Codex TUI {method} to app-server"));
                     }
                     trace_relay_with_read_flag(
@@ -1260,7 +1334,7 @@ where
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
                                 .input_sequence;
-                            trace_relay(
+                            trace_relay_transport_error(
                                 &response_trace,
                                 generation,
                                 thread_id,
@@ -1268,6 +1342,7 @@ where
                                 "read-error",
                                 None,
                                 sequence,
+                                &error,
                             )?;
                             return Err(error).context("reading native Codex app-server events");
                         }
@@ -1385,8 +1460,10 @@ where
                             "display-detached",
                             event["method"].as_str(),
                             input_sequence,
-                            None,
-                            Some(&rejection),
+                            RelayTraceDetails {
+                                display_rejection: Some(&rejection),
+                                ..Default::default()
+                            },
                         );
                         let _ = overflow_abort_client.shutdown(Shutdown::Both);
                     }
@@ -1839,6 +1916,66 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{self, Read};
+
+    #[test]
+    fn relay_transport_diagnostics_hide_error_text() {
+        let private = "private-token";
+        let errors = [
+            (
+                anyhow::Error::new(tungstenite::Error::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    private,
+                ))),
+                "io",
+                Some("BrokenPipe"),
+            ),
+            (
+                anyhow::Error::new(tungstenite::Error::WriteBufferFull(Message::Text(
+                    private.into(),
+                ))),
+                "write-buffer-full",
+                None,
+            ),
+            (
+                anyhow::Error::new(tungstenite::Error::Protocol(
+                    tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                )),
+                "protocol",
+                None,
+            ),
+            (
+                anyhow::Error::new(tungstenite::Error::ConnectionClosed),
+                "connection-closed",
+                None,
+            ),
+            (anyhow::anyhow!(private), "other", None),
+        ];
+        for (error, kind, io_kind) in errors {
+            // Error details must survive context wrappers and the normal-event
+            // budget without revealing their arbitrary strings or messages.
+            let trace = Mutex::new((Vec::new(), 256));
+            trace_relay_transport_error(
+                &trace,
+                "generation-1",
+                "assigned-thread",
+                "app-to-tui",
+                "send-error",
+                Some("private-token\n"),
+                1,
+                &error.context(private),
+            )
+            .unwrap();
+            let (bytes, count) = trace.into_inner().unwrap();
+            assert_eq!(count, 257);
+            let record: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                record["transport_error"],
+                json!({"kind":kind,"io_kind":io_kind,"raw_os_error":null})
+            );
+            assert_eq!(record["method"], "<other>");
+            assert!(!String::from_utf8(bytes).unwrap().contains(private));
+        }
+    }
 
     #[test]
     fn display_spool_delivers_one_oversized_response_in_order() {
