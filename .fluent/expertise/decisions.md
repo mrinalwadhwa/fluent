@@ -4,6 +4,42 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Preserve manual sizing for managed terminals
+
+Managed tmux windows use manual sizing from creation because `ignore-size`
+alone lets observers resize a window when no ordinary client is attached.
+Only the runtime's validated Control owner may resize the worker. Embedded
+Control supplies its viewport; full-screen Control polls terminal dimensions.
+Keep the status row disabled and retain the last controlled size after detach,
+including when observers remain. Future attachment clients must preserve this
+invariant. See [runtime terminal ownership](../../documentation/architecture.md)
+and `observer_cannot_type_or_resize_worker` and
+`fullscreen_resize_requires_control` in the
+[terminal regressions](../../tests/dashboard_terminal.rs).
+
+---
+
+## Keep separate budgets for Codex display responses
+
+The [Codex relay](../../src/native_agent/codex.rs) retains one FIFO with
+separate queued allowances: 12 MiB for ordinary frames and 64 MiB for large
+responses, plus one in-flight message bounded to 64 MiB. Valid UI catalog
+responses can exceed the ordinary allowance and overlap before display drains.
+Charge overlapping large responses against their aggregate byte allowance;
+keep ordinary events in wire order. Exceeding either budget disconnects the
+display without blocking independent provider evidence or assigned-turn
+completion. Combining the budgets or allowing only one large response would
+restore premature display disconnects.
+
+`display_spool_delivers_overlapping_large_responses_in_order` and
+`display_spool_bounds_oversized_responses_separately` in the relay cover FIFO
+order and separate bounds.
+`codex_relay_bounds_plugin_responses_without_losing_turn_evidence` in the
+[relay journeys](../../tests/native_agent_tasks.rs) covers evidence and
+completion after display overload.
+
+---
+
 ## Keep the old dashboard snapshot as an internal compatibility path
 
 The CLI opens the project grouped dashboard. The older status group snapshot

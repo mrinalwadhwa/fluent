@@ -12,6 +12,7 @@ Before building from source, run:
 
 ```sh
 bash scripts/prepare-terminal-deps.sh
+cargo fetch --locked
 cargo build --offline
 ```
 
@@ -20,6 +21,10 @@ Preparation downloads verified archives and builds the static library under
 caches remain under `target/terminal-deps/`. Cargo's build script compiles the
 local adapter and links the prepared archive; it never downloads dependencies.
 Keep the Attempt-provided `CARGO_HOME` when working in a Fluent workspace.
+The preparation script does not populate Cargo's registry or crate cache;
+`cargo fetch --locked` fills that cache before the first offline build. It
+needs network access unless the selected Cargo cache already has every locked
+dependency.
 
 To prepare the other macOS release target, pass `x86_64-apple-darwin` or
 `aarch64-apple-darwin` to the same script before `cargo build --target`.
