@@ -655,39 +655,59 @@ struct DisplaySpool {
 
 struct DisplaySpoolState {
     frames: VecDeque<String>,
+    // Charge ordinary frames to the backlog budget and reserve a separate,
+    // single slot for a response larger than that entire budget.
     queued_bytes: usize,
+    has_oversized_frame: bool,
     closed: bool,
 }
 
 impl DisplaySpool {
     const MAX_QUEUED_BYTES: usize = 12 * 1024 * 1024;
+    // Match tungstenite's default message limit, including fragmented
+    // messages. A valid app/read response can exceed the ordinary backlog.
+    const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
     fn new() -> Self {
         Self {
             state: Mutex::new(DisplaySpoolState {
                 frames: VecDeque::new(),
                 queued_bytes: 0,
+                has_oversized_frame: false,
                 closed: false,
             }),
             ready: Condvar::new(),
         }
     }
 
-    // A display that cannot keep up loses its connection. Provider evidence
-    // and completion continue through the independent downstream reader.
+    // Retain at most the ordinary backlog plus one bounded large response,
+    // in wire order. The display sender can also own one in-flight message.
+    // Never wait for it: a display that exceeds either budget disconnects,
+    // while the independent downstream reader continues provider evidence.
     fn push(&self, text: String) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
             return false;
         }
-        if text.len() > Self::MAX_QUEUED_BYTES - state.queued_bytes {
+        let oversized = text.len() > Self::MAX_QUEUED_BYTES;
+        let overflow = if oversized {
+            state.has_oversized_frame || text.len() > Self::MAX_FRAME_BYTES
+        } else {
+            text.len() > Self::MAX_QUEUED_BYTES - state.queued_bytes
+        };
+        if overflow {
             state.frames.clear();
             state.queued_bytes = 0;
+            state.has_oversized_frame = false;
             state.closed = true;
             self.ready.notify_all();
             return false;
         }
-        state.queued_bytes += text.len();
+        if oversized {
+            state.has_oversized_frame = true;
+        } else {
+            state.queued_bytes += text.len();
+        }
         state.frames.push_back(text);
         self.ready.notify_one();
         true
@@ -697,7 +717,11 @@ impl DisplaySpool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         loop {
             if let Some(frame) = state.frames.pop_front() {
-                state.queued_bytes -= frame.len();
+                if frame.len() > Self::MAX_QUEUED_BYTES {
+                    state.has_oversized_frame = false;
+                } else {
+                    state.queued_bytes -= frame.len();
+                }
                 return Some(frame);
             }
             if state.closed {
@@ -720,6 +744,7 @@ impl DisplaySpool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.frames.clear();
         state.queued_bytes = 0;
+        state.has_oversized_frame = false;
         state.closed = true;
         self.ready.notify_all();
     }
@@ -1744,6 +1769,56 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{self, Read};
+
+    #[test]
+    fn display_spool_delivers_one_oversized_response_in_order() {
+        let spool = DisplaySpool::new();
+        let response = "x".repeat(15_897_799);
+        assert!(
+            spool.push(response.clone()),
+            "empty spool rejected one response"
+        );
+        assert!(spool.push("following event".into()));
+        assert_eq!(spool.pop().unwrap(), response);
+        assert_eq!(spool.pop().unwrap(), "following event");
+
+        // A drained large response releases its allowance; earlier ordinary
+        // events retain their place when another large response arrives.
+        assert!(spool.push("preceding event".into()));
+        assert!(spool.push(response.clone()));
+        assert_eq!(spool.pop().unwrap(), "preceding event");
+        assert_eq!(spool.pop().unwrap(), response);
+        spool.close();
+        assert!(spool.pop().is_none());
+    }
+
+    #[test]
+    fn display_spool_bounds_oversized_responses_separately() {
+        let spool = DisplaySpool::new();
+        assert!(spool.push("x".repeat(15_897_799)));
+        assert!(spool.push("y".repeat(DisplaySpool::MAX_QUEUED_BYTES)));
+        assert!(!spool.push("z".into()), "ordinary backlog exceeded its cap");
+        assert!(spool.pop().is_none());
+        assert!(!spool.push("closed".into()));
+
+        let spool = DisplaySpool::new();
+        assert!(spool.push("x".repeat(15_897_799)));
+        assert!(
+            !spool.push("y".repeat(15_897_799)),
+            "queued two large responses"
+        );
+        assert!(spool.pop().is_none());
+
+        // Even an otherwise empty spool must reject an unbounded message.
+        let spool = DisplaySpool::new();
+        let message_limit = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size
+            .unwrap();
+        assert!(spool.push("x".repeat(message_limit)));
+        assert_eq!(spool.pop().unwrap().len(), message_limit);
+        assert!(!spool.push("x".repeat(message_limit + 1)));
+        assert!(spool.pop().is_none());
+    }
 
     #[test]
     fn display_spool_disconnects_at_its_byte_limit() {

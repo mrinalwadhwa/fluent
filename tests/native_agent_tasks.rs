@@ -1782,10 +1782,26 @@ fn native_terminal_controls_assigned_invocation() {
 #[cfg(unix)]
 #[test]
 fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
+    codex_relay_preserves_responses_and_turn_evidence("plugin/list", "plugins", 512 * 1024, 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_relay_delivers_oversized_app_response_without_losing_turn_evidence() {
+    codex_relay_preserves_responses_and_turn_evidence("app/read", "apps", 15_897_799, 1);
+}
+
+#[cfg(unix)]
+fn codex_relay_preserves_responses_and_turn_evidence(
+    method: &'static str,
+    catalog: &'static str,
+    response_bytes: usize,
+    response_count: u64,
+) {
     use fluent::native_agent::codex::relay_codex_websockets;
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use tungstenite::Message;
 
@@ -1794,16 +1810,22 @@ fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
     let evidence = tempfile::NamedTempFile::new().unwrap();
     let evidence_path = evidence.path().to_path_buf();
     let evidence_file = evidence.reopen().unwrap();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
     let provider = std::thread::spawn(move || {
         let mut socket = tungstenite::accept(provider_stream).unwrap();
-        for id in 1..=4 {
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        for id in 1..=response_count {
             let request: serde_json::Value =
                 serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
-            assert_eq!(request["method"], "plugin/list");
+            assert_eq!(request["method"], method);
             assert_eq!(request["id"], id);
             socket
                 .send(Message::Text(
-                    json!({"id":id,"result":{"plugins":[{"description":"x".repeat(512 * 1024)}]}})
+                    json!({"id":id,"result":{catalog:[{"description":"x".repeat(response_bytes)}]}})
                         .to_string(),
                 ))
                 .unwrap();
@@ -1817,7 +1839,7 @@ fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
         ] {
             socket.send(Message::Text(event.to_string())).unwrap();
         }
-        std::thread::sleep(Duration::from_millis(300));
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     });
     let relay = std::thread::spawn(move || {
         let client = tungstenite::accept(relay_client).unwrap();
@@ -1829,28 +1851,26 @@ fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
             "assigned-thread",
             Arc::new(NativeAdmission::new()),
             evidence_file,
-            |_| Ok(()),
+            |completion| completed_tx.send(completion).map_err(anyhow::Error::new),
         )
     });
     let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
     tui.get_ref()
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    for id in 1..=4 {
+    for id in 1..=response_count {
         tui.send(Message::Text(
-            json!({"id":id,"method":"plugin/list","params":{}}).to_string(),
+            json!({"id":id,"method":method,"params":{}}).to_string(),
         ))
         .unwrap();
         let response: serde_json::Value =
             serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(response["id"], id);
-        assert_eq!(
-            response["result"]["plugins"][0]["description"]
-                .as_str()
-                .unwrap()
-                .len(),
-            512 * 1024
-        );
+        let description = response["result"][catalog][0]["description"]
+            .as_str()
+            .unwrap();
+        assert_eq!(description.len(), response_bytes);
+        assert!(description.bytes().all(|byte| byte == b'x'));
     }
     tui.send(Message::Text(
         json!({"id":5,"method":"turn/start","params":{"threadId":"assigned-thread","input":[{"text":"review candidate"}]}})
@@ -1862,6 +1882,15 @@ fn codex_relay_bounds_plugin_responses_without_losing_turn_evidence() {
             serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(event["method"], method);
     }
+    assert_eq!(
+        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    release_tx.send(()).unwrap();
     let _ = tui.get_ref().shutdown(Shutdown::Both);
     provider.join().unwrap();
     let _ = relay.join().unwrap();
