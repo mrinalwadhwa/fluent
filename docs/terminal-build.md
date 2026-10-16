@@ -28,7 +28,9 @@ but do not need Zig or a separate Ghostty installation.
 
 In the dashboard, expand a Work Item, select its native agent worker, and press
 `t` to observe its terminal beside the project list. Observe clients use tmux's
-`read-only,ignore-size` flags. Terminal output is interpreted inside Ghostty
+`read-only,ignore-size` flags and preserve the worker's dimensions even when
+no controller is attached. Only Control resizes the worker; releasing Control
+retains its last dimensions. Terminal output is interpreted inside Ghostty
 and projected as cells; it cannot set the dashboard title or clipboard.
 
 Press `i` to acquire Control. While the terminal has focus, Esc, Ctrl-C,

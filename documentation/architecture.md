@@ -3627,6 +3627,16 @@ lock beside the host-owned descriptor. The writable tmux client directly inherit
 the Control lock descriptor, so Control remains occupied if the Fluent CLI exits
 while tmux is attached. The client releases the lock when it exits. A second
 controller may still observe, and detaching releases only the client lease.
+
+Managed windows use manual sizing from creation. tmux's `ignore-size` flag
+alone still lets an observer determine the window size when no ordinary client
+is attached. Observe keeps that flag and read-only input, while only Control
+calls the runtime's validated resize operation. Embedded Control supplies its
+viewport dimensions; full-screen Control polls the inherited terminal's size
+without reading its input. tmux's status row is disabled so the worker receives
+the entire viewport. Detaching Control leaves the last worker size intact,
+even when observers remain attached.
+
 Cancellation inventories tmux
 pane descendants, the captured pane process sessions, processes holding a
 private per-generation file handle, and processes with that generation's

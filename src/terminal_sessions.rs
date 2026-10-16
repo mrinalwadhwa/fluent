@@ -15,6 +15,25 @@ use crate::lease::{self, LeaseAttempt, TaskLease};
 
 const DESCRIPTOR: &str = "terminal-session.json";
 
+// tmux still uses ignore-size clients when no ordinary client is attached.
+// Freeze the window before publishing it; only the Control owner may resize it.
+// Hide tmux's status row so the pane occupies the entire requested viewport.
+const WINDOW_OPTIONS: &[&str] = &[
+    ";",
+    "set-option",
+    "-w",
+    "-t",
+    "fluent:0",
+    "window-size",
+    "manual",
+    ";",
+    "set-option",
+    "-t",
+    "fluent",
+    "status",
+    "off",
+];
+
 #[derive(Debug, Clone)]
 pub struct TerminalIdentity {
     pub source_root: PathBuf,
@@ -414,6 +433,7 @@ impl TerminalSession {
                 .arg("-S")
                 .arg(&socket)
                 .args(["new-session", "-d", "-s", "fluent", "/bin/sh"])
+                .args(WINDOW_OPTIONS)
                 .output()?;
             ensure!(
                 output.status.success(),
@@ -619,6 +639,7 @@ impl TerminalSession {
                 .arg("-s")
                 .arg("fluent")
                 .arg(&pane_command)
+                .args(WINDOW_OPTIONS)
                 .output()
                 .context("creating managed tmux session")?;
             ensure!(
@@ -828,10 +849,21 @@ impl Attachment {
 
     pub fn run(&self) -> Result<i32> {
         let mut command = self.client_command()?;
-        let status = spawn_attachment_client(&mut command, self.control.as_ref())
-            .context("attaching managed terminal")?
-            .wait()?;
-        Ok(status.code().unwrap_or(1))
+        let child = spawn_attachment_client(&mut command, self.control.as_ref())
+            .context("attaching managed terminal")?;
+        let mut size = None;
+        wait_for_attachment(child, || {
+            if self.has_control() {
+                // The native client owns stdin. Poll only dimensions while it
+                // runs, retaining manual sizing across every attach/detach.
+                let current = crossterm::terminal::size()?;
+                if size != Some(current) {
+                    self.resize(current.0, current.1)?;
+                    size = Some(current);
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Start an ordinary attachment client on the frontend's owned PTY.
@@ -877,6 +909,25 @@ impl Attachment {
     }
 
     pub fn detach(self) {}
+}
+
+fn wait_for_attachment(mut child: Child, mut resize: impl FnMut() -> Result<()>) -> Result<i32> {
+    let result = (|| {
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status.code().unwrap_or(1));
+            }
+            resize()?;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })();
+    if result.is_err() {
+        // A failed size read or rejected resize must not leave a writable
+        // attachment holding the lease after the dashboard returns.
+        let _ = child.kill();
+        child.wait().context("settling failed attachment client")?;
+    }
+    result
 }
 
 fn spawn_attachment_client(command: &mut Command, control: Option<&TaskLease>) -> Result<Child> {
@@ -1644,6 +1695,45 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
 #[cfg(test)]
 mod control_client_tests {
     use super::*;
+
+    #[test]
+    fn attachment_wait_updates_size_until_client_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("resized");
+        let child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "while ! test -f \"$1\"; do sleep 0.01; done; exit 7",
+                "sh",
+            ])
+            .arg(&ready)
+            .spawn()
+            .unwrap();
+        let mut updates = 0;
+        let status = wait_for_attachment(child, || {
+            updates += 1;
+            if updates == 2 {
+                std::fs::write(&ready, b"resized")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(status, 7);
+        assert!(updates >= 2);
+    }
+
+    #[test]
+    fn attachment_wait_settles_client_after_resize_failure() {
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let error = wait_for_attachment(child, || bail!("resize failed")).unwrap_err();
+        assert!(error.to_string().contains("resize failed"));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 
     #[test]
     fn writable_client_itself_holds_control_after_parent_releases_lease() {

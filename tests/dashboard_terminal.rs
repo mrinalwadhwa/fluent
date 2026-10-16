@@ -187,6 +187,23 @@ fn observer_cannot_type_or_resize_worker() {
     let before = size();
     let mut observer =
         EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 30, 6).unwrap();
+    let clients = || {
+        let out = std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(worker.socket_path().unwrap())
+            .args([
+                "list-clients",
+                "-F",
+                "#{client_width}x#{client_height}:#{client_readonly}",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // Wait for the server to see each viewport, not just the local parser.
+    wait_for(|| clients().contains("30x6:1"));
+    assert_eq!(size(), before, "the first observer resized the worker");
     assert!(
         observer
             .send(Event::Paste("touch forbidden\n".into()))
@@ -195,9 +212,35 @@ fn observer_cannot_type_or_resize_worker() {
     observer.resize(45, 12).unwrap();
     wait_for(|| {
         observer.refresh();
-        observer.frame().columns == 45
+        observer.frame().columns == 45 && clients().contains("45x12:1")
     });
     assert_eq!(size(), before);
+    let mut peer =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 90, 30).unwrap();
+    wait_for(|| clients().lines().count() == 2);
+    assert_eq!(size(), before, "multiple observers resized the worker");
+    observer.reconnect().unwrap();
+    wait_for(|| clients().contains("45x12:1"));
+    assert_eq!(
+        size(),
+        before,
+        "reconnecting an observer resized the worker"
+    );
+
+    peer.acquire_control().unwrap();
+    peer.resize(73, 13).unwrap();
+    wait_for(|| clients().contains("73x13:0"));
+    assert_eq!(size().trim(), "73x13");
+    peer.observe_only().unwrap();
+    wait_for(|| clients().lines().count() == 2 && !clients().contains(":0"));
+    observer.resize(35, 9).unwrap();
+    wait_for(|| clients().contains("35x9:1"));
+    assert_eq!(
+        size().trim(),
+        "73x13",
+        "releasing Control lost the worker size"
+    );
+    drop(peer);
     drop(observer);
     worker.stop().unwrap();
 }
@@ -296,6 +339,75 @@ fn fullscreen_return_restores_dashboard_after_exit_or_failure() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn fullscreen_resize_requires_control() {
+    for mode in ["observe", "control"] {
+        let output = std::process::Command::new("python3")
+            .arg("tests/fixtures/dashboard-terminal-handoff.py")
+            .arg(std::env::current_exe().unwrap())
+            .arg(mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn fullscreen_attachment_pty_child() {
+    let Ok(mode) = std::env::var("FLUENT_ATTACHMENT_PTY_MODE") else {
+        return;
+    };
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let mut worker = fixture(root.path(), "fullscreen-resize");
+    let mut attachment = worker.observe(worker.descriptor()).unwrap();
+    if mode == "control" {
+        assert_eq!(
+            attachment.acquire_control().unwrap(),
+            fluent::terminal_sessions::ControlOutcome::Acquired
+        );
+    }
+    let socket = worker.socket_path().unwrap().to_owned();
+    let driver = std::thread::spawn(move || {
+        let query = |args: &[&str]| {
+            let output = std::process::Command::new("tmux")
+                .env_remove("TMUX")
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let result = std::panic::catch_unwind(|| {
+            let size = || query(&["display-message", "-p", "#{pane_width}x#{pane_height}"]);
+            let clients = || query(&["list-clients", "-F", "#{client_width}x#{client_height}"]);
+            wait_for(|| clients().trim() == "100x30");
+            let initial = if mode == "control" { "100x30" } else { "80x24" };
+            wait_for(|| size().trim() == initial);
+            println!("RESIZE_ATTACH_READY");
+            std::io::stdout().flush().unwrap();
+            wait_for(|| clients().trim() == "73x13");
+            let expected = if mode == "control" { "73x13" } else { "80x24" };
+            wait_for(|| size().trim() == expected);
+        });
+        // Always release the blocking native attachment, even after an assertion.
+        query(&["detach-client", "-s", "fluent"]);
+        result.unwrap();
+    });
+    let result = attachment.run();
+    let driven = driver.join();
+    worker.stop().unwrap();
+    assert_eq!(result.unwrap(), 0);
+    driven.unwrap();
 }
 
 #[test]
