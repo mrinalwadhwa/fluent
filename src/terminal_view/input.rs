@@ -12,8 +12,11 @@ pub enum Input {
 }
 
 pub fn releases_focus(event: &Event) -> bool {
+    // Crossterm decodes legacy byte 0x1d as Ctrl-5. Enhanced keyboard
+    // protocols can report Ctrl-] directly; reserve both representations.
     matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release
-        && key.code == KeyCode::Char(']') && key.modifiers == KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(']' | '5'))
+        && key.modifiers == KeyModifiers::CONTROL)
 }
 
 fn mods(value: KeyModifiers) -> u16 {

@@ -37,6 +37,8 @@ Press `i` to acquire Control. While the terminal has focus, Esc, Ctrl-C,
 keys, mouse events inside the viewport, and paste reach that invocation.
 Ctrl-C does not cancel the Attempt. Press Ctrl-] to return to dashboard
 navigation while retaining Control; press `o` to release Control and observe.
+Ctrl-5 also returns to navigation: the terminal decoder treats it as the
+legacy Ctrl-] character.
 To send the reserved character literally, press Ctrl-], then `]`; this sends
 byte 0x1d and restores terminal focus. Paste is limited to 64 KiB per event.
 

@@ -9,6 +9,29 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
 
+fn run_input_pty(mode: &str) {
+    let output = std::process::Command::new("python3")
+        .arg("tests/fixtures/dashboard-terminal-handoff.py")
+        .arg(std::env::current_exe().unwrap())
+        .arg(mode)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn read_pty_input(step: &str) -> Event {
+    use std::io::Write;
+    println!("INPUT_READY_{step}");
+    std::io::stdout().flush().unwrap();
+    assert!(crossterm::event::poll(Duration::from_secs(5)).unwrap());
+    crossterm::event::read().unwrap()
+}
+
 #[test]
 fn escape_chord_preserves_native_keys_and_paste() {
     use fluent::terminal_view::Input;
@@ -29,6 +52,25 @@ fn escape_chord_preserves_native_keys_and_paste() {
             .unwrap(),
         Input::ReleaseFocus
     );
+    for code in [KeyCode::Char(']'), KeyCode::Char('5')] {
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ] {
+            assert!(!fluent::terminal_view::releases_focus(&key(
+                code, modifiers
+            )));
+        }
+        assert!(!fluent::terminal_view::releases_focus(&Event::Key(
+            KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::CONTROL,
+                crossterm::event::KeyEventKind::Release,
+            )
+        )));
+    }
     assert_eq!(
         screen.input(key(KeyCode::Up, KeyModifiers::NONE)).unwrap(),
         Input::Bytes(b"\x1b[A".to_vec())
@@ -66,6 +108,36 @@ fn escape_chord_preserves_native_keys_and_paste() {
             .unwrap(),
         Input::Bytes(b"\x1b[<0;3;2M".to_vec())
     );
+    run_input_pty("input");
+}
+
+#[test]
+fn terminal_input_pty_child() {
+    if std::env::var_os("FLUENT_INPUT_PTY_CHILD").is_none() {
+        return;
+    }
+    use fluent::terminal_view::Input;
+    let _terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
+    let mut screen = Screen::new(40, 8).unwrap();
+    screen.write(b"\x1b[?2004h");
+    for (step, expected) in [
+        ("esc", b"\x1b".to_vec()),
+        ("interrupt", b"\x03".to_vec()),
+        ("paste", "\x1b[200~native-界\x1b[201~".as_bytes().to_vec()),
+    ] {
+        assert_eq!(
+            screen.input(read_pty_input(step)).unwrap(),
+            Input::Bytes(expected)
+        );
+    }
+    for step in ["chord", "enhanced_chord"] {
+        let event = read_pty_input(step);
+        assert_eq!(
+            screen.input(event.clone()).unwrap(),
+            Input::ReleaseFocus,
+            "reserved chord decoded as {event:?}"
+        );
+    }
 }
 
 #[test]
@@ -108,7 +180,22 @@ fn wait_for(mut predicate: impl FnMut() -> bool) {
 
 #[test]
 fn focused_input_reaches_only_selected_invocation() {
+    run_input_pty("control-input");
+}
+
+#[test]
+fn terminal_control_input_pty_child() {
+    if std::env::var_os("FLUENT_CONTROL_INPUT_PTY_CHILD").is_none() {
+        return;
+    }
+    let _terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
     let root = tempfile::tempdir().unwrap();
+    let store = fluent::work_model::WorkModelStore::new(root.path());
+    for id in ["first", "second"] {
+        store
+            .create_work_item(&fluent::work_model::WorkItem::planned(id, id))
+            .unwrap();
+    }
     let mut first = fixture(root.path(), "first");
     let mut second = fixture(root.path(), "second");
     let mut selected =
@@ -151,12 +238,40 @@ fn focused_input_reaches_only_selected_invocation() {
         competitor.acquire_control().unwrap(),
         fluent::terminal_sessions::ControlOutcome::Occupied
     );
+    // Capture exact worker bytes in raw mode so Esc and Ctrl-C stay native.
+    // The final sentinel proves neither the reserved chord nor navigation
+    // leaked to the worker before the explicit literal-chord action.
+    let captured = root.path().join("native-input");
+    let expected = "\x1b\x03native-界\x1dZ".as_bytes();
     selected
-        .send(key(KeyCode::Char(']'), KeyModifiers::CONTROL))
+        .send(Event::Paste(format!(
+            "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane",
+            expected.len(),
+            captured.display()
+        )))
         .unwrap();
+    selected
+        .send(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    wait_for(|| captured.exists());
+    for step in ["esc", "interrupt", "paste"] {
+        selected.send(read_pty_input(step)).unwrap();
+    }
+    selected.send(read_pty_input("chord")).unwrap();
     assert!(!selected.focused());
-    selected.send_literal_escape().unwrap();
+    let navigation = read_pty_input("navigation");
+    let literal = read_pty_input("literal");
+    fluent::dashboard::test_support::navigate_then_send_literal_escape(
+        root.path(),
+        &mut selected,
+        navigation,
+        literal,
+    )
+    .unwrap();
     assert!(selected.focused());
+    selected.send(read_pty_input("sentinel")).unwrap();
+    wait_for(|| std::fs::metadata(&captured).unwrap().len() >= expected.len() as u64);
+    assert_eq!(std::fs::read(captured).unwrap(), expected);
     drop(selected);
     drop(peer);
     drop(competitor);

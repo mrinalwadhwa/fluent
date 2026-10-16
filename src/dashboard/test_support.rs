@@ -3,6 +3,42 @@ use super::*;
 use anyhow::ensure;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// Exercise dashboard navigation and the literal-chord action after focus returns.
+pub fn navigate_then_send_literal_escape(
+    root: &Path,
+    terminal: &mut crate::terminal_view::EmbeddedTerminal,
+    navigation: CEvent,
+    literal: CEvent,
+) -> Result<()> {
+    ensure!(
+        !terminal.focused(),
+        "reserved chord did not restore navigation"
+    );
+    let mut app = App::new(load_project_snapshot(&[root.to_owned()], Vec::new()));
+    app.filter = project::Filter::Current;
+    let keys = app.project_keys();
+    ensure!(keys.len() >= 2, "fixture must publish two Work items");
+    app.select_key(keys[0].clone());
+    let before = app.selected_key.clone();
+    let CEvent::Key(navigation) = navigation else {
+        anyhow::bail!("expected a navigation key");
+    };
+    app.handle_key(navigation.code, navigation.modifiers);
+    ensure!(
+        app.selected_key != before,
+        "dashboard navigation did not resume"
+    );
+    let CEvent::Key(literal) = literal else {
+        anyhow::bail!("expected the literal-chord key");
+    };
+    app.set_terminal(terminal.display());
+    ensure!(
+        app.handle_key(literal.code, literal.modifiers) == Effect::LiteralEscape,
+        "dashboard did not offer the literal chord"
+    );
+    terminal.send_literal_escape()
+}
+
 pub fn navigate_and_refresh(
     root: &Path,
     terminal: &mut crate::terminal_view::EmbeddedTerminal,
