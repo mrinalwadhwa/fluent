@@ -655,11 +655,24 @@ struct DisplaySpool {
 
 struct DisplaySpoolState {
     frames: VecDeque<String>,
-    // Charge ordinary frames to the backlog budget and reserve a separate,
-    // single slot for a response larger than that entire budget.
+    // Charge large responses separately so they leave room for turn events.
     queued_bytes: usize,
-    has_oversized_frame: bool,
+    queued_large_bytes: usize,
     closed: bool,
+}
+
+// Snapshot counters before clearing the spool. Never retain frame contents,
+// response IDs, provider errors, or other arbitrary strings in diagnostics.
+#[derive(Debug, serde::Serialize)]
+struct DisplaySpoolRejection {
+    reason: &'static str,
+    incoming_frame_bytes: usize,
+    queued_ordinary_bytes: usize,
+    queued_large_bytes: usize,
+    queued_frames: usize,
+    ordinary_byte_limit: usize,
+    large_byte_limit: usize,
+    frame_byte_limit: usize,
 }
 
 impl DisplaySpool {
@@ -667,50 +680,68 @@ impl DisplaySpool {
     // Match tungstenite's default message limit, including fragmented
     // messages. A valid app/read response can exceed the ordinary backlog.
     const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+    // Share the existing allowance across overlapping responses rather than
+    // detaching on a second response that still fits within the byte bound.
+    const MAX_LARGE_QUEUED_BYTES: usize = Self::MAX_FRAME_BYTES;
 
     fn new() -> Self {
         Self {
             state: Mutex::new(DisplaySpoolState {
                 frames: VecDeque::new(),
                 queued_bytes: 0,
-                has_oversized_frame: false,
+                queued_large_bytes: 0,
                 closed: false,
             }),
             ready: Condvar::new(),
         }
     }
 
-    // Retain at most the ordinary backlog plus one bounded large response,
-    // in wire order. The display sender can also own one in-flight message.
+    // Retain at most 12 MiB of ordinary frames plus 64 MiB of large frames,
+    // in wire order. The sender can also own one bounded in-flight message.
     // Never wait for it: a display that exceeds either budget disconnects,
     // while the independent downstream reader continues provider evidence.
-    fn push(&self, text: String) -> bool {
+    fn push(&self, text: String) -> Result<(), DisplaySpoolRejection> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed {
-            return false;
-        }
         let oversized = text.len() > Self::MAX_QUEUED_BYTES;
-        let overflow = if oversized {
-            state.has_oversized_frame || text.len() > Self::MAX_FRAME_BYTES
+        let rejection = if state.closed {
+            Some("closed")
+        } else if text.len() > Self::MAX_FRAME_BYTES {
+            Some("frame-byte-limit")
+        } else if oversized {
+            (text.len() > Self::MAX_LARGE_QUEUED_BYTES - state.queued_large_bytes)
+                .then_some("large-byte-limit")
         } else {
-            text.len() > Self::MAX_QUEUED_BYTES - state.queued_bytes
+            (text.len() > Self::MAX_QUEUED_BYTES - state.queued_bytes)
+                .then_some("ordinary-byte-limit")
         };
-        if overflow {
-            state.frames.clear();
-            state.queued_bytes = 0;
-            state.has_oversized_frame = false;
-            state.closed = true;
-            self.ready.notify_all();
-            return false;
+        if let Some(reason) = rejection {
+            let rejection = DisplaySpoolRejection {
+                reason,
+                incoming_frame_bytes: text.len(),
+                queued_ordinary_bytes: state.queued_bytes,
+                queued_large_bytes: state.queued_large_bytes,
+                queued_frames: state.frames.len(),
+                ordinary_byte_limit: Self::MAX_QUEUED_BYTES,
+                large_byte_limit: Self::MAX_LARGE_QUEUED_BYTES,
+                frame_byte_limit: Self::MAX_FRAME_BYTES,
+            };
+            if !state.closed {
+                state.frames.clear();
+                state.queued_bytes = 0;
+                state.queued_large_bytes = 0;
+                state.closed = true;
+                self.ready.notify_all();
+            }
+            return Err(rejection);
         }
         if oversized {
-            state.has_oversized_frame = true;
+            state.queued_large_bytes += text.len();
         } else {
             state.queued_bytes += text.len();
         }
         state.frames.push_back(text);
         self.ready.notify_one();
-        true
+        Ok(())
     }
 
     fn pop(&self) -> Option<String> {
@@ -718,7 +749,7 @@ impl DisplaySpool {
         loop {
             if let Some(frame) = state.frames.pop_front() {
                 if frame.len() > Self::MAX_QUEUED_BYTES {
-                    state.has_oversized_frame = false;
+                    state.queued_large_bytes -= frame.len();
                 } else {
                     state.queued_bytes -= frame.len();
                 }
@@ -744,7 +775,7 @@ impl DisplaySpool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.frames.clear();
         state.queued_bytes = 0;
-        state.has_oversized_frame = false;
+        state.queued_large_bytes = 0;
         state.closed = true;
         self.ready.notify_all();
     }
@@ -811,6 +842,30 @@ fn trace_relay_with_read_flag<T: Write>(
     input_sequence: u64,
     include_turns: Option<bool>,
 ) -> Result<()> {
+    trace_relay_with_details(
+        trace,
+        generation,
+        thread_id,
+        direction,
+        outcome,
+        method,
+        input_sequence,
+        include_turns,
+        None,
+    )
+}
+
+fn trace_relay_with_details<T: Write>(
+    trace: &Mutex<(T, usize)>,
+    generation: &str,
+    thread_id: &str,
+    direction: &str,
+    outcome: &str,
+    method: Option<&str>,
+    input_sequence: u64,
+    include_turns: Option<bool>,
+    display_rejection: Option<&DisplaySpoolRejection>,
+) -> Result<()> {
     let mut trace = trace
         .lock()
         .map_err(|_| anyhow::anyhow!("Codex relay trace lock poisoned"))?;
@@ -833,6 +888,7 @@ fn trace_relay_with_read_flag<T: Write>(
             "method": safe_method.unwrap_or("<other>"),
             "input_sequence": input_sequence,
             "include_turns": include_turns,
+            "display_rejection": display_rejection,
         }),
     )?;
     trace.0.write_all(b"\n")?;
@@ -1110,8 +1166,12 @@ where
                                 .context("Codex TUI bootstrap request omitted its id")?;
                             let mut reply = reply.clone();
                             reply["id"] = id.clone();
-                            if !bootstrap_display.push(reply.to_string()) {
+                            if let Err(rejection) = bootstrap_display.push(reply.to_string()) {
                                 request_display_detached.store(true, Ordering::Release);
+                                let _ = trace_relay_with_details(
+                                    &request_trace, generation, thread_id, "app-to-tui", "display-detached",
+                                    Some(method), next_sequence, None, Some(&rejection),
+                                );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "bootstrap-replied", Some(method), next_sequence)?;
@@ -1121,8 +1181,12 @@ where
                             && request["params"]["includeTurns"] == true
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_read(&responses.thread, &request, thread_id)?;
-                            if !bootstrap_display.push(reply.to_string()) {
+                            if let Err(rejection) = bootstrap_display.push(reply.to_string()) {
                                 request_display_detached.store(true, Ordering::Release);
+                                let _ = trace_relay_with_details(
+                                    &request_trace, generation, thread_id, "app-to-tui", "display-detached",
+                                    Some(method), next_sequence, None, Some(&rejection),
+                                );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
@@ -1131,8 +1195,12 @@ where
                         if responses.fresh && *resumed && method == "thread/turns/list"
                             && next_sequence == 0 {
                             let reply = fresh_thread_display_page(&responses.thread, &request, thread_id)?;
-                            if !bootstrap_display.push(reply.to_string()) {
+                            if let Err(rejection) = bootstrap_display.push(reply.to_string()) {
                                 request_display_detached.store(true, Ordering::Release);
+                                let _ = trace_relay_with_details(
+                                    &request_trace, generation, thread_id, "app-to-tui", "display-detached",
+                                    Some(method), next_sequence, None, Some(&rejection),
+                                );
                                 let _ = client_abort.shutdown(Shutdown::Both);
                             }
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "ui-only-replied", Some(method), next_sequence)?;
@@ -1306,17 +1374,19 @@ where
                         evidence.write_all(b"\n")?;
                         evidence.flush()?;
                     }
-                    if !response_display.push(line)
+                    if let Err(rejection) = response_display.push(line)
                         && !response_display_detached.swap(true, Ordering::AcqRel)
                     {
-                        let _ = trace_relay(
+                        let _ = trace_relay_with_details(
                             &response_trace,
                             generation,
                             thread_id,
                             "app-to-tui",
                             "display-detached",
-                            None,
+                            event["method"].as_str(),
                             input_sequence,
+                            None,
+                            Some(&rejection),
                         );
                         let _ = overflow_abort_client.shutdown(Shutdown::Both);
                     }
@@ -1775,17 +1845,17 @@ mod tests {
         let spool = DisplaySpool::new();
         let response = "x".repeat(15_897_799);
         assert!(
-            spool.push(response.clone()),
+            spool.push(response.clone()).is_ok(),
             "empty spool rejected one response"
         );
-        assert!(spool.push("following event".into()));
+        assert!(spool.push("following event".into()).is_ok());
         assert_eq!(spool.pop().unwrap(), response);
         assert_eq!(spool.pop().unwrap(), "following event");
 
         // A drained large response releases its allowance; earlier ordinary
         // events retain their place when another large response arrives.
-        assert!(spool.push("preceding event".into()));
-        assert!(spool.push(response.clone()));
+        assert!(spool.push("preceding event".into()).is_ok());
+        assert!(spool.push(response.clone()).is_ok());
         assert_eq!(spool.pop().unwrap(), "preceding event");
         assert_eq!(spool.pop().unwrap(), response);
         spool.close();
@@ -1793,20 +1863,66 @@ mod tests {
     }
 
     #[test]
+    fn display_spool_delivers_overlapping_large_responses_in_order() {
+        let spool = DisplaySpool::new();
+        let first = "x".repeat(15_897_799);
+        let second = "y".repeat(15_897_799);
+        assert!(spool.push("preceding event".into()).is_ok());
+        assert!(spool.push(first.clone()).is_ok());
+        assert!(
+            spool.push(second.clone()).is_ok(),
+            "two responses fit within the existing large-message byte allowance"
+        );
+        assert!(spool.push("following event".into()).is_ok());
+        assert_eq!(spool.pop().unwrap(), "preceding event");
+        assert_eq!(spool.pop().unwrap(), first);
+        assert_eq!(spool.pop().unwrap(), second);
+        assert_eq!(spool.pop().unwrap(), "following event");
+        spool.close();
+        assert!(spool.pop().is_none());
+    }
+
+    #[test]
     fn display_spool_bounds_oversized_responses_separately() {
         let spool = DisplaySpool::new();
-        assert!(spool.push("x".repeat(15_897_799)));
-        assert!(spool.push("y".repeat(DisplaySpool::MAX_QUEUED_BYTES)));
-        assert!(!spool.push("z".into()), "ordinary backlog exceeded its cap");
+        assert!(spool.push("x".repeat(15_897_799)).is_ok());
+        assert!(
+            spool
+                .push("y".repeat(DisplaySpool::MAX_QUEUED_BYTES))
+                .is_ok()
+        );
+        let rejection = spool.push("z".into()).unwrap_err();
+        assert_eq!(rejection.reason, "ordinary-byte-limit");
+        assert_eq!(rejection.incoming_frame_bytes, 1);
+        assert_eq!(
+            rejection.queued_ordinary_bytes,
+            DisplaySpool::MAX_QUEUED_BYTES
+        );
+        assert_eq!(rejection.queued_large_bytes, 15_897_799);
         assert!(spool.pop().is_none());
-        assert!(!spool.push("closed".into()));
+        let rejection = spool.push("closed".into()).unwrap_err();
+        assert_eq!(rejection.reason, "closed");
+        assert_eq!(rejection.queued_ordinary_bytes, 0);
+        assert_eq!(rejection.queued_large_bytes, 0);
+        assert_eq!(rejection.queued_frames, 0);
 
         let spool = DisplaySpool::new();
-        assert!(spool.push("x".repeat(15_897_799)));
-        assert!(
-            !spool.push("y".repeat(15_897_799)),
-            "queued two large responses"
+        let half = DisplaySpool::MAX_LARGE_QUEUED_BYTES / 2;
+        assert!(spool.push("x".repeat(half)).is_ok());
+        assert!(spool.push("y".repeat(half)).is_ok());
+        // Draining one response releases only its own bytes, and another
+        // response can use that capacity without exceeding the aggregate cap.
+        assert_eq!(spool.pop().unwrap(), "x".repeat(half));
+        assert!(spool.push("z".repeat(half)).is_ok());
+        let rejection = spool
+            .push("z".repeat(DisplaySpool::MAX_QUEUED_BYTES + 1))
+            .unwrap_err();
+        assert_eq!(rejection.reason, "large-byte-limit");
+        assert_eq!(
+            rejection.queued_large_bytes,
+            DisplaySpool::MAX_LARGE_QUEUED_BYTES
         );
+        assert_eq!(rejection.queued_frames, 2);
         assert!(spool.pop().is_none());
 
         // Even an otherwise empty spool must reject an unbounded message.
@@ -1814,19 +1930,26 @@ mod tests {
         let message_limit = tungstenite::protocol::WebSocketConfig::default()
             .max_message_size
             .unwrap();
-        assert!(spool.push("x".repeat(message_limit)));
+        assert!(spool.push("x".repeat(message_limit)).is_ok());
         assert_eq!(spool.pop().unwrap().len(), message_limit);
-        assert!(!spool.push("x".repeat(message_limit + 1)));
+        let rejection = spool.push("x".repeat(message_limit + 1)).unwrap_err();
+        assert_eq!(rejection.reason, "frame-byte-limit");
+        assert_eq!(rejection.incoming_frame_bytes, message_limit + 1);
+        assert_eq!(rejection.frame_byte_limit, message_limit);
         assert!(spool.pop().is_none());
     }
 
     #[test]
     fn display_spool_disconnects_at_its_byte_limit() {
         let spool = DisplaySpool::new();
-        assert!(spool.push("x".repeat(DisplaySpool::MAX_QUEUED_BYTES)));
-        assert!(!spool.push("y".into()));
+        assert!(
+            spool
+                .push("x".repeat(DisplaySpool::MAX_QUEUED_BYTES))
+                .is_ok()
+        );
+        assert!(spool.push("y".into()).is_err());
         assert!(spool.pop().is_none());
-        assert!(!spool.push("z".into()));
+        assert!(spool.push("z".into()).is_err());
     }
 
     #[test]

@@ -1915,6 +1915,153 @@ fn codex_relay_preserves_responses_and_turn_evidence(
 
 #[cfg(unix)]
 #[test]
+fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use tungstenite::Message;
+
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    // Keep the first ordinary response in flight while both app/read
+    // responses and turn events arrive. No timing-dependent sleep or mock
+    // queue is needed: this peer waits for provider completion before reading.
+    let buffer_size: libc::c_int = 4096;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                relay_client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer_size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_file = evidence.reopen().unwrap();
+    let trace = tempfile::NamedTempFile::new().unwrap();
+    let trace_file = trace.reopen().unwrap();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let provider = std::thread::spawn(move || {
+        let mut socket = tungstenite::accept(provider_stream).unwrap();
+        socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        for (id, method) in [
+            (0, "plugin/list"),
+            (1, "app/read"),
+            (2, "app/read"),
+            (3, "turn/start"),
+        ] {
+            let request: serde_json::Value =
+                serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
+            assert_eq!(request["id"], id);
+            assert_eq!(request["method"], method);
+        }
+        for (id, bytes) in [(0, 512 * 1024), (1, 15_897_799), (2, 15_897_799)] {
+            socket
+                .send(Message::Text(
+                    json!({"id":id,"result":{"data":"x".repeat(bytes)}}).to_string(),
+                ))
+                .unwrap();
+        }
+        socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+        for sequence in 0..8 {
+            socket.send(Message::Text(json!({"method":"item/updated","params":{"threadId":"assigned-thread","turnId":"turn-1","sequence":sequence}}).to_string())).unwrap();
+        }
+        socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}).to_string())).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    });
+    let relay = std::thread::spawn(move || {
+        let client = tungstenite::accept(relay_client).unwrap();
+        let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
+        relay_codex_websockets_with_trace(
+            client,
+            server,
+            "generation-1",
+            "assigned-thread",
+            Arc::new(NativeAdmission::new()),
+            evidence_file,
+            |completion| completed_tx.send(completion).map_err(anyhow::Error::new),
+            trace_file,
+        )
+    });
+    let (mut tui, _) = tungstenite::client("ws://localhost/", tui_stream).unwrap();
+    tui.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for (id, method) in [
+        (0, "plugin/list"),
+        (1, "app/read"),
+        (2, "app/read"),
+        (3, "turn/start"),
+    ] {
+        tui.send(Message::Text(
+            json!({"id":id,"method":method,"params":{"threadId":"assigned-thread","input":[]}})
+                .to_string(),
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1,
+        }
+    );
+    // Provider evidence settles even though the display has not consumed
+    // any responses. Opaque catalogs never become canonical turn evidence.
+    let transcript = std::fs::read_to_string(evidence.path()).unwrap();
+    assert!(transcript.len() < 64 * 1024);
+    let records: Vec<serde_json::Value> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 11);
+    assert!(
+        records
+            .iter()
+            .all(|record| record["execution_generation"] == "generation-1"
+                && record["input_sequence"] == 1)
+    );
+    assert_eq!(records.last().unwrap()["event"]["method"], "turn/completed");
+    assert!(
+        !std::fs::read_to_string(trace.path())
+            .unwrap()
+            .contains("display-detached")
+    );
+    for (id, bytes) in [(0, 512 * 1024), (1, 15_897_799), (2, 15_897_799)] {
+        let response: serde_json::Value =
+            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["data"], "x".repeat(bytes));
+    }
+    let mut read_event = || -> serde_json::Value {
+        serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap()
+    };
+    assert_eq!(read_event()["method"], "turn/started");
+    for sequence in 0..8 {
+        let event = read_event();
+        assert_eq!(event["method"], "item/updated");
+        assert_eq!(event["params"]["sequence"], sequence);
+    }
+    assert_eq!(read_event()["method"], "turn/completed");
+    release_tx.send(()).unwrap();
+    let _ = tui.get_ref().shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    let _ = relay.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_relay_records_which_peer_exits_before_first_turn() {
     use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::os::unix::net::UnixStream;
@@ -2258,10 +2405,25 @@ fn codex_websocket_backpressure_preserves_evidence_and_completion() {
         99
     );
     let diagnostics = std::fs::read_to_string(trace_path).unwrap();
+    let records: Vec<serde_json::Value> = diagnostics
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let detached = records
+        .iter()
+        .find(|record| record["outcome"] == "display-detached")
+        .expect("display overflow must retain its rejection reason");
+    let rejection = &detached["display_rejection"];
+    assert_eq!(rejection["reason"], "ordinary-byte-limit");
+    let queued = rejection["queued_ordinary_bytes"].as_u64().unwrap();
+    let incoming = rejection["incoming_frame_bytes"].as_u64().unwrap();
+    let limit = rejection["ordinary_byte_limit"].as_u64().unwrap();
+    assert!(queued <= limit && queued + incoming > limit);
+    assert_eq!(rejection["queued_large_bytes"], 0);
+    assert!(rejection["queued_frames"].as_u64().unwrap() > 0);
     assert!(
-        diagnostics.contains("\"outcome\":\"display-detached\"")
-            || diagnostics.contains("\"outcome\":\"send-error\""),
-        "slow display was never detached"
+        !diagnostics.contains("xxxxxxxx"),
+        "trace leaked frame contents"
     );
     let _ = tui.get_ref().shutdown(std::net::Shutdown::Both);
     provider.join().unwrap();
