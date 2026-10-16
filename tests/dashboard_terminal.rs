@@ -48,6 +48,12 @@ fn escape_chord_preserves_native_keys_and_paste() {
     );
     assert_eq!(
         screen
+            .input(key(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .unwrap(),
+        Input::Bytes(vec![2])
+    );
+    assert_eq!(
+        screen
             .input(key(KeyCode::Char(']'), KeyModifiers::CONTROL))
             .unwrap(),
         Input::ReleaseFocus
@@ -123,6 +129,8 @@ fn terminal_input_pty_child() {
     for (step, expected) in [
         ("esc", b"\x1b".to_vec()),
         ("interrupt", b"\x03".to_vec()),
+        ("prefix", b"\x02".to_vec()),
+        ("after_prefix", b"d".to_vec()),
         ("paste", "\x1b[200~native-界\x1b[201~".as_bytes().to_vec()),
     ] {
         assert_eq!(
@@ -238,11 +246,11 @@ fn terminal_control_input_pty_child() {
         competitor.acquire_control().unwrap(),
         fluent::terminal_sessions::ControlOutcome::Occupied
     );
-    // Capture exact worker bytes in raw mode so Esc and Ctrl-C stay native.
+    // Capture exact worker bytes so Esc, Ctrl-C and tmux's Ctrl-B stay native.
     // The final sentinel proves neither the reserved chord nor navigation
     // leaked to the worker before the explicit literal-chord action.
     let captured = root.path().join("native-input");
-    let expected = "\x1b\x03native-界\x1dZ".as_bytes();
+    let expected = "\x1b\x03\x02dnative-界\x1dZ".as_bytes();
     selected
         .send(Event::Paste(format!(
             "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane",
@@ -254,7 +262,7 @@ fn terminal_control_input_pty_child() {
         .send(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     wait_for(|| captured.exists());
-    for step in ["esc", "interrupt", "paste"] {
+    for step in ["esc", "interrupt", "prefix", "after_prefix", "paste"] {
         selected.send(read_pty_input(step)).unwrap();
     }
     selected.send(read_pty_input("chord")).unwrap();
@@ -513,9 +521,14 @@ fn fullscreen_attachment_pty_child() {
             wait_for(|| clients().trim() == "73x13");
             let expected = if mode == "control" { "73x13" } else { "80x24" };
             wait_for(|| size().trim() == expected);
+            println!("DETACH_ATTACH_READY");
+            std::io::stdout().flush().unwrap();
+            wait_for(|| clients().trim().is_empty());
         });
-        // Always release the blocking native attachment, even after an assertion.
-        query(&["detach-client", "-s", "fluent"]);
+        // Release a blocking attachment on failure; success must use Ctrl-B d.
+        if result.is_err() {
+            query(&["detach-client", "-s", "fluent"]);
+        }
         result.unwrap();
     });
     let result = attachment.run();

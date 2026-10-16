@@ -16,6 +16,8 @@ attachment_mode = mode if mode in ("observe", "control") else None
 input_bytes = {
     "esc": b"\x1b",
     "interrupt": b"\x03",
+    "prefix": b"\x02",
+    "after_prefix": b"d",
     "paste": "\x1b[200~native-界\x1b[201~".encode(),
     "chord": b"\x1d",
     "enhanced_chord": b"\x1b[93;5u",
@@ -45,6 +47,7 @@ deadline = time.monotonic() + 15
 status = None
 eof = False
 resized = False
+detached = False
 sent = set()
 try:
     # PTY EOF and waitpid become observable independently. Drain through EOF
@@ -68,6 +71,9 @@ try:
             if attachment_mode and not resized and b"RESIZE_ATTACH_READY" in output:
                 fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 13, 73, 0, 0))
                 resized = True
+            if attachment_mode and not detached and b"DETACH_ATTACH_READY" in output:
+                assert os.write(master, b"\x02d") == 2
+                detached = True
             if len(output) > 1024 * 1024:
                 raise AssertionError("unexpected terminal output flood")
         if status is None:
@@ -83,12 +89,13 @@ try:
     assert eof, "terminal handoff child left its PTY open"
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
     if input_mode:
-        required = {"esc", "interrupt", "paste", "chord"}
+        required = {"esc", "interrupt", "prefix", "after_prefix", "paste", "chord"}
         required |= {"enhanced_chord"} if mode == "input" else {"navigation", "literal", "sentinel"}
         assert sent == required, (sent, output)
         print(f"ok: real PTY {mode} decoded and routed")
     elif attachment_mode:
         assert resized, "the full-screen client never attached"
+        assert detached, "the full-screen client never requested native detach"
         print(f"ok: full-screen {attachment_mode} resize and detach")
     else:
         assert output.count(b"\x1b[?1049h") == 4, output

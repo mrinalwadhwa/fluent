@@ -3637,6 +3637,12 @@ without reading its input. tmux's status row is disabled so the worker receives
 the entire viewport. Detaching Control leaves the last worker size intact,
 even when observers remain attached.
 
+Embedded key input quotes tmux's Ctrl-B prefix so one native Ctrl-B reaches
+the worker and a following key cannot invoke a tmux command. Managed sessions
+disable timing-based paste detection so rapid native keys still obey that
+quoting; bracketed paste retains its explicit boundaries. Full-screen clients
+keep tmux's ordinary Ctrl-B, d detach sequence.
+
 Cancellation inventories tmux
 pane descendants, the captured pane process sessions, processes holding a
 private per-generation file handle, and processes with that generation's

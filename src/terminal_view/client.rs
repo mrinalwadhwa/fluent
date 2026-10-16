@@ -351,6 +351,36 @@ fn open_pty(columns: u16, rows: u16) -> Result<(File, File)> {
     Ok((master, slave))
 }
 
+fn tmux_input(screen: &mut Screen, event: Event) -> Result<Input> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    let prefix = matches!(&event, Event::Key(key)
+        if key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('b')
+            && key.modifiers == KeyModifiers::CONTROL);
+    let key_event = matches!(event, Event::Key(_));
+    let paste = matches!(event, Event::Paste(_));
+    let mut input = screen.input(event)?;
+    if let Input::Bytes(bytes) = &mut input {
+        if key_event && !bytes.is_empty() && (prefix || bytes.as_slice() == b"\x02") {
+            // The managed server keeps tmux's default C-b C-b send-prefix
+            // binding. The inherited full-screen client keeps normal detach.
+            bytes.insert(0, 2);
+        } else if paste && !bytes.starts_with(b"\x1b[200~") && bytes.contains(&2) {
+            // tmux bypasses key bindings inside bracketed paste. Before that
+            // mode arrives, quote prefix bytes in plain paste as native keys.
+            let mut quoted = Vec::with_capacity(bytes.len() * 2);
+            for &byte in bytes.iter() {
+                quoted.push(byte);
+                if byte == 2 {
+                    quoted.push(byte);
+                }
+            }
+            *bytes = quoted;
+        }
+    }
+    Ok(input)
+}
+
 fn drain(
     mut master: File,
     columns: u16,
@@ -392,7 +422,7 @@ fn drain(
                 active = true;
                 match command {
                     Command::Input(event) => {
-                        if let Input::Bytes(bytes) = screen.input(event)? {
+                        if let Input::Bytes(bytes) = tmux_input(&mut screen, event)? {
                             pending = bytes;
                         }
                     }
@@ -446,4 +476,45 @@ fn drain(
         latest.lock().unwrap().frame = Some(screen.snapshot()?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn embedded_input_quotes_tmux_prefix_without_changing_paste() {
+        let mut screen = Screen::new(40, 8).unwrap();
+        let prefix = Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(
+            tmux_input(&mut screen, prefix.clone()).unwrap(),
+            Input::Bytes(b"\x02\x02".to_vec())
+        );
+        let following = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            tmux_input(&mut screen, following).unwrap(),
+            Input::Bytes(b"d".to_vec())
+        );
+        assert_eq!(
+            tmux_input(&mut screen, Event::Paste("\x02d界".into())).unwrap(),
+            Input::Bytes("\x02\x02d界".as_bytes().to_vec())
+        );
+        screen.write(b"\x1b[?2004h");
+        assert_eq!(
+            tmux_input(&mut screen, Event::Paste("\x02d界".into())).unwrap(),
+            Input::Bytes("\x1b[200~\x02d界\x1b[201~".as_bytes().to_vec())
+        );
+        screen.write(b"\x1b[>1u");
+        assert_eq!(
+            tmux_input(&mut screen, prefix).unwrap(),
+            Input::Bytes(b"\x02\x1b[98;5u".to_vec())
+        );
+        let alt = Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        let expected = screen.input(alt.clone()).unwrap();
+        assert_eq!(tmux_input(&mut screen, alt).unwrap(), expected);
+    }
 }

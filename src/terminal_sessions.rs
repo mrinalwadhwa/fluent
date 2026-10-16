@@ -18,6 +18,8 @@ const DESCRIPTOR: &str = "terminal-session.json";
 // tmux still uses ignore-size clients when no ordinary client is attached.
 // Freeze the window before publishing it; only the Control owner may resize it.
 // Hide tmux's status row so the pane occupies the entire requested viewport.
+// Use bracketed paste, not timing heuristics: a burst of encoded native keys
+// must still honor C-b C-b quoting instead of leaking both prefix bytes.
 const WINDOW_OPTIONS: &[&str] = &[
     ";",
     "set-option",
@@ -32,6 +34,12 @@ const WINDOW_OPTIONS: &[&str] = &[
     "fluent",
     "status",
     "off",
+    ";",
+    "set-option",
+    "-t",
+    "fluent",
+    "assume-paste-time",
+    "0",
 ];
 
 #[derive(Debug, Clone)]
