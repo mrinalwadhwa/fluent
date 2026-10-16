@@ -69,53 +69,19 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             } else {
                 match event {
                     CEvent::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                        let previous = app.selected_key.clone();
-                        let effect = app.handle_key(key.code, key.modifiers);
-                        if let Some(terminal) = &mut embedded {
-                            let result = match effect {
-                                Effect::ControlTerminal => terminal.acquire_control(),
-                                Effect::ObserveTerminal => terminal.observe_only(),
-                                Effect::LiteralEscape => terminal.send_literal_escape(),
-                                Effect::FullscreenTerminal => {
-                                    let (columns, rows) = session.size()?;
-                                    session
-                                        .handoff(|| terminal.fullscreen(columns, rows))
-                                        .and_then(|code| {
-                                            anyhow::ensure!(
-                                                code == 0,
-                                                "terminal attachment exited with {code}"
-                                            );
-                                            Ok(())
-                                        })
-                                }
-                                _ => Ok(()),
-                            };
-                            if let Err(error) = result {
-                                app.refresh_failed(format!("{error:#}"));
-                            }
-                            app.set_terminal(terminal.display());
-                        }
-                        if effect == Effect::OpenTerminal
-                            || embedded.is_some() && previous != app.selected_key
-                        {
-                            let same_view = previous == app.selected_key && embedded.is_some();
-                            let result = if same_view {
-                                embedded.as_mut().unwrap().reconnect()
-                            } else {
-                                // An explicit selection releases the old client's authority.
-                                embedded.take();
-                                app.terminal = None;
-                                open_embedded(&app).map(|terminal| embedded = Some(terminal))
-                            };
-                            match result {
-                                Ok(()) => {
-                                    app.set_terminal(embedded.as_ref().unwrap().display());
-                                }
-                                Err(error) => {
-                                    app.refresh_failed(format!("Terminal unavailable: {error:#}"));
-                                }
-                            }
-                        }
+                        let effect =
+                            handle_terminal_key(&mut app, &mut embedded, key, |terminal| {
+                                let (columns, rows) = session.size()?;
+                                session
+                                    .handoff(|| terminal.fullscreen(columns, rows))
+                                    .and_then(|code| {
+                                        anyhow::ensure!(
+                                            code == 0,
+                                            "terminal attachment exited with {code}"
+                                        );
+                                        Ok(())
+                                    })
+                            });
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
                             resize_terminal(&mut app, embedded.as_mut(), width, height);
@@ -146,6 +112,50 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
         }
     }
     Ok(())
+}
+
+/// Apply navigation and terminal actions before the event loop refreshes data.
+fn handle_terminal_key(
+    app: &mut App,
+    embedded: &mut Option<crate::terminal_view::EmbeddedTerminal>,
+    key: crossterm::event::KeyEvent,
+    fullscreen: impl FnOnce(&mut crate::terminal_view::EmbeddedTerminal) -> Result<()>,
+) -> Effect {
+    let previous = app.selected_key.clone();
+    let effect = app.handle_key(key.code, key.modifiers);
+    if let Some(terminal) = embedded.as_mut() {
+        let result = match effect {
+            Effect::ControlTerminal => terminal.acquire_control(),
+            Effect::ObserveTerminal => terminal.observe_only(),
+            Effect::LiteralEscape => terminal.send_literal_escape(),
+            Effect::FullscreenTerminal => fullscreen(terminal),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            app.refresh_failed(format!("{error:#}"));
+        }
+        app.set_terminal(terminal.display());
+    }
+    if effect == Effect::OpenTerminal || embedded.is_some() && previous != app.selected_key {
+        let same_view = previous == app.selected_key && embedded.is_some();
+        let result = if same_view {
+            embedded.as_mut().unwrap().reconnect()
+        } else {
+            // An explicit selection releases the old client's authority.
+            embedded.take();
+            app.terminal = None;
+            open_embedded(app).map(|terminal| *embedded = Some(terminal))
+        };
+        match result {
+            Ok(()) => {
+                app.set_terminal(embedded.as_ref().unwrap().display());
+            }
+            Err(error) => {
+                app.refresh_failed(format!("Terminal unavailable: {error:#}"));
+            }
+        }
+    }
+    effect
 }
 
 fn terminal_input_event(app: &App, event: CEvent) -> Option<CEvent> {

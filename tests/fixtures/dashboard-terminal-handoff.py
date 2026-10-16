@@ -24,6 +24,9 @@ input_bytes = {
     "navigation": b"\x1b[B",
     "literal": b"]",
     "sentinel": b"Z",
+    "navigate_chord": b"\x1d",
+    "control_second": b"i",
+    "second_input": b"\x1b[200~secondZ\x1b[201~",
 }
 pid, master = pty.fork()
 if pid == 0:
@@ -90,7 +93,9 @@ try:
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
     if input_mode:
         required = {"esc", "interrupt", "prefix", "after_prefix", "paste", "chord"}
-        required |= {"enhanced_chord"} if mode == "input" else {"navigation", "literal", "sentinel"}
+        required |= {"enhanced_chord"} if mode == "input" else {
+            "navigation", "literal", "sentinel", "navigate_chord", "control_second", "second_input"
+        }
         assert sent == required, (sent, output)
         print(f"ok: real PTY {mode} decoded and routed")
     elif attachment_mode:

@@ -199,23 +199,38 @@ fn terminal_control_input_pty_child() {
     let _terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = fluent::work_model::WorkModelStore::new(root.path());
-    for id in ["first", "second"] {
-        store
-            .create_work_item(&fluent::work_model::WorkItem::planned(id, id))
-            .unwrap();
-    }
-    let mut first = fixture(root.path(), "first");
-    let mut second = fixture(root.path(), "second");
-    let mut selected =
-        EmbeddedTerminal::observe(first.observe(first.descriptor()).unwrap(), 60, 10).unwrap();
+    let mut item = fluent::work_model::WorkItem::planned("input", "Two selectable workers");
+    item.add_initial_attempt("attempt-1").unwrap();
+    let mut next = item.attempts[0].tasks[0].clone();
+    next.id = "attempt-1-write-2".into();
+    next.artifact_area.as_mut().unwrap().path =
+        fluent::work_model::work_artifact_path("input", "attempt-1", &next.id);
+    item.attempts[0].tasks.push(next);
+    store.create_work_item(&item).unwrap();
+    let worker = |task| {
+        TerminalSession::start_tmux_fixture(TerminalIdentity::fixture(
+            root.path(),
+            "input",
+            "attempt-1",
+            task,
+        ))
+        .unwrap()
+    };
+    let mut first = worker("attempt-1-write-1");
+    let mut second = worker("attempt-1-write-2");
+    let mut dashboard =
+        fluent::dashboard::test_support::TerminalDashboard::open(root.path()).unwrap();
+    assert_eq!(dashboard.terminal().descriptor(), first.descriptor());
     let mut peer =
         EmbeddedTerminal::observe(second.observe(second.descriptor()).unwrap(), 60, 10).unwrap();
     assert!(
-        selected
+        dashboard
+            .terminal()
             .send(key(KeyCode::Char('x'), KeyModifiers::NONE))
             .is_err()
     );
-    fluent::dashboard::test_support::control_from_narrow_list(root.path(), &mut selected).unwrap();
+    dashboard.control_from_narrow_list().unwrap();
+    let selected = dashboard.terminal();
     assert!(selected.display().state.contains("Control"));
     assert!(
         selected
@@ -247,15 +262,16 @@ fn terminal_control_input_pty_child() {
         fluent::terminal_sessions::ControlOutcome::Occupied
     );
     // Capture exact worker bytes so Esc, Ctrl-C and tmux's Ctrl-B stay native.
-    // The final sentinel proves neither the reserved chord nor navigation
-    // leaked to the worker before the explicit literal-chord action.
+    // Deliver the literal chord while this same invocation remains selected.
     let captured = root.path().join("native-input");
+    let capture_done = root.path().join("native-input-done");
     let expected = "\x1b\x03\x02dnative-界\x1d\x1d\x1dZ".as_bytes();
     selected
         .send(Event::Paste(format!(
-            "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane",
+            "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane; touch '{}'",
             expected.len(),
-            captured.display()
+            captured.display(),
+            capture_done.display()
         )))
         .unwrap();
     selected
@@ -267,21 +283,91 @@ fn terminal_control_input_pty_child() {
     }
     selected.send(read_pty_input("chord")).unwrap();
     assert!(!selected.focused());
-    let navigation = read_pty_input("navigation");
     let literal = read_pty_input("literal");
-    fluent::dashboard::test_support::navigate_then_send_literal_escape(
-        root.path(),
-        &mut selected,
-        navigation,
-        literal,
-    )
-    .unwrap();
+    dashboard.key(literal).unwrap();
+    let selected = dashboard.terminal();
     assert!(selected.focused());
-    fluent::dashboard::test_support::resize_control_and_resume(root.path(), &mut selected).unwrap();
+    dashboard.resize_control_and_resume().unwrap();
+    let selected = dashboard.terminal();
     selected.send(read_pty_input("sentinel")).unwrap();
     wait_for(|| std::fs::metadata(&captured).unwrap().len() >= expected.len() as u64);
+    assert_eq!(std::fs::read(&captured).unwrap(), expected);
+    wait_for(|| capture_done.exists());
+
+    // Keep the first worker capturing until a sentinel arrives after the second
+    // worker finishes. Any leaked navigation or second-worker input is visible.
+    let first_after_navigation = root.path().join("first-after-navigation");
+    selected
+        .send(Event::Paste(format!(
+            "stty raw -echo; dd bs=1 count=1 of='{}' 2>/dev/null; stty sane",
+            first_after_navigation.display()
+        )))
+        .unwrap();
+    selected
+        .send(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    wait_for(|| first_after_navigation.exists());
+    selected.send(read_pty_input("navigate_chord")).unwrap();
+    assert!(!selected.focused());
+    dashboard
+        .key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    dashboard.key(read_pty_input("navigation")).unwrap();
+    let selected = dashboard.terminal();
+    assert_eq!(selected.descriptor(), second.descriptor());
+    assert_eq!(selected.state_label(), "Observe · i control");
+    assert!(!selected.has_control());
+    assert!(!selected.focused());
+    assert!(selected.send(Event::Paste("forbidden".into())).is_err());
+    assert!(
+        selected
+            .send(key(KeyCode::Char('x'), KeyModifiers::NONE))
+            .is_err()
+    );
+    assert_eq!(
+        competitor.acquire_control().unwrap(),
+        fluent::terminal_sessions::ControlOutcome::Acquired
+    );
+    competitor.release_control();
+    // The literal action must not silently acquire the new invocation's lease.
+    dashboard
+        .key(key(KeyCode::Char(']'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(!dashboard.terminal().has_control());
+    assert!(!dashboard.terminal().focused());
+    dashboard.key(read_pty_input("control_second")).unwrap();
+    dashboard.assert_visible_control().unwrap();
+    let selected = dashboard.terminal();
+    assert_eq!(selected.descriptor(), second.descriptor());
+    assert!(selected.has_control());
+    let second_capture = root.path().join("second-input");
+    let second_expected = b"secondZ";
+    selected
+        .send(Event::Paste(format!(
+            "stty raw -echo; dd bs=1 count={} of='{}' 2>/dev/null; stty sane",
+            second_expected.len(),
+            second_capture.display()
+        )))
+        .unwrap();
+    selected
+        .send(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    wait_for(|| second_capture.exists());
+    selected.send(read_pty_input("second_input")).unwrap();
+    wait_for(|| std::fs::metadata(&second_capture).unwrap().len() >= second_expected.len() as u64);
+    assert_eq!(std::fs::read(second_capture).unwrap(), second_expected);
+    assert!(std::fs::read(&first_after_navigation).unwrap().is_empty());
+    let mut first_again =
+        EmbeddedTerminal::observe(first.observe(first.descriptor()).unwrap(), 60, 10).unwrap();
+    first_again.acquire_control().unwrap();
+    first_again
+        .send(key(KeyCode::Char('A'), KeyModifiers::NONE))
+        .unwrap();
+    wait_for(|| std::fs::metadata(&first_after_navigation).unwrap().len() >= 1);
+    assert_eq!(std::fs::read(first_after_navigation).unwrap(), b"A");
     assert_eq!(std::fs::read(captured).unwrap(), expected);
-    drop(selected);
+    drop(first_again);
+    drop(dashboard);
     drop(peer);
     drop(competitor);
     first.stop().unwrap();
