@@ -711,6 +711,48 @@ fn embedded_terminal_keeps_project_context_visible() {
 }
 
 #[test]
+fn narrow_terminal_focus_actions_reveal_control() {
+    for (key, effect) in [('i', Effect::ControlTerminal), (']', Effect::LiteralEscape)] {
+        let mut app = project_app(vec![project_source(
+            "/project",
+            vec![row("work", "executing")],
+        )]);
+        app.resize(80, 24);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
+            Effect::OpenTerminal
+        );
+        let display = crate::terminal_view::Display {
+            frame: crate::terminal_view::Screen::new(78, 16)
+                .unwrap()
+                .snapshot()
+                .unwrap(),
+            identity: "work / attempt-1 / writer / generation-1".into(),
+            state: "Observe".into(),
+        };
+        app.set_terminal(display);
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.pane, app::Pane::List);
+        assert_eq!(
+            app.handle_key(KeyCode::Char(key), KeyModifiers::NONE),
+            effect
+        );
+        app.terminal.as_mut().unwrap().state = "Control · Ctrl-] navigate".into();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(
+            rendered.contains("Control · Ctrl-] navigate"),
+            "{key}: {rendered}"
+        );
+        assert!(
+            rendered.contains("work / attempt-1 / writer / generation-1"),
+            "{key}: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn terminal_controls_require_an_open_view() {
     let mut app = project_app(vec![project_source(
         "/project",

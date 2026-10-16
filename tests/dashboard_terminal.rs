@@ -207,7 +207,7 @@ fn terminal_control_input_pty_child() {
             .send(key(KeyCode::Char('x'), KeyModifiers::NONE))
             .is_err()
     );
-    selected.acquire_control().unwrap();
+    fluent::dashboard::test_support::control_from_narrow_list(root.path(), &mut selected).unwrap();
     assert!(selected.display().state.contains("Control"));
     assert!(
         selected

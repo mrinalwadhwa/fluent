@@ -3,6 +3,41 @@ use super::*;
 use anyhow::ensure;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+fn assert_visible_control(app: &App) -> Result<()> {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut view = Terminal::new(TestBackend::new(app.size.0, app.size.1))?;
+    view.draw(|frame| render::draw(frame, app))?;
+    let buffer = view.backend().buffer();
+    let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    // Inspect the terminal header, not the dashboard's always-visible shortcuts.
+    ensure!(
+        rendered.contains("Control · Ctrl-] navigate"),
+        "Control state hidden: {rendered}"
+    );
+    ensure!(
+        rendered.contains(&app.terminal.as_ref().unwrap().identity),
+        "invocation identity hidden: {rendered}"
+    );
+    Ok(())
+}
+
+/// Enter Control after opening the terminal and returning to the narrow list.
+pub fn control_from_narrow_list(
+    root: &Path,
+    terminal: &mut crate::terminal_view::EmbeddedTerminal,
+) -> Result<()> {
+    let mut app = App::new(load_project_snapshot(&[root.to_owned()], Vec::new()));
+    app.resize(80, 24);
+    ensure!(app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE) == Effect::OpenTerminal);
+    app.set_terminal(terminal.display());
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    ensure!(app.pane == app::Pane::List);
+    ensure!(app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE) == Effect::ControlTerminal);
+    terminal.acquire_control()?;
+    app.set_terminal(terminal.display());
+    assert_visible_control(&app)
+}
+
 /// Exercise dashboard navigation and the literal-chord action after focus returns.
 pub fn navigate_then_send_literal_escape(
     root: &Path,
@@ -15,6 +50,11 @@ pub fn navigate_then_send_literal_escape(
         "reserved chord did not restore navigation"
     );
     let mut app = App::new(load_project_snapshot(&[root.to_owned()], Vec::new()));
+    app.resize(80, 24);
+    app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE);
+    app.set_terminal(terminal.display());
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    ensure!(app.pane == app::Pane::List);
     app.filter = project::Filter::Current;
     let keys = app.project_keys();
     ensure!(keys.len() >= 2, "fixture must publish two Work items");
@@ -36,7 +76,9 @@ pub fn navigate_then_send_literal_escape(
         app.handle_key(literal.code, literal.modifiers) == Effect::LiteralEscape,
         "dashboard did not offer the literal chord"
     );
-    terminal.send_literal_escape()
+    terminal.send_literal_escape()?;
+    app.set_terminal(terminal.display());
+    assert_visible_control(&app)
 }
 
 pub fn navigate_and_refresh(
