@@ -1218,9 +1218,16 @@ pub struct WorkAttemptRunResult {
 }
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
+    run_attempt_with_dispatch(config, run_attempt_inner)
+}
+
+pub(crate) fn run_attempt_with_dispatch(
+    config: WorkAttemptRunConfig<'_>,
+    dispatch: impl FnOnce(WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult>,
+) -> Result<WorkAttemptRunResult> {
     let project_root = config.project_root;
     let store = config.store;
-    let result = run_attempt_inner(config);
+    let result = dispatch(config);
     work_task_executor::reclaim_managed_build_output(project_root, store);
     result
 }

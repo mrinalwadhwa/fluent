@@ -4,6 +4,18 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Reclaim only owned historical fixture targets
+
+Managed historical fixtures live under a candidate worktree's `.scratch`
+directory. `historical_fixture_name_is_managed` in `src/work_task_executor.rs`
+allows specific fixture names and 40-character commit suffixes. A nested
+`target` is rebuildable output only when its fixture also has a regular
+`source-commit`, `source.tar`, `identity.json`, or `Cargo.toml` marker. When
+adding a fixture, update that allowlist deliberately; retain directories with
+unknown names, missing markers, or symlinked paths.
+
+---
+
 ## Preserve embedded input through tmux
 
 Keep embedded prefix quoting coupled to the managed server's default bindings

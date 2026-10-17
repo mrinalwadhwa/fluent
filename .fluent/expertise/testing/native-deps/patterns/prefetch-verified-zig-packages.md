@@ -10,14 +10,15 @@ reach the same archive. Keep the package cache under this checkout's
 ## Mechanism
 
 Download the declared archive with `curl --fail --location` into the checkout.
-Run `zig fetch --global-cache-dir target/terminal-deps/zig-cache <archive>` from
-the package's source directory. Compare Zig's printed content hash with the
+Run `zig fetch --global-cache-dir ../zig-cache <archive>` from
+`target/terminal-deps/ghostty-<pinned-revision>` (or use an absolute path to
+the checkout's `target/terminal-deps/zig-cache`). Compare Zig's printed content hash with the
 exact `.hash` in that package's `build.zig.zon`. Repeat for nested packages
 named by the next build error, then rerun `scripts/prepare-terminal-deps.sh`.
 
 ## Example
 
-If the build names a GitHub archive, fetch the same commit from codeload,
+On an Apple Silicon Mac, if the build names a GitHub archive, fetch the same commit from codeload,
 then ask Zig to verify and cache its content:
 
 ```sh

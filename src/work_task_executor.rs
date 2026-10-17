@@ -802,6 +802,22 @@ fn preflight_write_worktree(
 /// terminal state, rather than reviving the Attempt or auto-reopening the pause.
 /// No Task was mutated and no coder or tester launched.
 pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
+    run_task_with_dispatch(config, |config, task_kind| match task_kind {
+        TaskKind::Write => run_write_task(config),
+        TaskKind::Review => run_review_task(config),
+        TaskKind::Tester => run_tester_task(config),
+        TaskKind::Verification => run_verification_task(config),
+        kind => bail!(
+            "Task {:?} is kind {kind}; unsupported by task run",
+            config.task_id
+        ),
+    })
+}
+
+fn run_task_with_dispatch(
+    config: WorkTaskRunConfig<'_>,
+    dispatch: impl FnOnce(WorkTaskRunConfig<'_>, TaskKind) -> Result<WorkTaskRunResult>,
+) -> Result<WorkTaskRunResult> {
     let project_root = config.project_root;
     let store = config.store;
     let work_item_id = config.work_item_id;
@@ -867,16 +883,7 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     let build_lease_path = build_output_lease_path(project_root, work_item_id, config.attempt_id);
     let build_lease = crate::lease::acquire_shared_blocking(&build_lease_path)
         .with_context(|| format!("reserve managed build output for Task {task_id}"))?;
-    let result = match task_kind {
-        TaskKind::Write => run_write_task(config),
-        TaskKind::Review => run_review_task(config),
-        TaskKind::Tester => run_tester_task(config),
-        TaskKind::Verification => run_verification_task(config),
-        kind => bail!(
-            "Task {:?} is kind {kind}; unsupported by task run",
-            config.task_id
-        ),
-    };
+    let result = dispatch(config, task_kind);
     drop(build_lease);
     reclaim_managed_build_output(project_root, store);
     if let Err(error) = read_work_item_or_not_found(store, work_item_id).and_then(|item| {
@@ -8996,10 +9003,17 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
             .display()
             .to_string();
-    let reviewer_cache_dir =
-        candidate_reviewer_cache_dir(input.project_root, &review_context.candidate_commit)
-            .display()
-            .to_string();
+    let shared_cache =
+        candidate_reviewer_cache_dir(input.project_root, &review_context.candidate_commit);
+    let reviewer_cache_dir = if task.role == "tests"
+        && !reviewer_cache_is_admitted(input.project_root, &shared_cache).unwrap_or(false)
+    {
+        input.artifact_dir.join("scratch")
+    } else {
+        shared_cache
+    }
+    .display()
+    .to_string();
     let unresolved_steps = fs::read_to_string(&reviewer_progress_md_path)
         .ok()
         .map(|source| unresolved_progress_steps(&source))
@@ -9312,7 +9326,7 @@ fn prepare_reviewer_hook_cache(
                             });
                         match budget {
                             Ok((limit, used, protected)) if used > limit => reporter(&format!(
-                                "  Reviewer prep     {task_id} reusing protected shared cache: {used} bytes used, {limit} bytes allowed, {protected} bytes protected"
+                                "  Reviewer prep     {task_id} starting cold: {used} bytes used, {limit} bytes allowed, {protected} bytes protected"
                             )),
                             Ok(_) => reporter(&format!(
                                 "  Reviewer prep     {task_id} reusing shared candidate cache"
@@ -9413,6 +9427,16 @@ fn remove_unadmitted_hook_cache(artifact_dir: &Path) {
 
 fn reviewer_cache_lock_path(project_root: &Path) -> PathBuf {
     project_root.join(".fluent/work/locks/reviewer-cache.lock")
+}
+
+fn reviewer_cache_is_admitted(project_root: &Path, shared_cache: &Path) -> Result<bool> {
+    let store = WorkModelStore::new(project_root);
+    let limit = crate::config::resolve_reviewer_cache_config(project_root)
+        .map_err(anyhow::Error::new)?
+        .max_project_bytes
+        .value;
+    Ok(prep::managed_cache_bytes(shared_cache)? > 0
+        && managed_reviewer_cache_total(project_root, &store)? <= limit)
 }
 
 fn reviewer_cache_root(project_root: &Path) -> PathBuf {
@@ -9702,10 +9726,44 @@ fn reclaim_idle_build_output(
         )) {
             Ok(crate::lease::LeaseAttempt::Acquired(lease)) => lease,
             Ok(crate::lease::LeaseAttempt::Contended) => {
-                reporter(&format!(
-                    "  Build output      skipped {}: active Task lease",
-                    workspace.display()
-                ));
+                if fs::symlink_metadata(&workspace)
+                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                    && worktree::ensure_candidate_worktree(project_root, &workspace).is_ok()
+                {
+                    let mut targets = vec![workspace.join("target")];
+                    targets.extend(verified_historical_target_roots(&workspace, reporter));
+                    for target in targets {
+                        if fs::symlink_metadata(&target).is_ok_and(|metadata| {
+                            metadata.is_dir() && !metadata.file_type().is_symlink()
+                        }) && path_has_no_symlinked_components(&workspace, &target)
+                        {
+                            match prep::logical_bytes(&target) {
+                                Ok(bytes) => {
+                                    report.retained_bytes =
+                                        report.retained_bytes.saturating_add(bytes);
+                                    reporter(&format!(
+                                        "  Build output      skipped {}: active Task lease ({bytes} bytes protected)",
+                                        target.display()
+                                    ));
+                                }
+                                Err(error) => reporter(&format!(
+                                    "  Build output      skipped {}: active Task lease; size inspection failed: {error:#}",
+                                    target.display()
+                                )),
+                            }
+                        } else if target.exists() {
+                            reporter(&format!(
+                                "  Build output      skipped {}: active Task lease; unverified target",
+                                target.display()
+                            ));
+                        }
+                    }
+                } else {
+                    reporter(&format!(
+                        "  Build output      skipped {}: active Task lease; unverified worktree",
+                        workspace.display()
+                    ));
+                }
                 continue;
             }
             Err(error) => {
@@ -9995,10 +10053,10 @@ fn admit_reviewer_build_cache_with_admission(
         let existing = prep::managed_cache_bytes(artifact_dir)?;
         if existing > 0 {
             if current > limits.max_project_bytes.value {
-                reporter(&format!(
-                    "  Reviewer prep     {task_id} reusing protected shared cache: {current} bytes used, {} bytes allowed, {protected} bytes protected",
+                return Ok(Some(format!(
+                    "project cache budget: {current} bytes used, {} bytes allowed, {protected} bytes protected",
                     limits.max_project_bytes.value
-                ));
+                )));
             }
             return Ok(None);
         }
@@ -11363,6 +11421,57 @@ mod tests {
     }
 
     #[test]
+    fn build_reclamation_counts_live_lease_before_eviction() {
+        use super::*;
+        let (_tmp, project, live, store) = build_reclamation_fixture();
+        let idle_relative =
+            crate::work_model::initial_candidate_workspace_path("work-2", "attempt-1");
+        let idle = project.join(&idle_relative);
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "--detach", idle.to_str().unwrap()])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let idle = fs::canonicalize(idle).unwrap();
+        let mut item = WorkItem {
+            id: "work-2".into(),
+            title: "Idle".into(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0].workspace_access.writes = vec![WorkspaceRef {
+            id: "candidate".into(),
+            path: idle_relative,
+        }];
+        store.create_work_item(&item).unwrap();
+        for workspace in [&live, &idle] {
+            fs::create_dir_all(workspace.join("target")).unwrap();
+            fs::write(workspace.join("target/output"), b"build").unwrap();
+        }
+        let lease = crate::lease::acquire_shared_blocking(&build_output_lease_path(
+            &project,
+            "work-1",
+            "attempt-1",
+        ))
+        .unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 5, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert_eq!(report.retained_bytes, 5);
+        assert_eq!(report.reclaimed_paths, vec![idle.join("target")]);
+        assert!(live.join("target/output").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("active Task lease"))
+        );
+        drop(lease);
+    }
+
+    #[test]
     fn task_settlement_and_pause_trigger_idle_build_reclamation() {
         use super::*;
         let (_tmp, project, workspace, store) = build_reclamation_fixture();
@@ -11383,6 +11492,101 @@ mod tests {
         assert!(!workspace.join("target").exists());
         assert!(workspace.join("README.md").exists());
         assert!(workspace.join(".git").exists());
+    }
+
+    #[test]
+    fn task_route_holds_build_lease_until_settlement() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "build-output:\n  max-project-gib: 0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/output"), b"rebuildable").unwrap();
+        let resolver = ContentResolver::new(Some(&project));
+        run_task_with_dispatch(
+            WorkTaskRunConfig {
+                project_root: &project,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: "attempt-1-write-1",
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            |_, _| {
+                let report = reclaim_idle_build_output(&project, &store, 0, &mut |_| {}).unwrap();
+                assert!(report.reclaimed_paths.is_empty());
+                assert!(workspace.join("target/output").exists());
+                store
+                    .mutate_work_item("work-1", |item| {
+                        item.attempts[0].tasks[0].status = TaskStatus::Failed;
+                        Ok(())
+                    })
+                    .unwrap();
+                Ok(WorkTaskRunResult {
+                    task_id: "attempt-1-write-1".into(),
+                    output: String::new(),
+                })
+            },
+        )
+        .unwrap();
+        assert!(!workspace.join("target").exists());
+        assert!(workspace.join("README.md").exists());
+        assert!(workspace.join(".git").exists());
+    }
+
+    #[test]
+    fn terminal_attempt_route_reclaims_idle_build_output() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "build-output:\n  max-project-gib: 0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/output"), b"rebuildable").unwrap();
+        let resolver = ContentResolver::new(Some(&project));
+        crate::work_attempt_loop::run_attempt_with_dispatch(
+            crate::work_attempt_loop::WorkAttemptRunConfig {
+                project_root: &project,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                tester_no_sandbox: false,
+                resume_cancellation_requested_at: None,
+                coder_mapping_inputs: None,
+                learner_run_coder: None,
+            },
+            |_| {
+                store
+                    .mutate_work_item("work-1", |item| {
+                        item.attempts[0].tasks[0].status = TaskStatus::Failed;
+                        item.attempts[0].status = AttemptStatus::Failed;
+                        Ok(())
+                    })
+                    .unwrap();
+                Ok(crate::work_attempt_loop::WorkAttemptRunResult { outcomes: vec![] })
+            },
+        )
+        .unwrap();
+        assert!(!workspace.join("target").exists());
+        assert!(workspace.join("README.md").exists());
+        assert!(workspace.join(".git").exists());
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().attempts[0].status,
+            AttemptStatus::Failed
+        );
     }
 
     #[test]
@@ -14901,14 +15105,15 @@ mod tests {
 
         fn run_captured(
             &self,
-            _prompt: &str,
+            prompt: &str,
             _system_prompt: &str,
             working_dir: &Path,
             _extra_args: &[String],
             _extra_env: &[(String, String)],
             _capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> Result<i32> {
-            *self.saw_warm_cache.lock().unwrap() = self.cache_dir.join("target/output").is_file();
+            *self.saw_warm_cache.lock().unwrap() = self.cache_dir.join("target/output").is_file()
+                && prompt.contains(&self.cache_dir.display().to_string());
             assert!(!working_dir.join("target").exists());
             fs::write(working_dir.join("review.md"), "review evidence")?;
             Ok(0)
@@ -15189,15 +15394,77 @@ mod tests {
             &FilesystemReviewerCacheAdmission,
             &|message| messages.lock().unwrap().push(message.to_string()),
         );
-        assert!(
-            messages
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|message| message.contains("reusing protected shared cache")
-                    && message.contains("bytes protected"))
-        );
+        assert!(messages.lock().unwrap().iter().any(
+            |message| message.contains("starting cold") && message.contains("bytes protected")
+        ));
         assert!(fixture.cache_dir.join("target/output").exists());
+    }
+
+    #[test]
+    fn reviewer_existing_over_budget_cache_starts_cold() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(fixture.cache_dir.join("target")).unwrap();
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        let (warm, messages) = fixture.run_with_messages(&FilesystemReviewerCacheAdmission);
+        assert!(!warm);
+        assert!(fixture.cache_dir.join("target/output").exists());
+        assert!(messages.iter().any(
+            |message| message.contains("starting cold") && message.contains("bytes protected")
+        ));
+    }
+
+    #[test]
+    fn reviewer_budget_preserves_executing_cache_on_terminal_attempt() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(fixture.cache_dir.join("target")).unwrap();
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        // The model rejects a persisted terminal Attempt with an executing
+        // Task. Exercise the protection predicate with that boundary state.
+        let mut item = fixture.store.read_work_item("work-1").unwrap();
+        item.attempts[0].status = AttemptStatus::Complete;
+        let review_index = item.attempts[0]
+            .tasks
+            .iter()
+            .position(|task| task.id == fixture.review_task_id)
+            .unwrap();
+        item.attempts[0].tasks[review_index].status = TaskStatus::Executing;
+        let key = fixture.cache_dir.file_name().unwrap().to_os_string();
+        assert!(
+            protected_reviewer_cache_keys(&fixture.project_root, &[item.clone()]).contains(&key)
+        );
+        item.attempts[0].tasks[review_index].status = TaskStatus::Complete;
+        assert!(!protected_reviewer_cache_keys(&fixture.project_root, &[item]).contains(&key));
+        fixture
+            .store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].status = AttemptStatus::Reviewing;
+                item.attempts[0].tasks[review_index].status = TaskStatus::Executing;
+                Ok(())
+            })
+            .unwrap();
+        // A running Reviewer keeps the physical cache over budget.
+        reclaim_terminal_reviewer_caches(&fixture.project_root, &fixture.store).unwrap();
+        assert!(fixture.cache_dir.join("target/output").exists());
+        fixture
+            .store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].status = AttemptStatus::Failed;
+                item.attempts[0].tasks[review_index].status = TaskStatus::Failed;
+                Ok(())
+            })
+            .unwrap();
+        reclaim_terminal_reviewer_caches(&fixture.project_root, &fixture.store).unwrap();
+        assert!(!fixture.cache_dir.exists());
     }
 
     #[test]

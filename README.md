@@ -176,7 +176,9 @@ Set `build-output.max-project-gib` in `.fluent/config.yaml` to change the
 project retention budget (default: 100 GiB). Reviewer build caches use the
 separate `reviewer-cache.max-project-gib` budget (default: 50 GiB); caches still
 referenced by unfinished Work remain protected, and new cache admissions start
-cold if protected usage leaves no room.
+cold if protected usage leaves no room. A Reviewer also uses its Task scratch
+area for a cold build when an existing protected cache has grown over budget;
+Fluent keeps that shared cache on disk until it can safely reclaim it.
 
 Before starting review work, run `fluent tester check` to validate the Tester through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun the check.
 
