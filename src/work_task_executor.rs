@@ -864,6 +864,9 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     // Route by kind only; the coder mapping is resolved fresh under the model
     // lock when the atomic start reserves the Task, not from this early read.
     let task_kind = item.attempts[attempt_index].tasks[task_index].kind;
+    let build_lease_path = build_output_lease_path(project_root, work_item_id, config.attempt_id);
+    let build_lease = crate::lease::acquire_shared_blocking(&build_lease_path)
+        .with_context(|| format!("reserve managed build output for Task {task_id}"))?;
     let result = match task_kind {
         TaskKind::Write => run_write_task(config),
         TaskKind::Review => run_review_task(config),
@@ -874,6 +877,8 @@ pub fn run_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
             config.task_id
         ),
     };
+    drop(build_lease);
+    reclaim_managed_build_output(project_root, store);
     if let Err(error) = read_work_item_or_not_found(store, work_item_id).and_then(|item| {
         crate::work_status::refresh_persisted_task_metrics(project_root, &item, task_id)
     }) {
@@ -9414,6 +9419,392 @@ fn reviewer_cache_artifact_dir(
         .ok_or_else(|| anyhow::anyhow!("Reviewer Task {:?} has no artifact area", task.id))?;
     resolve_managed_artifact_area_path(project_root, &area.path)
 }
+#[derive(Debug, Default)]
+struct BuildReclamationReport {
+    reclaimed_paths: Vec<PathBuf>,
+    reclaimed_bytes: u64,
+    retained_bytes: u64,
+}
+
+fn build_output_lease_path(project_root: &Path, work_id: &str, attempt_id: &str) -> PathBuf {
+    project_root
+        .join(".fluent/work/locks/build-output")
+        .join(work_id)
+        .join(format!("{attempt_id}.lock"))
+}
+
+fn historical_fixture_name_is_managed(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "evidence-old-reader",
+        "ownership-old-reader",
+        "work-model-v0.3.0-reader",
+        "verification-old-reader",
+        "no-change-completion-old-reader",
+        "round-cap-approach-revision-stable-reader",
+        "round-cap-approach-revision-assignment-reader",
+    ];
+    const PREFIXES: &[&str] = &[
+        "installation-main-old-reader-",
+        "installation-output-free-old-reader-",
+        "installation-accepted-proof-old-reader-",
+        "combined-recovery-base-old-reader-",
+        "combined-recovery-assignment-old-reader-",
+        "combined-recovery-evidence-old-reader-",
+        "usage-limit-reader-",
+        "writer-assignment-main-reader-",
+        "writer-assignment-paused-reader-",
+        "carried-finding-old-reader-",
+        "output-free-context-old-reader-",
+        "launch-handoff-old-reader-",
+        "landing-recovery-old-reader-",
+    ];
+    EXACT.contains(&name)
+        || PREFIXES.iter().any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix.len() == 40 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        })
+}
+
+fn verified_historical_target_roots(
+    workspace: &Path,
+    reporter: &mut dyn FnMut(&str),
+) -> Vec<PathBuf> {
+    let scratch = workspace.join(".scratch");
+    let metadata = match fs::symlink_metadata(&scratch) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            reporter(&format!(
+                "  Build output      skipped {}: {error}",
+                scratch.display()
+            ));
+            return Vec::new();
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        reporter(&format!(
+            "  Build output      skipped {}: unsafe fixture root",
+            scratch.display()
+        ));
+        return Vec::new();
+    }
+    let entries = match fs::read_dir(&scratch) {
+        Ok(entries) => entries,
+        Err(error) => {
+            reporter(&format!(
+                "  Build output      skipped {}: {error}",
+                scratch.display()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut roots = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                reporter(&format!(
+                    "  Build output      skipped {}: read entry failed: {error}",
+                    scratch.display()
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            reporter(&format!(
+                "  Build output      skipped {}: unsafe fixture path",
+                path.display()
+            ));
+            continue;
+        }
+        if !historical_fixture_name_is_managed(name) {
+            if path.join("target").exists() {
+                reporter(&format!(
+                    "  Build output      skipped {}: unverified fixture name",
+                    path.display()
+                ));
+            }
+            continue;
+        }
+        let mut fixtures = vec![path.clone()];
+        match fs::read_dir(&path) {
+            Ok(children) => {
+                for child in children {
+                    let child = match child {
+                        Ok(child) => child,
+                        Err(error) => {
+                            reporter(&format!(
+                                "  Build output      skipped {}: read entry failed: {error}",
+                                path.display()
+                            ));
+                            continue;
+                        }
+                    };
+                    let child_name = child.file_name();
+                    if child_name.to_str().is_some_and(|name| {
+                        name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) {
+                        fixtures.push(child.path());
+                    }
+                }
+            }
+            Err(error) => reporter(&format!(
+                "  Build output      skipped {}: {error}",
+                path.display()
+            )),
+        }
+        for fixture in fixtures {
+            let target = fixture.join("target");
+            match fs::symlink_metadata(&target) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    reporter(&format!(
+                        "  Build output      skipped {}: {error}",
+                        target.display()
+                    ));
+                    continue;
+                }
+            }
+            if !fs::symlink_metadata(&fixture)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            {
+                reporter(&format!(
+                    "  Build output      skipped {}: unsafe fixture path",
+                    fixture.display()
+                ));
+                continue;
+            }
+            let owns_fixture = ["source-commit", "source.tar", "identity.json", "Cargo.toml"]
+                .iter()
+                .any(|marker| {
+                    fs::symlink_metadata(fixture.join(marker)).is_ok_and(|metadata| {
+                        metadata.is_file() && !metadata.file_type().is_symlink()
+                    })
+                });
+            if owns_fixture {
+                roots.push(target);
+            } else {
+                reporter(&format!(
+                    "  Build output      skipped {}: unverified fixture ownership",
+                    target.display()
+                ));
+            }
+        }
+    }
+    roots
+}
+
+fn path_has_no_symlinked_components(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if !fs::symlink_metadata(&current)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Consider only target roots named by persisted candidate workspaces. A
+/// per-workspace lease serializes each removal with Task launch in this Fluent
+/// version; the persisted Executing status also protects older runners.
+fn reclaim_idle_build_output(
+    project_root: &Path,
+    store: &WorkModelStore,
+    budget: u64,
+    reporter: &mut dyn FnMut(&str),
+) -> Result<BuildReclamationReport> {
+    let canonical_project_root = fs::canonicalize(project_root)
+        .with_context(|| format!("canonicalize project root {}", project_root.display()))?;
+    let project_root = canonical_project_root.as_path();
+    let items = store.list_work_items()?;
+    let mut candidates = BTreeMap::<PathBuf, (String, String, bool, String)>::new();
+    for item in &items {
+        for attempt in &item.attempts {
+            for task in &attempt.tasks {
+                for workspace in task
+                    .workspace_access
+                    .reads
+                    .iter()
+                    .chain(&task.workspace_access.writes)
+                {
+                    let Ok(path) = resolve_expected_candidate_workspace_path(
+                        project_root,
+                        &workspace.path,
+                        &item.id,
+                        &attempt.id,
+                        "build output",
+                    ) else {
+                        reporter(&format!(
+                            "  Build output      skipped {}: unverified workspace path",
+                            workspace.path
+                        ));
+                        continue;
+                    };
+                    let entry = candidates.entry(path).or_insert_with(|| {
+                        (item.id.clone(), attempt.id.clone(), false, String::new())
+                    });
+                    entry.2 |= task.status == TaskStatus::Executing;
+                    // Preserve output from nonterminal Work and recent Tasks first.
+                    let priority = format!(
+                        "{}{}",
+                        !crate::cleanup::work_item_is_cleanable(item),
+                        task.completed_at
+                            .as_deref()
+                            .or(task.started_at.as_deref())
+                            .unwrap_or("")
+                    );
+                    if priority > entry.3 {
+                        entry.3 = priority;
+                    }
+                }
+            }
+        }
+    }
+    let mut eligible = Vec::new();
+    let mut held_leases = Vec::new();
+    let mut report = BuildReclamationReport::default();
+    for (workspace, (work_id, attempt_id, executing, priority)) in candidates {
+        let lease = match crate::lease::try_acquire(&build_output_lease_path(
+            project_root,
+            &work_id,
+            &attempt_id,
+        )) {
+            Ok(crate::lease::LeaseAttempt::Acquired(lease)) => lease,
+            Ok(crate::lease::LeaseAttempt::Contended) => {
+                reporter(&format!(
+                    "  Build output      skipped {}: active Task lease",
+                    workspace.display()
+                ));
+                continue;
+            }
+            Err(error) => {
+                reporter(&format!(
+                    "  Build output      skipped {}: lease check failed: {error}",
+                    workspace.display()
+                ));
+                continue;
+            }
+        };
+        if !fs::symlink_metadata(&workspace)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || worktree::ensure_candidate_worktree(project_root, &workspace).is_err()
+        {
+            reporter(&format!(
+                "  Build output      skipped {}: unverified managed worktree",
+                workspace.display()
+            ));
+            continue;
+        }
+        held_leases.push(lease);
+        let mut targets = vec![workspace.join("target")];
+        targets.extend(verified_historical_target_roots(&workspace, reporter));
+        for target in targets {
+            let metadata = match fs::symlink_metadata(&target) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    reporter(&format!(
+                        "  Build output      skipped {}: {error}",
+                        target.display()
+                    ));
+                    continue;
+                }
+            };
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || !path_has_no_symlinked_components(&workspace, &target)
+            {
+                reporter(&format!(
+                    "  Build output      skipped {}: not a canonical directory",
+                    target.display()
+                ));
+                continue;
+            }
+            match prep::logical_bytes(&target) {
+                Ok(bytes) => {
+                    report.retained_bytes = report.retained_bytes.saturating_add(bytes);
+                    if executing {
+                        reporter(&format!(
+                            "  Build output      skipped {}: active Task ({bytes} bytes protected)",
+                            target.display()
+                        ));
+                    } else {
+                        eligible.push((priority.clone(), target, bytes, workspace.clone()));
+                    }
+                }
+                Err(error) => reporter(&format!(
+                    "  Build output      skipped {}: size inspection failed: {error:#}",
+                    target.display()
+                )),
+            }
+        }
+    }
+    eligible.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, path, bytes, workspace) in eligible {
+        if report.retained_bytes <= budget {
+            break;
+        }
+        // Revalidate the leaf after inventory. The workspace lease prevents a
+        // new Task from starting while this removal is in progress.
+        if !fs::symlink_metadata(&workspace)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || worktree::ensure_candidate_worktree(project_root, &workspace).is_err()
+            || !path_has_no_symlinked_components(&workspace, &path)
+        {
+            reporter(&format!(
+                "  Build output      skipped {}: path changed during inspection",
+                path.display()
+            ));
+            continue;
+        }
+        fs::remove_dir_all(&path)?;
+        report.retained_bytes = report.retained_bytes.saturating_sub(bytes);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(bytes);
+        reporter(&format!(
+            "  Build output      reclaimed {} ({bytes} bytes)",
+            path.display()
+        ));
+        report.reclaimed_paths.push(path);
+    }
+    if report.retained_bytes > budget {
+        reporter(&format!(
+            "  Build output      budget unmet: {} bytes retained, {budget} bytes allowed",
+            report.retained_bytes
+        ));
+    }
+    drop(held_leases);
+    Ok(report)
+}
+
+pub(crate) fn reclaim_managed_build_output(project_root: &Path, store: &WorkModelStore) {
+    match crate::config::resolve_build_output_config(project_root) {
+        Ok(limits) => {
+            if let Err(error) = reclaim_idle_build_output(
+                project_root,
+                store,
+                limits.max_project_bytes.value,
+                &mut |message| eprintln!("{message}"),
+            ) {
+                eprintln!("warning: could not reclaim idle build output: {error:#}");
+            }
+        }
+        Err(error) => eprintln!("warning: could not read build output budget: {error}"),
+    }
+}
+
 
 fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore) -> Result<()> {
     let items = store.list_work_items()?;
@@ -10791,6 +11182,259 @@ mod tests {
             }
         }
         assert!(plan_coder_kind(&item, "attempt-1", TaskKind::Tester).is_ok());
+    }
+
+    #[test]
+    fn idle_build_reclamation_reports_removed_paths_and_bytes() {
+        use super::*;
+        let (tmp, project, workspace, store) = build_reclamation_fixture();
+        let _keep = tmp;
+        fs::create_dir_all(workspace.join("target/debug")).unwrap();
+        fs::write(workspace.join("target/debug/output"), b"build").unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string());
+        })
+        .unwrap();
+        assert_eq!(report.reclaimed_bytes, 5);
+        assert_eq!(report.reclaimed_paths, vec![workspace.join("target")]);
+        assert!(!workspace.join("target").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("5 bytes") && message.contains("target"))
+        );
+    }
+
+    #[test]
+    fn build_reclamation_preserves_active_output() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/output"), b"active").unwrap();
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].tasks[0].status = TaskStatus::Executing;
+                Ok(())
+            })
+            .unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert!(report.reclaimed_paths.is_empty());
+        assert!(workspace.join("target/output").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("active Task"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_reclamation_skips_unverified_or_live_output() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        let external = project.join("evidence");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("note"), b"durable").unwrap();
+        std::os::unix::fs::symlink(&external, workspace.join("target")).unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert!(report.reclaimed_paths.is_empty());
+        assert!(external.join("note").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("not a canonical directory"))
+        );
+        fs::remove_file(workspace.join("target")).unwrap();
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        let lease = crate::lease::acquire_blocking(&build_output_lease_path(
+            &project,
+            "work-1",
+            "attempt-1",
+        ))
+        .unwrap();
+        messages.clear();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert!(report.reclaimed_paths.is_empty());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("active Task lease"))
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn build_reclamation_handles_nested_historical_fixture_targets() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        let managed = workspace.join(".scratch/evidence-old-reader");
+        let unknown = workspace.join(".scratch/my-private-reader");
+        fs::create_dir_all(managed.join("target")).unwrap();
+        fs::create_dir_all(unknown.join("target")).unwrap();
+        fs::write(managed.join("source-commit"), b"pinned").unwrap();
+        fs::write(managed.join("target/output"), b"historical build").unwrap();
+        fs::write(unknown.join("target/output"), b"private").unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert_eq!(report.reclaimed_bytes, 16);
+        assert!(!managed.join("target").exists());
+        assert!(managed.join("source-commit").exists());
+        assert!(unknown.join("target/output").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("my-private-reader")
+                    && message.contains("unverified"))
+        );
+    }
+
+    #[test]
+    fn task_settlement_and_pause_trigger_idle_build_reclamation() {
+        use super::*;
+        let (_tmp, project, workspace, store) = build_reclamation_fixture();
+        fs::create_dir_all(project.join(".fluent")).unwrap();
+        fs::write(
+            project.join(".fluent/config.yaml"),
+            "build-output:\n  max-project-gib: 0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/output"), b"rebuildable").unwrap();
+        crate::work_attempt_loop::cancel_local_attempt(&project, &store, "work-1", "attempt-1")
+            .unwrap();
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().attempts[0].status,
+            AttemptStatus::NeedsUser
+        );
+        assert!(!workspace.join("target").exists());
+        assert!(workspace.join("README.md").exists());
+        assert!(workspace.join(".git").exists());
+    }
+
+    #[test]
+    fn build_reclamation_prefers_reuse_and_reports_unmet_budget() {
+        use super::*;
+        let (_tmp, project, recent, store) = build_reclamation_fixture();
+        let old_relative =
+            crate::work_model::initial_candidate_workspace_path("work-2", "attempt-1");
+        let old = project.join(&old_relative);
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "--detach", old.to_str().unwrap()])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let old = fs::canonicalize(old).unwrap();
+        let mut retired = WorkItem {
+            id: "work-2".into(),
+            title: "Retired build".into(),
+            ..Default::default()
+        };
+        retired.add_initial_attempt("attempt-1").unwrap();
+        retired.attempts[0].tasks[0].workspace_access.writes = vec![WorkspaceRef {
+            id: "candidate".into(),
+            path: old_relative,
+        }];
+        retired.attempts[0].tasks[0].status = TaskStatus::Failed;
+        retired.attempts[0].status = AttemptStatus::Failed;
+        store.create_work_item(&retired).unwrap();
+        for path in [&recent, &old] {
+            fs::create_dir_all(path.join("target")).unwrap();
+            fs::write(path.join("target/output"), b"build").unwrap();
+        }
+        let report = reclaim_idle_build_output(&project, &store, 5, &mut |_| {}).unwrap();
+        assert_eq!(report.reclaimed_paths, vec![old.join("target")]);
+        assert!(recent.join("target/output").exists());
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].tasks[0].status = TaskStatus::Executing;
+                Ok(())
+            })
+            .unwrap();
+        let mut messages = Vec::new();
+        let report = reclaim_idle_build_output(&project, &store, 0, &mut |message| {
+            messages.push(message.to_string())
+        })
+        .unwrap();
+        assert_eq!(report.retained_bytes, 5);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("budget unmet"))
+        );
+        assert!(recent.join("target/output").exists());
+    }
+
+    fn build_reclamation_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, WorkModelStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("main");
+        fs::create_dir_all(&project).unwrap();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        fs::write(project.join("README.md"), "fixture").unwrap();
+        run(&["add", "README.md"]);
+        run(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "Add fixture",
+        ]);
+        let relative = crate::work_model::initial_candidate_workspace_path("work-1", "attempt-1");
+        let workspace = project.join(&relative);
+        run(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            workspace.to_str().unwrap(),
+        ]);
+        let workspace = fs::canonicalize(workspace).unwrap();
+        let store = WorkModelStore::new(&project);
+        let mut item = WorkItem {
+            id: "work-1".into(),
+            title: "Build fixture".into(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].tasks[0].workspace_access.writes = vec![WorkspaceRef {
+            id: "candidate".into(),
+            path: relative,
+        }];
+        store.create_work_item(&item).unwrap();
+        (tmp, project, workspace, store)
     }
 
     #[test]

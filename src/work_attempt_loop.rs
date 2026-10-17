@@ -1218,7 +1218,11 @@ pub struct WorkAttemptRunResult {
 }
 
 pub fn run_attempt(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
-    run_attempt_inner(config)
+    let project_root = config.project_root;
+    let store = config.store;
+    let result = run_attempt_inner(config);
+    work_task_executor::reclaim_managed_build_output(project_root, store);
+    result
 }
 
 fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
@@ -6268,6 +6272,7 @@ pub fn cancel_local_attempt(
         attempt.cancellation.as_mut().unwrap().settled_at = Some(crate::work_model::now_iso8601());
         Ok(executing.len())
     })?;
+    work_task_executor::reclaim_managed_build_output(project_root, store);
     Ok(canceled)
 }
 

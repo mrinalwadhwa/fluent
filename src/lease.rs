@@ -90,6 +90,21 @@ pub fn acquire_blocking(lock_path: &Path) -> io::Result<TaskLease> {
     Ok(TaskLease { _file: file })
 }
 
+/// Let concurrent Tasks use one build output while an exclusive reclamation
+/// check waits for every user to finish.
+pub fn acquire_shared_blocking(lock_path: &Path) -> io::Result<TaskLease> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    flock(&file, FlockOperation::LockShared).map_err(io::Error::from)?;
+    Ok(TaskLease { _file: file })
+}
+
 pub fn is_leased(lock_path: &Path) -> bool {
     let file = match OpenOptions::new().read(true).open(lock_path) {
         Ok(f) => f,
@@ -154,6 +169,28 @@ mod tests {
             LeaseAttempt::Contended => {}
             LeaseAttempt::Acquired(_) => panic!("a held lock must report contention"),
         }
+    }
+
+    #[test]
+    fn shared_task_leases_allow_peers_and_block_reclamation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build-output.lock");
+        let first = acquire_shared_blocking(&path).unwrap();
+        let second = acquire_shared_blocking(&path).unwrap();
+        assert!(matches!(
+            try_acquire(&path).unwrap(),
+            LeaseAttempt::Contended
+        ));
+        drop(first);
+        assert!(matches!(
+            try_acquire(&path).unwrap(),
+            LeaseAttempt::Contended
+        ));
+        drop(second);
+        assert!(matches!(
+            try_acquire(&path).unwrap(),
+            LeaseAttempt::Acquired(_)
+        ));
     }
 
     #[test]

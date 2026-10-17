@@ -43,6 +43,8 @@ pub const DEFAULT_CODEX_RESPONSE_CONTINUATIONS: u32 = 2;
 pub const DEFAULT_REVIEWER_CACHE_MAX_PROJECT_GIB: u64 = 50;
 /// Built-in filesystem space reserved after a reviewer cache admission.
 pub const DEFAULT_REVIEWER_CACHE_MIN_FREE_GIB: u64 = 50;
+/// Retain recent managed worktree build output up to this logical footprint.
+pub const DEFAULT_BUILD_OUTPUT_MAX_PROJECT_GIB: u64 = 100;
 /// Built-in maximum concurrent logical runs for one provider across projects.
 pub const DEFAULT_PROVIDER_CONCURRENCY: u32 = 5;
 /// Built-in maximum approved behaviors or required Plan rows before Work
@@ -258,6 +260,11 @@ pub struct ResolvedTranscriptPumpConfig {
 pub struct ResolvedReviewerCacheConfig {
     pub max_project_bytes: ResolvedLeaf<u64>,
     pub min_free_bytes: ResolvedLeaf<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBuildOutputConfig {
+    pub max_project_bytes: ResolvedLeaf<u64>,
 }
 
 /// Shared and project-local provider admission limits.
@@ -654,6 +661,23 @@ pub fn resolve_reviewer_cache_config(
         &project_config_path(project_root),
         user_config_path().as_deref(),
     )
+}
+
+pub fn resolve_build_output_config(
+    project_root: &Path,
+) -> Result<ResolvedBuildOutputConfig, FollowUpConfigError> {
+    let layers = load_policy_layers(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+    )?;
+    Ok(ResolvedBuildOutputConfig {
+        max_project_bytes: resolve_leaf(
+            &layers,
+            &["build-output", "max-project-gib"],
+            DEFAULT_BUILD_OUTPUT_MAX_PROJECT_GIB * GIB_BYTES,
+            convert_gib,
+        )?,
+    })
 }
 
 /// Resolve the deterministic Work-intake scope limit. A malformed configured
@@ -1495,6 +1519,20 @@ coders:
         assert_eq!(resolved.max_project_bytes.source, ConfigSource::Project);
         assert_eq!(resolved.min_free_bytes.value, 4 * GIB_BYTES);
         assert_eq!(resolved.min_free_bytes.source, ConfigSource::User);
+    }
+
+    #[test]
+    fn build_output_budget_uses_project_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".fluent")).unwrap();
+        std::fs::write(
+            dir.path().join(".fluent/config.yaml"),
+            "build-output:\n  max-project-gib: 2\n",
+        )
+        .unwrap();
+        let resolved = resolve_build_output_config(dir.path()).unwrap();
+        assert_eq!(resolved.max_project_bytes.value, 2 * GIB_BYTES);
+        assert_eq!(resolved.max_project_bytes.source, ConfigSource::Project);
     }
 
     #[test]
