@@ -1984,10 +1984,6 @@ mod setup_cleanup_tests {
             !tty.is_null(),
             "nested fixture requires a controlling terminal"
         );
-        let tty = unsafe { std::ffi::CStr::from_ptr(tty) }
-            .to_str()
-            .unwrap()
-            .to_owned();
         for retry in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
@@ -2039,6 +2035,39 @@ mod setup_cleanup_tests {
             };
             let mut dashboard = crate::dashboard::terminal::DashboardTerminal::open().unwrap();
             let size = dashboard.size().unwrap();
+            let readonly = if retry { "1" } else { "0" };
+            // Wait for the embedded client before taking the baseline so its
+            // delayed attachment cannot be mistaken for the full-screen client.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let baseline = loop {
+                let clients = Command::new(find_tmux().unwrap())
+                    .env_remove("TMUX")
+                    .arg("-S")
+                    .arg(&socket)
+                    .args(["list-clients", "-F", "#{client_tty} #{client_readonly}"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    clients.status.success(),
+                    "could not list embedded clients: {}",
+                    String::from_utf8_lossy(&clients.stderr)
+                );
+                let clients = String::from_utf8_lossy(&clients.stdout);
+                if clients.lines().any(|line| {
+                    line.split_once(' ')
+                        .is_some_and(|(_, mode)| mode == readonly)
+                }) {
+                    break clients
+                        .lines()
+                        .filter_map(|line| line.split_once(' ').map(|(tty, _)| tty.to_owned()))
+                        .collect::<Vec<_>>();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "embedded client never attached inside outer tmux"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
             std::thread::scope(|scope| {
                 let cancel = scope.spawn(|| {
                     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2047,13 +2076,17 @@ mod setup_cleanup_tests {
                             .env_remove("TMUX")
                             .arg("-S")
                             .arg(&socket)
-                            .args(["list-clients", "-F", "#{client_tty}"])
+                            .args(["list-clients", "-F", "#{client_tty} #{client_readonly}"])
                             .output()
                             .unwrap();
                         if clients.status.success()
                             && String::from_utf8_lossy(&clients.stdout)
                                 .lines()
-                                .any(|line| line == tty)
+                                .any(|line| {
+                                    line.split_once(' ').is_some_and(|(tty, mode)| {
+                                        mode == readonly && !baseline.iter().any(|old| old == tty)
+                                    })
+                                })
                         {
                             break;
                         }
@@ -2095,8 +2128,17 @@ mod setup_cleanup_tests {
                 let _ = dashboard.handoff(|| embedded.fullscreen(size.0, size.1));
                 assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
                 assert_eq!(dashboard.size().unwrap(), size);
-                embedded.refresh();
-                assert!(embedded.ended());
+                // Match the dashboard's repeated refreshes: liveness is
+                // checked every 200 ms, independently of the client's exit.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    embedded.refresh();
+                    if embedded.ended() {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "ended view never appeared");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 assert!(!embedded.has_control());
                 assert!(embedded.acquire_control().is_err());
                 cancel.join().unwrap();
