@@ -6,7 +6,7 @@ REAL_GIT="$(command -v git)"
 export REAL_GIT
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-mkdir -p "$temporary/bin" "$temporary/cache" "$temporary/cargo-home" "$temporary/one" "$temporary/two"
+mkdir -p "$temporary/bin" "$temporary/cache" "$temporary/cargo-home" "$temporary/cargo-cwd" "$temporary/one" "$temporary/two"
 cat > "$temporary/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -14,11 +14,16 @@ if [[ "${1-}" == --version ]]; then echo "${CARGO_VERSION:-cargo fixture}"; exit
 [[ "${1-}" == build ]] || exit 99
 printf 'build\n' >> "$BUILD_LOG"
 if [[ "${FAIL_BUILD:-0}" == 1 ]]; then echo 'fixture build failed' >&2; exit 1; fi
+if [[ -n "${EXPECT_CARGO_CWD:-}" && "$(pwd -P)" != "$(cd "$EXPECT_CARGO_CWD" && pwd -P)" ]]; then
+  echo "cargo ran from $PWD, expected $EXPECT_CARGO_CWD" >&2
+  exit 1
+fi
 while (( $# )); do
   if [[ "$1" == --target-dir ]]; then target="$2"; break; fi
   shift
 done
 mkdir -p "$target/debug"
+if [[ "${OMIT_BINARY:-0}" == 1 ]]; then exit 0; fi
 printf '#!/bin/sh\necho fixture\n' > "$target/debug/fluent"
 chmod +x "$target/debug/fluent"
 SH
@@ -51,6 +56,8 @@ SH
 chmod +x "$temporary/bin/git"
 export PATH="$temporary/bin:$PATH" BUILD_LOG="$temporary/builds"
 export CARGO_HOME="$temporary/cargo-home"
+export TMPDIR="$temporary/cargo-cwd"
+export EXPECT_CARGO_CWD="$TMPDIR"
 export FLUENT_HISTORICAL_READER_CACHE="$temporary/cache"
 commit=720368bb855dd6d10fffd221ed0e4badd0b6104e
 helper="$repository/tests/fixtures/prepare-historical-reader.py"
@@ -60,6 +67,53 @@ python3 "$helper" "$repository" "$commit" "$temporary/two" > "$temporary/second"
 cmp "$(cat "$temporary/first")" "$(cat "$temporary/second")"
 test -L "$(cat "$temporary/second")"
 initial_entry="$(readlink "$(cat "$temporary/first")")"
+cp "$(dirname "$initial_entry")/provenance.json" "$temporary/initial-provenance.json"
+
+verify_reader() {
+    python3 - "$1" "$2" "$3" "$temporary/initial-provenance.json" "$repository" <<'PY'
+import copy, hashlib, io, json, os, pathlib, subprocess, sys, tarfile
+path = pathlib.Path(pathlib.Path(sys.argv[1]).read_text().strip())
+expected_entry = pathlib.Path(sys.argv[2])
+field = sys.argv[3]
+baseline = json.loads(pathlib.Path(sys.argv[4]).read_text())['identity']
+repository = pathlib.Path(sys.argv[5])
+assert path.is_symlink() and path.is_file() and os.access(path, os.X_OK)
+assert path.resolve() == expected_entry.resolve()
+recorded = json.loads((expected_entry.parent / 'provenance.json').read_text())
+identity = recorded['identity']
+assert expected_entry.parent.name == hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+assert recorded['binary_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+expected = copy.deepcopy(baseline)
+if field == 'rustc':
+    expected['rustc'] = 'rustc concurrent\n'
+    expected['build_options']['RUSTC_VERSION'] = 'rustc concurrent'
+elif field == 'build_options':
+    expected['build_options']['RUSTFLAGS'] = '-Copt-level=1'
+elif field == 'cargo':
+    expected['cargo'] = 'cargo changed\n'
+elif field in ('source_commit', 'lockfile_sha256'):
+    commit = ('2e88c3cbc811a83d733106ded22d29d716cf7184'
+              if field == 'source_commit' else baseline['source_commit'])
+    env = dict(os.environ, TAMPER_LOCK='1') if field == 'lockfile_sha256' else os.environ
+    archive = subprocess.check_output(('git', 'archive', commit), cwd=repository, env=env)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+        expected['lockfile_sha256'] = hashlib.sha256(source.extractfile('Cargo.lock').read()).hexdigest()
+        expected['work_model_sha256'] = hashlib.sha256(source.extractfile('src/work_model.rs').read()).hexdigest()
+    expected['source_commit'] = commit
+    expected['source_archive_sha256'] = hashlib.sha256(archive).hexdigest()
+elif field == 'build_command':
+    expected['build_command'] = ['cargo', 'build', '--locked']
+elif field == 'cargo_cwd_config':
+    config = pathlib.Path(os.environ['TMPDIR']).resolve() / '.cargo/config.toml'
+    expected['cargo_cwd_config'][str(config)] = hashlib.sha256(config.read_bytes()).hexdigest()
+elif field == 'cargo_config':
+    config = pathlib.Path(os.environ['CARGO_HOME']) / 'config.toml'
+    expected['cargo_config']['config.toml'] = hashlib.sha256(config.read_bytes()).hexdigest()
+else:
+    assert field == ''
+assert identity == expected, field
+PY
+}
 
 # Concurrent callers publish one complete entry.
 RUSTC_VERSION='rustc concurrent' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/concurrent-one" &
@@ -70,27 +124,41 @@ wait "$first_pid"
 wait "$second_pid"
 (( $(wc -l < "$BUILD_LOG") == 2 ))
 cmp "$(cat "$temporary/concurrent-one")" "$(cat "$temporary/concurrent-two")"
+verify_reader "$temporary/concurrent-one" "$(readlink "$(cat "$temporary/concurrent-one")")" rustc
+[[ "$(readlink "$(cat "$temporary/concurrent-one")")" != "$initial_entry" ]]
 
 # Each input changes the key independently.
-RUSTFLAGS='-Copt-level=1' python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
-CARGO_VERSION='cargo changed' python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
+RUSTFLAGS='-Copt-level=1' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rustflags"
+verify_reader "$temporary/rustflags" "$(readlink "$(cat "$temporary/rustflags")")" build_options
+[[ "$(readlink "$(cat "$temporary/rustflags")")" != "$initial_entry" ]]
+CARGO_VERSION='cargo changed' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/cargo-version"
+verify_reader "$temporary/cargo-version" "$(readlink "$(cat "$temporary/cargo-version")")" cargo
+[[ "$(readlink "$(cat "$temporary/cargo-version")")" != "$initial_entry" ]]
 other_commit=2e88c3cbc811a83d733106ded22d29d716cf7184
-python3 "$helper" "$repository" "$other_commit" "$temporary/one" > /dev/null
-TAMPER_LOCK=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
-python3 "$helper" "$repository" "$commit" "$temporary/one" online > /dev/null
+python3 "$helper" "$repository" "$other_commit" "$temporary/one" > "$temporary/source"
+verify_reader "$temporary/source" "$(readlink "$(cat "$temporary/source")")" source_commit
+[[ "$(readlink "$(cat "$temporary/source")")" != "$initial_entry" ]]
+TAMPER_LOCK=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/lockfile"
+verify_reader "$temporary/lockfile" "$(readlink "$(cat "$temporary/lockfile")")" lockfile_sha256
+[[ "$(readlink "$(cat "$temporary/lockfile")")" != "$initial_entry" ]]
+python3 "$helper" "$repository" "$commit" "$temporary/one" online > "$temporary/mode"
+verify_reader "$temporary/mode" "$(readlink "$(cat "$temporary/mode")")" build_command
+[[ "$(readlink "$(cat "$temporary/mode")")" != "$initial_entry" ]]
 (( $(wc -l < "$BUILD_LOG") == 7 ))
 
 # A changed executable or provenance is rebuilt before publication.
 first_entry="$initial_entry"
 printf 'tampered\n' >> "$first_entry"
-python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-binary"
+verify_reader "$temporary/rebuilt-binary" "$initial_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 8 ))
 python3 - "$first_entry" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1]).with_name('provenance.json')
 path.write_text('{}')
 PY
-python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-provenance"
+verify_reader "$temporary/rebuilt-provenance" "$initial_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 9 ))
 
 # A failed rebuild leaves no usable stale reader; an orphan temporary entry is ignored.
@@ -103,8 +171,17 @@ fi
 rg -q 'build identity [0-9a-f]{64} failed' "$temporary/failure.err"
 rg -q 'fixture build failed' "$temporary/failure.err"
 [[ ! -s "$temporary/failure.out" ]]
-python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-after-failure"
+verify_reader "$temporary/rebuilt-after-failure" "$initial_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 11 ))
+
+# A successful Cargo exit without an executable must fail preparation.
+if RUSTC_VERSION='rustc no binary' OMIT_BINARY=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/missing.out" 2> "$temporary/missing.err"; then
+    echo 'missing executable unexpectedly supplied a reader' >&2
+    exit 1
+fi
+rg -q 'build identity [0-9a-f]{64}: executable verification failed' "$temporary/missing.err"
+[[ ! -s "$temporary/missing.out" ]]
 
 # Every pinned wrapper uses the same preparation path and returns its legacy
 # fixture location with independently checkable compatibility metadata.
@@ -154,3 +231,28 @@ builds_before="$(wc -l < "$BUILD_LOG")"
 (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
 [[ "$(readlink "$(cat "$temporary/work-one-path")")" == "$(readlink "$(cat "$temporary/work-two-path")")" ]]
 [[ "$(readlink "$(cat "$temporary/work-one-path")")" == *"/project/.fluent/work/cache/historical-readers/"* ]]
+
+# The calling worktree's Cargo configuration cannot affect an isolated build.
+mkdir -p "$temporary/work-two/.cargo"
+printf '[build]\nrustflags = ["-Copt-level=1"]\n' > "$temporary/work-two/.cargo/config.toml"
+builds_before="$(wc -l < "$BUILD_LOG")"
+(
+    unset FLUENT_HISTORICAL_READER_CACHE
+    python3 "$helper" "$temporary/work-two" "$commit" "$temporary/work-two/.scratch/old-reader" > "$temporary/work-two-config-path"
+)
+(( $(wc -l < "$BUILD_LOG") == builds_before ))
+verify_reader "$temporary/work-two-config-path" "$(readlink "$(cat "$temporary/work-one-path")")" ''
+
+# Configuration at Cargo's actual working directory changes the identity.
+mkdir -p "$TMPDIR/.cargo"
+printf '[build]\nrustflags = ["-Copt-level=1"]\n' > "$TMPDIR/.cargo/config.toml"
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/cargo-cwd-config"
+verify_reader "$temporary/cargo-cwd-config" "$(readlink "$(cat "$temporary/cargo-cwd-config")")" cargo_cwd_config
+[[ "$(readlink "$(cat "$temporary/cargo-cwd-config")")" != "$initial_entry" ]]
+
+# Cargo home configuration also changes the build identity.
+rm "$TMPDIR/.cargo/config.toml"
+printf '[build]\nincremental = false\n' > "$CARGO_HOME/config.toml"
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/cargo-home-config"
+verify_reader "$temporary/cargo-home-config" "$(readlink "$(cat "$temporary/cargo-home-config")")" cargo_config
+[[ "$(readlink "$(cat "$temporary/cargo-home-config")")" != "$initial_entry" ]]

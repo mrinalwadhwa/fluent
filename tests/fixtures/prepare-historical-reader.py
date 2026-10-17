@@ -29,6 +29,16 @@ def write_proof(path, content):
     Path(staged.name).replace(path)
 
 
+def cargo_cwd_config(build_cwd):
+    config = {}
+    for directory in (build_cwd, *build_cwd.parents):
+        for name in ("config.toml", "config"):
+            path = directory / ".cargo" / name
+            if path.is_file():
+                config[str(path)] = digest(path.read_bytes())
+    return config
+
+
 def main(repository, commit, reader_root, mode="offline", evidence="none"):
     if mode not in {"offline", "online"}:
         raise ValueError(f"unsupported historical reader build mode: {mode}")
@@ -36,6 +46,9 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
         raise ValueError(f"unsupported historical reader source evidence: {evidence}")
     repository = Path(repository).resolve()
     reader_root = Path(reader_root).resolve()
+    # Cargo reads configuration from its working directory and its ancestors.
+    # Build outside every worktree so the caller cannot change these inputs.
+    build_cwd = Path(tempfile.gettempdir()).resolve()
     git_dir = Path(run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=repository).decode().strip())
     cache = Path(os.environ.get("FLUENT_HISTORICAL_READER_CACHE", git_dir.parent / ".fluent/work/cache/historical-readers"))
     archive = run("git", "archive", commit, cwd=repository)
@@ -67,6 +80,7 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 "lockfile_sha256": lock_digest, "work_model_sha256": work_model_digest,
                 "rustc": rustc, "cargo": cargo, "build_options": options,
                 "cargo_config": cargo_config,
+                "cargo_cwd_config": cargo_cwd_config(build_cwd),
                 "build_command": build_command}
     key = digest(json.dumps(identity, sort_keys=True).encode())
     if not cargo_home:
@@ -110,7 +124,7 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 env = os.environ.copy()
                 env["GIT_CEILING_DIRECTORIES"] = str(source_dir.parent)
                 try:
-                    subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)
+                    subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], cwd=build_cwd, env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)
                 except subprocess.CalledProcessError as error:
                     raise RuntimeError(f"build identity {key} failed: {error}") from error
                 built = target / "debug/fluent"
