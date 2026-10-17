@@ -77,6 +77,8 @@ must not launch host evidence work or disable worker sandboxing to obtain it.
 
 ## Patterns
 
+- [confirm-native-tmux-detach](testing/patterns/confirm-native-tmux-detach.md) — read when a native tmux detach returns a nonzero client status in a PTY fixture.
+
 - [joint-tla-boundary-model](testing/patterns/joint-tla-boundary-model.md) — read when connecting a workflow action to an existing detailed TLA protocol.
 
 - [snapshot-split-work-state](testing/patterns/snapshot-split-work-state.md) — read when tracing Work Item readiness across the split Merge Candidate store.

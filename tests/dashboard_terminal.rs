@@ -553,6 +553,7 @@ fn fullscreen_return_restores_dashboard_after_exit_or_failure() {
 
 #[test]
 fn fullscreen_resize_requires_control() {
+    let mut failures = Vec::new();
     for mode in ["observe", "control"] {
         let output = std::process::Command::new("python3")
             .arg("tests/fixtures/dashboard-terminal-handoff.py")
@@ -560,13 +561,15 @@ fn fullscreen_resize_requires_control() {
             .arg(mode)
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{mode}: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            failures.push(format!(
+                "{mode}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -594,7 +597,11 @@ fn fullscreen_attachment_pty_child() {
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(output.status.success());
+            assert!(
+                output.status.success(),
+                "tmux {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             String::from_utf8(output.stdout).unwrap()
         };
         let result = std::panic::catch_unwind(|| {
@@ -603,6 +610,12 @@ fn fullscreen_attachment_pty_child() {
             wait_for(|| clients().trim() == "100x30");
             let initial = if mode == "control" { "100x30" } else { "80x24" };
             wait_for(|| size().trim() == initial);
+            query(&[
+                "set-hook",
+                "-g",
+                "client-detached",
+                "set-option -g @fluent_fixture_detached 1",
+            ]);
             println!("RESIZE_ATTACH_READY");
             std::io::stdout().flush().unwrap();
             wait_for(|| clients().trim() == "73x13");
@@ -611,6 +624,11 @@ fn fullscreen_attachment_pty_child() {
             println!("DETACH_ATTACH_READY");
             std::io::stdout().flush().unwrap();
             wait_for(|| clients().trim().is_empty());
+            wait_for(|| {
+                query(&["display-message", "-p", "#{@fluent_fixture_detached}"]).trim() == "1"
+            });
+            query(&["has-session", "-t", "fluent"]);
+            assert_eq!(size().trim(), expected, "detach changed the worker size");
         });
         // Release a blocking attachment on failure; success must use Ctrl-B d.
         if result.is_err() {
@@ -621,8 +639,14 @@ fn fullscreen_attachment_pty_child() {
     let result = attachment.run();
     let driven = driver.join();
     worker.stop().unwrap();
-    assert_eq!(result.unwrap(), 0);
-    driven.unwrap();
+    driven.expect("the server must confirm resize and native detach");
+    // tmux 3.5a can return 1 after Ctrl-B d. Accept that outcome only after
+    // the driver confirms client-detached, a live session, and its final size.
+    let status = result.unwrap();
+    assert!(
+        matches!(status, 0 | 1),
+        "unexpected tmux exit status {status}"
+    );
 }
 
 #[test]
