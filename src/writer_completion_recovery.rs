@@ -71,7 +71,7 @@ struct EligibleRecovery {
     superseded_task_ids: Vec<String>,
     existing_no_change: bool,
     schedule_corrective_writer: bool,
-    malformed_source_matrix: bool,
+    committed_source_matrix: bool,
     source_matrix_sha256: Option<String>,
     requirement_contract_sha256: Option<String>,
     source_assignment_sha256: Option<String>,
@@ -90,7 +90,7 @@ pub fn recovery_action(project_root: &Path, attempt: &Attempt) -> Option<String>
     ))
 }
 
-/// Report a repair for the latest malformed Writer or unfinished no-change work.
+/// Report a repair for the latest eligible Writer-completion pause.
 pub(crate) fn status_recovery_action(project_root: &Path, attempt: &Attempt) -> Option<String> {
     let eligible = inspect_eligible(project_root, attempt).ok()?;
     if eligible.existing_no_change {
@@ -422,7 +422,7 @@ pub fn repair(
                 });
             }
             if expected_eligible.schedule_corrective_writer {
-                if !expected_eligible.malformed_source_matrix && !expected_eligible.existing_no_change {
+                if !expected_eligible.committed_source_matrix && !expected_eligible.existing_no_change {
                     let attempt = fresh
                         .attempts
                         .iter_mut()
@@ -1432,7 +1432,7 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
     if pending_writers.len() > 1 {
         bail!("Attempt has more than one paused Writer-completion Task");
     }
-    let (task_id, existing_no_change, malformed_source_matrix) =
+    let (task_id, existing_no_change, committed_source_matrix) =
         if let Some(task) = pending_writers.first() {
             let area = task
                 .artifact_area
@@ -1497,8 +1497,10 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
                     matrix_path.display()
                 )
             })?;
-            if serde_json::from_slice::<crate::work_model::WriterCompletionMatrix>(&bytes).is_ok() {
-                bail!("Writer-completion pause has no paused Writer or valid no-change Writer");
+            if let Ok(matrix) =
+                serde_json::from_slice::<crate::work_model::WriterCompletionMatrix>(&bytes)
+            {
+                validate_stalled_committed_writer(project_root, attempt, source_writer, &matrix)?;
             }
             let next_task_id = format!(
                 "{}-write-{}",
@@ -1516,7 +1518,7 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
             );
             (next_task_id, false, true)
         };
-    let schedule_corrective_writer = malformed_source_matrix
+    let schedule_corrective_writer = committed_source_matrix
         || existing_no_change
             && writer_matrix_has_pending_writer_work(project_root, attempt, source_writer)?;
     if existing_no_change && !schedule_corrective_writer {
@@ -1556,7 +1558,7 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
         })
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();
-    let bind_source = malformed_source_matrix || existing_no_change && schedule_corrective_writer;
+    let bind_source = committed_source_matrix || existing_no_change && schedule_corrective_writer;
     let source_matrix_sha256 = if bind_source {
         let area = source_writer.artifact_area.as_ref().unwrap();
         let bytes = fs::read(
@@ -1606,13 +1608,104 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
         superseded_task_ids,
         existing_no_change,
         schedule_corrective_writer,
-        malformed_source_matrix,
+        committed_source_matrix,
         source_matrix_sha256,
         requirement_contract_sha256,
         source_assignment_sha256,
         source_transcript_sha256,
         source_output_sha256,
     })
+}
+
+/// Prove the repeated-progress guard's shape from the saved runs and matrices.
+/// A valid incomplete matrix alone cannot authorize another committed Writer.
+fn validate_stalled_committed_writer(
+    project_root: &Path,
+    attempt: &Attempt,
+    source: &crate::work_model::Task,
+    matrix: &crate::work_model::WriterCompletionMatrix,
+) -> Result<()> {
+    use crate::work_model::{WriterOutcome, WriterRunKind};
+
+    anyhow::ensure!(
+        attempt.review_state == Some(AttemptReviewState::NotReviewed)
+            && attempt
+                .tasks
+                .last()
+                .is_some_and(|task| task.id == source.id),
+        "stalled Writer must be the latest Task at the completion pause"
+    );
+    let runs = attempt.writer_runs.iter().rev().take(3).collect::<Vec<_>>();
+    anyhow::ensure!(
+        runs.len() == 3
+            && runs[0].task_id == source.id
+            && runs[0].outcome == WriterOutcome::Blocked
+            && runs[..2]
+                .iter()
+                .all(|run| run.kind != WriterRunKind::Initial),
+        "Writer-completion pause does not record two stagnant continuations"
+    );
+    let contract = attempt
+        .writer_completion_contract
+        .as_ref()
+        .context("stalled Writer completion contract is missing")?;
+    let findings = crate::recovery_contracts::writer_completion_findings(project_root, source)?;
+    matrix
+        .status_against(contract, &source.id, &findings)
+        .map_err(|reason| anyhow::anyhow!("stalled Writer matrix is invalid: {reason}"))?;
+    anyhow::ensure!(
+        !matrix.pending_writer_rows().is_empty(),
+        "stalled Writer has no pending Writer-owned work"
+    );
+    let identity = matrix.completion_identity();
+    let writers = attempt
+        .tasks
+        .iter()
+        .rev()
+        .filter(|task| task.kind == TaskKind::Write)
+        .take(3)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(writers.len() == 3, "stalled Writer history is incomplete");
+    for (run, task) in runs.iter().zip(&writers) {
+        let output = task
+            .output
+            .as_ref()
+            .context("stalled Writer history has no output")?;
+        anyhow::ensure!(
+            run.task_id == task.id
+                && task.status == TaskStatus::Complete
+                && run.candidate_commit == output.commit
+                && output.no_change.is_none()
+                && output
+                    .base_commit
+                    .as_ref()
+                    .is_some_and(|base| base != &output.commit)
+                && run.checked_required == runs[0].checked_required
+                && run.completed_matrix == runs[0].completed_matrix,
+            "stalled Writer history changed or did not commit against the same obligations"
+        );
+        let artifact =
+            crate::recovery_contracts::writer_completion_matrix_ref(project_root, attempt, task)
+                .context("stalled Writer history has no matrix")?;
+        let path =
+            crate::recovery_contracts::resolve_input_artifact_path(project_root, &artifact.path)?;
+        anyhow::ensure!(
+            fs::metadata(&path)?.len()
+                <= crate::work_model::WRITER_COMPLETION_MATRIX_MAX_BYTES as u64,
+            "stalled Writer matrix exceeds the size limit"
+        );
+        let saved: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_slice(&fs::read(path)?)?;
+        let findings = crate::recovery_contracts::writer_completion_findings(project_root, task)?;
+        let status = saved
+            .status_against(contract, &task.id, &findings)
+            .map_err(|reason| anyhow::anyhow!("stalled Writer matrix is invalid: {reason}"))?;
+        anyhow::ensure!(
+            saved.completion_identity() == identity && status.complete == run.completed_matrix,
+            "stalled Writer matrix changed or made completion progress"
+        );
+    }
+    Ok(())
 }
 
 /// A completed no-change Writer needs a corrective Writer when its validated
@@ -1863,6 +1956,225 @@ mod tests {
             project,
             workspace,
             store,
+        }
+    }
+
+    fn stalled_committed_fixture(corrective: bool) -> Fixture {
+        use crate::work_model::{
+            WriterCompletionContract, WriterCompletionMatrix, WriterOutcome, WriterRun,
+            WriterRunKind,
+        };
+
+        let fixture = fixture(false);
+        let mut item = fixture.store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.writer_completion_contract = WriterCompletionContract::from_planning_context(&crate::work_model::PlanningContext {
+            behaviors: Some("# Behaviors\n## Recovery\n### B1\nFinish the implementation.\nTest: src/lib.rs\n### B2\nFinish the tests.\nTest: src/lib.rs\n".into()),
+            plan: Some("# Plan\n| # | State reached | Verification | Responsibility | Req? |\n|---|---|---|---|---|\n| 1 | Review | Reviews | review | Yes |\n| 2 | Test | Full suite | tester | Yes |\n| 3 | Learn | Learn | learner | Yes |\n".into()),
+            ..Default::default()
+        });
+        let review = ArtifactRef {
+            producer_id: "review-tests".into(),
+            path: work_artifact_path("work-1", "attempt-1", "review-tests/review.md"),
+        };
+        fs::create_dir_all(fixture.project.join(&review.path).parent().unwrap()).unwrap();
+        fs::write(
+            fixture.project.join(&review.path),
+            "Verdict: fail\n- [ ] Complete the pending correction (blocking)\n",
+        )
+        .unwrap();
+        let tester = ArtifactRef {
+            producer_id: "tester".into(),
+            path: work_artifact_path("work-1", "attempt-1", "tester/tester-results.json"),
+        };
+        fs::create_dir_all(fixture.project.join(&tester.path).parent().unwrap()).unwrap();
+        fs::write(
+            fixture.project.join(&tester.path),
+            "retained Tester evidence\n",
+        )
+        .unwrap();
+        attempt.artifacts.extend([review.clone(), tester]);
+        let initial_output = attempt.tasks[0].output.clone().unwrap();
+        for (index, task) in attempt.tasks.iter_mut().enumerate() {
+            let mut output = initial_output.clone();
+            if index > 0 {
+                output.base_commit = Some(
+                    git::run_stdout(
+                        &fixture.workspace,
+                        &["rev-parse", "HEAD"],
+                        "prior candidate",
+                    )
+                    .unwrap(),
+                );
+                fs::write(
+                    fixture.workspace.join("candidate.txt"),
+                    format!("continuation {index}\n"),
+                )
+                .unwrap();
+                git::run(
+                    &fixture.workspace,
+                    &["add", "candidate.txt"],
+                    "stage continuation",
+                )
+                .unwrap();
+                git::run(
+                    &fixture.workspace,
+                    &["commit", "-qm", "Continue implementation"],
+                    "commit continuation",
+                )
+                .unwrap();
+                output.commit =
+                    git::run_stdout(&fixture.workspace, &["rev-parse", "HEAD"], "candidate")
+                        .unwrap();
+            }
+            task.status = TaskStatus::Complete;
+            task.output = Some(output.clone());
+            if corrective {
+                task.input_artifacts.push(review.clone());
+            }
+            let area = task.artifact_area.as_ref().unwrap();
+            fs::create_dir_all(fixture.project.join(&area.path)).unwrap();
+            let matrix_ref = ArtifactRef {
+                producer_id: task.id.clone(),
+                path: format!("{}/writer-completion.json", area.path),
+            };
+            fs::write(
+                fixture.project.join(&area.path).join("transcript.jsonl"),
+                "retained Writer transcript\n",
+            )
+            .unwrap();
+            task.input_artifacts.push(matrix_ref);
+            attempt.writer_runs.push(WriterRun {
+                task_id: task.id.clone(),
+                outcome: if index == 2 {
+                    WriterOutcome::Blocked
+                } else {
+                    WriterOutcome::Continue
+                },
+                kind: if corrective {
+                    WriterRunKind::Corrective
+                } else if index == 0 {
+                    WriterRunKind::Initial
+                } else {
+                    WriterRunKind::PreReviewContinuation
+                },
+                provider: "codex".into(),
+                session_id: None,
+                continuation: index as u32,
+                checked_required: 0,
+                completed_matrix: 0,
+                candidate_commit: output.commit,
+            });
+        }
+        fixture
+            .store
+            .mutate_work_item("work-1", |stored| {
+                *stored = item.clone();
+                Ok(())
+            })
+            .unwrap();
+        for task in &item.attempts[0].tasks {
+            let matrix = WriterCompletionMatrix::skeleton(
+                item.attempts[0]
+                    .writer_completion_contract
+                    .as_ref()
+                    .unwrap(),
+                &task.id,
+                &crate::recovery_contracts::writer_completion_findings(&fixture.project, task)
+                    .unwrap(),
+                None,
+            )
+            .unwrap();
+            fs::write(
+                fixture
+                    .project
+                    .join(&task.artifact_area.as_ref().unwrap().path)
+                    .join("writer-completion.json"),
+                serde_json::to_vec_pretty(&matrix).unwrap(),
+            )
+            .unwrap();
+        }
+        fixture
+    }
+
+    #[test]
+    fn recovers_stalled_committed_writer_with_valid_matrix() {
+        for corrective in [false, true] {
+            let fixture = stalled_committed_fixture(corrective);
+            let before = fixture.store.read_work_item("work-1").unwrap();
+            let attempt = &before.attempts[0];
+            let source = attempt.tasks.last().unwrap();
+            let area = fixture
+                .project
+                .join(&source.artifact_area.as_ref().unwrap().path);
+            let matrix = fs::read(area.join("writer-completion.json")).unwrap();
+            let transcript = fs::read(area.join("transcript.jsonl")).unwrap();
+            assert!(
+                recovery_action(&fixture.project, attempt).is_some(),
+                "{:?}",
+                inspect_eligible(&fixture.project, attempt)
+            );
+            assert_eq!(
+                status_recovery_action(&fixture.project, attempt),
+                recovery_action(&fixture.project, attempt)
+            );
+
+            let recovered = repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                "Authorize another Writer to finish the unchanged obligations.",
+            )
+            .unwrap();
+            let after = fixture.store.read_work_item("work-1").unwrap();
+            let next = &after.attempts[0];
+            assert_eq!(recovered.task_id, "attempt-1-write-4");
+            assert!(!recovered.already_applied);
+            assert_eq!(next.tasks.len(), 4);
+            assert_eq!(next.tasks[..3], attempt.tasks);
+            assert_eq!(next.writer_runs, attempt.writer_runs);
+            assert_eq!(next.status, AttemptStatus::Planned);
+            assert_eq!(next.pause_kind, None);
+            assert_eq!(next.tasks[3].status, TaskStatus::Planned);
+            assert_eq!(next.recovery_operations.len(), 1);
+            assert!(planned_successor_resume_ready(&fixture.project, &after, next).unwrap());
+            let context = validated_writer_context(&fixture.project, &after, &next.tasks[3])
+                .unwrap()
+                .unwrap();
+            assert_eq!(context.source_task_id, source.id);
+            assert_eq!(
+                context.candidate_commit,
+                source.output.as_ref().unwrap().commit
+            );
+            let authority: RecoveryAuthority = serde_json::from_slice(
+                &fs::read(fixture.project.join(&recovered.audit_artifact)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                authority.source_matrix_sha256,
+                Some(content_digest(&matrix))
+            );
+            assert_eq!(
+                authority.source_transcript_sha256,
+                Some(content_digest(&transcript))
+            );
+            assert!(authority.requirement_contract_sha256.is_some());
+            assert!(authority.source_assignment_sha256.is_some());
+            assert!(authority.source_output_sha256.is_some());
+            assert_eq!(
+                fs::read(area.join("writer-completion.json")).unwrap(),
+                matrix
+            );
+            assert_eq!(fs::read(area.join("transcript.jsonl")).unwrap(), transcript);
+            for artifact in &attempt.artifacts {
+                assert!(next.artifacts.contains(artifact));
+                assert!(
+                    !fs::read(fixture.project.join(&artifact.path))
+                        .unwrap()
+                        .is_empty()
+                );
+            }
         }
     }
 

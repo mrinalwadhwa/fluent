@@ -324,6 +324,15 @@ Tester, and Learner remain separate gates. Repeated authorization reuses the
 recorded Task and operation; changed source evidence, contract, assignment,
 candidate, or ownership rejects stale authority.
 
+The same action can recover a committed Writer stopped by the repeated-progress
+guard. Admission requires a valid matrix with pending Writer-owned work and
+saved runs proving two consecutive continuations with unchanged obligations and
+completion counts. The latest run must be blocked and match the completed source
+Task and candidate. Recovery retains the stop rule and all source evidence,
+binds the matrix, contract, assignment, transcript, and output to the decision,
+and schedules one corrective Writer through the existing recovery path. A
+regressed matrix or an unrelated completion pause does not grant this retry.
+
 The same public command repairs an unchanged Writer whose completion or
 no-change handoff contains an invalid result, including a saved failed retry
 that stopped during preparation before its provider launched. Approval retains

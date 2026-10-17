@@ -665,8 +665,9 @@ the matrix with invented passing evidence. This route requires the immutable
 completion contract and retained source transcript, output, assignment, and
 matrix. The candidate must still be clean at the recorded commit, all execution
 owners must be settled, and the Attempt must remain uncanceled and within its
-Writer-round limit. A missing matrix, a valid matrix, changed source evidence or
-assignment, or another pause kind is not this recovery case.
+Writer recovery boundary. A missing matrix, changed source evidence or assignment,
+or another pause kind is not this recovery case. A valid matrix qualifies only
+for the separate stalled-Writer case below or unfinished no-change work.
 
 After inspecting the saved evidence, authorize the correction with a concrete
 resolution, then explicitly resume the same Attempt:
@@ -695,6 +696,30 @@ recovery and Task identities. A later cancellation or changed candidate,
 assignment, contract, or source evidence invalidates stale authority. Host
 evidence, targeted Tests Review, ordinary review, final Tester, and Learner
 remain required after the correction.
+
+## Recover a stalled committed Writer
+
+When Fluent pauses after two Writer continuations made no completion progress,
+inspect the pending Writer rows and the retained Writer history with
+`fluent work-item show <work-item>`. Status offers `repair-writer-completion`
+only when the latest committed Writer has a valid incomplete matrix and the
+saved runs prove unchanged obligations and completion counts across both
+continuations. Preserve the matrices, transcripts, source Tasks, and earlier
+recovery audits.
+
+Authorize one corrective Writer with a concrete decision:
+
+```sh
+fluent attempt repair-writer-completion <work-item> <attempt> --resolution "<approved retry>"
+fluent attempt run <work-item> <attempt>
+```
+
+For queued Work, use `fluent queue resume <work-item> --attempt <attempt>` after
+the repair command. Approval binds the exact clean candidate, contract, source
+matrix, assignment, transcript, and output; it schedules but does not execute
+the corrective Writer. Repeating the same decision reuses that Task and audit.
+Changed evidence, live execution owners, regressions, and unrelated pauses
+remain ineligible. Pending external checks retain their separate gates.
 
 ## Continue a no-change Writer with unfinished Plan rows
 

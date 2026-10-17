@@ -226,6 +226,8 @@ The round outcome determines what happens next:
 - An incomplete Writer without a new candidate commit, regressed progress or
   matrix completion, or two consecutive Writer continuations against the same obligations, including after review, with no newly
   completed requirement — Attempt records `needs-user` before Tester and review.
+  For a committed Writer with a valid incomplete matrix and proven repeated
+  stagnation, follow [Recover a stalled committed Writer](references/host-evidence-recovery.md#recover-a-stalled-committed-writer).
 - A repeated deterministic candidate rejection, unreadable gate evidence, or a
   project check that changes HEAD or the worktree — Attempt records `needs-user`
   before Tester and review. Inspect `candidate-gate.json` and repair the named
