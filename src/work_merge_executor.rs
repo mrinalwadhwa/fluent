@@ -2208,6 +2208,11 @@ fn execute_merge_with_coder(
             &results_path,
             &baseline_dir.join("tester-results.json"),
             &candidate_commit,
+            config.project_root,
+            item.attempts
+                .iter()
+                .find(|attempt| attempt.id == candidate.attempt_id)
+                .context("Merge Candidate Attempt is missing")?,
         )?;
         if !reusable {
             crate::baseline_cache::record_final_tester_seed(
@@ -2333,6 +2338,8 @@ fn compare_merge_tester(
     results_path: &Path,
     baseline_path: &Path,
     candidate_commit: &str,
+    project_root: &Path,
+    attempt: &crate::work_model::Attempt,
 ) -> Result<()> {
     let results: crate::tester::TesterResults = serde_json::from_slice(&fs::read(results_path)?)?;
     anyhow::ensure!(
@@ -2360,10 +2367,17 @@ fn compare_merge_tester(
         results_path,
         Some(baseline_path),
     );
-    anyhow::ensure!(
-        introduced == 0 && unexplained == 0,
-        "Tester found {introduced} newly failing tests and {unexplained} unexplained failed commands"
-    );
+    if introduced != 0 || unexplained != 0 {
+        anyhow::ensure!(
+            crate::tester_evidence::reviewed_host_proof_covers_expertise_only_merge(
+                project_root,
+                attempt,
+                candidate_commit,
+                results_path,
+            )?,
+            "Tester found {introduced} newly failing tests and {unexplained} unexplained failed commands"
+        );
+    }
     Ok(())
 }
 

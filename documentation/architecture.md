@@ -838,6 +838,15 @@ follow that Writer. If an unchanged candidate first passes a failed-command
 recheck, the recheck result replaces the older failure for review; later
 unrelated correction rounds do not inherit stale Tester evidence.
 
+A targeted Tests Review may accept host proof for one canonical command.
+Native failures belong to that command only when its harness is unique in the
+configuration; repeated harnesses require an exact synthetic command identity.
+The assessment applies accepted coverage to named references in a copy of the
+Tester results and retains the original artifact. Landing may carry this proof
+across an expertise-only descendant commit after revalidating the original
+failures, command identities, source artifacts, and passing Review. Changed
+executable paths or newly failing tests block that allowance.
+
 Every Writer persists `writer-context-usage.json` beside its transcript. The
 sidecar records prompt kind and bytes, execution-context and transcript bytes,
 input, cached-input, uncached-input, and output tokens, plus warnings when cached

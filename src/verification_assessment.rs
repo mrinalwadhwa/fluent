@@ -208,15 +208,22 @@ pub(crate) fn assess_landed_tester_history(
                     .map(|intent| intent.target_before.as_str()),
             "retained target baseline does not match the landing target"
         );
-        anyhow::ensure!(
-            crate::tester_evidence::introduced_tester_failures(
+        let native_match = crate::tester_evidence::introduced_tester_failures(
+            &root.join(&path),
+            Some(&root.join(baseline)),
+        ) == 0
+            && crate::tester_evidence::unexplained_failed_tester_commands(
                 &root.join(&path),
-                Some(&root.join(baseline))
-            ) == 0
-                && crate::tester_evidence::unexplained_failed_tester_commands(
+                Some(&root.join(baseline)),
+            ) == 0;
+        anyhow::ensure!(
+            native_match
+                || crate::tester_evidence::reviewed_host_proof_covers_expertise_only_merge(
+                    root,
+                    attempt,
+                    merged_commit,
                     &root.join(&path),
-                    Some(&root.join(baseline))
-                ) == 0,
+                )?,
             "retained Tester result has new failures or unexplained failed commands"
         );
     }
@@ -871,7 +878,7 @@ fn assess_canonical_checks_at(
     })
 }
 
-fn failed_test_covered_by_accepted_command(
+pub(crate) fn failed_test_covered_by_accepted_command(
     commands: &[(&str, &str)],
     accepted: &[usize],
     test: &crate::tester::TestResult,

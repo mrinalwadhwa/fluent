@@ -11220,3 +11220,14 @@ WHEN an accepted command replacement covers a named test, THE SYSTEM SHALL
 satisfy its reference in the derived assessment and retain the original
 Tester result bytes.
 Test: src/recovery_contracts.rs (reviewed_command_satisfies_named_reference_without_rewriting_results)
+
+### B3
+
+WHEN only `.fluent/expertise/` changes separate a reviewed Writer and its
+descendant landing candidate, THE SYSTEM SHALL reuse accepted host proof only
+for the same canonical command and its original attributable failures, after
+revalidating the source artifacts, passing Review, and candidate ancestry.
+New failures, ambiguous attribution, changed commands, or altered evidence
+SHALL block reuse.
+Test: src/tester_evidence.rs (accepted_command_covers_only_its_original_failed_tests)
+Test: src/tester_evidence.rs (reviewed_host_proof_binds_source_and_expertise_ancestry)
