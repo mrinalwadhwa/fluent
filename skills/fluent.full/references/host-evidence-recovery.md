@@ -703,10 +703,13 @@ remain required after the correction.
 When Fluent pauses after two Writer continuations made no completion progress,
 inspect the pending Writer rows and the retained Writer history with
 `fluent work-item show <work-item>`. Status offers `repair-writer-completion`
-only when the latest committed Writer has a valid incomplete matrix and the
+only when the latest committed Writer has a parseable incomplete matrix with
+intact immutable rows and valid completed claims. Partial claims on pending
+rows are ignored only for eligibility; the original bytes remain bound. The
 saved runs prove unchanged obligations and completion counts across both
-continuations. Preserve the matrices, transcripts, source Tasks, and earlier
-recovery audits.
+continuations. An earlier continuation may be a verified no-change run at
+the preceding Writer's commit. Preserve the matrices, transcripts, source
+Tasks, and earlier recovery audits.
 
 Authorize one corrective Writer with a concrete decision:
 

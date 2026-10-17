@@ -325,10 +325,14 @@ recorded Task and operation; changed source evidence, contract, assignment,
 candidate, or ownership rejects stale authority.
 
 The same action can recover a committed Writer stopped by the repeated-progress
-guard. Admission requires a valid matrix with pending Writer-owned work and
-saved runs proving two consecutive continuations with unchanged obligations and
-completion counts. The latest run must be blocked and match the completed source
-Task and candidate. Recovery retains the stop rule and all source evidence,
+guard. Admission requires a parseable matrix with intact immutable rows,
+valid completed claims, and pending Writer-owned work. Partial claims on
+pending rows are ignored only for eligibility; the original matrix is retained.
+Saved runs must prove two continuations with unchanged obligations and
+completion counts. The latest run must be blocked and match the completed
+source Task and candidate. An earlier continuation may be a verified no-change
+run when its declaration and unchanged commit match the saved Writer chain.
+Recovery retains the stop rule and all source evidence,
 binds the matrix, contract, assignment, transcript, and output to the decision,
 and schedules one corrective Writer through the existing recovery path. A
 regressed matrix or an unrelated completion pause does not grant this retry.

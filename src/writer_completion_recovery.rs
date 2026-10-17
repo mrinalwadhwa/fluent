@@ -1623,8 +1623,37 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
     })
 }
 
+/// Check a saved matrix without treating partial claims on pending rows as credit.
+fn stalled_matrix_status(
+    matrix: &crate::work_model::WriterCompletionMatrix,
+    contract: &crate::work_model::WriterCompletionContract,
+    task_id: &str,
+    findings: &[crate::work_model::WriterCompletionFinding],
+) -> Result<crate::work_model::WriterCompletionMatrixStatus> {
+    use crate::work_model::{CompletionResponsibility, WriterCompletionState};
+
+    // The guard can stop after a Writer leaves partial claims on pending rows.
+    // Inspect a clone with those claims cleared; the source bytes stay intact
+    // and the successor Writer must settle the original pending obligations.
+    let mut inspect = matrix.clone();
+    for row in &mut inspect.rows {
+        if row.state == WriterCompletionState::Pending
+            && row
+                .responsibility
+                .is_none_or(|owner| owner == CompletionResponsibility::Writer)
+        {
+            row.implementation_evidence.clear();
+            row.verification.clear();
+            row.applicable_constraints.clear();
+        }
+    }
+    inspect
+        .status_against(contract, task_id, findings)
+        .map_err(|reason| anyhow::anyhow!("stalled Writer matrix is invalid: {reason}"))
+}
+
 /// Prove the repeated-progress guard's shape from the saved runs and matrices.
-/// A valid incomplete matrix alone cannot authorize another committed Writer.
+/// A parseable incomplete matrix alone cannot authorize another committed Writer.
 fn validate_stalled_committed_writer(
     project_root: &Path,
     attempt: &Attempt,
@@ -1656,9 +1685,7 @@ fn validate_stalled_committed_writer(
         .as_ref()
         .context("stalled Writer completion contract is missing")?;
     let findings = crate::recovery_contracts::writer_completion_findings(project_root, source)?;
-    matrix
-        .status_against(contract, &source.id, &findings)
-        .map_err(|reason| anyhow::anyhow!("stalled Writer matrix is invalid: {reason}"))?;
+    stalled_matrix_status(matrix, contract, &source.id, &findings)?;
     anyhow::ensure!(
         !matrix.pending_writer_rows().is_empty(),
         "stalled Writer has no pending Writer-owned work"
@@ -1672,24 +1699,73 @@ fn validate_stalled_committed_writer(
         .take(3)
         .collect::<Vec<_>>();
     anyhow::ensure!(writers.len() == 3, "stalled Writer history is incomplete");
-    for (run, task) in runs.iter().zip(&writers) {
+    for (index, (run, task)) in runs.iter().zip(&writers).enumerate() {
         let output = task
             .output
             .as_ref()
             .context("stalled Writer history has no output")?;
+        let previous_commit = writers
+            .get(index + 1)
+            .and_then(|previous| previous.output.as_ref())
+            .map(|output| output.commit.as_str());
+        let committed = output.no_change.is_none()
+            && output
+                .base_commit
+                .as_deref()
+                .is_some_and(|base| base != output.commit);
+        let unchanged = index > 0
+            && output.no_change.is_some()
+            && output.base_commit.as_deref() == Some(output.commit.as_str());
         anyhow::ensure!(
             run.task_id == task.id
                 && task.status == TaskStatus::Complete
                 && run.candidate_commit == output.commit
-                && output.no_change.is_none()
-                && output
-                    .base_commit
-                    .as_ref()
-                    .is_some_and(|base| base != &output.commit)
+                && (committed || unchanged)
+                && previous_commit
+                    .is_none_or(|previous| output.base_commit.as_deref() == Some(previous))
                 && run.checked_required == runs[0].checked_required
                 && run.completed_matrix == runs[0].completed_matrix,
-            "stalled Writer history changed or did not commit against the same obligations"
+            "stalled Writer history changed or lacks a committed source with the same obligations"
         );
+        if unchanged {
+            let no_change = output.no_change.as_ref().unwrap();
+            let area = task
+                .artifact_area
+                .as_ref()
+                .context("stalled no-change Writer has no artifact area")?;
+            let declaration = format!("{}/no-change.json", area.path.trim_end_matches('/'));
+            anyhow::ensure!(
+                no_change.schema_version == 1
+                    && no_change.declaration_path == declaration
+                    && !no_change.reason.trim().is_empty()
+                    && !no_change.verification.is_empty()
+                    && no_change
+                        .verification
+                        .iter()
+                        .all(|entry| !entry.command.trim().is_empty()),
+                "stalled no-change Writer has an invalid declaration reference"
+            );
+            let declaration_path =
+                crate::recovery_contracts::resolve_input_artifact_path(project_root, &declaration)?;
+            let saved: serde_json::Value = serde_json::from_slice(&fs::read(declaration_path)?)?;
+            let saved_verification: Vec<crate::work_model::NoChangeVerification> =
+                serde_json::from_value(
+                    saved
+                        .get("verification")
+                        .cloned()
+                        .context("stalled no-change Writer has no verification")?,
+                )?;
+            anyhow::ensure!(
+                saved
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)
+                    && saved.get("reason").and_then(serde_json::Value::as_str)
+                        == Some(no_change.reason.as_str())
+                    && saved_verification == no_change.verification,
+                "stalled no-change Writer declaration changed"
+            );
+        }
         let artifact =
             crate::recovery_contracts::writer_completion_matrix_ref(project_root, attempt, task)
                 .context("stalled Writer history has no matrix")?;
@@ -1703,9 +1779,7 @@ fn validate_stalled_committed_writer(
         let saved: crate::work_model::WriterCompletionMatrix =
             serde_json::from_slice(&fs::read(path)?)?;
         let findings = crate::recovery_contracts::writer_completion_findings(project_root, task)?;
-        let status = saved
-            .status_against(contract, &task.id, &findings)
-            .map_err(|reason| anyhow::anyhow!("stalled Writer matrix is invalid: {reason}"))?;
+        let status = stalled_matrix_status(&saved, contract, &task.id, &findings)?;
         anyhow::ensure!(
             saved.completion_identity() == identity && status.complete == run.completed_matrix,
             "stalled Writer matrix changed or made completion progress"
@@ -1966,7 +2040,15 @@ mod tests {
     }
 
     fn stalled_committed_fixture(corrective: bool) -> Fixture {
+        stalled_committed_fixture_with_no_change(corrective, false)
+    }
+
+    fn stalled_committed_fixture_with_no_change(
+        corrective: bool,
+        middle_no_change: bool,
+    ) -> Fixture {
         use crate::work_model::{
+            NoChangeOutput, NoChangeVerification, NoChangeVerificationResult,
             WriterCompletionContract, WriterCompletionMatrix, WriterOutcome, WriterRun,
             WriterRunKind,
         };
@@ -2012,26 +2094,53 @@ mod tests {
                     )
                     .unwrap(),
                 );
-                fs::write(
-                    fixture.workspace.join("candidate.txt"),
-                    format!("continuation {index}\n"),
-                )
-                .unwrap();
-                git::run(
-                    &fixture.workspace,
-                    &["add", "candidate.txt"],
-                    "stage continuation",
-                )
-                .unwrap();
-                git::run(
-                    &fixture.workspace,
-                    &["commit", "-qm", "Continue implementation"],
-                    "commit continuation",
-                )
-                .unwrap();
-                output.commit =
-                    git::run_stdout(&fixture.workspace, &["rev-parse", "HEAD"], "candidate")
-                        .unwrap();
+                if middle_no_change && index == 1 {
+                    output.commit = output.base_commit.clone().unwrap();
+                    let area = task.artifact_area.as_ref().unwrap();
+                    let declaration_path = format!("{}/no-change.json", area.path);
+                    let no_change = NoChangeOutput {
+                        schema_version: 1,
+                        declaration_path: declaration_path.clone(),
+                        reason: "The same obligations remain pending.".into(),
+                        verification: vec![NoChangeVerification {
+                            command: "true".into(),
+                            result: NoChangeVerificationResult::Pass,
+                        }],
+                    };
+                    fs::create_dir_all(fixture.project.join(&area.path)).unwrap();
+                    fs::write(
+                        fixture.project.join(declaration_path),
+                        serde_json::to_vec(&serde_json::json!({
+                            "schema_version": no_change.schema_version,
+                            "reason": &no_change.reason,
+                            "verification": &no_change.verification,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    output.no_change = Some(no_change);
+                } else {
+                    fs::write(
+                        fixture.workspace.join("candidate.txt"),
+                        format!("continuation {index}\n"),
+                    )
+                    .unwrap();
+                    git::run(
+                        &fixture.workspace,
+                        &["add", "candidate.txt"],
+                        "stage continuation",
+                    )
+                    .unwrap();
+                    git::run(
+                        &fixture.workspace,
+                        &["commit", "-qm", "Continue implementation"],
+                        "commit continuation",
+                    )
+                    .unwrap();
+                    output.commit =
+                        git::run_stdout(&fixture.workspace, &["rev-parse", "HEAD"], "candidate")
+                            .unwrap();
+                }
             }
             task.status = TaskStatus::Complete;
             task.output = Some(output.clone());
@@ -2052,12 +2161,12 @@ mod tests {
             task.input_artifacts.push(matrix_ref);
             attempt.writer_runs.push(WriterRun {
                 task_id: task.id.clone(),
-                outcome: if index == 2 {
+                outcome: if index == 2 || (middle_no_change && index == 1) {
                     WriterOutcome::Blocked
                 } else {
                     WriterOutcome::Continue
                 },
-                kind: if corrective {
+                kind: if corrective && (!middle_no_change || index == 0) {
                     WriterRunKind::Corrective
                 } else if index == 0 {
                     WriterRunKind::Initial
@@ -2184,6 +2293,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recovers_stalled_commit_after_a_no_change_continuation() {
+        let fixture = stalled_committed_fixture_with_no_change(true, true);
+        let item = fixture.store.read_work_item("work-1").unwrap();
+        let source = item.attempts[0].tasks.last().unwrap();
+        let matrix_path = fixture
+            .project
+            .join(&source.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json");
+        let mut matrix: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_slice(&fs::read(&matrix_path).unwrap()).unwrap();
+        matrix.rows[0]
+            .implementation_evidence
+            .push("partial work retained for the next Writer".into());
+        assert!(
+            matrix
+                .status_against(
+                    item.attempts[0]
+                        .writer_completion_contract
+                        .as_ref()
+                        .unwrap(),
+                    &source.id,
+                    &crate::recovery_contracts::writer_completion_findings(
+                        &fixture.project,
+                        source
+                    )
+                    .unwrap(),
+                )
+                .is_err()
+        );
+        fs::write(&matrix_path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+        let before = fixture.store.read_work_item("work-1").unwrap();
+        let attempt = &before.attempts[0];
+        assert!(
+            attempt.tasks[1]
+                .output
+                .as_ref()
+                .unwrap()
+                .no_change
+                .is_some()
+        );
+        assert!(recovery_action(&fixture.project, attempt).is_some());
+        let recovered = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            "Approve one more Writer after the stalled committed and no-change continuations.",
+        )
+        .unwrap();
+        let after = fixture.store.read_work_item("work-1").unwrap();
+        assert_eq!(recovered.task_id, "attempt-1-write-4");
+        assert_eq!(after.attempts[0].tasks[..3], attempt.tasks);
+        assert_eq!(
+            fs::read(&matrix_path).unwrap(),
+            serde_json::to_vec_pretty(&matrix).unwrap()
+        );
+        assert!(
+            planned_successor_resume_ready(&fixture.project, &after, &after.attempts[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_changed_stalled_no_change_declaration() {
+        let fixture = stalled_committed_fixture_with_no_change(false, true);
+        let item = fixture.store.read_work_item("work-1").unwrap();
+        let attempt = &item.attempts[0];
+        let declaration = &attempt.tasks[1]
+            .output
+            .as_ref()
+            .unwrap()
+            .no_change
+            .as_ref()
+            .unwrap()
+            .declaration_path;
+        fs::write(fixture.project.join(declaration), "{}\n").unwrap();
+        assert!(recovery_action(&fixture.project, attempt).is_none());
+        let before = snapshot_work(&fixture.project);
+        assert!(
+            repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                "Retry after checking the stalled Writer history.",
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot_work(&fixture.project), before);
     }
 
     fn snapshot_work(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
