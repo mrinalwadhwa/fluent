@@ -164,6 +164,10 @@ impl SshTerminal {
         }
         let ended = connection.ended();
         let detached = connection.detached();
+        let changed = !bytes.is_empty() || result.is_err() || ended || detached;
+        if !changed {
+            return false;
+        }
         if result.is_err() || ended || detached {
             self.focused = false;
             self.ended = ended;

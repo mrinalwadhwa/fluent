@@ -87,7 +87,11 @@ impl OpenSsh {
             let bytes = bounded_output(&mut command, Duration::from_secs(8))?;
             decode_snapshot(source, &bytes)
         })();
-        result.with_context(|| remedy(source))
+        result
+            .map_err(|error: anyhow::Error| {
+                anyhow::anyhow!("{}", super::display_diagnostic(&format!("{error:#}")))
+            })
+            .with_context(|| remedy(source))
     }
 }
 

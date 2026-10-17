@@ -104,3 +104,5 @@ must not launch host evidence work or disable worker sandboxing to obtain it.
 - [stateful-fake-cli-for-orchestration-tests](testing/patterns/stateful-fake-cli-for-orchestration-tests.md) — read when testing an operator shell script that sequences `fluent` commands and must be verified without a model, network, or the real home.
 
 - [verify-cancellation-before-fixture-cleanup](testing/patterns/verify-cancellation-before-fixture-cleanup.md) — read when verifying cancellation during setup, child launch, or process settlement.
+
+- [test-terminal-transport-with-confined-clients](testing/patterns/test-terminal-transport-with-confined-clients.md) — read when a transport test needs real runtime admission but the Writer sandbox denies Unix socket binds.

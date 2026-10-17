@@ -2107,6 +2107,27 @@ bounds without depending on interaction state or rendering. The `e` control
 opens a scrollable view of all Work read errors, including errors that overflow
 the list. `e` or Esc returns to the preserved selection. Help wraps navigation
 instructions and closes with `?` or Esc. Both controls leave Work files unchanged.
+Configured SSH sources use the same project view. `dashboard_sources` reads
+only operator-owned source configuration and polls each selected host through
+OpenSSH with batch authentication, strict host-key checks and forwarding disabled.
+Its bounded versioned wire schema contains published metadata and descriptors;
+projection binds every row to the configured source and rejects identities or
+fields that could substitute an endpoint. Remote paths never enter local
+attachment resolution. Snapshot helpers return without update checks or cache
+writes.
+
+`terminal_view::EmbeddedTerminal` selects a local client or `SshTerminal`.
+The SSH client and helper exchange bounded structured messages over an SSH PTY.
+On the remote host, the helper resolves the exact descriptor through
+`terminal_sessions::Attachment`, revalidates its generation and holds Control
+for the connection's lifetime. Embedded/full-screen handoff retains that helper
+and lease while replacing only its tmux display client. The helper waits for
+raw client mode before admitting input, revalidates every partial write, and
+settles display clients on disconnect, timeout, or owner revocation. Provider
+evidence and worker execution remain independent of the display. Reconnect
+opens a new Observe attachment to the saved descriptor and never follows a
+replacement generation. See [SSH operations](../docs/ssh-agent-sources.md).
+
 Next-action guidance consumes these rows directly. A `merge-ready` row renders
 `merge-candidate show` and `merge-candidate land` with both its Work Item ID and
 Merge Candidate ID. A ready `attempt run` outcome uses the command's Work Item

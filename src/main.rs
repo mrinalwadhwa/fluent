@@ -107,9 +107,11 @@ fn main() -> Result<()> {
                     columns,
                     rows,
                 )?;
+                return Ok(());
             }
             fluent::cli::AgentSourceCommands::Snapshot { project_root } => {
                 fluent::dashboard_sources::helper_snapshot(&project_root)?;
+                return Ok(());
             }
         },
         Some(Commands::Terminal { command }) => match command {

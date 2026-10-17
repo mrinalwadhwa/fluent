@@ -243,6 +243,10 @@ fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
             .into_iter()
             .find(|configured| configured.id() == source.id)
             .context("SSH source is no longer configured")?;
+        anyhow::ensure!(
+            configured.host == source.host && configured.project_root == source.path,
+            "SSH source configuration changed; reopen the dashboard"
+        );
         let identity = format!(
             "{} ({}) / {}",
             configured.name,

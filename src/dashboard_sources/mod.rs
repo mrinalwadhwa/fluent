@@ -13,6 +13,7 @@ pub use ssh::OpenSsh;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 pub const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
@@ -86,11 +87,14 @@ pub fn load_sources(home: &Path) -> Result<Vec<SshSource>> {
         ssh: Vec<SshSource>,
     }
     let path = home.join(".config/fluent/dashboard-sources.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    let mut bytes = Vec::new();
+    match std::fs::File::open(&path) {
+        Ok(file) => {
+            file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
+    }
     ensure!(
         bytes.len() <= 64 * 1024,
         "SSH source configuration exceeds 64 KiB"
@@ -121,4 +125,11 @@ pub fn helper_snapshot(project_root: &Path) -> Result<()> {
     let snapshot = crate::dashboard::project::SourceSnapshot::load(project_root)?;
     std::io::stdout().write_all(&encode_snapshot(&snapshot)?)?;
     Ok(())
+}
+
+pub(crate) fn display_diagnostic(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }

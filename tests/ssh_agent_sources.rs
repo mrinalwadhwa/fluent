@@ -28,6 +28,7 @@ fn invalid_remote_protocol_cannot_supply_attachment_authority() {
     let good: Value = serde_json::from_slice(&bytes).unwrap();
     for (field, value) in [
         ("schema_version", serde_json::json!(999)),
+        ("project", serde_json::json!("\u{1b}]52;c;untrusted\u{7}")),
         ("project_root", serde_json::json!("/another/project")),
         ("endpoint", serde_json::json!("/tmp/untrusted.sock")),
         ("command", serde_json::json!("touch /tmp/never-execute")),
@@ -407,4 +408,162 @@ fn reconnect_never_restarts_or_retargets_worker() {
     assert!(replacement.is_live().unwrap());
     drop(view);
     replacement.stop().unwrap();
+}
+
+#[test]
+fn ssh_prerequisite_failure_isolated_to_source() {
+    use fluent::dashboard_sources::RemoteSources;
+    let root = tempfile::tempdir().unwrap();
+    let ssh = fake_ssh(root.path());
+    let script = root.path().join("ssh-fixture");
+    let code = std::fs::read_to_string(&script).unwrap().replace("args = shlex.split(sys.argv[-1])", r#"
+errors = {'auth': 'Permission denied (publickey)', 'host-key': 'Host key verification failed', 'prerequisite': 'fluent: command not found'}
+if sys.argv[-2] in errors:
+    print(errors[sys.argv[-2]], file=sys.stderr)
+    sys.exit(255)
+args = shlex.split(sys.argv[-1])"#);
+    std::fs::write(script, code).unwrap();
+    fluent::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&fluent::work_model::WorkItem::planned(
+            "live",
+            "Healthy project",
+        ))
+        .unwrap();
+    let mut sources = vec![source(root.path())];
+    for name in ["auth", "host-key", "prerequisite"] {
+        let mut config = source(root.path());
+        config.name = name.into();
+        config.host = name.into();
+        sources.push(config);
+    }
+    let mut remote = RemoteSources::new(sources, ssh);
+    remote.refresh();
+    // Poll remains nonblocking while every host has its own outstanding request.
+    let start = std::time::Instant::now();
+    remote.poll();
+    assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    wait_for(|| {
+        remote.poll();
+        let snapshots = remote.snapshots();
+        snapshots[0].stale.is_none()
+            && snapshots[1..].iter().all(|s| {
+                s.stale
+                    .as_deref()
+                    .is_some_and(|e| e.contains("establish SSH access"))
+            })
+    });
+    let mut all = vec![SourceSnapshot::load(root.path()).unwrap()];
+    all.extend(remote.snapshots());
+    assert_eq!(all[0].work[0].status.title, "Healthy project");
+    assert_eq!(all[1].work[0].status.title, "Healthy project");
+    for snapshot in &all[2..] {
+        let error = snapshot.stale.as_ref().unwrap();
+        assert!(error.contains(&snapshot.host));
+        assert!(error.contains("outside the dashboard"));
+        assert!(error.contains("canonical project root"));
+    }
+}
+
+#[test]
+fn ssh_source_uses_existing_host_without_provider_credentials() {
+    use fluent::dashboard_sources::OpenSsh;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project ' $(touch INJECTED) ; name");
+    std::fs::create_dir(&root).unwrap();
+    let config = source(&root);
+    let ssh = OpenSsh::default();
+    let command = ssh.command(&config, "snapshot", &[], false).unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    for option in [
+        "BatchMode=yes",
+        "StrictHostKeyChecking=yes",
+        "ForwardAgent=no",
+        "ClearAllForwardings=yes",
+        "PermitLocalCommand=no",
+    ] {
+        assert!(args.iter().any(|a| a == option));
+    }
+    assert_eq!(args[args.len() - 2], config.host);
+    let remote_command = args.last().unwrap();
+    for forbidden in [
+        "CODEX_HOME",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "scp ",
+        "aws ",
+        "SendEnv",
+    ] {
+        assert!(!remote_command.contains(forbidden));
+    }
+    // Exercise the real shell boundary with metacharacters in the configured root.
+    let shim = temp.path().join("ssh-shell");
+    let bin_dir = assert_cmd::cargo::cargo_bin("fluent")
+        .parent()
+        .unwrap()
+        .to_owned();
+    let body = format!(
+        "#!/bin/sh\nfor last do :; done\nPATH='{}':\"$PATH\" exec /bin/sh -c \"$last\"\n",
+        bin_dir.display()
+    );
+    std::fs::write(&shim, body).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        OpenSsh::with_executable(shim)
+            .snapshot(&config)
+            .unwrap()
+            .path,
+        config.project_root
+    );
+    assert!(!std::path::Path::new("INJECTED").exists());
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.join(".fluent")).unwrap();
+    std::fs::write(
+        root.join(".fluent/dashboard-sources.json"),
+        b"untrusted project configuration",
+    )
+    .unwrap();
+    assert!(load_sources(home.path()).unwrap().is_empty());
+    let mut invalid = config;
+    invalid.host = "builder;touch INJECTED".into();
+    assert!(ssh.command(&invalid, "snapshot", &[], false).is_err());
+}
+
+#[test]
+fn remote_protocol_rejects_unsolicited_control() {
+    use fluent::dashboard_sources::{OpenSsh, RemoteConnection};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let owner = terminal_fixture(TerminalIdentity::fixture(
+        root.path(),
+        "remote",
+        "attempt-1",
+        "writer",
+    ))
+    .unwrap();
+    let messages = format!(
+        "{}\n{}\n",
+        serde_json::json!({"kind":"ready","schema_version":1,"descriptor":owner.descriptor()}),
+        serde_json::json!({"kind":"ack","id":0,"control":true,"error":null})
+    );
+    let shim = root.path().join("unsolicited-helper");
+    std::fs::write(&shim, format!("#!/usr/bin/env python3\nimport sys,time\nsys.stdout.write({messages:?})\nsys.stdout.flush()\ntime.sleep(1)\n")).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let result = RemoteConnection::open(
+        OpenSsh::with_executable(shim),
+        source(root.path()),
+        owner.descriptor().clone(),
+        60,
+        10,
+    );
+    match result {
+        Err(_) => {}
+        Ok(mut connection) => {
+            assert!(connection.poll().is_err());
+            assert!(!connection.has_control());
+        }
+    }
 }

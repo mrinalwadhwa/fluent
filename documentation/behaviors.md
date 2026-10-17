@@ -11295,3 +11295,57 @@ Rebase Task, THE SYSTEM SHALL supersede the older reservation in the retry's
 atomic state update and preserve the completed Task and result. A latest
 executing Rebase Task SHALL block retry without changing saved state.
 Test: src/work_merge_executor.rs (failed_landing_retry_restores_reviewed_attempt_atomically)
+
+## SSH agent sources
+
+### B1
+
+WHEN the dashboard loads an explicitly configured SSH source,
+THE SYSTEM SHALL show the remote project's published Work snapshot with its host
+identity in the same project view as local sources.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"remote_snapshot_appears_with_source_identity"}
+
+### B2
+
+WHEN the operator attaches to a remote agent terminal,
+THE SYSTEM SHALL attach to the verified invocation on that source in the
+requested embedded or full-screen mode with the same Observe and Control rules.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"remote_attachment_preserves_invocation_and_control_mode"}
+Test: {"kind":"whole-script","path":"tests/host/check-ssh-agent-terminal.sh"}
+
+### B3
+
+WHEN an SSH attachment disconnects,
+THE SYSTEM SHALL label the terminal disconnected and discard unsent local input.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"ssh_disconnect_discards_unsent_input"}
+Derived: Reconnection must not replay old keystrokes into a later interaction.
+
+### B4
+
+WHEN the operator reconnects to an SSH source,
+THE SYSTEM SHALL resolve the same invocation again and show its current terminal
+or an explicit unavailable result without restarting the agent.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"reconnect_never_restarts_or_retargets_worker"}
+
+### B5
+
+IF SSH authentication, host verification, or a remote prerequisite fails,
+THEN THE SYSTEM SHALL report the source-specific remedy while keeping other
+sources usable.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"ssh_prerequisite_failure_isolated_to_source"}
+
+### B6
+
+IF a remote response has an unsupported protocol version, malformed identity, or
+unexpected endpoint,
+THEN THE SYSTEM SHALL reject the response before using it to attach or control a
+worker.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"invalid_remote_protocol_cannot_supply_attachment_authority"}
+
+### B7
+
+WHEN the dashboard opens an SSH source,
+THE SYSTEM SHALL use the operator's explicitly selected SSH destination without
+provisioning a host or copying provider credentials to it.
+Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"ssh_source_uses_existing_host_without_provider_credentials"}
+Derived: This feature accesses Fluent work already running on a configured host.

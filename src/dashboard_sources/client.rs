@@ -3,6 +3,7 @@ use super::ssh::{nonblocking, remedy};
 use super::{OpenSsh, SshSource, validate_descriptor};
 use crate::terminal_sessions::TerminalDescriptor;
 use anyhow::{Context, Result, bail, ensure};
+use std::collections::VecDeque;
 use std::io::Read;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ pub struct RemoteConnection {
     ended: bool,
     detached: bool,
     serial: u64,
+    outstanding: VecDeque<(u64, Option<bool>)>,
     waiting: Option<(u64, Option<String>)>,
     bytes: Vec<u8>,
     heartbeat: Instant,
@@ -79,6 +81,7 @@ impl RemoteConnection {
             ended: false,
             detached: false,
             serial: 0,
+            outstanding: VecDeque::new(),
             waiting: None,
             bytes: Vec::new(),
             heartbeat: Instant::now(),
@@ -118,9 +121,15 @@ impl RemoteConnection {
         let result = self.poll_inner();
         if result.is_err() {
             self.control = false;
+            self.ready = false;
             self.wire = Wire::default();
+            self.outstanding.clear();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
-        result
+        result.map_err(|error| {
+            anyhow::anyhow!("{}", super::display_diagnostic(&format!("{error:#}")))
+        })
     }
     fn poll_inner(&mut self) -> Result<()> {
         let mut errors = [0; 1024];
@@ -149,6 +158,10 @@ impl RemoteConnection {
             })?;
         for response in responses {
             self.last_response = Instant::now();
+            ensure!(
+                self.ready || matches!(response, Response::Ready { .. }),
+                "SSH response precedes protocol admission"
+            );
             match response {
                 Response::Ready {
                     schema_version,
@@ -161,10 +174,21 @@ impl RemoteConnection {
                     self.ready = true;
                 }
                 Response::Ack { id, control, error } => {
+                    let (expected_id, requested_control) = self
+                        .outstanding
+                        .pop_front()
+                        .context("unsolicited SSH acknowledgement")?;
+                    ensure!(id == expected_id, "unexpected SSH acknowledgement identity");
+                    let expected_control = if error.is_none() {
+                        requested_control.unwrap_or(self.control)
+                    } else {
+                        self.control
+                    };
                     ensure!(
-                        self.ready && id <= self.serial,
-                        "unexpected SSH acknowledgement"
+                        control == expected_control,
+                        "unsolicited SSH Control change"
                     );
+                    let error = error.map(|error| super::display_diagnostic(&error));
                     self.control = control;
                     if self
                         .waiting
@@ -208,11 +232,18 @@ impl RemoteConnection {
     }
     fn enqueue(&mut self, action: Action) -> Result<u64> {
         ensure!(self.ready && !self.ended, "remote invocation unavailable");
+        ensure!(self.outstanding.len() < 64, "SSH request queue is full");
+        let requested_control = match action {
+            Action::Control => Some(true),
+            Action::Observe => Some(false),
+            _ => None,
+        };
         self.serial += 1;
         self.wire.queue(&Request {
             id: self.serial,
             action,
         })?;
+        self.outstanding.push_back((self.serial, requested_control));
         Ok(self.serial)
     }
     fn request(&mut self, action: Action) -> Result<()> {

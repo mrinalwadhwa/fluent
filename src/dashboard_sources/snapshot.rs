@@ -101,7 +101,9 @@ pub fn decode_snapshot(source: &SshSource, bytes: &[u8]) -> Result<SourceSnapsho
         bytes.len() <= MAX_SNAPSHOT_BYTES,
         "remote snapshot exceeds 2 MiB"
     );
-    let snapshot: Snapshot = serde_json::from_slice(bytes)?;
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    validate_text(&value)?;
+    let snapshot: Snapshot = serde_json::from_value(value)?;
     ensure!(
         snapshot.schema_version == 1,
         "unsupported remote snapshot protocol version"
@@ -199,4 +201,29 @@ pub fn decode_snapshot(source: &SshSource, bytes: &[u8]) -> Result<SourceSnapsho
         diagnostics: snapshot.diagnostics,
         stale: None,
     })
+}
+
+fn validate_text(value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) => ensure!(
+            !text.chars().any(char::is_control),
+            "remote metadata contains terminal control characters"
+        ),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_text(item)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                ensure!(
+                    !key.chars().any(char::is_control),
+                    "remote metadata field contains terminal control characters"
+                );
+                validate_text(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
