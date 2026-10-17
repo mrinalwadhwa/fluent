@@ -9301,9 +9301,26 @@ fn prepare_reviewer_hook_cache(
             match cache_admission.reclaim_terminal_caches(project_root, &store) {
                 Ok(()) => match prep::managed_cache_bytes(cache_dir) {
                     Ok(bytes) if bytes > 0 => {
-                        reporter(&format!(
-                            "  Reviewer prep     {task_id} reusing shared candidate cache"
-                        ));
+                        let budget = crate::config::resolve_reviewer_cache_config(project_root)
+                            .map_err(anyhow::Error::new)
+                            .and_then(|limits| {
+                                let used =
+                                    cache_admission.managed_cache_total(project_root, &store)?;
+                                let protected =
+                                    protected_reviewer_cache_bytes(project_root, &store)?;
+                                Ok((limits.max_project_bytes.value, used, protected))
+                            });
+                        match budget {
+                            Ok((limit, used, protected)) if used > limit => reporter(&format!(
+                                "  Reviewer prep     {task_id} reusing protected shared cache: {used} bytes used, {limit} bytes allowed, {protected} bytes protected"
+                            )),
+                            Ok(_) => reporter(&format!(
+                                "  Reviewer prep     {task_id} reusing shared candidate cache"
+                            )),
+                            Err(error) => reporter(&format!(
+                                "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
+                            )),
+                        }
                         return;
                     }
                     Ok(_) => Some((lock, store)),
@@ -9419,6 +9436,7 @@ fn reviewer_cache_artifact_dir(
         .ok_or_else(|| anyhow::anyhow!("Reviewer Task {:?} has no artifact area", task.id))?;
     resolve_managed_artifact_area_path(project_root, &area.path)
 }
+
 #[derive(Debug, Default)]
 struct BuildReclamationReport {
     reclaimed_paths: Vec<PathBuf>,
@@ -9805,28 +9823,46 @@ pub(crate) fn reclaim_managed_build_output(project_root: &Path, store: &WorkMode
     }
 }
 
-
-fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore) -> Result<()> {
-    let items = store.list_work_items()?;
+fn protected_reviewer_cache_keys(
+    project_root: &Path,
+    items: &[WorkItem],
+) -> HashSet<std::ffi::OsString> {
     let mut active_keys = HashSet::new();
-    for item in &items {
-        if !crate::cleanup::work_item_is_cleanable(item) {
-            for context in item
-                .attempts
-                .iter()
-                .flat_map(|attempt| &attempt.tasks)
-                .filter(|task| task.kind == TaskKind::Review)
-                .filter_map(|task| task.review_context.as_ref())
-            {
-                if let Some(key) =
+    for item in items {
+        for task in item.attempts.iter().flat_map(|attempt| &attempt.tasks) {
+            if task.kind != TaskKind::Review {
+                continue;
+            }
+            if (task.status == TaskStatus::Executing
+                || !crate::cleanup::work_item_is_cleanable(item))
+                && let Some(context) = task.review_context.as_ref()
+                && let Some(key) =
                     candidate_reviewer_cache_dir(project_root, &context.candidate_commit)
                         .file_name()
-                {
-                    active_keys.insert(key.to_os_string());
-                }
+            {
+                active_keys.insert(key.to_os_string());
             }
         }
     }
+    active_keys
+}
+
+fn protected_reviewer_cache_bytes(project_root: &Path, store: &WorkModelStore) -> Result<u64> {
+    let keys = protected_reviewer_cache_keys(project_root, &store.list_work_items()?);
+    let mut bytes = 0_u64;
+    for key in keys {
+        bytes = bytes
+            .checked_add(prep::managed_cache_bytes(
+                &reviewer_cache_root(project_root).join(key),
+            )?)
+            .ok_or_else(|| anyhow::anyhow!("protected reviewer cache size overflow"))?;
+    }
+    Ok(bytes)
+}
+
+fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore) -> Result<()> {
+    let items = store.list_work_items()?;
+    let active_keys = protected_reviewer_cache_keys(project_root, &items);
 
     let root = reviewer_cache_root(project_root);
     let entries = match fs::read_dir(&root) {
@@ -9845,7 +9881,15 @@ fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore)
                     path.display()
                 );
             }
-            if metadata.is_dir() && !active_keys.contains(&entry.file_name()) {
+            let managed_key = entry.file_name().to_str().is_some_and(|key| {
+                key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            if metadata.is_dir() && !managed_key {
+                eprintln!(
+                    "  Reviewer cache    skipped {}: unverified cache key",
+                    path.display()
+                );
+            } else if metadata.is_dir() && !active_keys.contains(&entry.file_name()) {
                 fs::remove_dir_all(&path).with_context(|| {
                     format!("remove retired candidate reviewer cache {}", path.display())
                 })?;
@@ -9942,27 +9986,38 @@ fn admit_reviewer_build_cache_with_admission(
         }
     };
     let store = WorkModelStore::new(project_root);
-    let decision = (|| -> Result<Option<&'static str>> {
+    let decision = (|| -> Result<Option<String>> {
         admission.reclaim_terminal_caches(project_root, &store)?;
-        if prep::managed_cache_bytes(artifact_dir)? > 0 {
-            return Ok(None);
-        }
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
         let current = admission.managed_cache_total(project_root, &store)?;
+        let protected = protected_reviewer_cache_bytes(project_root, &store)?;
+        let existing = prep::managed_cache_bytes(artifact_dir)?;
+        if existing > 0 {
+            if current > limits.max_project_bytes.value {
+                reporter(&format!(
+                    "  Reviewer prep     {task_id} reusing protected shared cache: {current} bytes used, {} bytes allowed, {protected} bytes protected",
+                    limits.max_project_bytes.value
+                ));
+            }
+            return Ok(None);
+        }
         let prospective = prep::toolchain_cache_bytes(candidate_workspace, toolchain)?;
         let total = current
             .checked_add(prospective)
             .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
         if total > limits.max_project_bytes.value {
-            return Ok(Some("project cache budget"));
+            return Ok(Some(format!(
+                "project cache budget: {current} bytes used, {prospective} bytes proposed, {} bytes allowed, {protected} bytes protected",
+                limits.max_project_bytes.value
+            )));
         }
         let free = admission.filesystem_free_bytes(project_root)?;
         let required = prospective
             .checked_add(limits.min_free_bytes.value)
             .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
         if free < required {
-            return Ok(Some("host free-space floor"));
+            return Ok(Some("host free-space floor".into()));
         }
         fs::create_dir_all(artifact_dir).with_context(|| {
             format!(
@@ -9976,11 +10031,11 @@ fn admit_reviewer_build_cache_with_admission(
     drop(lock);
     match decision {
         Ok(None) => reporter(&format!(
-            "  Reviewer prep     pre-populated {} build cache from candidate",
+            "  Reviewer prep     {} build cache available",
             toolchain.name
         )),
         Ok(Some(reason)) => reporter(&format!(
-            "  Reviewer prep     {task_id} starting cold: {reason} would be exceeded"
+            "  Reviewer prep     {task_id} starting cold: {reason}"
         )),
         Err(error) => reporter(&format!(
             "  Reviewer prep     {task_id} starting cold: cache admission check failed: {error:#}"
@@ -10000,10 +10055,11 @@ fn admit_hook_reviewer_cache_with_admission(
     admission: &dyn ReviewerCacheAdmission,
     reporter: &dyn Fn(&str),
 ) {
-    let decision = (|| -> Result<Option<&'static str>> {
+    let decision = (|| -> Result<Option<String>> {
         let limits = crate::config::resolve_reviewer_cache_config(project_root)
             .map_err(anyhow::Error::new)?;
         let current = admission.managed_cache_total(project_root, store)?;
+        let protected = protected_reviewer_cache_bytes(project_root, store)?;
         let replacing = prep::managed_cache_bytes(cache_dir)?;
         let prospective = prep::managed_cache_bytes(artifact_dir)?;
         let total = current
@@ -10011,14 +10067,17 @@ fn admit_hook_reviewer_cache_with_admission(
             .and_then(|current| current.checked_add(prospective))
             .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
         if total > limits.max_project_bytes.value {
-            return Ok(Some("project cache budget"));
+            return Ok(Some(format!(
+                "project cache budget: {current} bytes used, {prospective} bytes proposed, {} bytes allowed, {protected} bytes protected",
+                limits.max_project_bytes.value
+            )));
         }
         let free = admission.filesystem_free_bytes(project_root)?;
         let required = prospective
             .checked_add(limits.min_free_bytes.value)
             .ok_or_else(|| anyhow::anyhow!("reviewer free-space requirement overflow"))?;
         if free < required {
-            return Ok(Some("host free-space floor"));
+            return Ok(Some("host free-space floor".into()));
         }
         prep::populate_managed_cache(artifact_dir, cache_dir)?;
         prep::remove_managed_cache_dirs(artifact_dir)?;
@@ -10036,7 +10095,7 @@ fn admit_hook_reviewer_cache_with_admission(
                 );
             }
             reporter(&format!(
-                "  Reviewer prep     {task_id} starting cold: {reason} would be exceeded"
+                "  Reviewer prep     {task_id} starting cold: {reason}"
             ));
         }
         Err(error) => {
@@ -15061,6 +15120,137 @@ mod tests {
             fs::read_to_string(fixture.artifact_dir.join("review.md")).unwrap(),
             "review evidence"
         );
+    }
+
+    #[test]
+    fn grown_reviewer_cache_triggers_bounded_reclamation() {
+        use super::*;
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        let retired = candidate_reviewer_cache_dir(&fixture.project_root, "retired-candidate");
+        fs::create_dir_all(retired.join("target")).unwrap();
+        fs::File::create(retired.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        let candidate = fixture
+            .project_root
+            .parent()
+            .unwrap()
+            .join("work-6-work-1-attempt-1");
+        let messages = std::sync::Mutex::new(Vec::new());
+        admit_reviewer_build_cache_with_admission(
+            &fixture.project_root,
+            &candidate,
+            &fixture.cache_dir,
+            prep::detect_toolchain(&candidate).unwrap(),
+            "review-2",
+            &FilesystemReviewerCacheAdmission,
+            &|message| messages.lock().unwrap().push(message.to_string()),
+        );
+        assert!(!retired.exists());
+        assert!(fixture.cache_dir.join("target/output").exists());
+        assert!(
+            managed_reviewer_cache_total(&fixture.project_root, &fixture.store).unwrap()
+                < 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn reviewer_budget_preserves_live_and_nonterminal_caches() {
+        use super::*;
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(fixture.cache_dir.join("target")).unwrap();
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        reclaim_terminal_reviewer_caches(&fixture.project_root, &fixture.store).unwrap();
+        assert!(fixture.cache_dir.join("target/output").exists());
+        assert_eq!(
+            protected_reviewer_cache_bytes(&fixture.project_root, &fixture.store).unwrap(),
+            2 * 1024 * 1024 * 1024
+        );
+        let candidate = fixture
+            .project_root
+            .parent()
+            .unwrap()
+            .join("work-6-work-1-attempt-1");
+        let messages = std::sync::Mutex::new(Vec::new());
+        admit_reviewer_build_cache_with_admission(
+            &fixture.project_root,
+            &candidate,
+            &fixture.cache_dir,
+            prep::detect_toolchain(&candidate).unwrap(),
+            "review-2",
+            &FilesystemReviewerCacheAdmission,
+            &|message| messages.lock().unwrap().push(message.to_string()),
+        );
+        assert!(
+            messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.contains("reusing protected shared cache")
+                    && message.contains("bytes protected"))
+        );
+        assert!(fixture.cache_dir.join("target/output").exists());
+    }
+
+    #[test]
+    fn reviewer_over_budget_starts_cold_with_accounting() {
+        use super::*;
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        let protected = candidate_reviewer_cache_dir(&fixture.project_root, "other-candidate");
+        fs::create_dir_all(protected.join("target")).unwrap();
+        fs::File::create(protected.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        let mut other = WorkItem {
+            id: "other-work".into(),
+            title: "Protected review".into(),
+            ..Default::default()
+        };
+        other.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut other.attempts[0].tasks[0];
+        task.id = "review-1".into();
+        task.kind = TaskKind::Review;
+        task.status = TaskStatus::Executing;
+        task.workspace_access.writes.clear();
+        task.workspace_access.reads.push(WorkspaceRef {
+            id: "candidate".into(),
+            path: "candidate".into(),
+        });
+        task.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".into(),
+            candidate_workspace_path: "candidate".into(),
+            source_branch: "main".into(),
+            candidate_commit: "other-candidate".into(),
+            base_commit: None,
+        });
+        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: crate::work_model::work_artifact_path("other-work", "attempt-1", "review-1"),
+        });
+        fixture.store.create_work_item(&other).unwrap();
+        let (warmed, messages) = fixture.run_with_messages(&FilesystemReviewerCacheAdmission);
+        assert!(!warmed);
+        assert!(protected.join("target/output").exists());
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("starting cold")
+                    && message.contains("bytes used")
+                    && message.contains("bytes allowed")
+                    && message.contains("bytes protected"))
+        );
+        assert!(fixture.artifact_dir.join("review.md").is_file());
+        assert_eq!(fixture.review_status(), TaskStatus::Complete);
     }
 
     #[test]
