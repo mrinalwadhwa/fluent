@@ -1441,6 +1441,15 @@ dangling targets. It rejects symlink ancestors, symlinked managed evidence,
 other nonregular files, unmerged stages, unsupported path encoding, files over
 64 MiB, and unstable observations.
 
+When a matrix-bound completion recovery later hits quota, the completion
+contract keeps its original source candidate and evidence bindings. Before
+launch, `usage_limit_contracts::validated_prelaunch_approval` validates the exact
+prepared Task, unused approval, retained failure evidence, and approved partial
+workspace. The completion contract accepts that partial workspace only when
+the quota approval also names its original source candidate and workspace.
+Without this separate authority, the initial corrective Writer still requires
+the original clean candidate. Neither contract rewrites the other's audit.
+
 Approval neither queues nor launches work. Foreground resume, queue admission,
 scheduler claim, direct Task reservation, and the immediate pre-spawn boundary
 revalidate authority. Status uses the same read-only inspector and suppresses

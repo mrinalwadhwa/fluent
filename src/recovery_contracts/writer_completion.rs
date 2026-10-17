@@ -276,25 +276,37 @@ pub(crate) fn validated_writer_context(
             && task.output.is_none()
             && matches!(task.status, TaskStatus::Planned | TaskStatus::Executing)
         {
-            let workspace = resolve_managed_sibling_workspace_path(
+            if let Some(approval) = crate::usage_limit_contracts::validated_prelaunch_approval(
                 project_root,
-                &output.workspace_path,
-                "Writer-completion recovery candidate workspace",
-            )?;
-            let head = git::run_stdout(
-                &workspace,
-                &["rev-parse", "HEAD"],
-                "check Writer-completion recovery candidate HEAD before launch",
-            )?;
-            let status = git::run_stdout(
-                &workspace,
-                &["status", "--porcelain", "--untracked-files=all", "--", "."],
-                "check Writer-completion recovery candidate cleanliness before launch",
-            )?;
-            anyhow::ensure!(
-                head == authority.candidate_commit && status.is_empty(),
-                "Writer-completion recovery candidate changed or is dirty before launch"
-            );
+                item,
+                task,
+            )? {
+                anyhow::ensure!(
+                    approval.binding.source_candidate == authority.candidate_commit
+                        && approval.binding.workspace == output.workspace_path,
+                    "quota approval does not match the Writer-completion recovery source"
+                );
+            } else {
+                let workspace = resolve_managed_sibling_workspace_path(
+                    project_root,
+                    &output.workspace_path,
+                    "Writer-completion recovery candidate workspace",
+                )?;
+                let head = git::run_stdout(
+                    &workspace,
+                    &["rev-parse", "HEAD"],
+                    "check Writer-completion recovery candidate HEAD before launch",
+                )?;
+                let status = git::run_stdout(
+                    &workspace,
+                    &["status", "--porcelain", "--untracked-files=all", "--", "."],
+                    "check Writer-completion recovery candidate cleanliness before launch",
+                )?;
+                anyhow::ensure!(
+                    head == authority.candidate_commit && status.is_empty(),
+                    "Writer-completion recovery candidate changed or is dirty before launch"
+                );
+            }
         }
         let authorized = attempt
             .tasks

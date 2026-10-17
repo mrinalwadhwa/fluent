@@ -915,6 +915,63 @@ pub(crate) fn validate_pending(
     Ok(())
 }
 
+/// Recheck a prepared retry while constructing its prompt, possibly inside its
+/// live Task lease. Admission and provider spawn enforce launch ownership; this
+/// check binds the retained failure and approved partial work without restarting.
+pub(crate) fn validated_prelaunch_approval(
+    root: &Path,
+    item: &WorkItem,
+    task: &Task,
+) -> Result<Option<Approval>> {
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|a| Some(a.id.as_str()) == task.attempt_id.as_deref())
+        .context("prepared Writer Attempt disappeared")?;
+    let Some(approval) = current_approval(root, attempt)? else {
+        return Ok(None);
+    };
+    if approval.binding.failed_task.id != task.id {
+        return Ok(None);
+    }
+    ensure!(
+        recorded(attempt, &approval, PREPARE)? && !has_launched(root, &approval)?,
+        "quota retry lacks unused preparation authority"
+    );
+    let mut prepared = prepared_task(&approval)?;
+    if task.status == TaskStatus::Executing {
+        ensure!(
+            recorded(attempt, &approval, START)? && task.started_at.is_some(),
+            "executing quota retry lacks its reserved start authority"
+        );
+        prepared.status = TaskStatus::Executing;
+        prepared.started_at = task.started_at.clone();
+    }
+    ensure!(
+        task == &prepared
+            && attempt.tasks.last() == Some(task)
+            && matches!(
+                attempt.status,
+                AttemptStatus::Planned | AttemptStatus::Executing
+            ),
+        "prepared Writer changed or stopped"
+    );
+    let mut original = item.clone();
+    let restored = original
+        .attempts
+        .iter_mut()
+        .find(|a| a.id == attempt.id)
+        .unwrap();
+    *restored.tasks.last_mut().unwrap() = approval.binding.failed_task.clone();
+    restored.status = AttemptStatus::NeedsUser;
+    restored.pause_kind = Some(PauseKind::RoundCap);
+    ensure!(
+        inspect_with_lease(root, &original, &attempt.id, true)? == approval.binding,
+        "approved evidence, assignment, settings, or partial candidate changed"
+    );
+    Ok(Some(approval))
+}
+
 /// Return true only for an unused, freshly validated approval. A used approval
 /// permits ordinary downstream continuation after completion, never a restart.
 pub(crate) fn resume_ready(root: &Path, item: &WorkItem, attempt_id: &str) -> Result<bool> {

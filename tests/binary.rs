@@ -63916,6 +63916,22 @@ cat correction.txt new-source.txt > resumed-source.txt
 git add correction.txt new-source.txt resumed-source.txt retry-args.txt
 git commit -m 'Finish saved correction' >/dev/null
 printf '%s\n' '- [x] Finish the remaining correction' > "$FLUENT_USAGE_TEST_PROGRESS"
+if [[ -f "${FLUENT_USAGE_TEST_MATRIX:-}" ]]; then
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+path = Path(os.environ['FLUENT_USAGE_TEST_MATRIX'])
+matrix = json.loads(path.read_text())
+for row in matrix['rows']:
+    if row.get('responsibility', 'writer') == 'writer':
+        row['state'] = 'complete'
+        row['implementation-evidence'] = ['resumed-source.txt: retained partial work']
+        row['verification'] = [{'command': 'true', 'result': 'pass'}]
+        if row['kind'] == 'finding':
+            row['applicable-constraints'] = [matrix['rows'][0]['id']]
+path.write_text(json.dumps(matrix))
+PY
+fi
 printf '%s\n' '{"type":"thread.started","thread_id":"saved-thread"}' '{"type":"turn.started"}' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
 "#,
     );
@@ -63927,6 +63943,30 @@ printf '%s\n' '{"type":"thread.started","thread_id":"saved-thread"}' '{"type":"t
     // Cross admission, reservation, execution, and the remaining gates.
 
     let mut command = fluent_cmd();
+    let item = WorkModelStore::new(&fixture.project)
+        .read_work_item_snapshot(&fixture.work)
+        .unwrap();
+    if let Some(approval) = item.attempts[0]
+        .recovery_operations
+        .iter()
+        .rev()
+        .find(|record| {
+            record.operation_kind == "usage-limit-writer-approval"
+                && record.task_id.as_deref() == Some(fixture.task.as_str())
+        })
+    {
+        command.env(
+            "FLUENT_USAGE_TEST_MATRIX",
+            fixture.project.join(fluent::work_model::work_artifact_path(
+                &fixture.work,
+                "attempt-1",
+                &format!(
+                    "usage-limit-retries/{}/writer-completion.json",
+                    approval.operation_id
+                ),
+            )),
+        );
+    }
     command
         .current_dir(&fixture.project)
         .env("CODEX_HOME", &source_home)
@@ -67375,8 +67415,151 @@ fn usage_limit_writer_completion_recovery_requires_fresh_quota_approval() {
     assert_usage_limit_completion_recovery_resume(false, true);
 }
 
+fn usage_limit_committed_matrix_fixture() -> UsageLimitFixture {
+    let tmp = TempDir::new().unwrap();
+    let (recovery, _) = committed_matrix_recovery_fixture(&tmp);
+    let store = WorkModelStore::new(&recovery.project);
+    store
+        .mutate_work_item(&recovery.work, |item| {
+            item.attempts[0].coder_mapping.write.coder = fluent::coder::CoderKind::Codex;
+            item.attempts[0].coder_mapping.write.model = "saved-model".into();
+            Ok(())
+        })
+        .unwrap();
+    committed_matrix_repair_command(&recovery)
+        .assert()
+        .success();
+    let approved = store.read_work_item_snapshot(&recovery.work).unwrap();
+    let writer = approved.attempts[0].tasks.last().unwrap();
+    let audit = writer
+        .input_artifacts
+        .iter()
+        .find(|a| a.producer_id == "writer-completion-recovery")
+        .unwrap();
+    assert!(
+        read_json_path(&recovery.project.join(&audit.path))["source-matrix-sha256"].is_string()
+    );
+    assert!(
+        approved.attempts[0].tasks[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .no_change
+            .is_none()
+    );
+    let mut fixture = UsageLimitFixture {
+        failed_area: recovery
+            .project
+            .join(&writer.artifact_area.as_ref().unwrap().path),
+        task: writer.id.clone(),
+        source: recovery.candidate.clone(),
+        partial: recovery.candidate,
+        project: recovery.project,
+        workspace: recovery.workspace,
+        work: recovery.work,
+        _tmp: tmp,
+    };
+    let mut command = usage_limit_retry_command(&fixture);
+    write_mock_codex(
+        &fixture._tmp.path().join("quota-provider"),
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-} ${2:-}" == "login status" ]]; then exit 0; fi
+if [[ "$1" == "--version" ]]; then echo 'codex-cli 0.100.0'; exit 0; fi
+printf 'first correction\n' > correction.txt
+git add correction.txt
+git commit -m 'Apply partial correction' >/dev/null
+printf 'unfinished tracked correction\n' > correction.txt
+printf 'unfinished untracked correction\n' > new-source.txt
+cat <<'QUOTA'
+{"type":"thread.started","thread_id":"saved-thread"}
+{"type":"turn.started"}
+{"type":"error","message":"You've hit your usage limit. Try again later."}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again later."}}
+QUOTA
+exit 1
+"#,
+    );
+    command.assert().failure();
+    fixture.assert_settled();
+    fixture.partial = git_head(&fixture.workspace);
+    assert_ne!(
+        fixture.partial, fixture.source,
+        "the provider must commit partial work before failing"
+    );
+    let failed = store.read_work_item_snapshot(&fixture.work).unwrap();
+    assert_eq!(
+        failed.attempts[0].tasks.last().unwrap().status,
+        TaskStatus::Failed
+    );
+    assert!(
+        failed.attempts[0]
+            .tasks
+            .last()
+            .unwrap()
+            .writer_correction_assignment
+            .is_some()
+    );
+    fixture
+}
+
+#[test]
+fn usage_limit_committed_matrix_recovery_resumes_foreground() {
+    assert_usage_limit_completion_recovery_resume_with(
+        usage_limit_committed_matrix_fixture(),
+        false,
+        false,
+    );
+}
+
+#[test]
+fn usage_limit_committed_matrix_recovery_resumes_queue() {
+    assert_usage_limit_completion_recovery_resume_with(
+        usage_limit_committed_matrix_fixture(),
+        true,
+        false,
+    );
+}
+
+#[test]
+fn usage_limit_committed_matrix_recovery_rejects_changed_partial_work() {
+    for queued in [false, true] {
+        let fixture = usage_limit_committed_matrix_fixture();
+        fixture.approve();
+        fs::write(
+            fixture.workspace.join("correction.txt"),
+            "changed after approval\n",
+        )
+        .unwrap();
+        let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+        let source = snapshot_tree(&fixture.workspace);
+        let mut command = fluent_cmd();
+        command.current_dir(&fixture.project);
+        if queued {
+            command.args(["queue", "resume", &fixture.work, "--attempt", "attempt-1"]);
+        } else {
+            command.args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"]);
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("partial candidate changed"));
+        assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
+        assert_eq!(snapshot_tree(&fixture.workspace), source);
+        assert!(!fixture.workspace.join("resumed-source.txt").exists());
+    }
+}
+
 fn assert_usage_limit_completion_recovery_resume(queued: bool, repeated_quota: bool) {
     let fixture = usage_limit_fixture_with_history(TempDir::new().unwrap(), true);
+    assert_usage_limit_completion_recovery_resume_with(fixture, queued, repeated_quota);
+}
+
+fn assert_usage_limit_completion_recovery_resume_with(
+    fixture: UsageLimitFixture,
+    queued: bool,
+    repeated_quota: bool,
+) {
     let store = WorkModelStore::new(&fixture.project);
     let before = store.read_work_item_snapshot(&fixture.work).unwrap();
     let failed = before.attempts[0].tasks.last().unwrap();
