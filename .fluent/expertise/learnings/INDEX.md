@@ -47,6 +47,7 @@
 - [doc-comment-attachment-in-rust](doc-comment-attachment-in-rust.md) — Inserting a function between a doc comment and its target silently re-attaches the comment to the wrong item
 - [durable-external-effects-use-reconcilable-identities](durable-external-effects-use-reconcilable-identities.md) — Persist a stable action identity before an external effect and reconcile that identity before retrying after an interruption
 - [ears-statements-are-atomic-and-triggered](ears-statements-are-atomic-and-triggered.md) — Each EARS statement must name one independently verifiable effect and include the operation or event that triggers it
+- [embedded-input-preserves-tmux-prefix](embedded-input-preserves-tmux-prefix.md) — Keep embedded Ctrl-B quoting coupled to managed tmux bindings and paste settings while preserving native full-screen detach
 - [evidence-needed-disposition-uses-closed-grammar](evidence-needed-disposition-uses-closed-grammar.md) — Review classification accepts evidence-needed only from an exact actionable disposition grammar and fails closed on ambiguity
 - [exception-must-not-widen-conjunctive-invariant](exception-must-not-widen-conjunctive-invariant.md) — A guard exception that relaxes one condition in an AND-chain must not replace the entire chain — every unreachable condition must remain enforced
 - [expertise-claims-match-enforced-mechanism](expertise-claims-match-enforced-mechanism.md) — Expertise prose must scope guarantees to their precondition and describe mechanisms at real enforcement strength; a private-field token is a convention, not an unforgeable type, and a claim that survives only under negation is a corrected overclaim
@@ -181,7 +182,9 @@
 - [superseded-history-requires-recovery-provenance](superseded-history-requires-recovery-provenance.md) — Admit retained Superseded Tasks to Learner retry only when recovery authority, operation, and replacement account for every one
 - [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
 - [terminal-control-lease-follows-client](terminal-control-lease-follows-client.md) — Hold a managed terminal's Control lease in the writable tmux client for its full attachment lifetime
+- [terminal-focus-requires-visible-identity](terminal-focus-requires-visible-identity.md) — Grant embedded input focus only when the dashboard shows the selected invocation identity and Control state
 - [terminal-host-tests-exercise-live-boundaries](terminal-host-tests-exercise-live-boundaries.md) — Prove managed terminal attachment and settlement with live PTY clients, tmux, and macOS sandbox behavior
+- [terminal-revocation-precedes-cleanup](terminal-revocation-precedes-cleanup.md) — Revoke attachment access before terminal cleanup waits for Control, retaining execution authority until settlement is verified
 - [terminal-session-cleanup-covers-partial-setup](terminal-session-cleanup-covers-partial-setup.md) — Arm terminal cleanup before enabling raw mode or alternate-screen features so every setup failure restores prior terminal state
 - [test-fixtures-use-production-state](test-fixtures-use-production-state.md) — Reproduce production states and persisted aggregates in lifecycle fixtures; use explicit historical evidence for compatibility tests
 - [test-names-match-assertions](test-names-match-assertions.md) — Test function names must describe the behavior the test actually asserts, not what a behavior statement claims

@@ -44,7 +44,12 @@ Fluent is an autonomous software factory that orchestrates coding agents (Claude
 
 ## Build and test
 
+Prepare the pinned native terminal library before compiling in a fresh checkout.
+See [terminal source builds](../../docs/terminal-build.md) for target selection
+and Cargo cache prerequisites; keep the Attempt-provided `CARGO_HOME`.
+
 ```sh
+bash scripts/prepare-terminal-deps.sh
 cargo build --release
 install -m 0755 target/release/fluent /Users/mrinal/.local/bin/fluent
 

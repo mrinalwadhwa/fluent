@@ -4,6 +4,24 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Preserve embedded input through tmux
+
+Keep embedded prefix quoting coupled to the managed server's default bindings
+and disabled timing-based paste detection, while retaining native full-screen
+detach. The [prefix contract](learnings/embedded-input-preserves-tmux-prefix.md)
+records the mechanism and its worker-byte and detach regressions.
+
+---
+
+## Revoke attachment access before cleanup
+
+Publish attachment revocation before cleanup waits for Control, while retaining
+execution ownership until settlement is verified. The
+[revocation contract](learnings/terminal-revocation-precedes-cleanup.md) records
+the ordering and cancellation/retry regressions.
+
+---
+
 ## Preserve manual sizing for managed terminals
 
 Managed tmux windows use manual sizing from creation because `ignore-size`
