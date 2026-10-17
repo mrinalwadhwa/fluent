@@ -79,15 +79,19 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                or key in {"CARGO_INCREMENTAL", "RUSTUP_TOOLCHAIN", "CC", "CFLAGS", "AR",
                           "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"}}
     cargo_home = os.environ.get("CARGO_HOME")
-    cargo_config = ({name: checked_config_digest(Path(cargo_home) / name)
-                     for name in ("config.toml", "config") if (Path(cargo_home) / name).is_file()}
-                    if cargo_home else {})
+    cargo_home_path = Path(cargo_home).resolve() if cargo_home else reader_root / "cargo-home"
+    if not cargo_home:
+        # Keep isolated preparation independent of the operator's Cargo home.
+        cargo_home_path.mkdir(parents=True, exist_ok=True)
+    cargo_config = {name: checked_config_digest(cargo_home_path / name)
+                    for name in ("config.toml", "config") if (cargo_home_path / name).is_file()}
     build_command = ["cargo", "build", "--locked"]
     if mode == "offline":
         build_command.append("--offline")
     identity = {"source_commit": commit, "source_archive_sha256": digest(archive),
                 "lockfile_sha256": lock_digest, "work_model_sha256": work_model_digest,
                 "rustc": rustc, "cargo": cargo, "build_options": options,
+                "cargo_home": str(cargo_home_path),
                 "cargo_config": cargo_config,
                 "cargo_cwd_config": cargo_cwd_config(build_cwd),
                 "build_command": build_command}
@@ -131,6 +135,7 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                     source.extractall(source_dir)
                 target = temporary / "target"
                 env = os.environ.copy()
+                env["CARGO_HOME"] = str(cargo_home_path)
                 env["GIT_CEILING_DIRECTORIES"] = str(source_dir.parent)
                 try:
                     subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], cwd=build_cwd, env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)

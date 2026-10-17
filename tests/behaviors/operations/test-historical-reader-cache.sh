@@ -18,6 +18,10 @@ if [[ -n "${EXPECT_CARGO_CWD:-}" && "$(pwd -P)" != "$(cd "$EXPECT_CARGO_CWD" && 
   echo "cargo ran from $PWD, expected $EXPECT_CARGO_CWD" >&2
   exit 1
 fi
+if [[ -n "${EXPECT_CARGO_HOME:-}" && "$(cd "${CARGO_HOME:-/}" && pwd -P)" != "$(cd "$EXPECT_CARGO_HOME" && pwd -P)" ]]; then
+  echo "cargo used ${CARGO_HOME:-unset}, expected $EXPECT_CARGO_HOME" >&2
+  exit 1
+fi
 while (( $# )); do
   if [[ "$1" == --target-dir ]]; then target="$2"; break; fi
   shift
@@ -242,6 +246,41 @@ builds_before="$(wc -l < "$BUILD_LOG")"
 )
 (( $(wc -l < "$BUILD_LOG") == builds_before ))
 verify_reader "$temporary/work-two-config-path" "$(readlink "$(cat "$temporary/work-one-path")")" ''
+
+# An unset CARGO_HOME uses an isolated, identified home instead of HOME/.cargo.
+mkdir -p "$temporary/implicit-home/.cargo"
+printf '[build]\nrustflags = ["-Copt-level=1"]\n' > "$temporary/implicit-home/.cargo/config.toml"
+isolated_root="$temporary/isolated-reader"
+builds_before="$(wc -l < "$BUILD_LOG")"
+(
+    unset CARGO_HOME
+    export HOME="$temporary/implicit-home"
+    export EXPECT_CARGO_HOME="$isolated_root/cargo-home"
+    python3 "$helper" "$repository" "$commit" "$isolated_root" > "$temporary/isolated-first"
+    readlink "$(cat "$temporary/isolated-first")" > "$temporary/isolated-first-entry"
+    (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+    printf '[build]\nrustflags = ["-Copt-level=2"]\n' > "$HOME/.cargo/config.toml"
+    python3 "$helper" "$repository" "$commit" "$isolated_root" > "$temporary/isolated-second"
+    readlink "$(cat "$temporary/isolated-second")" > "$temporary/isolated-second-entry"
+    (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+    printf '[build]\nrustflags = ["-Copt-level=3"]\n' > "$isolated_root/cargo-home/config.toml"
+    python3 "$helper" "$repository" "$commit" "$isolated_root" > "$temporary/isolated-third"
+    readlink "$(cat "$temporary/isolated-third")" > "$temporary/isolated-third-entry"
+)
+(( $(wc -l < "$BUILD_LOG") == builds_before + 2 ))
+cmp "$temporary/isolated-first-entry" "$temporary/isolated-second-entry"
+[[ "$(cat "$temporary/isolated-first-entry")" != "$(cat "$temporary/isolated-third-entry")" ]]
+python3 - "$temporary/isolated-third" "$isolated_root" <<'PY'
+import hashlib, json, pathlib, sys
+third = pathlib.Path(pathlib.Path(sys.argv[1]).read_text().strip())
+root = pathlib.Path(sys.argv[2])
+assert third.is_symlink() and third.is_file()
+entry = third.resolve().parent
+recorded = json.loads((entry / 'provenance.json').read_text())
+assert recorded['identity']['cargo_home'] == str((root / 'cargo-home').resolve())
+assert recorded['identity']['cargo_config']['config.toml'] == hashlib.sha256((root / 'cargo-home/config.toml').read_bytes()).hexdigest()
+assert recorded['binary_sha256'] == hashlib.sha256(third.read_bytes()).hexdigest()
+PY
 
 # Configuration at Cargo's actual working directory changes the identity.
 mkdir -p "$TMPDIR/.cargo"
