@@ -6805,6 +6805,92 @@ pub(crate) mod verification_tests {
         assert!(blocked.reason.contains("sh -c false"));
     }
 
+    pub(crate) fn unique_harness_fixture() -> (tempfile::TempDir, WorkItem) {
+        let (root, mut item) = fixture(true);
+        fs::write(
+            root.path().join("tests/native.sh"),
+            "#!/bin/sh\necho 'not ok broken'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: 'false'\n    test_harness: shell-harness\n",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["add", ".fluent/tester.yaml", "tests/native.sh"],
+            "stage unique command",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Use unique harness"],
+            "commit unique command",
+        )
+        .unwrap();
+        let candidate =
+            crate::git::run_stdout(root.path(), &["rev-parse", "HEAD"], "read unique candidate")
+                .unwrap();
+        for task in &mut item.attempts[0].tasks {
+            if let Some(output) = &mut task.output {
+                output.commit = candidate.clone();
+            }
+            if let Some(context) = &mut task.review_context {
+                context.candidate_commit = candidate.clone();
+            }
+        }
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let area = root
+            .path()
+            .join(&tester.artifact_area.as_ref().unwrap().path);
+        crate::tester::run(
+            root.path(),
+            &area,
+            true,
+            &crate::content::ContentResolver::new(Some(root.path())),
+        )
+        .unwrap();
+        crate::tester::bind_candidate_commit(&area, &candidate).unwrap();
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .verification_refs =
+            vec![r#"{"kind":"named-test","path":"tests/native.sh","name":"broken"}"#.into()];
+        (root, item)
+    }
+
+    #[test]
+    fn reviewed_command_satisfies_named_reference_without_rewriting_results() {
+        let (root, mut item) = unique_harness_fixture();
+        let before = assess_canonical_checks(root.path(), &item.attempts[0]).unwrap();
+        let original = fs::read(&before.results_path).unwrap();
+        assert!(
+            !assess_current_verification(root.path(), &item.attempts[0])
+                .unwrap()
+                .references[0]
+                .satisfied
+        );
+        accept_first_check(root.path(), &mut item);
+        let current = assess_current_verification(root.path(), &item.attempts[0]).unwrap();
+        assert!(current.commands[0].satisfied);
+        assert!(
+            current.references[0].satisfied,
+            "{:?}",
+            current.references[0]
+        );
+        let canonical = assess_canonical_checks(root.path(), &item.attempts[0]).unwrap();
+        assert!(canonical.defects.is_empty());
+        assert!(canonical.blockers.is_empty());
+        assert_eq!(fs::read(before.results_path).unwrap(), original);
+    }
+
     pub(crate) fn accept_first_check(root: &Path, item: &mut WorkItem) {
         let attempt = &mut item.attempts[0];
         let check = assess_canonical_checks(root, attempt).unwrap().checks[0].clone();

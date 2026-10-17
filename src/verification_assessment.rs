@@ -819,14 +819,13 @@ fn assess_canonical_checks_at(
         }
         checks.push(check);
     }
+    let command_identities = manifest
+        .commands
+        .iter()
+        .map(|command| (command.command.as_str(), command.test_harness.as_str()))
+        .collect::<Vec<_>>();
     for test in results.tests.iter().filter(|test| test.status == "fail") {
-        // Only the established command identity can be discharged by a reviewed
-        // replacement. A harness match alone cannot attribute an assertion.
-        let covered = accepted.iter().any(|index| {
-            let command = &manifest.commands[*index];
-            test.id == format!("command-{index}:{}", command.command)
-                && test.test_harness == command.test_harness
-        });
+        let covered = failed_test_covered_by_accepted_command(&command_identities, &accepted, test);
         let preexisting = baseline_results.is_some_and(|baseline| {
             baseline
                 .tests
@@ -870,6 +869,93 @@ fn assess_canonical_checks_at(
         review_bindings,
         blockers,
     })
+}
+
+fn failed_test_covered_by_accepted_command(
+    commands: &[(&str, &str)],
+    accepted: &[usize],
+    test: &crate::tester::TestResult,
+) -> bool {
+    let matching = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, harness))| *harness == test.test_harness)
+        .collect::<Vec<_>>();
+    // The extractor records a native test's harness but not its command index.
+    // Attribute it to a reviewed replacement only when that harness occurs in
+    // exactly one configured command. A synthetic command failure has its own
+    // exact command identity, even when a harness is configured more than once.
+    matching.iter().any(|(index, (command, _))| {
+        accepted.contains(index)
+            && (test.id == format!("command-{index}:{command}") || matching.len() == 1)
+    })
+}
+
+#[cfg(test)]
+mod command_failure_attribution_tests {
+    use super::failed_test_covered_by_accepted_command;
+    use crate::tester::TestResult;
+
+    fn failure(id: &str, harness: &str) -> TestResult {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "test_harness": harness,
+            "status": "fail",
+            "duration_ms": 1,
+            "failure_excerpt": "fixture socket was denied"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn reviewed_unique_harness_command_covers_its_native_failures() {
+        let commands = [
+            ("cargo nextest run", "cargo-nextest"),
+            ("bash checks.sh", "shell"),
+        ];
+        let native = failure(
+            "fluent::dashboard_terminal$fullscreen_resize_requires_control",
+            "cargo-nextest",
+        );
+        assert!(failed_test_covered_by_accepted_command(
+            &commands,
+            &[0],
+            &native
+        ));
+        assert!(!failed_test_covered_by_accepted_command(
+            &commands,
+            &[1],
+            &native
+        ));
+    }
+
+    #[test]
+    fn duplicate_harness_requires_exact_synthetic_command_identity() {
+        let commands = [
+            ("cargo nextest run -E one", "cargo-nextest"),
+            ("cargo nextest run -E two", "cargo-nextest"),
+        ];
+        let native = failure(
+            "fluent::dashboard_terminal$fullscreen_resize_requires_control",
+            "cargo-nextest",
+        );
+        assert!(!failed_test_covered_by_accepted_command(
+            &commands,
+            &[0],
+            &native
+        ));
+        let synthetic = failure("command-0:cargo nextest run -E one", "cargo-nextest");
+        assert!(failed_test_covered_by_accepted_command(
+            &commands,
+            &[0],
+            &synthetic
+        ));
+        assert!(!failed_test_covered_by_accepted_command(
+            &commands,
+            &[1],
+            &synthetic
+        ));
+    }
 }
 
 pub(crate) fn validate_required_check_acceptance_at(
@@ -2871,6 +2957,24 @@ fn reference_is_satisfied(
     };
     let mut results = results.clone();
     results.tests = normalized;
+    if let Some(view) = canonical {
+        let command_identities = results
+            .commands
+            .iter()
+            .map(|command| (command.command.as_str(), command.test_harness.as_str()))
+            .collect::<Vec<_>>();
+        for test in &mut results.tests {
+            if test.status == "fail"
+                && failed_test_covered_by_accepted_command(
+                    &command_identities,
+                    &view.accepted,
+                    test,
+                )
+            {
+                test.status = "pass".into();
+            }
+        }
+    }
     match reference.meaning() {
         ReferenceMeaning::CargoLibTest { name } => {
             let Some(library) = candidate_library else {

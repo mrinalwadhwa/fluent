@@ -11203,3 +11203,20 @@ WHEN a passing Plan host Review belongs to an earlier Writer, THE SYSTEM SHALL
 allow explicit historical settlement against its bound source evidence even
 before the current Writer's matrix is ready, without granting current credit.
 Test: src/host_evidence.rs (historical_plan_review_settles_before_current_matrix_is_ready)
+
+## Reviewed canonical command replacements
+
+### B1
+
+WHEN targeted Tests Review accepts replacement host proof for a canonical
+command, THE SYSTEM SHALL attribute its native failures only through a unique
+configured harness or an exact synthetic command identity.
+Test: src/verification_assessment.rs (reviewed_unique_harness_command_covers_its_native_failures)
+Test: src/verification_assessment.rs (duplicate_harness_requires_exact_synthetic_command_identity)
+
+### B2
+
+WHEN an accepted command replacement covers a named test, THE SYSTEM SHALL
+satisfy its reference in the derived assessment and retain the original
+Tester result bytes.
+Test: src/recovery_contracts.rs (reviewed_command_satisfies_named_reference_without_rewriting_results)
