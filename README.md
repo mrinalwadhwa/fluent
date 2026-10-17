@@ -170,6 +170,14 @@ cache. Each sandbox grants only that private cache's dependency stores; the
 operator's Cargo home, credentials, configuration, and binaries remain outside
 the boundary.
 
+Fluent reclaims idle `target` output in its managed worktrees after Tasks settle
+or Attempts stop. It keeps active output and favors output from unfinished Work.
+Set `build-output.max-project-gib` in `.fluent/config.yaml` to change the
+project retention budget (default: 100 GiB). Reviewer build caches use the
+separate `reviewer-cache.max-project-gib` budget (default: 50 GiB); caches still
+referenced by unfinished Work remain protected, and new cache admissions start
+cold if protected usage leaves no room.
+
 Before starting review work, run `fluent tester check` to validate the Tester through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun the check.
 
 If a production Tester Task needs a tracked change to `.fluent/tester.yaml` or `.fluent/extract-tester-results`, run the exact `fluent attempt repair-tester <work-item-id> <attempt-id> --resolution "<repair needed>"` command reported by `fluent status` or the needs-user handoff. Fluent records the decision and failed Tester artifacts, schedules a narrowly scoped Writer, and accepts only a clean commit whose changes stay inside those two project Tester files. If the Writer exceeds that boundary, Fluent records the rejected commit and restores the approved candidate so a public resume can retry. After Fluent accepts the repair request, resume through the scheduler or foreground Attempt command. Fresh reviews and the final Tester bind to the repair commit; the failed Tester and original candidate remain in the Attempt history.

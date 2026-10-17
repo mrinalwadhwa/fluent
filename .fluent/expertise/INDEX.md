@@ -11,5 +11,6 @@ Load expertise files on demand based on what your task involves.
 | documentation.md | Fluent-specific documentation naming conventions | Writing or reviewing expertise files and procedural docs |
 | skills.md | Skill conversation design patterns for interactive flows | Creating or modifying interactive skills |
 | testing.md | Test types, output locations, and test configuration | Writing tests or debugging test failures |
+| testing/native-deps.md | Pinned terminal dependency preparation | When Zig cannot resolve a declared package during native test setup |
 | work-model.md | Work model storage and lifecycle transition patterns | Adding or changing split-stored model fields, aggregate mutations, or resumable lifecycle transitions |
 | learnings/INDEX.md | Durable learnings captured from review runs | When orienting to project conventions or checking known gotchas |
