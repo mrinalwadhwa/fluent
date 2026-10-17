@@ -41275,6 +41275,39 @@ fn attempt_run_checks_host_sandbox_before_provider_or_state_change() {
 
 #[test]
 fn scheduler_checks_host_sandbox_before_claiming_queued_work() {
+    assert_scheduler_checks_host_sandbox_before_claiming(0);
+}
+
+#[test]
+fn scheduler_checks_host_sandbox_before_claiming_after_slow_startup() {
+    assert_scheduler_checks_host_sandbox_before_claiming(6);
+}
+
+// The coordinator hashes its executable before preflight or queue diagnostics.
+// Bound this setup separately from assertions about rejection and cancellation.
+const SCHEDULER_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn scheduler_fixture_command(startup_delay_secs: u64) -> Command {
+    let binary = std::env::var_os("FLUENT_BIN_OVERRIDE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| assert_cmd::cargo::cargo_bin("fluent"));
+    if startup_delay_secs == 0 {
+        return Command::new(binary);
+    }
+    // Keep the delay and coordinator in the same owned process so cleanup
+    // cannot orphan a sleep child if the startup deadline expires.
+    let mut command = Command::new("python3");
+    command
+        .args([
+            "-c",
+            "import os, sys, time; time.sleep(float(sys.argv[1])); os.execv(sys.argv[2], sys.argv[2:])",
+        ])
+        .arg(startup_delay_secs.to_string())
+        .arg(binary);
+    command
+}
+
+fn assert_scheduler_checks_host_sandbox_before_claiming(startup_delay_secs: u64) {
     let tmp = TempDir::new().unwrap();
     let inaccessible_home = tmp.path().join("nested-sandbox-home");
     fs::write(&inaccessible_home, "outer sandbox owns this path").unwrap();
@@ -41285,7 +41318,7 @@ fn scheduler_checks_host_sandbox_before_claiming_queued_work() {
         .assert()
         .success();
 
-    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+    let mut command = scheduler_fixture_command(startup_delay_secs);
     command
         .current_dir(tmp.path())
         .env("HOME", &inaccessible_home)
@@ -41293,14 +41326,19 @@ fn scheduler_checks_host_sandbox_before_claiming_queued_work() {
         .args(["scheduler", "run", "--poll-seconds", "1"])
         .stderr(std::process::Stdio::piped());
     let mut child = OwnedFixtureProcess::spawn(&mut command);
-    let exited = poll_until(std::time::Duration::from_secs(5), || {
+    let exited = poll_until(SCHEDULER_STARTUP_TIMEOUT, || {
         child.try_wait().unwrap().is_some()
     });
     if !exited {
         child.terminate_and_wait();
-        panic!("scheduler did not reject the blocked host sandbox");
     }
     let output = child.wait_with_output().unwrap();
+    assert!(
+        exited,
+        "scheduler did not reject the blocked host sandbox: status={}; stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("FLUENT_HOST_SANDBOX_BLOCKED"));
 
