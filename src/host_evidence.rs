@@ -4432,6 +4432,105 @@ mod tests {
     }
 
     #[test]
+    fn historical_plan_review_settles_before_current_matrix_is_ready() {
+        let (project, workspace, store, candidate, evidence_path) =
+            plan_host_evidence_fixture("python3 tests/readiness.py");
+        let mut item = store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .responsibility = Some(work_model::CompletionResponsibility::Host);
+        let source =
+            writer_completion_matrix_ref(project.path(), attempt, &attempt.tasks[0]).unwrap();
+        let mut matrix: WriterCompletionMatrix =
+            serde_json::from_slice(&fs::read(project.path().join(&source.path)).unwrap()).unwrap();
+        matrix.rows[0].responsibility = Some(work_model::CompletionResponsibility::Host);
+        fs::write(
+            project.path().join(&source.path),
+            serde_json::to_vec_pretty(&matrix).unwrap(),
+        )
+        .unwrap();
+        store.write_work_item(&item).unwrap();
+        let recovery = attach_plan_row(
+            project.path(),
+            &store,
+            "work-1",
+            "attempt-1",
+            &candidate,
+            "plan:step-6",
+            &evidence_path,
+        )
+        .unwrap();
+        let mut item = store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        let review = attempt
+            .tasks
+            .iter_mut()
+            .find(|task| Some(task.id.as_str()) == recovery.targets[0].review_task_id.as_deref())
+            .unwrap();
+        let review_path = project
+            .path()
+            .join(&review.artifact_area.as_ref().unwrap().path)
+            .join("review.md");
+        fs::create_dir_all(review_path.parent().unwrap()).unwrap();
+        fs::write(&review_path, "Verdict: pass\n").unwrap();
+        work_model::set_task_terminal(review, TaskStatus::Complete);
+        let source =
+            writer_completion_matrix_ref(project.path(), attempt, &attempt.tasks[0]).unwrap();
+        let original = fs::read(project.path().join(&source.path)).unwrap();
+        fs::write(workspace.path().join("README.md"), "corrected candidate\n").unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["add", "README.md"],
+            "stage later Writer",
+        )
+        .unwrap();
+        crate::git::run(
+            workspace.path(),
+            &["commit", "-qm", "Correct candidate"],
+            "commit later Writer",
+        )
+        .unwrap();
+        let mut later = attempt.tasks[0].clone();
+        later.id = "attempt-1-write-2".into();
+        later.artifact_area.as_mut().unwrap().path =
+            work_artifact_path("work-1", "attempt-1", &later.id);
+        later.output.as_mut().unwrap().commit = crate::git::run_stdout(
+            workspace.path(),
+            &["rev-parse", "HEAD"],
+            "read later candidate",
+        )
+        .unwrap();
+        attempt.tasks.push(later);
+        // No current matrix exists yet. It cannot supply current acceptance,
+        // but the completed Review still belongs to its intact source Writer.
+        assert!(
+            crate::recovery_contracts::complete_owned_plan_evidence_review(
+                project.path(),
+                attempt,
+                true
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            attempt.evidence_recoveries[0].state,
+            EvidenceRecoveryState::Complete
+        );
+        assert_eq!(
+            fs::read(project.path().join(&source.path)).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_to_string(review_path).unwrap(), "Verdict: pass\n");
+        assert!(
+            completed_plan_host_matrix_ref(project.path(), attempt, attempt.tasks.last().unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
     fn plan_row_host_evidence_binds_unchanged_candidate_and_is_idempotent() {
         let command = "python3 tests/readiness.py";
         let (project, _workspace, store, candidate, evidence_path) =

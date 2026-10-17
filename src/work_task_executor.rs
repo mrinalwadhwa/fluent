@@ -1522,13 +1522,9 @@ fn complete_write_task(
             producer_id: config.task_id.to_string(),
             path: commit.clone(),
         });
-    let all_complete =
-        completed_item.attempts[attempt_index].all_tasks_complete_or_approach_superseded();
-    let (next_status, next_pause) = if all_complete {
-        (AttemptStatus::Complete, None)
-    } else {
-        (AttemptStatus::Executing, None)
-    };
+    // A Writer's Task result is not an Attempt result. Completion evidence,
+    // Reviews, Tester, and Learner still need admission.
+    let (next_status, next_pause) = (AttemptStatus::Executing, None);
     // Advance the Attempt only through the precedence boundary: a completion must
     // update its own Task but never overwrite an Attempt a peer already took
     // terminal (for example a transcript-pump pause).
@@ -11674,6 +11670,60 @@ mod tests {
             stored.attempts[0].pause_recovery,
             Some(PauseRecovery::TesterNoSandbox)
         );
+    }
+
+    #[test]
+    fn completed_writer_keeps_attempt_active_for_later_gates() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::git::run(tmp.path(), &["init", "-q"], "initialize Writer fixture").unwrap();
+        crate::git::run(
+            tmp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Add candidate",
+            ],
+            "commit Writer fixture",
+        )
+        .unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let mut item = WorkItem::planned("work-1", "Keep later gates pending");
+        item.add_initial_attempt("attempt-1").unwrap();
+        item.attempts[0].status = AttemptStatus::Executing;
+        item.attempts[0].tasks[0].status = TaskStatus::Executing;
+        let workspace = item.attempts[0].tasks[0].workspace_access.writes[0].clone();
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(tmp.path()));
+        let config = WorkTaskRunConfig {
+            project_root: tmp.path(),
+            store: &store,
+            work_item_id: "work-1",
+            attempt_id: "attempt-1",
+            task_id: "attempt-1-write-1",
+            resolver: &resolver,
+            extra_args: &[],
+            no_sandbox: false,
+            store_lock: None,
+        };
+        complete_write_task(
+            &config,
+            &workspace,
+            tmp.path(),
+            "main".into(),
+            "base".into(),
+            None,
+        )
+        .unwrap();
+        let saved = store.read_work_item("work-1").unwrap();
+        assert_eq!(saved.attempts[0].tasks[0].status, TaskStatus::Complete);
+        assert!(saved.attempts[0].tasks[0].output.is_some());
+        assert_eq!(saved.attempts[0].status, AttemptStatus::Executing);
+        assert!(saved.attempts[0].completed_at.is_none());
     }
 
     #[test]

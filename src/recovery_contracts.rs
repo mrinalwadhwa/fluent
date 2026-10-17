@@ -268,12 +268,12 @@ fn validate_plan_evidence_recovery_at(
         )?)?;
         // Keep current candidate admission strict, but validate each receipt
         // against the Writer it actually reviewed, including completed history.
-        let Some((current_writer, _, current_matrix)) =
-            owned_host_completion_matrix(project_root, attempt)?
-        else {
-            completed = false;
-            continue;
-        };
+        let current_writer = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .context("host evidence has no current Writer")?;
         let writer = attempt
             .tasks
             .iter()
@@ -330,6 +330,16 @@ fn validate_plan_evidence_recovery_at(
                 "historical Plan settlement requires a different current candidate"
             );
         } else {
+            let Some((validated_writer, _, current_matrix)) =
+                owned_host_completion_matrix(project_root, attempt)?
+            else {
+                completed = false;
+                continue;
+            };
+            anyhow::ensure!(
+                validated_writer.id == current_writer.id,
+                "current host Writer changed during validation"
+            );
             let current_row = current_matrix
                 .rows
                 .iter()

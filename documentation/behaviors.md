@@ -11174,3 +11174,32 @@ supported history and prevent the pinned predecessor from mutating new records
 or pending transactions, including after older envelopes are restored.
 Test: tests/binary.rs (no_change_completion_retry_reads_supported_predecessor)
 Test: tests/binary.rs (no_change_completion_retry_older_reader_refuses_mutation)
+
+### B10
+
+WHEN a completed no-change Writer has pending rows with partial claims, THE
+SYSTEM SHALL allow an audited corrective Writer only after validating the
+remaining work without crediting those claims, and SHALL retain the original
+matrix bytes.
+Test: src/writer_completion_recovery.rs (completed_no_change_with_pending_finding_schedules_corrective_writer)
+
+### B11
+
+WHEN a Writer Task completes, THE SYSTEM SHALL keep its Attempt active until
+completion evidence, required host checks, reviews, Tester, and Learner gates
+have been admitted.
+Test: src/work_task_executor.rs (completed_writer_keeps_attempt_active_for_later_gates)
+
+### B12
+
+WHEN a retained historical Writer matrix cannot be parsed, THE SYSTEM SHALL
+withhold its advisory completion identity without preventing validation of
+the current Writer's matrix or changing the historical bytes.
+Test: src/work_attempt_loop.rs (malformed_historical_matrix_cannot_block_current_writer_identity)
+
+### B13
+
+WHEN a passing Plan host Review belongs to an earlier Writer, THE SYSTEM SHALL
+allow explicit historical settlement against its bound source evidence even
+before the current Writer's matrix is ready, without granting current credit.
+Test: src/host_evidence.rs (historical_plan_review_settles_before_current_matrix_is_ready)

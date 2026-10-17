@@ -1812,9 +1812,7 @@ fn writer_matrix_has_pending_writer_work(
         .as_ref()
         .context("Writer completion contract is missing")?;
     let findings = crate::recovery_contracts::writer_completion_findings(project_root, task)?;
-    matrix
-        .status_against(contract, &task.id, &findings)
-        .map_err(|reason| anyhow::anyhow!("Writer completion matrix is invalid: {reason}"))?;
+    stalled_matrix_status(&matrix, contract, &task.id, &findings)?;
     Ok(matrix.rows.iter().any(|row| {
         row.responsibility.is_none_or(|responsibility| {
             responsibility == crate::work_model::CompletionResponsibility::Writer
@@ -3112,19 +3110,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(findings.len(), 1);
-        let matrix = crate::work_model::WriterCompletionMatrix::skeleton(
+        let mut matrix = crate::work_model::WriterCompletionMatrix::skeleton(
             attempt.writer_completion_contract.as_ref().unwrap(),
             task_id,
             &findings,
             None,
         )
         .unwrap();
+        matrix.rows[0]
+            .implementation_evidence
+            .push("Unverified partial note".to_string());
+        let original_matrix = serde_json::to_vec(&matrix).unwrap();
         fs::write(
             fixture
                 .project
                 .join(&area)
                 .join(crate::recovery_contracts::WRITER_COMPLETION_MATRIX_FILE),
-            serde_json::to_vec(&matrix).unwrap(),
+            &original_matrix,
         )
         .unwrap();
 
@@ -3154,6 +3156,16 @@ mod tests {
         );
         assert_eq!(attempt.tasks[2].status, TaskStatus::Superseded);
         assert_eq!(attempt.tasks[3].status, TaskStatus::Planned);
+        assert_eq!(
+            fs::read(
+                fixture
+                    .project
+                    .join(&area)
+                    .join(crate::recovery_contracts::WRITER_COMPLETION_MATRIX_FILE)
+            )
+            .unwrap(),
+            original_matrix
+        );
         assert!(attempt.tasks[3].input_artifacts.iter().any(|artifact| {
             artifact.producer_id == PRODUCER && artifact.path.ends_with("/recovery.json")
         }));

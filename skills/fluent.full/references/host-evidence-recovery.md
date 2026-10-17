@@ -732,6 +732,11 @@ its completion matrix, inspect `fluent work-item show <work-item>` and the
 source matrix. An explicit decision schedules one corrective Writer on the
 same Attempt:
 
+Partial claims on pending Writer rows do not count as completion. Recovery
+checks a copy with those claims cleared and retains the original matrix bytes
+in the audit; the corrective Writer must submit valid evidence for any row it
+marks complete.
+
 ```sh
 fluent attempt repair-writer-completion <work-item> <attempt> --resolution "<approved correction>"
 fluent attempt run <work-item> <attempt>

@@ -9966,7 +9966,14 @@ fn writer_completion_identity(
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let matrix: crate::work_model::WriterCompletionMatrix = serde_json::from_slice(&bytes)?;
+    // This identity is advisory for comparing Writer runs. A malformed
+    // historical matrix may be retained as the bound source of an audited
+    // completion recovery. The current matrix is validated by the completion
+    // gate before this comparison; historical bytes cannot become authority.
+    let matrix: crate::work_model::WriterCompletionMatrix = match serde_json::from_slice(&bytes) {
+        Ok(matrix) => matrix,
+        Err(_) => return Ok(None),
+    };
     let findings = crate::recovery_contracts::writer_completion_findings(project_root, task)?;
     if matrix
         .status_against(contract, &task.id, &findings)
@@ -22343,6 +22350,36 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         });
         store.create_work_item(&item).unwrap();
         store
+    }
+
+    #[test]
+    fn malformed_historical_matrix_cannot_block_current_writer_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_completed_writer_matrix_fixture(tmp.path(), true);
+        let item = store.read_work_item("matrix-work").unwrap();
+        let attempt = &item.attempts[0];
+        let current = &attempt.tasks[0];
+        let mut historical = current.clone();
+        historical.id = "historical-writer".into();
+        historical.artifact_area.as_mut().unwrap().path =
+            ".fluent/work/artifacts/matrix-work/attempt-1/historical-writer".into();
+        let path = tmp
+            .path()
+            .join(&historical.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{malformed retained evidence\n").unwrap();
+        assert!(
+            writer_completion_identity(tmp.path(), attempt, &historical)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            writer_completion_identity(tmp.path(), attempt, current)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(fs::read(path).unwrap(), b"{malformed retained evidence\n");
     }
 
     fn make_completed_writer_progress_matrix_fixture(project_root: &Path) -> WorkModelStore {
