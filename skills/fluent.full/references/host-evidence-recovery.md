@@ -664,8 +664,8 @@ matrix bytes and completed source Task; do not rewrite host-owned rows or replac
 the matrix with invented passing evidence. This route requires the immutable
 completion contract and retained source transcript, output, assignment, and
 matrix. The candidate must still be clean at the recorded commit, all execution
-owners must be settled, and the Attempt must remain uncanceled and within its
-Writer recovery boundary. A missing matrix, changed source evidence or assignment,
+owners must be settled, and the Attempt must remain uncanceled.
+A missing matrix, changed source evidence or assignment,
 or another pause kind is not this recovery case. A valid matrix qualifies only
 for the separate stalled-Writer case below or unfinished no-change work.
 

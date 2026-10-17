@@ -1,4 +1,4 @@
-//! Audited recovery for a Writer that stopped before producing a valid result.
+//! Audited recovery for paused Writers and unfinished Writer-owned work.
 //!
 //! A Writer can finish its model session without changing the candidate. In
 //! that case it must either write the required `no-change.json` declaration or
@@ -7,6 +7,9 @@
 //! and creating an endless sequence of duplicate retries. This module records
 //! one explicit recovery, retries the same task, and marks only those later
 //! duplicate Writer tasks as superseded history.
+//! Completed Writers retain their original evidence while a bound corrective
+//! Writer repairs malformed completion, unfinished no-change work, or proven
+//! repeated stagnation after committed continuations.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -230,9 +233,12 @@ fn validate_prior_recoveries(
             }
             continue;
         }
+        // The completed replacement may itself be the new stalled source.
+        // Its prior decision remains history; only a distinct decision below
+        // can authorize another corrective Writer.
         anyhow::ensure!(
             source_index <= replacement_index
-                && replacement_index < current_index
+                && replacement_index <= current_index
                 && source.kind == TaskKind::Write
                 && source.status == TaskStatus::Complete
                 && source_output.commit == authority.candidate_commit
@@ -256,7 +262,7 @@ fn validate_prior_recoveries(
     Ok(())
 }
 
-/// Retry the exact paused Writer through one audited, idempotent operation.
+/// Retry or schedule a corrective Writer through one audited, idempotent operation.
 /// Existing Task and artifact history is retained. Planned Writer tasks that
 /// were appended after the paused task by an older retry are marked
 /// `superseded`; they are not silently deleted or counted as valid next work.
@@ -1248,8 +1254,8 @@ fn existing_recovery(
     {
         bail!("existing Writer-completion recovery does not match this authorization or Attempt");
     }
-    // A settled recovery is history once a later completed Writer has its own
-    // malformed completion matrix. Validate the old authority before selecting
+    // A settled recovery is history once a completed Writer has another
+    // eligible completion pause. Validate the old authority before selecting
     // the current incident; its resolution must not authorize the new Writer.
     if let Ok(eligible) = inspect_eligible(project_root, attempt)
         && eligible.task_id != authority.task_id
@@ -2094,6 +2100,8 @@ mod tests {
             )
             .unwrap();
         }
+        // Include the coordination lock file in byte-preservation baselines.
+        drop(crate::land_lock::acquire(&crate::land_lock::lock_path(&fixture.project)).unwrap());
         fixture
     }
 
@@ -2175,6 +2183,472 @@ mod tests {
                         .is_empty()
                 );
             }
+        }
+    }
+
+    fn snapshot_work(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(path: &Path, files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.insert(path.clone(), Vec::new());
+                    visit(&path, files);
+                } else {
+                    files.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+        }
+        let mut files = std::collections::BTreeMap::new();
+        visit(&root.join(".fluent/work"), &mut files);
+        files
+    }
+
+    #[test]
+    fn replays_stalled_committed_writer_recovery() {
+        let fixture = stalled_committed_fixture(true);
+        let resolution = "Finish the pending work after inspecting the stalled Writers.";
+        let first = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            resolution,
+        )
+        .unwrap();
+        let before = fixture.store.read_work_item("work-1").unwrap();
+        let bytes = snapshot_work(&fixture.project);
+        let replay = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            resolution,
+        )
+        .unwrap();
+        assert_eq!(
+            replay,
+            WriterCompletionRecovery {
+                already_applied: true,
+                ..first
+            }
+        );
+        assert_eq!(fixture.store.read_work_item("work-1").unwrap(), before);
+        assert_eq!(snapshot_work(&fixture.project), bytes);
+        assert_eq!(before.attempts[0].tasks.len(), 4);
+        assert_eq!(before.attempts[0].recovery_operations.len(), 1);
+    }
+
+    #[test]
+    fn preserves_prior_recovery_when_stalled_successor_commits() {
+        let fixture = stalled_committed_fixture(false);
+        let first_resolution = "Retry the original stalled Writer.";
+        let first = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            first_resolution,
+        )
+        .unwrap();
+        let mut item = fixture.store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        let mut output = attempt.tasks[2].output.clone().unwrap();
+        output.base_commit = Some(output.commit.clone());
+        fs::write(
+            fixture.workspace.join("candidate.txt"),
+            "another committed continuation\n",
+        )
+        .unwrap();
+        git::run(
+            &fixture.workspace,
+            &["add", "candidate.txt"],
+            "stage successor",
+        )
+        .unwrap();
+        git::run(
+            &fixture.workspace,
+            &["commit", "-qm", "Continue implementation"],
+            "commit successor",
+        )
+        .unwrap();
+        output.commit = git::run_stdout(
+            &fixture.workspace,
+            &["rev-parse", "HEAD"],
+            "successor candidate",
+        )
+        .unwrap();
+        let task = &mut attempt.tasks[3];
+        task.status = TaskStatus::Complete;
+        task.output = Some(output.clone());
+        let area = fixture
+            .project
+            .join(&task.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(&area).unwrap();
+        fs::write(area.join("transcript.jsonl"), "successor transcript\n").unwrap();
+        let mut matrix: crate::work_model::WriterCompletionMatrix = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .project
+                    .join(&attempt.tasks[2].artifact_area.as_ref().unwrap().path)
+                    .join("writer-completion.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        matrix.task_id = first.task_id.clone();
+        fs::write(
+            area.join("writer-completion.json"),
+            serde_json::to_vec_pretty(&matrix).unwrap(),
+        )
+        .unwrap();
+        let mut run = attempt.writer_runs.last().unwrap().clone();
+        run.task_id = first.task_id.clone();
+        run.continuation += 1;
+        run.candidate_commit = output.commit;
+        attempt.writer_runs.push(run);
+        attempt.status = AttemptStatus::NeedsUser;
+        attempt.pause_kind = Some(PauseKind::WriterCompletion);
+        fixture
+            .store
+            .mutate_work_item("work-1", |stored| {
+                *stored = item.clone();
+                Ok(())
+            })
+            .unwrap();
+        let before = snapshot_work(&fixture.project);
+        assert!(
+            repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                first_resolution
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot_work(&fixture.project), before);
+        assert!(recovery_action(&fixture.project, &item.attempts[0]).is_some());
+        let second = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            "Approve the newly committed successor after inspecting its remaining work.",
+        )
+        .unwrap();
+        assert_eq!(second.task_id, "attempt-1-write-5");
+        let after = fixture.store.read_work_item("work-1").unwrap();
+        assert_eq!(after.attempts[0].tasks[..4], item.attempts[0].tasks);
+        assert_eq!(after.attempts[0].recovery_operations.len(), 2);
+        for (path, bytes) in before.iter().filter(|(path, _)| {
+            path.starts_with(fixture.project.join(".fluent/work/artifacts")) && path.is_file()
+        }) {
+            assert_eq!(fs::read(path).unwrap(), *bytes, "{}", path.display());
+        }
+        assert!(
+            planned_successor_resume_ready(&fixture.project, &after, &after.attempts[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_valid_matrix_completion_pause() {
+        let fixture = stalled_committed_fixture(false);
+        fixture
+            .store
+            .mutate_work_item("work-1", |item| {
+                // A blocked Writer with a valid matrix is insufficient: this pause
+                // lacks the two saved continuations required by the stop rule.
+                item.attempts[0].writer_runs.drain(..2);
+                Ok(())
+            })
+            .unwrap();
+        let item = fixture.store.read_work_item("work-1").unwrap();
+        let before = snapshot_work(&fixture.project);
+        assert!(status_recovery_action(&fixture.project, &item.attempts[0]).is_none());
+        let error = repair(
+            &fixture.project,
+            &fixture.store,
+            "work-1",
+            "attempt-1",
+            "Inspect an unrelated completion pause.",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not record two stagnant continuations"),
+            "{error:#}"
+        );
+        assert_eq!(snapshot_work(&fixture.project), before);
+    }
+
+    #[test]
+    fn rejects_unrelated_or_changed_stalled_writer_recovery() {
+        use crate::work_model::{
+            WriterCompletionMatrix, WriterCompletionState, WriterOutcome, WriterRunKind,
+            WriterVerificationClaim, WriterVerificationResult,
+        };
+
+        for defect in [
+            "regressed",
+            "altered-row",
+            "historical-matrix",
+            "run-candidate",
+            "run-count",
+            "uncommitted-continuation",
+            "one-continuation",
+            "initial-run",
+            "unrelated-pause",
+            "later-task",
+            "external-only",
+            "dirty",
+            "head",
+            "task-owner",
+            "execution-owner",
+            "learner-owner",
+            "executing",
+        ] {
+            let fixture = stalled_committed_fixture(false);
+            let mut item = fixture.store.read_work_item("work-1").unwrap();
+            let attempt = &mut item.attempts[0];
+            let source = attempt.tasks.last().unwrap().clone();
+            let area = fixture
+                .project
+                .join(&source.artifact_area.as_ref().unwrap().path);
+            let matrix_path = area.join("writer-completion.json");
+            let mut matrix: WriterCompletionMatrix =
+                serde_json::from_slice(&fs::read(&matrix_path).unwrap()).unwrap();
+            let mut lease = None;
+            match defect {
+                "regressed" | "external-only" => {
+                    for (index, task) in attempt.tasks.iter().enumerate() {
+                        let path = fixture
+                            .project
+                            .join(&task.artifact_area.as_ref().unwrap().path)
+                            .join("writer-completion.json");
+                        let mut saved: WriterCompletionMatrix =
+                            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                        for (row_index, row) in saved.rows.iter_mut().enumerate() {
+                            // Swap completed rows without reducing the count: only
+                            // comparing counts would miss this regression.
+                            if row.responsibility.is_none()
+                                && (defect == "external-only"
+                                    || row_index == usize::from(index == 2))
+                            {
+                                row.state = WriterCompletionState::Complete;
+                                row.implementation_evidence = vec!["candidate.txt".into()];
+                                row.verification = vec![WriterVerificationClaim {
+                                    command: "true".into(),
+                                    result: WriterVerificationResult::Pass,
+                                }];
+                            }
+                        }
+                        attempt.writer_runs[index].completed_matrix =
+                            if defect == "external-only" { 2 } else { 1 };
+                        fs::write(path, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+                    }
+                }
+                "altered-row" => {
+                    matrix.rows[0].requirement = "Replace the approved obligation".into();
+                    fs::write(&matrix_path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+                }
+                "historical-matrix" => fs::write(
+                    fixture
+                        .project
+                        .join(&attempt.tasks[1].artifact_area.as_ref().unwrap().path)
+                        .join("writer-completion.json"),
+                    "{}",
+                )
+                .unwrap(),
+                "run-candidate" => attempt.writer_runs[2].candidate_commit = "changed".into(),
+                "run-count" => attempt.writer_runs[1].checked_required += 1,
+                "uncommitted-continuation" => {
+                    let output = attempt.tasks[1].output.as_mut().unwrap();
+                    output.base_commit = Some(output.commit.clone());
+                }
+                "one-continuation" => {
+                    attempt.writer_runs.remove(0);
+                }
+                "initial-run" => attempt.writer_runs[1].kind = WriterRunKind::Initial,
+                "unrelated-pause" => attempt.writer_runs[2].outcome = WriterOutcome::Continue,
+                "later-task" => {
+                    let mut later = source.clone();
+                    later.id = "attempt-1-write-4".into();
+                    later.status = TaskStatus::Planned;
+                    later.output = None;
+                    attempt.tasks.push(later);
+                }
+                "dirty" => fs::write(fixture.workspace.join("uncommitted.txt"), "dirty").unwrap(),
+                "head" => git::run(
+                    &fixture.workspace,
+                    &["commit", "--allow-empty", "-qm", "Change candidate"],
+                    "drift candidate",
+                )
+                .unwrap(),
+                "task-owner" => {
+                    lease = Some(
+                        crate::lease::acquire_blocking(&crate::lease::task_lock_path(
+                            &fixture.project,
+                            "work-1",
+                            &source.id,
+                        ))
+                        .unwrap(),
+                    )
+                }
+                "execution-owner" => {
+                    lease = Some(
+                        crate::lease::acquire_blocking(&area.join("execution-owner.lock")).unwrap(),
+                    )
+                }
+                "learner-owner" => {
+                    lease = Some(
+                        crate::lease::acquire_blocking(&crate::lease::learner_lock_path(
+                            &fixture.project,
+                            "work-1",
+                            "attempt-1",
+                        ))
+                        .unwrap(),
+                    )
+                }
+                "executing" => {
+                    attempt.tasks[1].status = TaskStatus::Executing;
+                    attempt.tasks[1].output = None;
+                }
+                _ => unreachable!(),
+            }
+            fixture
+                .store
+                .mutate_work_item("work-1", |stored| {
+                    *stored = item.clone();
+                    Ok(())
+                })
+                .unwrap();
+            let before = snapshot_work(&fixture.project);
+            assert!(
+                recovery_action(&fixture.project, &item.attempts[0]).is_none(),
+                "{defect}"
+            );
+            assert!(
+                status_recovery_action(&fixture.project, &item.attempts[0]).is_none(),
+                "{defect}"
+            );
+            let result = repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                "Approve only proven stagnation.",
+            );
+            assert!(result.is_err(), "{defect}: {result:?}");
+            assert_eq!(snapshot_work(&fixture.project), before, "{defect}");
+            drop(lease);
+        }
+    }
+
+    #[test]
+    fn rejects_changed_stalled_writer_recovery_evidence_on_replay() {
+        for defect in [
+            "matrix",
+            "contract",
+            "assignment",
+            "transcript",
+            "output",
+            "audit",
+            "resolution",
+            "dirty",
+            "head",
+            "owner",
+        ] {
+            let fixture = stalled_committed_fixture(true);
+            let resolution = "Authorize one retry against this exact evidence.";
+            let recovered = repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                resolution,
+            )
+            .unwrap();
+            let mut item = fixture.store.read_work_item("work-1").unwrap();
+            let attempt = &mut item.attempts[0];
+            let source = &mut attempt.tasks[2];
+            let area = fixture
+                .project
+                .join(&source.artifact_area.as_ref().unwrap().path);
+            let mut lease = None;
+            match defect {
+                "matrix" | "transcript" | "audit" => {
+                    let path = match defect {
+                        "matrix" => area.join("writer-completion.json"),
+                        "transcript" => area.join("transcript.jsonl"),
+                        _ => fixture.project.join(&recovered.audit_artifact),
+                    };
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(b'\n');
+                    fs::write(path, bytes).unwrap();
+                }
+                "contract" => attempt
+                    .writer_completion_contract
+                    .as_mut()
+                    .unwrap()
+                    .requirements[0]
+                    .requirement
+                    .push_str(" changed"),
+                "assignment" => source.workspace_access.reads.push(WorkspaceRef {
+                    id: "new-input".into(),
+                    path: ".".into(),
+                }),
+                "output" => source.output.as_mut().unwrap().source_branch = "changed".into(),
+                "resolution" => {}
+                "dirty" => fs::write(fixture.workspace.join("uncommitted.txt"), "dirty").unwrap(),
+                "head" => git::run(
+                    &fixture.workspace,
+                    &["commit", "--allow-empty", "-qm", "Change candidate"],
+                    "drift candidate",
+                )
+                .unwrap(),
+                "owner" => {
+                    lease = Some(
+                        crate::lease::acquire_blocking(&area.join("execution-owner.lock")).unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            fixture
+                .store
+                .mutate_work_item("work-1", |stored| {
+                    *stored = item.clone();
+                    Ok(())
+                })
+                .unwrap();
+            let before = snapshot_work(&fixture.project);
+            let resolution = if defect == "resolution" {
+                "A different decision"
+            } else {
+                resolution
+            };
+            let result = repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                resolution,
+            );
+            assert!(result.is_err(), "{defect}: {result:?}");
+            assert_eq!(snapshot_work(&fixture.project), before, "{defect}");
+            if defect != "resolution" {
+                assert!(
+                    planned_successor_resume_ready(&fixture.project, &item, &item.attempts[0])
+                        .is_err(),
+                    "{defect}"
+                );
+                assert_eq!(
+                    snapshot_work(&fixture.project),
+                    before,
+                    "{defect}: resume changed evidence"
+                );
+            }
+            drop(lease);
         }
     }
 

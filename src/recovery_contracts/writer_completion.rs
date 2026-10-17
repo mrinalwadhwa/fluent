@@ -272,8 +272,7 @@ pub(crate) fn validated_writer_context(
             .output
             .as_ref()
             .context("Writer-completion recovery source has no output")?;
-        if output.no_change.is_some()
-            && authority.source_matrix_sha256.is_some()
+        if authority.source_matrix_sha256.is_some()
             && task.output.is_none()
             && matches!(task.status, TaskStatus::Planned | TaskStatus::Executing)
         {
