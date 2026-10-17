@@ -94,6 +94,11 @@ fn main() -> Result<()> {
     let is_update_command = matches!(cli.command, Some(Commands::Update));
 
     match cli.command {
+        Some(Commands::AgentSource { command }) => match command {
+            fluent::cli::AgentSourceCommands::Snapshot { project_root } => {
+                fluent::dashboard_sources::helper_snapshot(&project_root)?;
+            }
+        },
         Some(Commands::Terminal { command }) => match command {
             TerminalCommands::List { source } => {
                 println!(

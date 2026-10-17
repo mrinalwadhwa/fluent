@@ -42,6 +42,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Serve a bounded SSH source protocol (invoked by the dashboard)
+    #[command(hide = true)]
+    AgentSource {
+        #[command(subcommand)]
+        command: AgentSourceCommands,
+    },
     /// List or attach to a managed worker terminal
     Terminal {
         #[command(subcommand)]
@@ -1546,4 +1552,12 @@ mod tests {
                 && resolution == "Adopt the reviewed design."
         ));
     }
+}
+
+#[derive(Subcommand)]
+pub enum AgentSourceCommands {
+    Snapshot {
+        #[arg(long)]
+        project_root: PathBuf,
+    },
 }

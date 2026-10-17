@@ -195,3 +195,23 @@ pub fn navigate_and_refresh(
     );
     Ok(())
 }
+
+/// Render the production project view with multiple transport sources.
+pub fn render_sources(sources: Vec<project::SourceSnapshot>) -> String {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut app = App::new(snapshot::DashboardSnapshot {
+        rows: Vec::new(),
+        errors: Vec::new(),
+        sources,
+        project_view: true,
+    });
+    app.resize(160, 35);
+    let mut view = Terminal::new(TestBackend::new(160, 35)).unwrap();
+    view.draw(|frame| render::draw(frame, &app)).unwrap();
+    view.backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}

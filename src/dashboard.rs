@@ -29,7 +29,17 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
 pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> Result<()> {
     let home = crate::scheduler_service::runtime_home(search_root)?;
     let (paths, discovery_errors) = project::discover_paths(search_root, explicit, &home);
-    let snapshot = load_project_snapshot(&paths, discovery_errors);
+    let mut snapshot = load_project_snapshot(&paths, discovery_errors);
+    let config = match crate::dashboard_sources::load_sources(&home) {
+        Ok(config) => config,
+        Err(error) => {
+            snapshot.errors.push(format!("SSH sources: {error:#}"));
+            Vec::new()
+        }
+    };
+    let mut remote = crate::dashboard_sources::RemoteSources::new(config, Default::default());
+    remote.refresh();
+    snapshot.sources.extend(remote.snapshots());
     let mut session = DashboardTerminal::open()?;
     let mut app = App::new(snapshot);
     let size = session.terminal.size()?;
@@ -38,6 +48,13 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
     let mut embedded: Option<crate::terminal_view::EmbeddedTerminal> = None;
 
     loop {
+        if remote.poll() {
+            let mut snapshot = app.snapshot.clone();
+            snapshot.sources.retain(|s| !s.id.starts_with("ssh:"));
+            snapshot.sources.extend(remote.snapshots());
+            snapshot.errors = project_diagnostics(&snapshot.sources);
+            app.refresh(snapshot);
+        }
         if let Some(terminal) = &mut embedded {
             if terminal.focused() && !app.terminal_visible() {
                 terminal.release_focus();
@@ -86,6 +103,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                             let (width, height) = session.size()?;
                             resize_terminal(&mut app, embedded.as_mut(), width, height);
                             refresh_projects(search_root, explicit, &home, &mut app);
+                            remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                         if let Effect::ToggleMouse(enabled) = effect {
@@ -93,6 +111,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         }
                         if matches!(effect, Effect::Refresh) {
                             refresh_projects(search_root, explicit, &home, &mut app);
+                            remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                     }
@@ -105,6 +124,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
         }
         if poll_due(Instant::now(), next_poll) {
             refresh_projects(search_root, explicit, &home, &mut app);
+            remote.refresh();
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
         if app.should_quit() {
@@ -272,12 +292,26 @@ fn refresh_projects(root: &Path, explicit: &[PathBuf], home: &Path, app: &mut Ap
         app.snapshot
             .sources
             .iter()
+            .filter(|source| !source.id.starts_with("ssh:"))
             .map(|source| source.path.clone()),
     );
     paths.sort();
     paths.dedup();
     let mut next = app.snapshot.clone();
-    next.sources = project::refresh_sources(&next.sources, &paths);
+    let remote = next
+        .sources
+        .iter()
+        .filter(|s| s.id.starts_with("ssh:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let local = next
+        .sources
+        .iter()
+        .filter(|s| !s.id.starts_with("ssh:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    next.sources = project::refresh_sources(&local, &paths);
+    next.sources.extend(remote);
     next.errors = errors;
     next.errors.extend(project_diagnostics(&next.sources));
     app.refresh(next);

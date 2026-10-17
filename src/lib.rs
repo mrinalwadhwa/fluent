@@ -16,6 +16,7 @@ pub mod config;
 pub mod content;
 pub mod credential;
 pub mod dashboard;
+pub mod dashboard_sources;
 pub mod execution;
 pub mod fargate;
 pub mod fargate_bootstrap;

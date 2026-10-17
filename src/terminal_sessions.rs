@@ -83,6 +83,7 @@ pub enum TerminalLifecycle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalDescriptor {
     pub schema_version: u32,
     pub source_id: String,
