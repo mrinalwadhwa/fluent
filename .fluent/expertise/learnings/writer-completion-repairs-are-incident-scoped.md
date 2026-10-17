@@ -6,10 +6,11 @@ metadata:
 ---
 
 A Writer-completion approval authorizes one source Writer and candidate, not
-every later failure in the same Attempt. When another completed Writer has a
-malformed matrix, select that current source before deciding whether an audit
-is a replay. Validate earlier attached audits and their completed replacement
-Tasks as history, then require a distinct decision and new audit, operation,
+every later failure in the same Attempt. When a completed Writer has another
+eligible completion pause, select that current source before deciding whether
+an audit is a replay. The completed replacement from an earlier repair can itself
+be the new stalled source. Validate earlier attached audits and their completed
+replacement Tasks as history, then require a distinct decision and new audit, operation,
 and corrective Task for the later incident. Preserve both historical authority
 shapes: older output-free audits and committed-matrix audits have different
 source and operation bindings.

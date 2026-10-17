@@ -8,9 +8,9 @@ metadata:
 Writer-completion recovery keeps two compatible authority shapes under the
 persisted schema. Older audits omit `source_matrix_sha256` and bind the recovery
 operation to the Task named by `task_id`. An audit for a completed Writer's
-malformed matrix or unfinished Writer-owned work after a no-change completion
-includes `source_matrix_sha256`: `task_id` names the new corrective Writer,
-while the operation binds `source_writer_task_id`, the completed source Writer.
+malformed matrix, unfinished no-change work, or proven stagnation after committed
+continuations includes `source_matrix_sha256`: `task_id` names the new corrective
+Writer, while the operation binds `source_writer_task_id`, the completed source Writer.
 The optional digest selects this interpretation; do not infer it from Task
 order or change the binding for older audits.
 
@@ -23,6 +23,10 @@ Keep the completed source Task and its artifacts intact, and give the corrective
 Writer a fresh matrix from the contract. Approval schedules a Writer; a
 separate resume executes it.
 
+For a valid incomplete committed matrix, preserve the saved-history admission
+contract recorded in [decisions.md](../decisions.md#keep-saved-writer-history-aligned-with-stagnation-recovery).
+The pause label and pending rows alone do not prove stagnation.
+
 A valid no-change output does not itself finish every completion requirement.
 Validate the matrix against the immutable contract and review findings, then
 schedule a separate Writer only when a row assigned to the Writer remains
@@ -34,4 +38,5 @@ revalidate that authority before launch.
 
 Related: [[recovery-contracts-form-neutral-boundary]],
 [[reused-recovery-authority-revalidates-publication]],
+[[composed-recovery-validates-partial-workspace]],
 [[corrective-writers-preserve-candidate-lineage]].
