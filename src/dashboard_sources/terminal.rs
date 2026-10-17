@@ -51,7 +51,33 @@ impl Pty {
         }
         nonblocking(&master)?;
         let child = attachment.spawn_in_pty(&slave)?;
-        Ok(Self { master, child })
+        let mut client = Self { master, child };
+        drop(slave);
+        // Admit input only after the terminal client has entered raw mode.
+        // Otherwise its startup tcsetattr can flush newly accepted keystrokes.
+        let start = Instant::now();
+        loop {
+            attachment.validate_live()?;
+            ensure!(
+                client.child.try_wait()?.is_none(),
+                "remote terminal client exited during setup"
+            );
+            let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+            ensure!(
+                unsafe { libc::tcgetattr(client.master.as_raw_fd(), attributes.as_mut_ptr()) } == 0,
+                "reading remote PTY modes failed"
+            );
+            let attributes = unsafe { attributes.assume_init() };
+            if attributes.c_lflag & (libc::ICANON | libc::ECHO) == 0 {
+                break;
+            }
+            ensure!(
+                start.elapsed() < Duration::from_secs(5),
+                "remote terminal client did not enter raw mode"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(client)
     }
     fn resize(&self, columns: u16, rows: u16) -> Result<()> {
         let size = libc::winsize {

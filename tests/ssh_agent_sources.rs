@@ -317,3 +317,94 @@ fn ssh_fullscreen_pty_child() {
 fn terminal_fixture(identity: TerminalIdentity) -> anyhow::Result<TerminalSession> {
     TerminalSession::start_fixture(identity, "sleep 60")
 }
+
+#[test]
+fn ssh_disconnect_discards_unsent_input() {
+    use crossterm::event::Event;
+    use fluent::terminal_view::EmbeddedTerminal;
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = terminal_fixture(TerminalIdentity::fixture(
+        root.path(),
+        "remote",
+        "attempt-1",
+        "writer",
+    ))
+    .unwrap();
+    let mut view = EmbeddedTerminal::observe_ssh(
+        fake_ssh(root.path()),
+        source(root.path()),
+        owner.descriptor().clone(),
+        60,
+        10,
+    )
+    .unwrap();
+    view.acquire_control().unwrap();
+    // Queue input locally and break the connection before the next IO poll.
+    view.send(Event::Paste("must-not-replay".into())).unwrap();
+    let pid: i32 = std::fs::read_to_string(root.path().join("ssh.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    wait_for(|| {
+        view.refresh();
+        view.state_label().contains("Disconnected")
+    });
+    assert!(!view.has_control());
+    assert!(!view.focused());
+    assert!(owner.is_live().unwrap());
+    view.reconnect().unwrap();
+    assert_eq!(view.descriptor(), owner.descriptor());
+    assert!(!view.has_control());
+    assert!(view.send(Event::Paste("still-observe".into())).is_err());
+    view.acquire_control().unwrap();
+    view.send(Event::Paste("fresh-input".into())).unwrap();
+    wait_for(|| {
+        view.refresh();
+        std::fs::read_to_string(root.path().join("writer.input"))
+            .unwrap_or_default()
+            .contains("fresh-input")
+    });
+    let received = std::fs::read_to_string(root.path().join("writer.input")).unwrap();
+    assert!(!received.contains("must-not-replay"));
+    assert!(!received.contains("still-observe"));
+    drop(view);
+    owner.stop().unwrap();
+}
+
+#[test]
+fn reconnect_never_restarts_or_retargets_worker() {
+    use fluent::terminal_view::EmbeddedTerminal;
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "remote", "attempt-1", "writer");
+    let mut owner = terminal_fixture(identity.clone()).unwrap();
+    let original = owner.descriptor().clone();
+    let mut view = EmbeddedTerminal::observe_ssh(
+        fake_ssh(root.path()),
+        source(root.path()),
+        original.clone(),
+        60,
+        10,
+    )
+    .unwrap();
+    owner.stop().unwrap();
+    let mut replacement = terminal_fixture(identity).unwrap();
+    let replacement_descriptor = replacement.descriptor().clone();
+    assert_ne!(
+        replacement_descriptor.execution_generation,
+        original.execution_generation
+    );
+    assert!(view.reconnect().is_err());
+    assert!(
+        view.state_label().contains("Disconnected"),
+        "{}",
+        view.state_label()
+    );
+    assert_eq!(view.descriptor(), &original);
+    assert!(!view.has_control());
+    assert!(view.acquire_control().is_err());
+    assert_eq!(replacement.descriptor(), &replacement_descriptor);
+    assert!(replacement.is_live().unwrap());
+    drop(view);
+    replacement.stop().unwrap();
+}

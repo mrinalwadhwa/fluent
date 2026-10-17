@@ -57,7 +57,11 @@ impl SshTerminal {
             self.descriptor.clone(),
             self.size.0,
             self.size.1,
-        )?;
+        )
+        .map_err(|error| {
+            self.diagnostic = Some(format!("{error:#}"));
+            error
+        })?;
         self.screen = Screen::new(self.size.0, self.size.1)?;
         self.connection = Some(connection);
         self.diagnostic = None;
@@ -99,6 +103,8 @@ impl SshTerminal {
             "Ended · input unavailable".into()
         } else if let Some(reason) = &self.diagnostic {
             format!("Disconnected · {reason} · t reconnect")
+        } else if self.connection.is_none() {
+            "Disconnected · t reconnect".into()
         } else if self.has_control() && self.focused {
             "Control · Ctrl-] navigate".into()
         } else if self.has_control() {

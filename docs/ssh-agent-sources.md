@@ -51,3 +51,11 @@ The transport carries bounded protocol messages over an SSH PTY. The helper
 keeps socket paths and process receipts on the remote host. It checks runtime
 liveness independently of display output and closes the attachment when the
 client stops responding. Closing a display never cancels or restarts a worker.
+
+When SSH disconnects, the terminal shows `Disconnected`, releases input focus,
+and discards queued local input. Press `t` to reconnect the original invocation;
+it always starts in Observe and requires `i` to request Control again. If that
+generation ended or changed while disconnected, Fluent reports it unavailable.
+It never follows a replacement process or restarts an agent. Select the new
+worker explicitly to attach to a later invocation. Workflow execution, provider
+evidence, cancellation, and successful-Learner readiness remain remote-owned.
