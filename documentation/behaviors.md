@@ -11231,3 +11231,13 @@ New failures, ambiguous attribution, changed commands, or altered evidence
 SHALL block reuse.
 Test: src/tester_evidence.rs (accepted_command_covers_only_its_original_failed_tests)
 Test: src/tester_evidence.rs (reviewed_host_proof_binds_source_and_expertise_ancestry)
+
+## Retry an interrupted landing
+
+### B1
+
+WHEN a landing retry finds an executing Rebase Task followed by a completed
+Rebase Task, THE SYSTEM SHALL supersede the older reservation in the retry's
+atomic state update and preserve the completed Task and result. A latest
+executing Rebase Task SHALL block retry without changing saved state.
+Test: src/work_merge_executor.rs (failed_landing_retry_restores_reviewed_attempt_atomically)

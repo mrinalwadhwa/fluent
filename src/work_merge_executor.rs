@@ -2820,18 +2820,29 @@ fn set_candidate_executing(
                     ),
                 });
             }
-            if let Some(task) = attempt
-                .tasks
-                .iter()
-                .find(|task| task.kind == TaskKind::Rebase && task.status == TaskStatus::Executing)
-            {
-                return Err(WorkModelError::MergeCandidateCorrectionIneligible {
-                    candidate_id: candidate_id.to_string(),
-                    reason: format!(
-                        "landing Rebase Task {} is still executing; wait for it to settle",
-                        task.id
-                    ),
-                });
+            for index in 0..attempt.tasks.len() {
+                if attempt.tasks[index].kind != TaskKind::Rebase
+                    || attempt.tasks[index].status != TaskStatus::Executing
+                {
+                    continue;
+                }
+                if attempt.tasks[index + 1..].iter().any(|task| {
+                    task.kind == TaskKind::Rebase && task.status == TaskStatus::Complete
+                }) {
+                    // A later completed rebase supersedes a reservation stranded by
+                    // an interrupted landing. Settle it in the same model write as
+                    // the retry; an active latest rebase still blocks the retry.
+                    attempt.tasks[index].status = TaskStatus::Superseded;
+                    attempt.tasks[index].completed_at = Some(crate::work_model::now_iso8601());
+                } else {
+                    return Err(WorkModelError::MergeCandidateCorrectionIneligible {
+                        candidate_id: candidate_id.to_string(),
+                        reason: format!(
+                            "landing Rebase Task {} is still executing; wait for it to settle",
+                            attempt.tasks[index].id
+                        ),
+                    });
+                }
             }
             attempt.status = crate::work_model::AttemptStatus::Complete;
             attempt.pause_kind = None;
@@ -4492,7 +4503,8 @@ mod tests {
         // already complete. The public landing retry must restore the Attempt's
         // terminal review state in the same model write that marks the candidate
         // Executing; otherwise candidate validation rejects the retry between the
-        // two states. Existing tasks and their history remain untouched.
+        // two states. A rebase reservation stranded by an older interrupted
+        // landing is superseded only after a later rebase has completed.
         let tmp = tempfile::TempDir::new().unwrap();
         let source_workspace = tmp.path().join("workspace");
         fs::create_dir_all(&source_workspace).unwrap();
@@ -4510,6 +4522,18 @@ mod tests {
                 digest: "sha256:test".to_string(),
             },
         ));
+        let mut stranded_rebase = attempt.tasks[0].clone();
+        stranded_rebase.id = "attempt-1-rebase-2".to_string();
+        stranded_rebase.kind = TaskKind::Rebase;
+        stranded_rebase.role = "rebase".to_string();
+        stranded_rebase.status = TaskStatus::Executing;
+        stranded_rebase.output = None;
+        let mut later_rebase = stranded_rebase.clone();
+        later_rebase.id = "attempt-1-rebase-3".to_string();
+        later_rebase.status = TaskStatus::Complete;
+        later_rebase.output = attempt.tasks[0].output.clone();
+        let completed_rebase = later_rebase.clone();
+        attempt.tasks.extend([stranded_rebase, later_rebase]);
         let prior_task_ids = attempt
             .tasks
             .iter()
@@ -4533,6 +4557,25 @@ mod tests {
         );
         store.create_work_item(&item).unwrap();
 
+        // A newer executing rebase still owns the landing. Reject the entire
+        // retry without persisting even the older reservation's supersession.
+        let blocked_store = WorkModelStore::new(&tmp.path().join("blocked"));
+        let mut blocked = item.clone();
+        let mut latest = completed_rebase.clone();
+        latest.id = "attempt-1-rebase-4".into();
+        latest.status = TaskStatus::Executing;
+        latest.output = None;
+        blocked.attempts[0].tasks.push(latest);
+        blocked_store.create_work_item(&blocked).unwrap();
+        let before = serde_json::to_value(blocked_store.read_work_item("work-1").unwrap()).unwrap();
+        assert!(
+            set_candidate_executing(&blocked_store, "work-1", "attempt-1-merge-candidate").is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(blocked_store.read_work_item("work-1").unwrap()).unwrap(),
+            before
+        );
+
         set_candidate_executing(&store, "work-1", "attempt-1-merge-candidate").unwrap();
 
         let after = store.read_work_item("work-1").unwrap();
@@ -4540,6 +4583,9 @@ mod tests {
         assert_eq!(attempt.status, crate::work_model::AttemptStatus::Complete);
         assert_eq!(attempt.pause_kind, None);
         assert_eq!(attempt.completed_at.as_deref(), Some(ready_at.as_str()));
+        assert_eq!(attempt.tasks[1].status, TaskStatus::Superseded);
+        assert_eq!(attempt.tasks[2].status, TaskStatus::Complete);
+        assert_eq!(attempt.tasks[2], completed_rebase);
         assert_eq!(
             attempt
                 .tasks
