@@ -14306,6 +14306,11 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
         let project = tmp.path().join("tester project");
         let fixtures = project.join("tests/fixtures");
         let bin_dir = tmp.path().join("bin");
+        write_mock_executable(
+            &project.join("scripts"),
+            "prepare-terminal-deps.sh",
+            "#!/bin/sh\nexit 0\n",
+        );
         for (helper, _) in helpers {
             let status = if helper == failed_helper {
                 setup_status

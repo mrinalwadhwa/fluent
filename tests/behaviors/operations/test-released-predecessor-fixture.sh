@@ -171,6 +171,9 @@ target.write_bytes(pathlib.Path(os.environ["DOWNLOAD_SOURCE"]).read_bytes())
         config = (PROJECT / ".fluent/tester.yaml").read_text()
         command = textwrap.dedent(config.split("  - command: |\n", 1)[1]
                                  .split("\n    test_harness:", 1)[0])
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "prepare-terminal-deps.sh").write_text("#!/bin/sh\nexit 0\n")
         for helper in re.findall(r"bash (tests/fixtures/[a-z0-9-]+\.sh)", command):
             if Path(helper).name != self.helper.name:
                 (self.root / helper).write_text('#!/bin/sh\nprintf "/unused-old-reader\\n"\n')

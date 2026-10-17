@@ -117,7 +117,7 @@ def journey(binary, project, mode):
         wait_for("Work Items", "work-visible")
         if mode == "help":
             os.write(master, b"?")
-            wait_for("Help", "j/k", "select", "f next filter", "Esc close help", absent=("Projects / Work / Workers",))
+            wait_for("Help", "j/k", "select", "f full-screen", "F filter", "Esc close help", absent=("Projects / Work / Workers",))
             os.write(master, b"\x1b")
             wait_for("Work Items", "work-visible", absent=("Esc close help",))
         else:
