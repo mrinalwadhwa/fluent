@@ -29,13 +29,22 @@ def write_proof(path, content):
     Path(staged.name).replace(path)
 
 
+def checked_config_digest(path):
+    content = path.read_bytes()
+    # Cargo may load files named by include, including paths outside this tree.
+    # Reject even possible escaped keys until those files can be verified.
+    if b"include" in content or b"\\u" in content or b"\\U" in content:
+        raise ValueError(f"Cargo configuration include cannot be verified: {path}")
+    return digest(content)
+
+
 def cargo_cwd_config(build_cwd):
     config = {}
     for directory in (build_cwd, *build_cwd.parents):
         for name in ("config.toml", "config"):
             path = directory / ".cargo" / name
             if path.is_file():
-                config[str(path)] = digest(path.read_bytes())
+                config[str(path)] = checked_config_digest(path)
     return config
 
 
@@ -70,7 +79,7 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                or key in {"CARGO_INCREMENTAL", "RUSTUP_TOOLCHAIN", "CC", "CFLAGS", "AR",
                           "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"}}
     cargo_home = os.environ.get("CARGO_HOME")
-    cargo_config = ({name: digest((Path(cargo_home) / name).read_bytes())
+    cargo_config = ({name: checked_config_digest(Path(cargo_home) / name)
                      for name in ("config.toml", "config") if (Path(cargo_home) / name).is_file()}
                     if cargo_home else {})
     build_command = ["cargo", "build", "--locked"]

@@ -256,3 +256,28 @@ printf '[build]\nincremental = false\n' > "$CARGO_HOME/config.toml"
 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/cargo-home-config"
 verify_reader "$temporary/cargo-home-config" "$(readlink "$(cat "$temporary/cargo-home-config")")" cargo_config
 [[ "$(readlink "$(cat "$temporary/cargo-home-config")")" != "$initial_entry" ]]
+
+# An included file can change build options without changing the including file.
+# Reject both versions before returning a cached reader or starting a build.
+printf 'include = ["extra.toml"]\n' > "$TMPDIR/.cargo/config.toml"
+builds_before="$(wc -l < "$BUILD_LOG")"
+for flags in 1 2; do
+    printf '[build]\nrustflags = ["-Copt-level=%s"]\n' "$flags" > "$TMPDIR/.cargo/extra.toml"
+    if python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/included.out" 2> "$temporary/included.err"; then
+        echo 'included Cargo configuration unexpectedly supplied a reader' >&2
+        exit 1
+    fi
+    rg -q 'Cargo configuration include.*config.toml' "$temporary/included.err"
+    [[ ! -s "$temporary/included.out" ]]
+done
+(( $(wc -l < "$BUILD_LOG") == builds_before ))
+
+rm "$TMPDIR/.cargo/config.toml"
+printf 'include = ["extra.toml"]\n' > "$CARGO_HOME/config.toml"
+if python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/home-include.out" 2> "$temporary/home-include.err"; then
+    echo 'Cargo home include unexpectedly supplied a reader' >&2
+    exit 1
+fi
+rg -q 'Cargo configuration include.*config.toml' "$temporary/home-include.err"
+[[ ! -s "$temporary/home-include.out" ]]
+(( $(wc -l < "$BUILD_LOG") == builds_before ))
