@@ -15376,6 +15376,47 @@ mod tests {
                 messages.lock().unwrap().clone(),
             )
         }
+
+        fn run_with_sandbox_profile(&self) -> (bool, String) {
+            let saw_warm_cache = Arc::new(Mutex::new(false));
+            let recorded_profile = Arc::new(Mutex::new(None));
+            let make_coder = {
+                let saw_warm_cache = Arc::clone(&saw_warm_cache);
+                let recorded_profile = Arc::clone(&recorded_profile);
+                move |sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
+                    let CoderSandbox::SeatbeltProfile(profile_path) = sandbox else {
+                        panic!("Reviewer must launch with its selected sandbox profile")
+                    };
+                    *recorded_profile.lock().unwrap() =
+                        Some(fs::read_to_string(profile_path).unwrap());
+                    Box::new(CacheObservingReviewCoder {
+                        saw_warm_cache: Arc::clone(&saw_warm_cache),
+                        cache_dir: self.cache_dir.clone(),
+                    })
+                }
+            };
+            let resolver = ContentResolver::new(Some(&self.project_root));
+            run_review_task_with_coder(
+                WorkTaskRunConfig {
+                    project_root: &self.project_root,
+                    store: &self.store,
+                    work_item_id: "work-1",
+                    attempt_id: "attempt-1",
+                    task_id: &self.review_task_id,
+                    resolver: &resolver,
+                    extra_args: &[],
+                    no_sandbox: false,
+                    store_lock: None,
+                },
+                Some(&make_coder),
+                &FilesystemReviewerCacheAdmission,
+                &|_| {},
+            )
+            .unwrap();
+            let warm = *saw_warm_cache.lock().unwrap();
+            let profile = recorded_profile.lock().unwrap().take().unwrap();
+            (warm, profile)
+        }
     }
 
     #[test]
@@ -15520,6 +15561,55 @@ mod tests {
         assert!(
             selected_reviewer_cache_dir(&fixture.project_root, Some(&fixture.cache_dir), false,)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reviewer_cold_route_launches_without_shared_cache_write_grant() {
+        // The canonical Tester supplies the host-preflight test seam while
+        // this route still renders and passes its real Reviewer profile.
+        let cold = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(cold.cache_dir.join("target")).unwrap();
+        fs::File::create(cold.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        let (warm, profile) = cold.run_with_sandbox_profile();
+        let cache_write = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            cold.cache_dir.display()
+        );
+        let artifact_write = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            cold.artifact_dir.display()
+        );
+        assert!(!warm);
+        assert!(
+            !profile.contains(&cache_write),
+            "cold Reviewer must not receive the shared cache write grant"
+        );
+        assert!(
+            profile.contains(&artifact_write),
+            "cold Reviewer must retain writable Task scratch"
+        );
+        assert!(cold.cache_dir.join("target/output").exists());
+
+        let admitted = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(admitted.cache_dir.join("target")).unwrap();
+        fs::write(admitted.cache_dir.join("target/output"), b"warm").unwrap();
+        let (warm, profile) = admitted.run_with_sandbox_profile();
+        let cache_write = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            admitted.cache_dir.display()
+        );
+        assert!(warm);
+        assert!(
+            profile.contains(&cache_write),
+            "admitted Reviewer must receive the shared cache write grant"
         );
     }
 
