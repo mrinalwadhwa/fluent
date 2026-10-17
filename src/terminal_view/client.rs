@@ -44,7 +44,7 @@ impl Drop for Client {
 
 /// Own only the display client. Execution ownership and Control admission stay
 /// with the runtime; input is revalidated again immediately before each write.
-pub struct EmbeddedTerminal {
+pub struct LocalTerminal {
     attachment: Arc<Mutex<Attachment>>,
     descriptor: TerminalDescriptor,
     client: Option<Client>,
@@ -56,7 +56,7 @@ pub struct EmbeddedTerminal {
     next_liveness: Instant,
     pub diagnostic: Option<String>,
 }
-impl EmbeddedTerminal {
+impl LocalTerminal {
     pub fn observe(attachment: Attachment, columns: u16, rows: u16) -> Result<Self> {
         dimensions(columns, rows)?;
         ensure!(
@@ -354,7 +354,7 @@ fn open_pty(columns: u16, rows: u16) -> Result<(File, File)> {
     Ok((master, slave))
 }
 
-fn tmux_input(screen: &mut Screen, event: Event) -> Result<Input> {
+pub(super) fn tmux_input(screen: &mut Screen, event: Event) -> Result<Input> {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     let prefix = matches!(&event, Event::Key(key)
         if key.kind != KeyEventKind::Release

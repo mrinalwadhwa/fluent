@@ -95,6 +95,19 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::AgentSource { command }) => match command {
+            fluent::cli::AgentSourceCommands::Terminal {
+                project_root,
+                identity,
+                columns,
+                rows,
+            } => {
+                fluent::dashboard_sources::helper_terminal(
+                    &project_root,
+                    &identity,
+                    columns,
+                    rows,
+                )?;
+            }
             fluent::cli::AgentSourceCommands::Snapshot { project_root } => {
                 fluent::dashboard_sources::helper_snapshot(&project_root)?;
             }

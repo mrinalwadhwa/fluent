@@ -209,7 +209,7 @@ fn resize_terminal(
             terminal.release_focus();
         }
         if app.terminal_fits() {
-            let identity = crate::terminal_view::identity(terminal.descriptor());
+            let identity = terminal.identity();
             let (columns, rows) = layout::terminal_size(app.size, &identity);
             if let Err(error) = terminal.resize(columns, rows) {
                 app.refresh_failed(format!("{error:#}"));
@@ -237,6 +237,27 @@ fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
         .iter()
         .find(|source| source.id == key.source_id)
         .context("source is unavailable")?;
+    if source.id.starts_with("ssh:") {
+        let home = crate::scheduler_service::runtime_home(&source.path)?;
+        let configured = crate::dashboard_sources::load_sources(&home)?
+            .into_iter()
+            .find(|configured| configured.id() == source.id)
+            .context("SSH source is no longer configured")?;
+        let identity = format!(
+            "{} ({}) / {}",
+            configured.name,
+            configured.host,
+            crate::terminal_view::identity(descriptor)
+        );
+        let (columns, rows) = layout::terminal_size(app.size, &identity);
+        return crate::terminal_view::EmbeddedTerminal::observe_ssh(
+            Default::default(),
+            configured,
+            descriptor.clone(),
+            columns,
+            rows,
+        );
+    }
     let attachment = crate::terminal_sessions::resolve(&source.path, &descriptor.session_id)?;
     anyhow::ensure!(
         attachment.descriptor() == descriptor,

@@ -38,3 +38,16 @@ transcripts, evidence paths, or executable commands. The receiver verifies the
 configured project, source and worker identities before displaying descriptors.
 Unknown protocol versions and unexpected fields fail that source. Remote
 metadata cannot supply a local socket, executable, or attachment endpoint.
+
+Select a remote agent worker and press `t` to observe, then `i` for Control.
+The remote runtime revalidates the complete descriptor, including its execution
+generation, and holds the same exclusive Control lease used by local clients.
+Use `Ctrl-]` to return to navigation and `f` for full-screen access. Both views
+share one SSH PTY connection and one remote lease. Native tmux detach
+(`Ctrl-b`, then `d`) returns from full-screen. Only Control can resize the
+shared worker; Observe changes only its client viewport.
+
+The transport carries bounded protocol messages over an SSH PTY. The helper
+keeps socket paths and process receipts on the remote host. It checks runtime
+liveness independently of display output and closes the attachment when the
+client stops responding. Closing a display never cancels or restarts a worker.

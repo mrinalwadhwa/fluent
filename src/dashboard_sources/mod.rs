@@ -1,4 +1,9 @@
 //! Read explicitly trusted SSH sources without granting remote metadata authority.
+mod client;
+mod protocol;
+mod terminal;
+pub use client::RemoteConnection;
+pub use terminal::helper_terminal;
 mod collection;
 mod snapshot;
 pub use collection::RemoteSources;

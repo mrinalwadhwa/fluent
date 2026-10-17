@@ -1,8 +1,10 @@
 //! Display managed invocation terminals without owning worker execution.
+mod attachment;
 mod client;
 mod input;
+mod remote;
 mod screen;
-pub use client::EmbeddedTerminal;
+pub use attachment::EmbeddedTerminal;
 pub use input::{Input, releases_focus};
 pub use screen::{Cell, Frame, Screen};
 
@@ -14,10 +16,9 @@ pub struct Display {
 
 impl EmbeddedTerminal {
     pub fn display(&self) -> Display {
-        let d = self.descriptor();
         Display {
             frame: self.frame().clone(),
-            identity: identity(d),
+            identity: self.identity(),
             state: self.state_label(),
         }
     }

@@ -1556,6 +1556,16 @@ mod tests {
 
 #[derive(Subcommand)]
 pub enum AgentSourceCommands {
+    Terminal {
+        #[arg(long)]
+        project_root: PathBuf,
+        #[arg(long)]
+        identity: String,
+        #[arg(long)]
+        columns: u16,
+        #[arg(long)]
+        rows: u16,
+    },
     Snapshot {
         #[arg(long)]
         project_root: PathBuf,

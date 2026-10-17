@@ -842,6 +842,11 @@ impl Attachment {
             columns > 0 && rows > 0,
             "terminal dimensions must be positive"
         );
+        #[cfg(feature = "test-support")]
+        if self.stored.socket.is_none() && std::env::var_os("FLUENT_TEST_TERMINAL_CLIENT").is_some()
+        {
+            return Ok(());
+        }
         let socket = self
             .stored
             .socket
@@ -915,6 +920,20 @@ impl Attachment {
 
     fn client_command(&self) -> Result<Command> {
         validate(&self.stored, &self.stored.descriptor)?;
+        // Hermetic transport tests replace only the external tmux client.
+        // Production builds and all managed tmux sessions ignore this seam.
+        #[cfg(feature = "test-support")]
+        if self.stored.socket.is_none() {
+            if let Some(program) = std::env::var_os("FLUENT_TEST_TERMINAL_CLIENT") {
+                let mut command = Command::new(program);
+                command.arg(if self.has_control() {
+                    "control"
+                } else {
+                    "observe"
+                });
+                return Ok(command);
+            }
+        }
         let socket = self
             .stored
             .socket
