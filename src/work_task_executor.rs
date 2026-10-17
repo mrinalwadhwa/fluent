@@ -1913,7 +1913,9 @@ fn run_review_task_with_coder(
         }
     }
 
-    let sandbox_profile = match preflight_review_sandbox_profile(
+    // Check both access sets before reserving the Task. Cache admission runs
+    // after reservation; only its selected profile reaches the Reviewer.
+    let cold_sandbox_profile = match preflight_review_sandbox_profile(
         config.project_root,
         config.work_item_id,
         config.attempt_id,
@@ -1921,7 +1923,7 @@ fn run_review_task_with_coder(
         &workspace_reads,
         &input_artifacts,
         &artifact_dir,
-        reviewer_cache_dir.as_deref(),
+        None,
         config.resolver,
         config.no_sandbox && !native_review,
         plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
@@ -1940,6 +1942,30 @@ fn run_review_task_with_coder(
             )?;
             return Err(error);
         }
+    };
+    let warm_sandbox_profile = if let Some(cache_dir) = reviewer_cache_dir.as_deref() {
+        match preflight_review_sandbox_profile(
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+            &attempt_kind,
+            &workspace_reads,
+            &input_artifacts,
+            &artifact_dir,
+            Some(cache_dir),
+            config.resolver,
+            config.no_sandbox && !native_review,
+            plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?,
+            provider_readiness.codex_worker(),
+        ) {
+            Ok(profile) => profile,
+            Err(error) => {
+                eprintln!("  Reviewer prep     warm sandbox unavailable: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
     };
 
     let reviewer_coder = plan_coder_kind(&planned_item, config.attempt_id, TaskKind::Review)?;
@@ -2050,6 +2076,17 @@ fn run_review_task_with_coder(
             cache_reporter,
         );
     }
+    let selected_reviewer_cache = selected_reviewer_cache_dir(
+        config.project_root,
+        reviewer_cache_dir.as_deref(),
+        (config.no_sandbox && !native_review && provider_readiness.codex_worker().is_none())
+            || warm_sandbox_profile.is_some(),
+    );
+    let sandbox_profile = if selected_reviewer_cache.is_some() {
+        warm_sandbox_profile.as_ref()
+    } else {
+        cold_sandbox_profile.as_ref()
+    };
 
     // Resolve the transcript-capture config once per logical Reviewer run, before the
     // retry loop, and thread the same immutable config into every attempt so a config
@@ -2075,7 +2112,8 @@ fn run_review_task_with_coder(
             reservation.effort.as_deref(),
             &pump_config,
             provider_readiness.codex_worker(),
-            sandbox_profile.as_ref(),
+            sandbox_profile,
+            selected_reviewer_cache.as_deref(),
             coder_override,
         ),
         reservation.coder,
@@ -2108,7 +2146,8 @@ fn run_review_task_with_coder(
                 reservation.effort.as_deref(),
                 &pump_config,
                 provider_readiness.codex_worker(),
-                sandbox_profile.as_ref(),
+                sandbox_profile,
+                selected_reviewer_cache.as_deref(),
                 coder_override,
             ),
             reservation.coder,
@@ -8481,6 +8520,7 @@ fn run_review_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox_profile: Option<&os::SandboxProfile>,
+    selected_reviewer_cache: Option<&Path>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
 ) -> Result<()> {
     // Production launches the resolved coder; the `_with_coder` seam lets route
@@ -8508,6 +8548,7 @@ fn run_review_coder(
         pump_config,
         codex_worker,
         sandbox_profile,
+        selected_reviewer_cache,
         move |sandbox, _executable| match coder_override {
             Some(make) => make(sandbox),
             None => coder_kind.boxed_with_model_and_executable(
@@ -8540,6 +8581,7 @@ fn run_review_coder_with_coder(
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
     sandbox_profile: Option<&os::SandboxProfile>,
+    selected_reviewer_cache: Option<&Path>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
 ) -> Result<()> {
     if !no_sandbox || codex_worker.is_some() {
@@ -8556,26 +8598,20 @@ fn run_review_coder_with_coder(
     // run_review_task, before the source-checkout review guard snapshotted
     // the workspace). Build prompts here only; a missing review-<role> skill
     // will surface as a Result error.
-    let prompts = build_work_review_prompts(WorkReviewPromptInput {
-        item,
-        attempt_id,
-        task_id,
-        project_root,
-        artifact_dir,
-        review_path,
-        readable_workspaces,
-        input_artifacts,
-        review_only,
-    })?;
-    let reviewer_cache_dir = item
-        .attempts
-        .iter()
-        .find(|attempt| attempt.id == attempt_id)
-        .filter(|attempt| !attempt.kind.is_review_only_like())
-        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
-        .filter(|task| task.role == "tests")
-        .and_then(|task| task.review_context.as_ref())
-        .map(|context| candidate_reviewer_cache_dir(project_root, &context.candidate_commit));
+    let prompts = build_work_review_prompts_with_cache(
+        WorkReviewPromptInput {
+            item,
+            attempt_id,
+            task_id,
+            project_root,
+            artifact_dir,
+            review_path,
+            readable_workspaces,
+            input_artifacts,
+            review_only,
+        },
+        selected_reviewer_cache,
+    )?;
 
     let (sandbox, _sandbox_profile) = if let Some(profile) = sandbox_profile {
         (
@@ -8597,7 +8633,10 @@ fn run_review_coder_with_coder(
             coder_kind,
             resolver,
             artifact_dir,
-            &reviewer_cache_dir.into_iter().collect::<Vec<_>>(),
+            &selected_reviewer_cache
+                .into_iter()
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>(),
             &readable_roots,
             codex_worker.map(|worker| worker.home()),
         )?
@@ -8790,6 +8829,32 @@ struct WorkReviewPromptInput<'a> {
 }
 
 fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkReviewPrompts> {
+    let task = input
+        .item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == input.attempt_id)
+        .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == input.task_id))
+        .ok_or_else(|| anyhow::anyhow!("Task {:?} not found", input.task_id))?;
+    let context = task.review_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Review Task {:?} must declare review context",
+            input.task_id
+        )
+    })?;
+    let shared = candidate_reviewer_cache_dir(input.project_root, &context.candidate_commit);
+    let selected = if task.role == "tests" {
+        selected_reviewer_cache_dir(input.project_root, Some(&shared), true)
+    } else {
+        Some(shared)
+    };
+    build_work_review_prompts_with_cache(input, selected.as_deref())
+}
+
+fn build_work_review_prompts_with_cache(
+    input: WorkReviewPromptInput<'_>,
+    selected_reviewer_cache: Option<&Path>,
+) -> Result<WorkReviewPrompts> {
     let task = input
         .item
         .attempts
@@ -9003,17 +9068,11 @@ fn build_work_review_prompts(input: WorkReviewPromptInput<'_>) -> Result<WorkRev
         progress_md_path_for(input.project_root, &input.item.id, input.attempt_id)
             .display()
             .to_string();
-    let shared_cache =
-        candidate_reviewer_cache_dir(input.project_root, &review_context.candidate_commit);
-    let reviewer_cache_dir = if task.role == "tests"
-        && !reviewer_cache_is_admitted(input.project_root, &shared_cache).unwrap_or(false)
-    {
-        input.artifact_dir.join("scratch")
-    } else {
-        shared_cache
-    }
-    .display()
-    .to_string();
+    let reviewer_cache_dir = selected_reviewer_cache
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| input.artifact_dir.join("scratch"))
+        .display()
+        .to_string();
     let unresolved_steps = fs::read_to_string(&reviewer_progress_md_path)
         .ok()
         .map(|source| unresolved_progress_steps(&source))
@@ -9437,6 +9496,20 @@ fn reviewer_cache_is_admitted(project_root: &Path, shared_cache: &Path) -> Resul
         .value;
     Ok(prep::managed_cache_bytes(shared_cache)? > 0
         && managed_reviewer_cache_total(project_root, &store)? <= limit)
+}
+
+/// Grant a shared Reviewer cache only when admission and its sandbox profile agree.
+fn selected_reviewer_cache_dir(
+    project_root: &Path,
+    shared_cache: Option<&Path>,
+    writable_profile_available: bool,
+) -> Option<PathBuf> {
+    shared_cache
+        .filter(|cache| {
+            writable_profile_available
+                && reviewer_cache_is_admitted(project_root, cache).unwrap_or(false)
+        })
+        .map(Path::to_path_buf)
 }
 
 fn reviewer_cache_root(project_root: &Path) -> PathBuf {
@@ -14418,6 +14491,7 @@ mod tests {
             &pump_config,
             None,
             None,
+            None,
             move |_sandbox, _executable| {
                 Box::new(RecordingLearnerCoder {
                     recorded: recorded_for_coder,
@@ -14478,6 +14552,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             None,
             move |_sandbox, _executable| {
@@ -14554,6 +14629,7 @@ mod tests {
             None,
             None,
             &pump_config,
+            None,
             None,
             None,
             move |_sandbox, _executable| {
@@ -15416,6 +15492,35 @@ mod tests {
         assert!(messages.iter().any(
             |message| message.contains("starting cold") && message.contains("bytes protected")
         ));
+    }
+
+    #[test]
+    fn reviewer_cold_admission_withholds_shared_writable_root() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        fs::create_dir_all(fixture.cache_dir.join("target")).unwrap();
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert!(
+            selected_reviewer_cache_dir(&fixture.project_root, Some(&fixture.cache_dir), true,)
+                .is_none()
+        );
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(64)
+            .unwrap();
+        assert_eq!(
+            selected_reviewer_cache_dir(&fixture.project_root, Some(&fixture.cache_dir), true,)
+                .as_deref(),
+            Some(fixture.cache_dir.as_path())
+        );
+        assert!(
+            selected_reviewer_cache_dir(&fixture.project_root, Some(&fixture.cache_dir), false,)
+                .is_none()
+        );
     }
 
     #[test]
