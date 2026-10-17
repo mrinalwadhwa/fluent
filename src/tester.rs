@@ -639,6 +639,27 @@ pub(crate) fn render_sandbox_profile_with_cache(
     }
     writable_roots.extend(settlement_directories.iter().flatten().cloned());
     let common_git_dir = tester_git_metadata_root(&candidate_abs)?;
+    // Historical fixture binaries live beside the shared Git directory, outside
+    // worktree targets. Grant only that cache to Testers that use the helper.
+    let historical_cache = if candidate_abs
+        .join("tests/fixtures/prepare-historical-reader.py")
+        .is_file()
+    {
+        let project_root = common_git_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Tester Git metadata has no project parent"))?;
+        let historical_cache = project_root.join(".fluent/work/cache/historical-readers");
+        fs::create_dir_all(&historical_cache).with_context(|| {
+            format!(
+                "prepare historical reader cache {}",
+                historical_cache.display()
+            )
+        })?;
+        writable_roots.push(fs::canonicalize(&historical_cache)?);
+        Some(historical_cache)
+    } else {
+        None
+    };
     match os::render_profile_common_only_with_denied_access(
         resolver,
         &home,
@@ -648,6 +669,14 @@ pub(crate) fn render_sandbox_profile_with_cache(
         std::slice::from_ref(&common_git_dir),
     ) {
         Ok(profile) => {
+            if let Some(cache) = &historical_cache {
+                let mut content = fs::read_to_string(&profile.path)?;
+                content.push_str(&format!(
+                    "\n(allow file-map-executable (subpath {}))\n",
+                    os::sbpl_string(cache)
+                ));
+                fs::write(&profile.path, content)?;
+            }
             os::preflight_profile(&profile)?;
             Ok(TesterSandbox {
                 profile: Some(profile),
@@ -1755,24 +1784,31 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn guarded_tester_grants_canonical_settlement_to_rendered_sandbox() {
-        let workspace = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let workspace = project.path().join("main");
+        fs::create_dir(&workspace).unwrap();
         let artifact_dir = TempDir::new().unwrap();
-        make_workspace(workspace.path());
+        make_workspace(&workspace);
         crate::git::run(
-            workspace.path(),
+            &workspace,
             &["init", "-q"],
             "initialize rendered sandbox fixture",
         )
         .unwrap();
+        fs::create_dir_all(workspace.join("tests/fixtures")).unwrap();
+        fs::write(
+            workspace.join("tests/fixtures/prepare-historical-reader.py"),
+            "",
+        )
+        .unwrap();
         write_tester_yaml(
-            workspace.path(),
+            &workspace,
             "commands:\n  - command: true\n    test_harness: shell-harness\n    reject_process_leaks: true\n",
         );
 
         unsafe { std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass") };
         let sandbox =
-            preflight_sandbox_profile(workspace.path(), artifact_dir.path(), false, &resolver())
-                .unwrap();
+            preflight_sandbox_profile(&workspace, artifact_dir.path(), false, &resolver()).unwrap();
         unsafe { std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT") };
 
         let settlement = sandbox.settlement_directory(0).unwrap();
@@ -1789,6 +1825,18 @@ mod tests {
             )),
             "the rendered sandbox must grant the canonical guarded settlement path: {profile_content}"
         );
+        let historical_cache = fs::canonicalize(&workspace)
+            .unwrap()
+            .join(".fluent/work/cache/historical-readers");
+        assert!(historical_cache.is_dir());
+        assert!(profile_content.contains(&format!(
+            "(allow file-write* (subpath \"{}\"))",
+            historical_cache.display()
+        )));
+        assert!(profile_content.contains(&format!(
+            "(allow file-map-executable (subpath \"{}\"))",
+            historical_cache.display()
+        )));
     }
 
     #[test]

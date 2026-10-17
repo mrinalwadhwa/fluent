@@ -1133,7 +1133,7 @@ fn render_root_rules(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> 
         .join("\n")
 }
 
-fn sbpl_string(path: &Path) -> String {
+pub(crate) fn sbpl_string(path: &Path) -> String {
     let escaped = path
         .to_string_lossy()
         .replace('\\', "\\\\")
