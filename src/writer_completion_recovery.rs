@@ -2384,6 +2384,71 @@ mod tests {
         assert_eq!(snapshot_work(&fixture.project), before);
     }
 
+    #[test]
+    fn rejects_broken_stalled_writer_commit_chain() {
+        let fixture = stalled_committed_fixture_with_no_change(false, true);
+        let mut item = fixture.store.read_work_item("work-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        assert!(status_recovery_action(&fixture.project, attempt).is_some());
+
+        let base = attempt.tasks[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .base_commit
+            .clone()
+            .unwrap();
+        git::run(
+            &fixture.workspace,
+            &["cat-file", "-e", &format!("{base}^{{commit}}")],
+            "verify the original base commit",
+        )
+        .unwrap();
+        let preceding = attempt.tasks[1].output.as_ref().unwrap();
+        assert!(preceding.no_change.is_some());
+        assert_ne!(base, preceding.commit);
+        let output = attempt.tasks[2].output.as_mut().unwrap();
+        assert!(output.no_change.is_none());
+        assert_ne!(base, output.commit);
+        let candidate = output.commit.clone();
+        // Keep a committed output, but disconnect it from the no-change Writer.
+        output.base_commit = Some(base);
+        fixture
+            .store
+            .mutate_work_item("work-1", |stored| {
+                *stored = item.clone();
+                Ok(())
+            })
+            .unwrap();
+
+        let before = snapshot_work(&fixture.project);
+        assert!(status_recovery_action(&fixture.project, &item.attempts[0]).is_none());
+        assert!(recovery_action(&fixture.project, &item.attempts[0]).is_none());
+        assert_eq!(snapshot_work(&fixture.project), before);
+        assert!(
+            repair(
+                &fixture.project,
+                &fixture.store,
+                "work-1",
+                "attempt-1",
+                "Retry only with a connected Writer commit chain.",
+            )
+            .is_err()
+        );
+        assert_eq!(snapshot_work(&fixture.project), before);
+        assert_eq!(
+            git::run_stdout(&fixture.workspace, &["rev-parse", "HEAD"], "read candidate")
+                .unwrap()
+                .trim(),
+            candidate
+        );
+        assert!(
+            git::non_fluent_worktree_status(&fixture.workspace)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn snapshot_work(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
         fn visit(path: &Path, files: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(path).unwrap() {
