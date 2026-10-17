@@ -83,9 +83,12 @@ test_version_uses_fluent_bin_override() {
 
 test_operation_scripts_use_override_for_debug_binary() {
   RESULT=0
+  # The historical reader cache test creates fixture binaries under isolated
+  # target directories; it does not invoke the current Fluent binary.
   UNSUPPORTED="$(
     grep -RIn 'target/debug/fluent' "$PROJECT_DIR/tests/behaviors/operations" |
       grep -v '/test-behavior-bin-override.sh:' |
+      grep -vE '/test-historical-reader-cache.sh:[0-9]+:.*(\$target/debug/fluent|\$stable_root/target/debug/fluent)' |
       grep -v 'FLUENT_BIN_OVERRIDE' || true
   )"
 
