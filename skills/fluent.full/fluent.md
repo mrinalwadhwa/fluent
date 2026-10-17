@@ -223,11 +223,8 @@ The round outcome determines what happens next:
   Writer produced by an evidence-targeted `code-change` review already counts
   in the effective cap, so the extension starts from the Writer frontier shown
   in the handoff.
-- An incomplete Writer without a new candidate commit, regressed progress or
-  matrix completion, or two consecutive Writer continuations against the same obligations, including after review, with no newly
-  completed requirement — Attempt records `needs-user` before Tester and review.
-  For a committed Writer with a valid incomplete matrix and proven repeated
-  stagnation, follow [Recover a stalled committed Writer](references/host-evidence-recovery.md#recover-a-stalled-committed-writer).
+- An incomplete Writer without a new commit, regressed completion, or two stagnant continuations against unchanged obligations, including after review, pauses at `needs-user` before Tester and review.
+  For a committed Writer with a valid incomplete matrix and proven stagnation, follow [Recover a stalled committed Writer](references/host-evidence-recovery.md#recover-a-stalled-committed-writer).
 - A repeated deterministic candidate rejection, unreadable gate evidence, or a
   project check that changes HEAD or the worktree — Attempt records `needs-user`
   before Tester and review. Inspect `candidate-gate.json` and repair the named

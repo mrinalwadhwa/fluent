@@ -20,6 +20,7 @@ schedules a Writer on the existing Attempt.
 
 - [Recover mutable Writer assignment context](#recover-mutable-writer-assignment-context)
 - [Recover a committed Writer with a malformed matrix](#recover-a-committed-writer-with-a-malformed-matrix)
+- [Recover a stalled committed Writer](#recover-a-stalled-committed-writer)
 - [Retry an unchanged Writer after invalid completion](#retry-an-unchanged-writer-after-invalid-completion)
 - [Recover an output-free failed Writer](#recover-an-output-free-failed-writer)
 - [Recover a usage-limit-interrupted Writer](#recover-a-usage-limit-interrupted-writer)
