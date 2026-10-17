@@ -725,6 +725,22 @@ Review, Tester, host-evidence or merge authority, and replay retains later stops
 See [the storage architecture](../../documentation/architecture.md) and
 [the complete-audit publication pattern](persistence/patterns/bind-complete-recovery-audit.md).
 
+## Keep saved Writer history aligned with stagnation recovery
+
+The last three durable Writer runs and their completed Tasks establish admission
+to recover a stalled committed Writer. Preserve their ordering and candidate
+bindings: the latest run must be blocked, the last two runs must be continuations
+or corrective work, and all three matrices must validate against the immutable
+contract with identical obligation identities and completion counts. The latest
+matrix must still contain pending Writer-owned work. A Writer-completion pause
+label alone grants no retry authority.
+
+Treat these saved fields as a recovery contract when changing the stop rule,
+Writer-run recording, or matrix identity. Keep the guard and
+[`validate_stalled_committed_writer`](../../src/writer_completion_recovery.rs)
+in agreement, and retain the shared eligibility check for status and repair.
+See the [completion recovery architecture](../../documentation/architecture.md#core-work-model).
+
 ## Require separate approval to retry a quota-failed Writer
 
 The source-correction decision still refuses implicit retries of a failed Writer.
