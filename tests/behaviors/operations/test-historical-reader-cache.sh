@@ -6,7 +6,7 @@ REAL_GIT="$(command -v git)"
 export REAL_GIT
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-mkdir -p "$temporary/bin" "$temporary/cache" "$temporary/one" "$temporary/two"
+mkdir -p "$temporary/bin" "$temporary/cache" "$temporary/cargo-home" "$temporary/one" "$temporary/two"
 cat > "$temporary/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -50,6 +50,7 @@ fi
 SH
 chmod +x "$temporary/bin/git"
 export PATH="$temporary/bin:$PATH" BUILD_LOG="$temporary/builds"
+export CARGO_HOME="$temporary/cargo-home"
 export FLUENT_HISTORICAL_READER_CACHE="$temporary/cache"
 commit=720368bb855dd6d10fffd221ed0e4badd0b6104e
 helper="$repository/tests/fixtures/prepare-historical-reader.py"
@@ -136,3 +137,20 @@ stable_root="$temporary/worktree/.scratch/round-cap-approach-revision-stable-rea
 assignment_root="$temporary/worktree/.scratch/writer-assignment-main-reader-bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
 [[ "$(readlink "$stable_root/target/debug/fluent")" != "$(readlink "$assignment_root/target/debug/fluent")" ]]
 )
+
+# Linked worktrees use the same project-owned cache without building twice.
+git clone --shared --quiet "$repository" "$temporary/project"
+git -C "$temporary/project" worktree add --detach --quiet "$temporary/work-one" HEAD
+git -C "$temporary/project" worktree add --detach --quiet "$temporary/work-two" HEAD
+[[ "$(git -C "$temporary/work-one" rev-parse --path-format=absolute --git-common-dir)" == \
+   "$(git -C "$temporary/work-two" rev-parse --path-format=absolute --git-common-dir)" ]]
+builds_before="$(wc -l < "$BUILD_LOG")"
+(
+    unset FLUENT_HISTORICAL_READER_CACHE
+    python3 "$helper" "$temporary/work-one" "$commit" "$temporary/work-one/.scratch/old-reader" > "$temporary/work-one-path"
+    (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+    python3 "$helper" "$temporary/work-two" "$commit" "$temporary/work-two/.scratch/old-reader" > "$temporary/work-two-path"
+)
+(( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+[[ "$(readlink "$(cat "$temporary/work-one-path")")" == "$(readlink "$(cat "$temporary/work-two-path")")" ]]
+[[ "$(readlink "$(cat "$temporary/work-one-path")")" == *"/project/.fluent/work/cache/historical-readers/"* ]]
