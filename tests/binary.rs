@@ -57355,6 +57355,15 @@ fn interrupted_plan_host_evidence_recovers_same_attempt_rejects_unsafe_state() {
 
 #[test]
 fn host_plan_recovery_public_commands_are_idempotent_recheck_changed_evidence() {
+    assert_host_plan_recovery_rechecks_changed_evidence(0);
+}
+
+#[test]
+fn host_plan_recovery_public_commands_recheck_after_slow_startup() {
+    assert_host_plan_recovery_rechecks_changed_evidence(16);
+}
+
+fn assert_host_plan_recovery_rechecks_changed_evidence(startup_delay_secs: u64) {
     for drift in ["evidence", "matrix", "dirty"] {
         let tmp = TempDir::new().unwrap();
         let id = format!(
@@ -57420,7 +57429,11 @@ fn host_plan_recovery_public_commands_are_idempotent_recheck_changed_evidence() 
         );
         let provider_log = tmp.path().join("provider-launched");
         let scheduler_log = tmp.path().join("scheduler-stderr");
-        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        let mut command = scheduler_fixture_command(if drift == "dirty" {
+            startup_delay_secs
+        } else {
+            0
+        });
         command
             .current_dir(&project)
             .env("PATH", mock_path(&bin))
@@ -57431,17 +57444,23 @@ fn host_plan_recovery_public_commands_are_idempotent_recheck_changed_evidence() 
                 fs::File::create(&scheduler_log).unwrap(),
             ));
         let mut child = OwnedFixtureProcess::spawn(&mut command);
-        assert!(
-            poll_until(std::time::Duration::from_secs(15), || {
-                fs::read_to_string(&scheduler_log)
-                    .unwrap_or_default()
-                    .contains("[scheduler] project")
-            }),
-            "{drift}: scheduler did not report the rejected dispatch: {}",
-            fs::read_to_string(&scheduler_log).unwrap_or_default()
-        );
-        assert!(child.try_wait().unwrap().is_none());
+        let observed = poll_until(SCHEDULER_STARTUP_TIMEOUT, || {
+            fs::read_to_string(&scheduler_log)
+                .unwrap_or_default()
+                .contains("[scheduler] project")
+                || child.try_wait().unwrap().is_some()
+        });
+        let exited = child.try_wait().unwrap();
+        let diagnostics = fs::read_to_string(&scheduler_log).unwrap_or_default();
         child.terminate_and_wait();
+        assert!(
+            observed && diagnostics.contains("[scheduler] project"),
+            "{drift}: scheduler did not report the rejected dispatch: exit={exited:?}; stderr={diagnostics}"
+        );
+        assert!(
+            exited.is_none(),
+            "{drift}: scheduler exited instead of retaining the rejected dispatch: {exited:?}; stderr={diagnostics}"
+        );
         assert!(!provider_log.exists(), "{drift}: provider must not launch");
         assert_eq!(latest_dispatch_status(&project, &id), "queued");
         assert_eq!(
