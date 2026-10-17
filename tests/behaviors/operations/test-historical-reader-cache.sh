@@ -105,7 +105,12 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
 
 # Every pinned wrapper uses the same preparation path and returns its legacy
 # fixture location with independently checkable compatibility metadata.
-for wrapper in "$repository"/tests/fixtures/build-*-old-reader.sh; do
+git clone --shared --quiet "$repository" "$temporary/worktree"
+cp "$repository"/tests/fixtures/build-*-old-reader.sh "$temporary/worktree/tests/fixtures/"
+cp "$repository/tests/fixtures/prepare-historical-reader.py" "$temporary/worktree/tests/fixtures/"
+(
+cd "$temporary/worktree"
+for wrapper in tests/fixtures/build-*-old-reader.sh; do
     binary="$(bash "$wrapper")"
     python3 - "$binary" <<'PY'
 import hashlib, json, pathlib, sys
@@ -116,6 +121,7 @@ assert identity['binary_sha256'] == hashlib.sha256(binary.read_bytes()).hexdiges
 assert len(identity['source_commit']) == 40
 PY
 done
-stable_root="$repository/.scratch/round-cap-approach-revision-stable-reader/bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
-assignment_root="$repository/.scratch/writer-assignment-main-reader-bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
+stable_root="$temporary/worktree/.scratch/round-cap-approach-revision-stable-reader/bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
+assignment_root="$temporary/worktree/.scratch/writer-assignment-main-reader-bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
 [[ "$(readlink "$stable_root/target/debug/fluent")" != "$(readlink "$assignment_root/target/debug/fluent")" ]]
+)
