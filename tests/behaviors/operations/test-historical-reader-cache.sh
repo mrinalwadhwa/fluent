@@ -112,6 +112,7 @@ elif field == 'cargo_cwd_config':
     expected['cargo_cwd_config'][str(config)] = hashlib.sha256(config.read_bytes()).hexdigest()
 elif field == 'cargo_config':
     config = pathlib.Path(os.environ['CARGO_HOME']) / 'config.toml'
+    expected['cargo_home'] = str(config.parent.resolve())
     expected['cargo_config']['config.toml'] = hashlib.sha256(config.read_bytes()).hexdigest()
 else:
     assert field == ''
@@ -235,6 +236,25 @@ builds_before="$(wc -l < "$BUILD_LOG")"
 (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
 [[ "$(readlink "$(cat "$temporary/work-one-path")")" == "$(readlink "$(cat "$temporary/work-two-path")")" ]]
 [[ "$(readlink "$(cat "$temporary/work-one-path")")" == *"/project/.fluent/work/cache/historical-readers/"* ]]
+
+# Separate Attempt Cargo homes with no config share the same verified reader.
+mkdir -p "$temporary/attempt-one-home" "$temporary/attempt-two-home"
+builds_before="$(wc -l < "$BUILD_LOG")"
+(
+    export FLUENT_HISTORICAL_READER_CACHE="$temporary/attempt-cache"
+    CARGO_HOME="$temporary/attempt-one-home" python3 "$helper" "$temporary/work-one" "$commit" "$temporary/attempt-one-reader" > "$temporary/attempt-one-path"
+    (( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+    CARGO_HOME="$temporary/attempt-two-home" python3 "$helper" "$temporary/work-two" "$commit" "$temporary/attempt-two-reader" > "$temporary/attempt-two-path"
+)
+(( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
+[[ "$(readlink "$(cat "$temporary/attempt-one-path")")" == "$(readlink "$(cat "$temporary/attempt-two-path")")" ]]
+python3 - "$(readlink "$(cat "$temporary/attempt-one-path")")" <<'PY'
+import json, pathlib, sys
+entry = pathlib.Path(sys.argv[1]).parent
+identity = json.loads((entry / 'provenance.json').read_text())['identity']
+assert identity['cargo_home'] is None
+assert identity['cargo_config'] == {}
+PY
 
 # The calling worktree's Cargo configuration cannot affect an isolated build.
 mkdir -p "$temporary/work-two/.cargo"

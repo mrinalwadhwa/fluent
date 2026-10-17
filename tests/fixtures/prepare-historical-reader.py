@@ -91,7 +91,9 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
     identity = {"source_commit": commit, "source_archive_sha256": digest(archive),
                 "lockfile_sha256": lock_digest, "work_model_sha256": work_model_digest,
                 "rustc": rustc, "cargo": cargo, "build_options": options,
-                "cargo_home": str(cargo_home_path),
+                # A config-free Cargo home is portable across Attempts. Keep
+                # the path when config values may resolve relative to it.
+                "cargo_home": str(cargo_home_path) if cargo_config else None,
                 "cargo_config": cargo_config,
                 "cargo_cwd_config": cargo_cwd_config(build_cwd),
                 "build_command": build_command}
