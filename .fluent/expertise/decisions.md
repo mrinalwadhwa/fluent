@@ -524,6 +524,26 @@ and targeted Tests Review; the selector alone never grants acceptance.
 See [host evidence recovery](../../documentation/architecture.md#host-evidence-recovery)
 and `canonical_tester_replacement_covers_attributed_failure` in `tests/binary.rs`.
 
+## Reuse reviewed command proof only for unchanged inputs
+
+`verification_assessment` attributes native failures to an accepted canonical
+command only when its harness is unique in the ordered configuration. Repeated
+harnesses require the exact synthetic command identity. Apply that coverage to
+named references in a derived view; retain the original Tester result unchanged.
+
+`tester_evidence` may carry reviewed proof from its original candidate to a
+descendant only when every changed path is under `.fluent/expertise/`. Require
+the same ordered commands, harnesses, configuration and extractor, only
+originally covered failures, and identical resolved applicability, including
+comparison commits.
+Revalidate the original artifact bindings, targeted Tests Review, environment
+requirements, and freshness. `work_merge_executor` includes the landing
+`canonical-run.json` in the evidence digest; `verification_assessment` checks
+that binding when inspecting history. Use the inputs recorded for that run,
+not mutable refs resolved later. No original matrix, Tester result, or host
+proof is rewritten to grant credit. See the
+[architecture documentation](../../documentation/architecture.md#core-work-model).
+
 ## Legacy reconstruction proves only default candidate-code checks
 
 Reconstruct an absent canonical manifest only from a completed candidate-bound
