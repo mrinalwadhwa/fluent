@@ -1249,15 +1249,21 @@ fn workflow_integrated_queue_survives_other_attempt_cancellation() {
 
 #[test]
 fn workflow_integrated_queue_claim_holds_bound_attempt_lease() {
-    queue_dispatch_trace(false);
+    queue_dispatch_trace(false, false);
 }
 
 #[test]
 fn workflow_integrated_queue_recovery_fences_old_generation() {
-    queue_dispatch_trace(true);
+    queue_dispatch_trace(true, false);
 }
 
-fn queue_dispatch_trace(recover: bool) {
+#[test]
+fn workflow_integrated_queue_recovery_waits_for_slow_startup() {
+    // Exceed the former ten-second cutoff before starting the real coordinator.
+    queue_dispatch_trace(true, true);
+}
+
+fn queue_dispatch_trace(recover: bool, delay_start: bool) {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -1344,18 +1350,40 @@ exit 0
     if recover {
         for round in 0..2 {
             let barrier = tmp.path().join(format!("dispatch-barrier-{round}"));
-            let mut child = Command::new(env!("CARGO_BIN_EXE_fluent"))
+            let scheduler_log = tmp.path().join(format!("dispatch-scheduler-{round}.log"));
+            let mut command = if delay_start && round == 0 {
+                // Delay in the same process, then exec the real coordinator so
+                // killing a timed-out fixture cannot orphan a sleep process.
+                let mut command = Command::new("python3");
+                command.args([
+                    "-c",
+                    "import os, sys, time; time.sleep(11); os.execv(sys.argv[1], sys.argv[1:])",
+                    env!("CARGO_BIN_EXE_fluent"),
+                ]);
+                command
+            } else {
+                Command::new(env!("CARGO_BIN_EXE_fluent"))
+            };
+            let mut child = command
                 .current_dir(&project)
                 .env("FLUENT_NO_UPDATE_CHECK", "1")
                 .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
                 .env("FLUENT_TEST_DISPATCH_RUNNING_BARRIER", &barrier)
                 .args(["scheduler", "run", "--poll-seconds", "1"])
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(
+                    fs::File::create(&scheduler_log).unwrap(),
+                ))
                 .spawn()
                 .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            // Startup hashes the executable and prepares the coordinator before
+            // claiming Work. Use the same allowance as the Writer-start wait
+            // below so parallel suite load does not cause a false recovery failure.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             while !barrier.exists() && std::time::Instant::now() < deadline {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             // Kill and reap even when the barrier is missing; failure must not
@@ -1365,11 +1393,14 @@ exit 0
             let work = fluent(&project, &["work-item", "show", &first]);
             let held =
                 fluent::lease::is_leased(&fluent::queue::dispatch_lease_path(&project, &first));
-            child.kill().unwrap();
-            child.wait().unwrap();
+            if child.try_wait().unwrap().is_none() {
+                child.kill().unwrap();
+            }
+            let status = child.wait().unwrap();
             assert!(
                 reached,
-                "scheduler did not reach the running dispatch barrier"
+                "scheduler did not reach the running dispatch barrier in round {round} ({status}): {}",
+                fs::read_to_string(&scheduler_log).unwrap()
             );
             assert!(snapshot.status.success() && work.status.success() && held);
             assert!(!fluent::lease::is_leased(
@@ -1480,7 +1511,9 @@ exit 0
 
     let target = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/formal/workflow/integrated/production")
-        .join(if recover {
+        .join(if delay_start {
+            "queue-recovery-delayed"
+        } else if recover {
             "queue-recovery"
         } else {
             "queue-dispatch"
