@@ -10,7 +10,9 @@ use crate::work_model::{Attempt, RequiredCheckSource, work_artifact_path};
 
 /// A reviewed host pass for the Writer's canonical command can cover the same
 /// sandbox-only failures after Learning adds expertise. Bind the allowance to
-/// the original Tester failures and reject any executable or check change.
+/// the original Tester failures and recorded comparison inputs, and reject any
+/// executable or check change. Historical inspection uses the landing snapshot,
+/// since mutable comparison refs may have moved after that run.
 pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
     project_root: &Path,
     attempt: &Attempt,
@@ -39,6 +41,7 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
         let RequiredCheckSource::CanonicalTester {
             command_index,
             results,
+            manifest,
             ..
         } = &check.source
         else {
@@ -87,6 +90,37 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
             crate::check_applicability::evaluation_time(),
         )
         .is_err()
+        {
+            return Ok(false);
+        }
+        let (_, source_manifest_bytes) =
+            crate::verification_assessment::bound_recovery_artifact(project_root, &manifest.path)?;
+        let source_manifest: crate::tester::CanonicalRunManifest =
+            serde_json::from_slice(&source_manifest_bytes)?;
+        let current_manifest: crate::tester::CanonicalRunManifest = serde_json::from_slice(
+            &fs::read(current_path.with_file_name("canonical-run.json"))?,
+        )?;
+        if current_manifest.schema_version != 1
+            || !current_manifest.full_run
+            || current_manifest.config_digest != source_manifest.config_digest
+            || current_manifest.extractor_digest != source_manifest.extractor_digest
+            || current_manifest.commands != source_manifest.commands
+            || current_manifest.commands.len() != current.commands.len()
+        {
+            return Ok(false);
+        }
+        let Some(definition) = current_manifest.commands.get(*command_index) else {
+            return Ok(false);
+        };
+        let applicability = match current_manifest.applicability.get(*command_index) {
+            Some(binding) => binding.clone(),
+            None if definition.applicability.is_default() => Default::default(),
+            None => return Ok(false),
+        };
+        // Acceptance above validates the host document against this saved
+        // contract. The landing run must have captured exactly the same inputs.
+        if applicability.definition != definition.applicability
+            || applicability != check.applicability
         {
             return Ok(false);
         }
@@ -389,6 +423,11 @@ mod reviewed_host_proof_tests {
         let mut current = source.clone();
         current.candidate_commit = Some(merged.clone());
         let current_path = root.path().join("landing-results.json");
+        fs::copy(
+            source_path.with_file_name("canonical-run.json"),
+            current_path.with_file_name("canonical-run.json"),
+        )
+        .unwrap();
         let check =
             |attempt: &crate::work_model::Attempt, candidate: &str, results: &TesterResults| {
                 fs::write(&current_path, serde_json::to_vec(results).unwrap()).unwrap();
@@ -466,6 +505,149 @@ mod reviewed_host_proof_tests {
         .unwrap();
         current.candidate_commit = Some(changed.clone());
         assert!(!check(attempt, &changed, &current));
+    }
+
+    #[test]
+    fn reviewed_host_proof_binds_landing_comparison_inputs() {
+        use crate::recovery_contracts::verification_tests::{
+            accept_first_check, unique_harness_fixture_with_comparison,
+        };
+        use crate::verification_assessment::assess_canonical_checks;
+        use std::fs;
+
+        let (root, mut item) = unique_harness_fixture_with_comparison(true);
+        accept_first_check(root.path(), &mut item);
+        let attempt = &item.attempts[0];
+        let assessment = assess_canonical_checks(root.path(), attempt).unwrap();
+        let original_ref =
+            assessment.checks[0].applicability.comparison_commits["baseline"].clone();
+        let retained_paths = [
+            assessment.results_path.clone(),
+            assessment.results_path.with_file_name("canonical-run.json"),
+            root.path()
+                .join(&attempt.evidence_recoveries[0].attachment.snapshot_path),
+        ];
+        let retained = retained_paths.map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        });
+        fs::create_dir_all(root.path().join(".fluent/expertise")).unwrap();
+        fs::write(
+            root.path().join(".fluent/expertise/lesson.md"),
+            "Retain comparison inputs.\n",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["add", ".fluent/expertise/lesson.md"],
+            "stage lesson",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Record lesson"],
+            "commit lesson",
+        )
+        .unwrap();
+        let merged =
+            crate::git::run_stdout(root.path(), &["rev-parse", "HEAD"], "read candidate").unwrap();
+        let area = root.path().join(crate::work_model::work_artifact_path(
+            &item.id,
+            &attempt.id,
+            "landing",
+        ));
+        let results_path = area.join("tester-results.json");
+        let manifest_path = area.join("canonical-run.json");
+        fs::create_dir_all(&area).unwrap();
+        let run = || {
+            crate::tester::run(
+                root.path(),
+                &area,
+                true,
+                &crate::content::ContentResolver::new(Some(root.path())),
+            )
+            .unwrap();
+            crate::tester::bind_candidate_commit(&area, &merged).unwrap();
+        };
+        let covered = || {
+            super::reviewed_host_proof_covers_expertise_only_merge(
+                root.path(),
+                attempt,
+                &merged,
+                &results_path,
+            )
+            .unwrap()
+        };
+        run();
+        assert!(
+            covered(),
+            "unchanged comparison inputs retain reviewed coverage"
+        );
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let original_results: TesterResults =
+            serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap();
+
+        crate::git::run(
+            root.path(),
+            &["branch", "-f", "baseline", &merged],
+            "move comparison ref",
+        )
+        .unwrap();
+        run();
+        let changed_results: TesterResults =
+            serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap();
+        assert_eq!(
+            original_results.candidate_commit,
+            changed_results.candidate_commit
+        );
+        assert!(
+            original_results
+                .tests
+                .iter()
+                .map(|test| (&test.id, &test.test_harness, &test.status))
+                .eq(changed_results.tests.iter().map(|test| (
+                    &test.id,
+                    &test.test_harness,
+                    &test.status
+                )))
+        );
+        assert!(
+            !covered(),
+            "the same failures against a moved comparison ref need new proof"
+        );
+
+        crate::git::run(
+            root.path(),
+            &["branch", "-f", "baseline", &original_ref],
+            "restore ref",
+        )
+        .unwrap();
+        assert!(
+            !covered(),
+            "history uses the landing run's recorded inputs, not today's ref"
+        );
+        fs::write(&manifest_path, &original_manifest).unwrap();
+        crate::git::run(
+            root.path(),
+            &["branch", "-f", "baseline", &merged],
+            "move ref after run",
+        )
+        .unwrap();
+        assert!(
+            covered(),
+            "later ref movement does not rewrite the historical run"
+        );
+        let mut missing: crate::tester::CanonicalRunManifest =
+            serde_json::from_slice(&original_manifest).unwrap();
+        missing.applicability.clear();
+        fs::write(&manifest_path, serde_json::to_vec(&missing).unwrap()).unwrap();
+        assert!(
+            !covered(),
+            "non-default applicability requires a recorded binding"
+        );
+        for (path, bytes) in retained {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
     }
 
     fn result(failures: &[(&str, &str)]) -> TesterResults {

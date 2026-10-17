@@ -216,6 +216,20 @@ pub(crate) fn assess_landed_tester_history(
                 &root.join(&path),
                 Some(&root.join(baseline)),
             ) == 0;
+        if !native_match {
+            anyhow::ensure!(
+                candidate.merge_state.landing_intent.is_some()
+                    && candidate
+                        .merge_state
+                        .check_artifacts
+                        .iter()
+                        .any(|artifact| {
+                            artifact.producer_id == "merge-tester-manifest"
+                                && artifact.path == manifest_path
+                        }),
+                "reviewed host proof requires the landing manifest bound in retained evidence"
+            );
+        }
         anyhow::ensure!(
             native_match
                 || crate::tester_evidence::reviewed_host_proof_covers_expertise_only_merge(

@@ -72135,6 +72135,16 @@ fn landed_status_uses_final_landing_tester_evidence() {
         .unwrap()["path"]
         .as_str()
         .unwrap();
+    let manifest = item["merge_candidates"][0]["merge_state"]["check_artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["producer_id"] == "merge-tester-manifest")
+        .expect("landing retains the resolved comparison inputs in its evidence digest");
+    assert_eq!(
+        Path::new(manifest["path"].as_str().unwrap()),
+        Path::new(landing_path).with_file_name("canonical-run.json")
+    );
     assert_eq!(item["evidence-history"]["tester-results"], landing_path);
     assert_eq!(
         item["evidence-history"]["merged-commit"],
@@ -72402,6 +72412,18 @@ fn landed_status_validates_retained_landing_evidence() {
     );
     fs::write(project.join(path), &original).unwrap();
     let manifest_path = project.join(path).with_file_name("canonical-run.json");
+    let mut manifest = read_json_path(&manifest_path);
+    let original_manifest = fs::read(&manifest_path).unwrap();
+    manifest["run_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(
+        read_work_show_json(&project, "work-1")["evidence-history"]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("landing evidence changed"),
+        "landing binds the complete canonical manifest, including resolved inputs"
+    );
+    fs::write(&manifest_path, &original_manifest).unwrap();
     let mut manifest = read_json_path(&manifest_path);
     manifest["config_digest"] = serde_json::json!("sha256:forged");
     fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();

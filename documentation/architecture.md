@@ -844,8 +844,13 @@ configuration; repeated harnesses require an exact synthetic command identity.
 The assessment applies accepted coverage to named references in a copy of the
 Tester results and retains the original artifact. Landing may carry this proof
 across an expertise-only descendant commit after revalidating the original
-failures, command identities, source artifacts, and passing Review. Changed
-executable paths or newly failing tests block that allowance.
+failures, command identities, source artifacts, and passing Review. The landing
+command's resolved applicability in `canonical-run.json` must equal the accepted
+proof's applicability, including comparison commits. Landing includes that
+manifest in its evidence digest so historical inspection uses the recorded
+inputs and rejects changed artifact bytes rather than resolving today's refs.
+Changed executable paths, comparison inputs, or newly failing tests block that
+allowance.
 
 Every Writer persists `writer-context-usage.json` beside its transcript. The
 sidecar records prompt kind and bytes, execution-context and transcript bytes,

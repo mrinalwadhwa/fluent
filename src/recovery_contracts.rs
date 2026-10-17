@@ -6806,7 +6806,24 @@ pub(crate) mod verification_tests {
     }
 
     pub(crate) fn unique_harness_fixture() -> (tempfile::TempDir, WorkItem) {
+        unique_harness_fixture_with_comparison(false)
+    }
+
+    pub(crate) fn unique_harness_fixture_with_comparison(
+        comparison: bool,
+    ) -> (tempfile::TempDir, WorkItem) {
         let (root, mut item) = fixture(true);
+        let applicability = if comparison {
+            crate::git::run(
+                root.path(),
+                &["branch", "baseline"],
+                "record comparison ref",
+            )
+            .unwrap();
+            "    applicability: {comparison_refs: [baseline]}\n"
+        } else {
+            ""
+        };
         fs::write(
             root.path().join("tests/native.sh"),
             "#!/bin/sh\necho 'not ok broken'\n",
@@ -6814,7 +6831,9 @@ pub(crate) mod verification_tests {
         .unwrap();
         fs::write(
             root.path().join(".fluent/tester.yaml"),
-            "commands:\n  - command: 'false'\n    test_harness: shell-harness\n",
+            format!(
+                "commands:\n  - command: 'false'\n    test_harness: shell-harness\n{applicability}"
+            ),
         )
         .unwrap();
         crate::git::run(
@@ -6899,7 +6918,7 @@ pub(crate) mod verification_tests {
         let prior = format!("{area}/check.json");
         fs::write(root.join(&prior), serde_json::to_vec(&check).unwrap()).unwrap();
         let proof_path = format!("{area}/evidence.json");
-        let proof = serde_json::to_vec(&serde_json::json!({"schema_version":1,"producer":"authorized host","check":check.command,"working_directory":".","result":"pass","output":"passed","run_at":now_iso8601()})).unwrap();
+        let proof = serde_json::to_vec(&serde_json::json!({"schema_version":1,"producer":"authorized host","check":check.command,"working_directory":".","result":"pass","output":"passed","run_at":now_iso8601(),"comparison_commits":check.applicability.comparison_commits})).unwrap();
         fs::write(root.join(&proof_path), &proof).unwrap();
         let attachment = EvidenceAttachment {
             snapshot_path: proof_path,

@@ -2194,6 +2194,10 @@ fn execute_merge_with_coder(
         producer_id: "merge-tester".to_string(),
         path: path_for_model(config.project_root, &results_path),
     });
+    check_artifacts.push(ArtifactRef {
+        producer_id: "merge-tester-manifest".to_string(),
+        path: path_for_model(config.project_root, &tester_dir.join("canonical-run.json")),
+    });
     let verification: Result<()> = (|| {
         if !reusable {
             run_merge_tester(
