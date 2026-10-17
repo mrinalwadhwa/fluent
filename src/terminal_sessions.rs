@@ -2038,13 +2038,14 @@ mod setup_cleanup_tests {
             let readonly = if retry { "1" } else { "0" };
             // Wait for the embedded client before taking the baseline so its
             // delayed attachment cannot be mistaken for the full-screen client.
+            // Compare process IDs because the full-screen client can reuse its TTY.
             let deadline = Instant::now() + Duration::from_secs(5);
-            let baseline = loop {
+            let baseline_pids = loop {
                 let clients = Command::new(find_tmux().unwrap())
                     .env_remove("TMUX")
                     .arg("-S")
                     .arg(&socket)
-                    .args(["list-clients", "-F", "#{client_tty} #{client_readonly}"])
+                    .args(["list-clients", "-F", "#{client_pid} #{client_readonly}"])
                     .output()
                     .unwrap();
                 assert!(
@@ -2059,7 +2060,7 @@ mod setup_cleanup_tests {
                 }) {
                     break clients
                         .lines()
-                        .filter_map(|line| line.split_once(' ').map(|(tty, _)| tty.to_owned()))
+                        .filter_map(|line| line.split_once(' ').map(|(pid, _)| pid.to_owned()))
                         .collect::<Vec<_>>();
                 }
                 assert!(
@@ -2076,15 +2077,16 @@ mod setup_cleanup_tests {
                             .env_remove("TMUX")
                             .arg("-S")
                             .arg(&socket)
-                            .args(["list-clients", "-F", "#{client_tty} #{client_readonly}"])
+                            .args(["list-clients", "-F", "#{client_pid} #{client_readonly}"])
                             .output()
                             .unwrap();
                         if clients.status.success()
                             && String::from_utf8_lossy(&clients.stdout)
                                 .lines()
                                 .any(|line| {
-                                    line.split_once(' ').is_some_and(|(tty, mode)| {
-                                        mode == readonly && !baseline.iter().any(|old| old == tty)
+                                    line.split_once(' ').is_some_and(|(pid, mode)| {
+                                        mode == readonly
+                                            && !baseline_pids.iter().any(|old| old == pid)
                                     })
                                 })
                         {
