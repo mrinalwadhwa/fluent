@@ -1,5 +1,9 @@
 # Testing in the fluent
 
+## Patterns
+
+- [verified-historical-readers](testing/patterns/verified-historical-readers.md) — read when adding pinned historical executable fixtures that run across worktrees.
+
 Fluent has four complementary test surfaces:
 
 **Rust unit tests** (`src/`) — exercise module-local logic and invariants.
