@@ -5,14 +5,18 @@ import os
 import pty
 import select
 import signal
+import shlex
 import struct
+import subprocess
 import sys
+import tempfile
 import termios
 import time
 
 mode = sys.argv[2] if len(sys.argv) > 2 else None
 input_mode = mode in ("input", "control-input")
 attachment_mode = mode if mode in ("observe", "control") else None
+nested = tempfile.TemporaryDirectory(prefix="fluent-cancel-", dir="/private/tmp") if mode == "cancel-nested" else None
 input_bytes = {
     "esc": b"\x1b",
     "interrupt": b"\x03",
@@ -35,6 +39,11 @@ if pid == 0:
         os.environ["FLUENT_ATTACHMENT_PTY_MODE"] = attachment_mode
     os.environ["TERM"] = "xterm-256color"
     fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    if nested:
+        os.environ["FLUENT_CANCEL_NESTED_CHILD"] = nested.name
+        os.environ.pop("TMUX", None)
+        command = shlex.join([sys.argv[1], "--exact", "terminal_sessions::setup_cleanup_tests::nested_fullscreen_cancellation_child", "--nocapture"])
+        os.execlp("tmux", "tmux", "-S", nested.name + "/outer", "-f", "/dev/null", "new-session", command)
     test = "fullscreen_attachment_pty_child" if attachment_mode else "fullscreen_pty_child"
     if input_mode:
         variable, test = (
@@ -46,7 +55,7 @@ if pid == 0:
     os.execv(sys.argv[1], [sys.argv[1], "--exact", test, "--nocapture"])
 
 output = bytearray()
-deadline = time.monotonic() + 15
+deadline = time.monotonic() + (35 if nested else 15)
 status = None
 eof = False
 resized = False
@@ -91,7 +100,10 @@ try:
         raise AssertionError("terminal handoff child did not settle")
     assert eof, "terminal handoff child left its PTY open"
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
-    if input_mode:
+    if nested:
+        assert os.path.isfile(nested.name + "/passed"), output.decode(errors="replace")
+        print("ok: nested full-screen cancellation, failed cleanup, and retry")
+    elif input_mode:
         required = {"esc", "interrupt", "prefix", "after_prefix", "paste", "chord"}
         required |= {"enhanced_chord"} if mode == "input" else {
             "navigation", "literal", "sentinel", "navigate_chord", "control_second", "second_input"
@@ -113,3 +125,11 @@ finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
     os.close(master)
+    if nested:
+        try:
+            with open(nested.name + "/inner") as inner:
+                subprocess.run(["tmux", "-S", inner.read(), "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+        subprocess.run(["tmux", "-S", nested.name + "/outer", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        nested.cleanup()

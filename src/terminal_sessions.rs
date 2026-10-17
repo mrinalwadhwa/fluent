@@ -296,6 +296,10 @@ fn capture_pane_command(socket: &Path) -> Result<Command> {
 
 fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<()> {
     ensure!(stored.descriptor == *requested, "terminal identity changed");
+    ensure!(
+        requested.lifecycle == TerminalLifecycle::Running,
+        "terminal is no longer available for attachment"
+    );
     let published: StoredTerminal = serde_json::from_slice(&std::fs::read(&stored.registry_path)?)?;
     ensure!(
         published.descriptor == *requested,
@@ -864,8 +868,15 @@ impl Attachment {
         let mut command = self.client_command()?;
         let child = spawn_attachment_client(&mut command, self.control.as_ref())
             .context("attaching managed terminal")?;
+        self.wait_client(child)
+    }
+
+    fn wait_client(&self, child: Child) -> Result<i32> {
         let mut size = None;
         wait_for_attachment(child, || {
+            // Settlement revokes attachment admission before waiting for the
+            // Control lease. Check even when the terminal has not resized.
+            self.validate_live()?;
             if self.has_control() {
                 // The native client owns stdin. Poll only dimensions while it
                 // runs, retaining manual sizing across every attach/detach.
@@ -1043,7 +1054,13 @@ pub fn list(source_root: &Path) -> Result<Vec<TerminalDescriptor>> {
     let mut descriptors = Vec::new();
     for stored in list_stored(source_root)? {
         let mut descriptor = stored.descriptor.clone();
-        if validate(&stored, &descriptor).is_err() {
+        let settling = descriptor.lifecycle == TerminalLifecycle::Settling
+            && execution::verified_running_generation(
+                &stored.execution_record,
+                &descriptor.execution_generation,
+            )
+            .unwrap_or(false);
+        if !settling && validate(&stored, &descriptor).is_err() {
             descriptor.lifecycle = TerminalLifecycle::Ended;
             descriptor.can_observe = false;
             descriptor.can_control = false;
@@ -1371,7 +1388,7 @@ fn settle_panes(socket: &Path, leader_pid: u32, sessions: &[i32], marker: &str) 
         } else {
             None
         };
-        check_pane_query_failure(&error, has_sessions)?;
+        check_pane_query_failure_at(socket, &error, has_sessions)?;
     }
     let panes: Vec<u32> =
         String::from_utf8(output.map(|output| output.stdout).unwrap_or_default())?
@@ -1519,6 +1536,30 @@ fn check_pane_query_failure(error: &str, has_sessions: Option<bool>) -> Result<(
     bail!("reading managed pane owners failed: {error}")
 }
 
+fn check_pane_query_failure_at(
+    socket: &Path,
+    error: &str,
+    has_sessions: Option<bool>,
+) -> Result<()> {
+    if error.contains("no server running on") || error.contains("error connecting to") {
+        match UnixStream::connect(socket) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error).context("checking managed terminal socket after pane query");
+            }
+            Ok(_) => {}
+        }
+    }
+    check_pane_query_failure(error, has_sessions)
+}
+
 fn descriptor_publishes_resource(
     stored: &StoredTerminal,
     resource: &TerminalResource,
@@ -1527,6 +1568,33 @@ fn descriptor_publishes_resource(
     generation.is_some_and(|generation| stored.descriptor.execution_generation == generation)
         && stored.execution_record == resource.execution_record
         && stored.socket.as_ref() == Some(&resource.socket)
+}
+
+fn revoke_attachment(
+    registry: &Path,
+    resource: &TerminalResource,
+    generation: Option<&str>,
+) -> Result<()> {
+    let path = registry.join(DESCRIPTOR);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut stored: StoredTerminal = serde_json::from_slice(&bytes)?;
+    if !descriptor_publishes_resource(&stored, resource, generation) {
+        return Ok(()); // Setup may still have the previous generation's descriptor.
+    }
+    ensure!(
+        stored.registry_path == path,
+        "terminal registry changed before settlement"
+    );
+    stored.descriptor.lifecycle = TerminalLifecycle::Settling;
+    stored.descriptor.can_observe = false;
+    stored.descriptor.can_control = false;
+    stored.descriptor.unavailable_reason = Some("worker invocation is settling".into());
+    crate::atomic_write::atomic_write(&path, &serde_json::to_vec_pretty(&stored)?)?;
+    Ok(())
 }
 
 /// Settle pane descendants before the existing execution owner signals its
@@ -1602,6 +1670,9 @@ pub(crate) fn settle_for_execution(path: &Path, record: &ExecutionRecord) -> Res
                 .is_some_and(|name| name == resource.owner_marker.as_str()),
         "terminal owner marker changed"
     );
+    // Revoke the frontend's authority before waiting for its lease. The
+    // execution stays live and its receipt remains until cleanup is verified.
+    revoke_attachment(&registry, &resource, record.launch_generation.as_deref())?;
     // The resource receipt exists before descriptor publication. It remains
     // authoritative when setup fails or the server exits first.
     if !resource.socket.exists()
@@ -1708,6 +1779,43 @@ pub(crate) fn retire_for_execution(path: &Path, record: &ExecutionRecord) -> Res
 #[cfg(test)]
 mod control_client_tests {
     use super::*;
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn attachment_wait_stops_revoked_client_without_resize() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+        let mut session = TerminalSession::start_fixture(identity, "sleep 30").unwrap();
+        let attachment = session.observe(session.descriptor()).unwrap();
+        let child = Command::new("/bin/sleep").arg("3").spawn().unwrap();
+        let pid = child.id();
+        let mut stored = session.stored.clone();
+        let revoke = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stored.descriptor.lifecycle = TerminalLifecycle::Settling;
+            crate::atomic_write::atomic_write(
+                &stored.registry_path,
+                &serde_json::to_vec(&stored).unwrap(),
+            )
+            .unwrap();
+        });
+        let started = Instant::now();
+        let result = attachment.wait_client(child);
+        let elapsed = started.elapsed();
+        revoke.join().unwrap();
+        assert!(session.is_live().unwrap());
+        session.stop().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "revoked client waited for natural exit"
+        );
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 
     #[test]
     fn attachment_wait_updates_size_until_client_exits() {
@@ -1843,6 +1951,226 @@ mod control_client_tests {
 #[cfg(test)]
 mod setup_cleanup_tests {
     use super::*;
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn nested_fullscreen_cancellation_and_retry() {
+        let output = Command::new("python3")
+            .arg("tests/fixtures/dashboard-terminal-handoff.py")
+            .arg(std::env::current_exe().unwrap())
+            .arg("cancel-nested")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn nested_fullscreen_cancellation_child() {
+        let Some(result_dir) = std::env::var_os("FLUENT_CANCEL_NESTED_CHILD") else {
+            return;
+        };
+        assert!(
+            std::env::var_os("TMUX").is_some(),
+            "fixture must run inside outer tmux"
+        );
+        let tty = unsafe { libc::ttyname(libc::STDIN_FILENO) };
+        assert!(
+            !tty.is_null(),
+            "nested fixture requires a controlling terminal"
+        );
+        let tty = unsafe { std::ffi::CStr::from_ptr(tty) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        for retry in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+            let mut session = TerminalSession::start_tmux_fixture(identity.clone()).unwrap();
+            let socket = session.socket_path().unwrap().to_owned();
+            std::fs::write(
+                Path::new(&result_dir).join("inner"),
+                socket.as_os_str().as_encoded_bytes(),
+            )
+            .unwrap();
+            // Give this real tmux fixture the same resource receipt used by
+            // managed execution, without launching a provider or host sandbox.
+            let mut record = read_record(&record_for(&identity)).unwrap();
+            record.attempt_owner = Some(execution::AttemptExecutionOwner {
+                project_root: identity.source_root.clone(),
+                work_item_id: identity.work_item_id.clone(),
+                attempt_id: identity.attempt_id.clone(),
+            });
+            crate::atomic_write::atomic_write(
+                &record_for(&identity),
+                &serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            let resource = TerminalResource {
+                execution_record: record_for(&identity),
+                socket: socket.clone(),
+                pane_sessions: tmux_pane_pids(&socket)
+                    .unwrap()
+                    .into_iter()
+                    .map(|pid| process_session(pid).unwrap())
+                    .collect(),
+                owner_marker: String::new(),
+            };
+            std::fs::write(
+                resource_path(&identity),
+                serde_json::to_vec(&resource).unwrap(),
+            )
+            .unwrap();
+            let attachment = session.observe(session.descriptor()).unwrap();
+            let mut embedded =
+                crate::terminal_view::EmbeddedTerminal::observe(attachment, 60, 12).unwrap();
+            let blocker = if retry {
+                Some(
+                    lease::acquire(&registry_dir(&identity).join("terminal-control.lock")).unwrap(),
+                )
+            } else {
+                embedded.acquire_control().unwrap();
+                None
+            };
+            let mut dashboard = crate::dashboard::terminal::DashboardTerminal::open().unwrap();
+            let size = dashboard.size().unwrap();
+            std::thread::scope(|scope| {
+                let cancel = scope.spawn(|| {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let clients = Command::new(find_tmux().unwrap())
+                            .env_remove("TMUX")
+                            .arg("-S")
+                            .arg(&socket)
+                            .args(["list-clients", "-F", "#{client_tty}"])
+                            .output()
+                            .unwrap();
+                        if clients.status.success()
+                            && String::from_utf8_lossy(&clients.stdout)
+                                .lines()
+                                .any(|line| line == tty)
+                        {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "full-screen client never attached inside outer tmux"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let outcome = session.stop();
+                    if retry {
+                        assert!(
+                            outcome
+                                .unwrap_err()
+                                .to_string()
+                                .contains("control attachment did not close")
+                        );
+                        assert!(resource_path(&identity).exists());
+                        assert_ne!(
+                            read_record(&record_for(&identity)).unwrap().state,
+                            ExecutionState::Canceled
+                        );
+                        // Retain an unconnected socket inode if this tmux
+                        // version removes it on exit; retries must verify it.
+                        if !socket.exists() {
+                            drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+                        }
+                        drop(blocker);
+                        session.stop().unwrap();
+                    } else {
+                        outcome.unwrap();
+                    }
+                    assert_eq!(
+                        execution::cancel(&record_for(&identity)).unwrap(),
+                        execution::CancelOutcome::AlreadyStopped
+                    );
+                    assert!(!resource_path(&identity).exists());
+                });
+                let _ = dashboard.handoff(|| embedded.fullscreen(size.0, size.1));
+                assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+                assert_eq!(dashboard.size().unwrap(), size);
+                embedded.refresh();
+                assert!(embedded.ended());
+                assert!(!embedded.has_control());
+                assert!(embedded.acquire_control().is_err());
+                cancel.join().unwrap();
+            });
+            assert!(!session.is_live().unwrap());
+        }
+        std::fs::write(PathBuf::from(result_dir).join("passed"), b"passed").unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn settlement_revokes_attachment_before_failed_cleanup_and_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = TerminalIdentity::fixture(root.path(), "work-1", "attempt-1", "task-1");
+        let mut session = TerminalSession::start_fixture(identity.clone(), "sleep 30").unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fluent-t-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        session.stored.socket = Some(socket_dir.path().join("socket"));
+        crate::atomic_write::atomic_write(
+            &session.stored.registry_path,
+            &serde_json::to_vec(&session.stored).unwrap(),
+        )
+        .unwrap();
+        let resource = TerminalResource {
+            execution_record: session.stored.execution_record.clone(),
+            socket: session.stored.socket.clone().unwrap(),
+            pane_sessions: vec![],
+            owner_marker: socket_dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+        };
+        std::fs::write(
+            resource_path(&identity),
+            serde_json::to_vec(&resource).unwrap(),
+        )
+        .unwrap();
+        let mut record = read_record(&resource.execution_record).unwrap();
+        record.attempt_owner = Some(execution::AttemptExecutionOwner {
+            project_root: identity.source_root.clone(),
+            work_item_id: identity.work_item_id.clone(),
+            attempt_id: identity.attempt_id.clone(),
+        });
+        let mut attachment = session.observe(session.descriptor()).unwrap();
+        assert_eq!(
+            attachment.acquire_control().unwrap(),
+            ControlOutcome::Acquired
+        );
+        // The missing owner handle must keep cleanup unverified. Even so,
+        // both the existing attachment and new admission must be revoked.
+        let mut revoked = Vec::new();
+        for _ in 0..2 {
+            assert!(settle_for_execution(&resource.execution_record, &record).is_err());
+            revoked.push((
+                attachment.validate_input().is_err(),
+                resolve(root.path(), &session.descriptor().session_id).is_err(),
+                list(root.path()).unwrap()[0].lifecycle,
+            ));
+            assert!(resource_path(&identity).exists());
+            assert!(session.is_live().unwrap());
+            assert_eq!(
+                read_record(&resource.execution_record).unwrap().state,
+                ExecutionState::Running
+            );
+        }
+        attachment.release_control();
+        session.stop().unwrap();
+        assert_eq!(revoked, vec![(true, true, TerminalLifecycle::Settling); 2]);
+    }
 
     #[test]
     fn settlement_waits_for_control_client_to_release_lease() {
@@ -2036,6 +2364,32 @@ mod setup_cleanup_tests {
         assert!(check_pane_query_failure("no sessions", None).is_ok());
         assert!(check_pane_query_failure("no current target", Some(true)).is_err());
         assert!(check_pane_query_failure("permission denied", None).is_err());
+    }
+
+    #[test]
+    fn pane_query_retry_requires_confirmed_server_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("socket");
+        assert!(check_pane_query_failure_at(&socket, "no server running on fixture", None).is_ok());
+        assert!(
+            check_pane_query_failure_at(
+                &socket,
+                "error connecting to fixture (No such file or directory)",
+                None
+            )
+            .is_ok()
+        );
+        assert!(check_pane_query_failure_at(&socket, "permission denied", None).is_err());
+        // An invalid path is not evidence that the owned server has exited.
+        std::fs::write(&socket, b"obstruction").unwrap();
+        assert!(
+            check_pane_query_failure_at(
+                &socket.join("child"),
+                "no server running on fixture",
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
