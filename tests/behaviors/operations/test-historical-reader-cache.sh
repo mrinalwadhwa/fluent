@@ -99,7 +99,9 @@ if FAIL_BUILD=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$t
     echo 'failed build unexpectedly supplied a reader' >&2
     exit 1
 fi
-rg -q 'historical reader preparation failed|fixture build failed' "$temporary/failure.err"
+rg -q 'build identity [0-9a-f]{64} failed' "$temporary/failure.err"
+rg -q 'fixture build failed' "$temporary/failure.err"
+[[ ! -s "$temporary/failure.out" ]]
 python3 "$helper" "$repository" "$commit" "$temporary/one" > /dev/null
 (( $(wc -l < "$BUILD_LOG") == 11 ))
 
@@ -112,13 +114,22 @@ cp "$repository/tests/fixtures/prepare-historical-reader.py" "$temporary/worktre
 cd "$temporary/worktree"
 for wrapper in tests/fixtures/build-*-old-reader.sh; do
     binary="$(bash "$wrapper")"
-    python3 - "$binary" <<'PY'
-import hashlib, json, pathlib, sys
+    python3 - "$binary" "$wrapper" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
 binary = pathlib.Path(sys.argv[1])
-identity = json.loads((binary.parent.parent.parent / 'identity.json').read_text())
+wrapper = pathlib.Path(sys.argv[2]).name
+root = binary.parent.parent.parent
+identity = json.loads((root / 'identity.json').read_text())
 assert binary.is_symlink() and binary.is_file()
 assert identity['binary_sha256'] == hashlib.sha256(binary.read_bytes()).hexdigest()
 assert len(identity['source_commit']) == 40
+if wrapper == 'build-landing-recovery-old-reader.sh':
+    assert identity['source_archive_sha256'] == hashlib.sha256((root / 'source.tar').read_bytes()).hexdigest()
+    assert identity['work_model_sha256'] == hashlib.sha256((root / 'source/src/work_model.rs').read_bytes()).hexdigest()
+if wrapper == 'build-ownership-old-reader.sh':
+    for name in ('Cargo.toml', 'Cargo.lock', 'src/main.rs'):
+        committed = subprocess.check_output(('git', 'show', f"{identity['source_commit']}:{name}"))
+        assert (root / name).read_bytes() == committed
 PY
 done
 stable_root="$temporary/worktree/.scratch/round-cap-approach-revision-stable-reader/bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"

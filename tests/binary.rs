@@ -14152,13 +14152,16 @@ fn fluent_release_tester_historical_reader_setup_is_cold_cache_safe() {
 import sys
 from pathlib import Path
 args = sys.argv[1:]
+if args == ['--version']:
+    print('cargo fixture')
+    sys.exit(0)
 if '--offline' in args or '--frozen' in args:
     sys.exit('historical reader dependencies are absent from the cold cache')
 assert args[0] == 'build', args
 assert '--locked' in args, 'historical reader must preserve its committed lockfile'
 root = Path(args[args.index('--manifest-path') + 1]).parent
 assert (root / 'Cargo.lock').is_file(), 'archive must include the committed lockfile'
-binary = root / 'target/debug/fluent'
+binary = Path(args[args.index('--target-dir') + 1]) / 'debug/fluent'
 binary.parent.mkdir(parents=True)
 binary.write_text('#!/bin/sh\nexit 0\n')
 binary.chmod(0o755)

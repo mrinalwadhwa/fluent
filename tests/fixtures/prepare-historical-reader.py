@@ -22,9 +22,18 @@ def run(*args, cwd=None):
     return subprocess.check_output(args, cwd=cwd)
 
 
-def main(repository, commit, reader_root, mode="offline"):
+def write_proof(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as staged:
+        staged.write(content)
+    Path(staged.name).replace(path)
+
+
+def main(repository, commit, reader_root, mode="offline", evidence="none"):
     if mode not in {"offline", "online"}:
         raise ValueError(f"unsupported historical reader build mode: {mode}")
+    if evidence not in {"none", "archive", "root"}:
+        raise ValueError(f"unsupported historical reader source evidence: {evidence}")
     repository = Path(repository).resolve()
     reader_root = Path(reader_root).resolve()
     git_dir = Path(run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=repository).decode().strip())
@@ -36,7 +45,10 @@ def main(repository, commit, reader_root, mode="offline"):
         if lockfile is None or work_model is None:
             raise ValueError("source archive lacks Cargo.lock or src/work_model.rs")
         lock_digest = digest(lockfile.read())
-        work_model_digest = digest(work_model.read())
+        work_model_bytes = work_model.read()
+        work_model_digest = digest(work_model_bytes)
+        root_files = {name: source.extractfile(name).read()
+                      for name in ("Cargo.toml", "Cargo.lock", "src/main.rs")} if evidence == "root" else {}
     rustc = run("rustc", "-vV").decode()
     cargo = run("cargo", "--version").decode()
     options = {key: value for key, value in os.environ.items()
@@ -97,7 +109,10 @@ def main(repository, commit, reader_root, mode="offline"):
                 target = temporary / "target"
                 env = os.environ.copy()
                 env["GIT_CEILING_DIRECTORIES"] = str(source_dir.parent)
-                subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)
+                try:
+                    subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)
+                except subprocess.CalledProcessError as error:
+                    raise RuntimeError(f"build identity {key} failed: {error}") from error
                 built = target / "debug/fluent"
                 if not built.is_file() or not os.access(built, os.X_OK):
                     raise ValueError(f"build identity {key}: executable verification failed: {built}")
@@ -107,6 +122,12 @@ def main(repository, commit, reader_root, mode="offline"):
                 (staged / "provenance.json").write_text(json.dumps({"identity": identity, "binary_sha256": digest((staged / "fluent").read_bytes())}, indent=2) + "\n")
                 staged.rename(entry)
         # Preserve the fixture path and identity fields consumed by compatibility tests.
+        if evidence == "archive":
+            write_proof(reader_root / "source.tar", archive)
+            write_proof(reader_root / "source/src/work_model.rs", work_model_bytes)
+        elif evidence == "root":
+            for name, content in root_files.items():
+                write_proof(reader_root / name, content)
         local_binary = reader_root / "target/debug/fluent"
         local_binary.parent.mkdir(parents=True, exist_ok=True)
         link = local_binary.with_name(f"fluent.{os.getpid()}.tmp")
