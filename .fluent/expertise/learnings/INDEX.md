@@ -68,6 +68,7 @@
 - [git-publication-validates-push-destination](git-publication-validates-push-destination.md) — Validate the effective Git push URL independently from the fetch URL and publish only through that validated destination
 - [git-subprocesses-use-central-wrapper](git-subprocesses-use-central-wrapper.md) — Production Git subprocesses must use src/git.rs rather than constructing git commands directly
 - [hermetic-release-provider-boundary](hermetic-release-provider-boundary.md) — Declared release suites isolate nested provider routes with fail-closed doubles and an explicit fixture credential allowlist
+- [historical-reader-cargo-identity-portability](historical-reader-cargo-identity-portability.md) — Share historical readers across Attempts only when Cargo's effective configuration is portable and verified
 - [hook-base-commit-is-context-specific](hook-base-commit-is-context-specific.md) — Treat FLUENT_BASE_COMMIT as optional hook context supplied by candidate-gate checks, not as a universal hook variable
 - [host-evidence-settles-against-bound-writer](host-evidence-settles-against-bound-writer.md) — Settle host-evidence reviews against their recorded Writer candidate while requiring fresh evidence for a later candidate
 - [host-evidence-writes-use-exclusive-create](host-evidence-writes-use-exclusive-create.md) — Host-owned run/handoff evidence is written with exclusive create-new and propagates every write error — never a best-effort copy
