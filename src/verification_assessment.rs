@@ -306,6 +306,7 @@ pub(crate) fn assess_landed_tester_history(
 }
 
 const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
+const MAX_NATIVE_OBSERVATIONS: usize = 10_000;
 pub(crate) fn candidate_workspace_path(
     project_root: &Path,
     output: &work_model::TaskOutput,
@@ -369,6 +370,18 @@ pub(crate) fn parse_evidence_document(bytes: &[u8]) -> Result<EvidenceDocument> 
         bail!("evidence document has an unsupported version or empty required field");
     }
     DateTime::parse_from_rfc3339(&document.run_at).context("evidence run_at must be RFC3339")?;
+    if document.native_observations.len() > MAX_NATIVE_OBSERVATIONS {
+        bail!("evidence document has too many native observations (max {MAX_NATIVE_OBSERVATIONS})");
+    }
+    let mut seen_ids = std::collections::BTreeSet::new();
+    for obs in &document.native_observations {
+        if obs.id.trim().is_empty() || obs.harness.trim().is_empty() {
+            bail!("native observation must have non-empty id and harness");
+        }
+        if !seen_ids.insert(obs.id.as_str()) {
+            bail!("native observations must have unique ids");
+        }
+    }
     Ok(document)
 }
 
@@ -789,6 +802,7 @@ fn assess_canonical_checks_at(
             run_at: manifest.run_at.clone().unwrap_or_default(),
             environment: manifest.environment.get(index).cloned().unwrap_or_default(),
             comparison_commits: check.applicability.comparison_commits.clone(),
+            native_observations: vec![],
         };
         let local_applies =
             validate_check_applicability_at(&check.applicability, &local_evidence, now).is_ok();
@@ -3145,7 +3159,7 @@ pub fn assess_current_verification_at(
     }
     let canonical = assess_canonical_checks_at(project_root, attempt, now)?;
     let bytes = fs::read(&canonical.results_path)?;
-    let results = serde_json::from_slice(&bytes)?;
+    let results: crate::tester::TesterResults = serde_json::from_slice(&bytes)?;
     let bindings = vec![work_model::BoundRecheckArtifact {
         path: canonical
             .results_path
@@ -3154,6 +3168,18 @@ pub fn assess_current_verification_at(
             .into_owned(),
         digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
     }];
+    // Merge accepted native observations into a view for named-test reference
+    // matching only. The original results remain the canonical record for
+    // command-level checks.
+    let native_tests =
+        accepted_native_observation_tests(project_root, attempt, &output.commit, &canonical, now);
+    let results_with_native = if native_tests.is_empty() {
+        results.clone()
+    } else {
+        let mut augmented = results.clone();
+        augmented.tests.extend(native_tests);
+        augmented
+    };
     let mut references = match &attempt.writer_completion_contract {
         Some(contract) => assess_references(
             &candidate_workspace_path(project_root, output),
@@ -3161,7 +3187,7 @@ pub fn assess_current_verification_at(
             &attempt.id,
             &output.commit,
             contract,
-            Some(&results),
+            Some(&results_with_native),
             Some(&canonical),
             &bindings,
             &accepted_legacy_commands(project_root, attempt, now),
@@ -3493,6 +3519,168 @@ pub(crate) struct FailedCommandRecheckEvidenceBinding {
     pub(crate) working_directory: String,
 }
 
+/// Binds a second attachment (with native observations) to the accepted canonical
+/// command occurrence it follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub(crate) struct NativeObservationRecoveryBinding {
+    pub(crate) schema_version: u32,
+    pub(crate) candidate_commit: String,
+    pub(crate) source_recovery_id: String,
+    pub(crate) required_check_id: String,
+    pub(crate) command_index: usize,
+    pub(crate) command: String,
+    pub(crate) test_harness: String,
+    pub(crate) working_directory: String,
+    pub(crate) source_results: work_model::BoundRecheckArtifact,
+}
+
+pub(crate) const NATIVE_OBSERVATION_BINDING_SCHEMA_VERSION: u32 = 1;
+
+/// Collect passing test observations from second-attachment native obs recoveries.
+///
+/// Only observations from a complete recovery with a passing targeted Tests Review
+/// are returned. An observation is included only when its harness matches the
+/// binding's declared test_harness.
+pub(crate) fn accepted_native_observation_tests(
+    project_root: &Path,
+    attempt: &work_model::Attempt,
+    candidate_commit: &str,
+    canonical: &CanonicalCheckAssessment,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<crate::tester::TestResult> {
+    attempt
+        .evidence_recoveries
+        .iter()
+        .filter_map(|recovery| {
+            if recovery.state != EvidenceRecoveryState::Complete
+                || recovery.candidate_commit != candidate_commit
+            {
+                return None;
+            }
+            let [target] = recovery.targets.as_slice() else {
+                return None;
+            };
+            if target.role != "tests" {
+                return None;
+            }
+            let (_, binding_bytes) =
+                bound_recovery_artifact(project_root, &target.prior_review_artifact).ok()?;
+            let binding: NativeObservationRecoveryBinding =
+                serde_json::from_slice(&binding_bytes).ok()?;
+            if binding.schema_version != NATIVE_OBSERVATION_BINDING_SCHEMA_VERSION
+                || binding.candidate_commit != candidate_commit
+            {
+                return None;
+            }
+            let check = canonical.checks.iter().find(|check| {
+                check.id == binding.required_check_id
+                    && check.candidate_commit == candidate_commit
+                    && check.command == binding.command
+                    && check.working_directory == binding.working_directory
+            })?;
+            let work_model::RequiredCheckSource::CanonicalTester {
+                command_index,
+                results: source_results,
+                ..
+            } = &check.source
+            else {
+                return None;
+            };
+            if *command_index != binding.command_index
+                || *source_results != binding.source_results
+                || canonical.outstanding.contains(command_index)
+                || validate_required_check_acceptance_at(project_root, attempt, check, now).is_err()
+            {
+                return None;
+            }
+            let accepted_source = attempt.evidence_recoveries.iter().rev().find(|source| {
+                source
+                    .required_check
+                    .as_ref()
+                    .is_some_and(|bound| bound.id == check.id)
+            })?;
+            if accepted_source.id != binding.source_recovery_id {
+                return None;
+            }
+            let (bound_results, source_bytes) =
+                bound_recovery_artifact(project_root, &source_results.path).ok()?;
+            if bound_results.digest != source_results.digest {
+                return None;
+            }
+            let source: crate::tester::TesterResults =
+                serde_json::from_slice(&source_bytes).ok()?;
+            if source.commands.get(*command_index)?.test_harness != binding.test_harness {
+                return None;
+            }
+            let (att, evidence_bytes) =
+                bound_recovery_artifact(project_root, &recovery.attachment.snapshot_path).ok()?;
+            if att.digest != recovery.attachment.digest {
+                return None;
+            }
+            let evidence = parse_evidence_document(&evidence_bytes).ok()?;
+            if evidence.result != EvidenceResult::Pass
+                || evidence.check != binding.command
+                || evidence.working_directory != binding.working_directory
+                || evidence.native_observations.is_empty()
+                || evidence
+                    .native_observations
+                    .iter()
+                    .any(|obs| obs.harness != binding.test_harness)
+                || validate_check_applicability_at(&check.applicability, &evidence, now).is_err()
+            {
+                return None;
+            }
+            let review_task = target.review_task_id.as_ref().and_then(|id| {
+                attempt.tasks.iter().find(|task| {
+                    task.id == *id
+                        && task.kind == TaskKind::Review
+                        && task.role == "tests"
+                        && task.status == TaskStatus::Complete
+                        && task
+                            .evidence_review_context
+                            .as_ref()
+                            .is_some_and(|context| {
+                                context.recovery_id == recovery.id
+                                    && context.candidate_commit == recovery.candidate_commit
+                                    && context.attachment == recovery.attachment
+                                    && context.prior_review_artifact == target.prior_review_artifact
+                            })
+                })
+            })?;
+            let review_path = review_artifact_path(review_task)?;
+            let (review_art, review_bytes) =
+                bound_recovery_artifact(project_root, &review_path).ok()?;
+            if target.review_digest.as_deref() != Some(review_art.digest.as_str()) {
+                return None;
+            }
+            if review::extract_verdict(std::str::from_utf8(&review_bytes).ok()?)
+                != review::Verdict::Pass
+            {
+                return None;
+            }
+            let observations = evidence
+                .native_observations
+                .iter()
+                .filter(|obs| obs.harness == binding.test_harness)
+                .map(|obs| crate::tester::TestResult {
+                    identity: None,
+                    id: obs.id.clone(),
+                    test_harness: obs.harness.clone(),
+                    status: "pass".into(),
+                    duration_ms: None,
+                    failure_excerpt: None,
+                })
+                .collect::<Vec<_>>();
+            if observations.is_empty() {
+                return None;
+            }
+            Some(observations)
+        })
+        .flatten()
+        .collect()
+}
+
 struct AcceptedRecheckResult {
     source_results: work_model::BoundRecheckArtifact,
     command_index: usize,
@@ -3765,4 +3953,203 @@ pub(crate) fn failed_command_recheck_correction_artifacts(
         }
     }
     Ok(artifacts)
+}
+
+#[cfg(test)]
+mod native_observation_tests {
+    use super::*;
+    use crate::{
+        host_evidence::{EvidenceDocument, EvidenceResult},
+        recovery_contracts::verification_tests::{accept_first_check, unique_harness_fixture},
+        work_model::{
+            EvidenceRecoveryState, NativeTestObservation, TaskKind, TaskStatus, WorkModelStore,
+        },
+    };
+    use std::fs;
+
+    /// Build a complete native observation recovery: accepted command-level proof,
+    /// then a native observation attachment with a passed targeted Tests Review.
+    fn make_accepted_native_recovery(
+        root: &std::path::Path,
+        item: &mut work_model::WorkItem,
+    ) -> (String, String, String) {
+        let candidate = item.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|t| t.kind == TaskKind::Write && t.status == TaskStatus::Complete)
+            .and_then(|t| t.output.as_ref())
+            .unwrap()
+            .commit
+            .clone();
+        item.attempts[0].status = work_model::AttemptStatus::Complete;
+        let assessment =
+            crate::recovery_contracts::assess_canonical_checks(root, &item.attempts[0]).unwrap();
+        let check_id = assessment.checks[0].id.clone();
+        let command = assessment.checks[0].command.clone();
+
+        let store = WorkModelStore::new(root);
+        store.create_work_item(item).unwrap();
+
+        let obs_document = EvidenceDocument {
+            environment: Default::default(),
+            comparison_commits: Default::default(),
+            schema_version: 1,
+            producer: "authorized host".to_string(),
+            check: command.clone(),
+            working_directory: ".".to_string(),
+            result: EvidenceResult::Pass,
+            run_at: work_model::now_iso8601(),
+            output: "passed with observations".to_string(),
+            native_observations: vec![NativeTestObservation {
+                id: "tests/native.sh::observed-test".to_string(),
+                harness: "shell-harness".to_string(),
+            }],
+        };
+        let evidence_path = root.join("native-obs-evidence.json");
+        fs::write(
+            &evidence_path,
+            serde_json::to_vec_pretty(&obs_document).unwrap(),
+        )
+        .unwrap();
+
+        let recovery = crate::host_evidence::attach_native_observations_for_required_check(
+            root,
+            &store,
+            &item.id,
+            "attempt-1",
+            &candidate,
+            &check_id,
+            &evidence_path,
+        )
+        .unwrap();
+
+        // Complete the targeted Tests Review so the recovery settles.
+        store
+            .mutate_work_item(&item.id, |item| {
+                let attempt = &mut item.attempts[0];
+                let review_id = recovery.targets[0].review_task_id.as_ref().unwrap().clone();
+                let review = attempt
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == review_id)
+                    .unwrap();
+                work_model::set_task_terminal(review, TaskStatus::Complete);
+                let area = root.join(&review.artifact_area.as_ref().unwrap().path);
+                fs::create_dir_all(&area).unwrap();
+                fs::write(area.join("review.md"), "Verdict: pass\n").unwrap();
+                let nat_recovery = attempt
+                    .evidence_recoveries
+                    .iter_mut()
+                    .find(|r| r.id == recovery.id)
+                    .unwrap();
+                nat_recovery.state = EvidenceRecoveryState::Complete;
+                nat_recovery.targets[0].review_digest =
+                    Some(crate::verification_policy::digest(b"Verdict: pass\n"));
+                Ok(())
+            })
+            .unwrap();
+
+        (item.id.clone(), candidate, recovery.id)
+    }
+
+    #[test]
+    fn reviewed_host_native_results_satisfy_matching_references_only() {
+        let (root, mut item) = unique_harness_fixture();
+        accept_first_check(root.path(), &mut item);
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .verification_refs =
+            vec![r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.into()];
+
+        let (_, _, _recovery_id) = make_accepted_native_recovery(root.path(), &mut item);
+
+        let item = WorkModelStore::new(root.path())
+            .read_work_item("verification")
+            .unwrap();
+        let attempt = &item.attempts[0];
+
+        let assessment = assess_current_verification(root.path(), attempt).unwrap();
+
+        // The named-test reference for the observed test must be satisfied.
+        assert!(
+            assessment.references.iter().any(|r| r.satisfied),
+            "reviewed native observation must satisfy its matching reference: {:?}",
+            assessment.references
+        );
+
+        // The canonical Tester results file must be unmodified.
+        let canonical =
+            crate::recovery_contracts::assess_canonical_checks(root.path(), attempt).unwrap();
+        let original_bytes = fs::read(&canonical.results_path).unwrap();
+        let results: crate::tester::TesterResults =
+            serde_json::from_slice(&original_bytes).unwrap();
+        assert!(
+            !results
+                .tests
+                .iter()
+                .any(|t| t.id == "tests/native.sh::observed-test"),
+            "canonical Tester results must not be modified by native observation attachment"
+        );
+    }
+
+    #[test]
+    fn native_observations_reject_changed_command_source_binding() {
+        let (root, mut item) = unique_harness_fixture();
+        accept_first_check(root.path(), &mut item);
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .verification_refs =
+            vec![r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.into()];
+        let (_, _, recovery_id) = make_accepted_native_recovery(root.path(), &mut item);
+        let store = WorkModelStore::new(root.path());
+        let stored = store.read_work_item("verification").unwrap();
+        let recovery = stored.attempts[0]
+            .evidence_recoveries
+            .iter()
+            .find(|recovery| recovery.id == recovery_id)
+            .unwrap();
+        let binding_path = root.path().join(&recovery.targets[0].prior_review_artifact);
+        let mut binding: NativeObservationRecoveryBinding =
+            serde_json::from_slice(&fs::read(&binding_path).unwrap()).unwrap();
+        binding.source_recovery_id = "different-command-proof".into();
+        fs::write(&binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
+
+        let assessment = assess_current_verification(root.path(), &stored.attempts[0]).unwrap();
+        assert!(assessment.references.iter().all(|row| !row.satisfied));
+    }
+
+    #[test]
+    fn command_level_host_pass_does_not_invent_named_results() {
+        let (root, mut item) = unique_harness_fixture();
+        accept_first_check(root.path(), &mut item);
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .verification_refs =
+            vec![r#"{"kind":"named-test","path":"tests/native.sh","name":"any-test-id"}"#.into()];
+        item.attempts[0].status = work_model::AttemptStatus::Complete;
+
+        let store = WorkModelStore::new(root.path());
+        store.create_work_item(&item).unwrap();
+
+        let item = store.read_work_item("verification").unwrap();
+        let attempt = &item.attempts[0];
+        let assessment = assess_current_verification(root.path(), attempt).unwrap();
+
+        // A command-level host pass alone must not satisfy a named-test reference.
+        assert!(
+            assessment.references.iter().all(|r| !r.satisfied),
+            "command-level pass must not invent named test results: {:?}",
+            assessment.references
+        );
+    }
 }

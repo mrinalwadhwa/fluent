@@ -1764,6 +1764,31 @@ fn check_behavior_references(
             vec!["Tester evidence is not bound to this candidate commit".into()],
         )]);
     }
+    if let (Some(results), Some(attempt), Some(canonical)) =
+        (adjusted.as_mut(), saved_attempt, canonical.as_ref())
+    {
+        if let Some(writer_commit) = attempt
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| {
+                task.kind == crate::work_model::TaskKind::Write
+                    && task.status == crate::work_model::TaskStatus::Complete
+            })
+            .and_then(|task| task.output.as_ref())
+            .map(|output| output.commit.as_str())
+        {
+            results.tests.extend(
+                crate::verification_assessment::accepted_native_observation_tests(
+                    request.project_root,
+                    attempt,
+                    writer_commit,
+                    canonical,
+                    crate::check_applicability::evaluation_time(),
+                ),
+            );
+        }
+    }
     let bindings = request
         .tester_results_path
         .map(|path| crate::work_model::BoundRecheckArtifact {

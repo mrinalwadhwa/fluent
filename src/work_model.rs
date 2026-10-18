@@ -23517,6 +23517,14 @@ pub(crate) fn publish_recovery_snapshot(
     Ok(())
 }
 
+/// A single passing test identity observed by the host rerun.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTestObservation {
+    pub id: String,
+    pub harness: String,
+}
+
 /// Version-one operator evidence document. The parser below is the single
 /// validation boundary for host-evidence attachment and source correction.
 /// Callers retain the exact serialized bytes separately as the audit artifact.
@@ -23534,6 +23542,8 @@ pub struct EvidenceDocument {
     pub result: EvidenceResult,
     pub run_at: String,
     pub output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_observations: Vec<NativeTestObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -4030,6 +4030,7 @@ mod tests {
             result: EvidenceResult::Pass,
             run_at: "2026-08-25T12:00:00Z".to_string(),
             output: "passed on the authorized host".to_string(),
+            native_observations: vec![],
         };
         fs::write(
             &evidence_path,
@@ -4167,6 +4168,7 @@ mod tests {
             result: EvidenceResult::Pass,
             run_at: "2026-08-25T12:00:00Z".to_string(),
             output: "passed on the authorized host".to_string(),
+            native_observations: vec![],
         };
         fs::write(
             &evidence_path,
@@ -4288,6 +4290,7 @@ mod tests {
             result: EvidenceResult::Pass,
             run_at: "2026-08-25T12:00:00Z".to_string(),
             output: "passed on the authorized host".to_string(),
+            native_observations: vec![],
         };
         fs::write(
             &evidence_path,
@@ -5582,6 +5585,243 @@ mod tests {
         );
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
+
+    #[test]
+    fn legacy_required_check_evidence_keeps_command_only_meaning() {
+        // An evidence document without native_observations deserializes with an
+        // empty list — existing command-level recovery semantics are unchanged.
+        let legacy = br#"{"schema_version":1,"producer":"host","check":"false","working_directory":".","result":"pass","run_at":"2026-08-03T17:59:47Z","output":"ok"}"#;
+        let document = parse_evidence_document(legacy).unwrap();
+        assert!(document.native_observations.is_empty());
+        assert_eq!(document.result, EvidenceResult::Pass);
+
+        // A serialized document with no observations omits the field entirely.
+        let reserialized = serde_json::to_string(&document).unwrap();
+        assert!(!reserialized.contains("native_observations"));
+    }
+
+    #[test]
+    fn reviewed_required_check_native_results_can_follow_command_proof() {
+        let (root, mut item) =
+            crate::recovery_contracts::verification_tests::unique_harness_fixture();
+        crate::recovery_contracts::verification_tests::accept_first_check(root.path(), &mut item);
+
+        let candidate = item.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .unwrap()
+            .commit
+            .clone();
+        item.attempts[0].status = work_model::AttemptStatus::Complete;
+
+        let assessment =
+            crate::recovery_contracts::assess_canonical_checks(root.path(), &item.attempts[0])
+                .unwrap();
+        let check_id = assessment.checks[0].id.clone();
+        let command = assessment.checks[0].command.clone();
+
+        let store = WorkModelStore::new(root.path());
+        store.create_work_item(&item).unwrap();
+
+        let document = EvidenceDocument {
+            environment: Default::default(),
+            comparison_commits: Default::default(),
+            schema_version: 1,
+            producer: "authorized host".to_string(),
+            check: command,
+            working_directory: ".".to_string(),
+            result: EvidenceResult::Pass,
+            run_at: work_model::now_iso8601(),
+            output: "passed with observations".to_string(),
+            native_observations: vec![work_model::NativeTestObservation {
+                id: "tests/native.sh::observed".to_string(),
+                harness: "shell-harness".to_string(),
+            }],
+        };
+        let evidence_path = root.path().join("native-evidence.json");
+        fs::write(
+            &evidence_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let recovery = attach_required_check(
+            root.path(),
+            &store,
+            "verification",
+            "attempt-1",
+            &candidate,
+            &check_id,
+            &evidence_path,
+        )
+        .unwrap();
+
+        assert_eq!(recovery.state, EvidenceRecoveryState::Reviewing);
+        assert!(
+            recovery.required_check.is_none(),
+            "native observation recovery must not carry required_check"
+        );
+
+        let item = store.read_work_item("verification").unwrap();
+        let attempt = &item.attempts[0];
+        let review_id = recovery.targets[0].review_task_id.as_ref().unwrap();
+        assert!(attempt.tasks.iter().any(|task| {
+            task.id == *review_id
+                && task.kind == TaskKind::Review
+                && task.role == "tests"
+                && task.status == TaskStatus::Planned
+        }));
+
+        // Original command-level recovery must be intact.
+        assert!(
+            attempt
+                .evidence_recoveries
+                .iter()
+                .any(|r| r.required_check.is_some() && r.state == EvidenceRecoveryState::Complete),
+            "command-level recovery must remain after native observation attachment"
+        );
+    }
+
+    #[test]
+    fn required_check_native_results_reject_wrong_or_unreviewed_source() {
+        let (root, mut item) =
+            crate::recovery_contracts::verification_tests::unique_harness_fixture();
+        crate::recovery_contracts::verification_tests::accept_first_check(root.path(), &mut item);
+        item.attempts[0].status = work_model::AttemptStatus::Complete;
+
+        let candidate = item.attempts[0]
+            .tasks
+            .iter()
+            .rev()
+            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+            .and_then(|task| task.output.as_ref())
+            .unwrap()
+            .commit
+            .clone();
+        let assessment =
+            crate::recovery_contracts::assess_canonical_checks(root.path(), &item.attempts[0])
+                .unwrap();
+        let check_id = assessment.checks[0].id.clone();
+        let command = assessment.checks[0].command.clone();
+
+        let store = WorkModelStore::new(root.path());
+        store.create_work_item(&item).unwrap();
+
+        let make_evidence =
+            |cmd: &str, harness: &str, obs: Vec<work_model::NativeTestObservation>| {
+                EvidenceDocument {
+                    environment: Default::default(),
+                    comparison_commits: Default::default(),
+                    schema_version: 1,
+                    producer: "host".to_string(),
+                    check: cmd.to_string(),
+                    working_directory: ".".to_string(),
+                    result: EvidenceResult::Pass,
+                    run_at: work_model::now_iso8601(),
+                    output: "ok".to_string(),
+                    native_observations: obs,
+                }
+            };
+
+        let write_evidence = |document: &EvidenceDocument| -> std::path::PathBuf {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.into_path().join("evidence.json");
+            fs::write(&path, serde_json::to_vec_pretty(document).unwrap()).unwrap();
+            path
+        };
+
+        // Reject: empty native_observations (checked before entering mutation).
+        let empty_obs = make_evidence(&command, "shell-harness", vec![]);
+        let path = write_evidence(&empty_obs);
+        assert!(
+            attach_native_observations_for_required_check(
+                root.path(),
+                &store,
+                "verification",
+                "attempt-1",
+                &candidate,
+                &check_id,
+                &path,
+            )
+            .is_err(),
+            "empty observations must be rejected"
+        );
+
+        // Reject: wrong command in the evidence document.
+        let wrong_cmd = make_evidence(
+            "totally-different-command",
+            "shell-harness",
+            vec![work_model::NativeTestObservation {
+                id: "test1".to_string(),
+                harness: "shell-harness".to_string(),
+            }],
+        );
+        let path = write_evidence(&wrong_cmd);
+        assert!(
+            attach_native_observations_for_required_check(
+                root.path(),
+                &store,
+                "verification",
+                "attempt-1",
+                &candidate,
+                &check_id,
+                &path,
+            )
+            .is_err(),
+            "wrong command must be rejected"
+        );
+
+        // Reject: wrong candidate commit.
+        let valid_obs = make_evidence(
+            &command,
+            "shell-harness",
+            vec![work_model::NativeTestObservation {
+                id: "test1".to_string(),
+                harness: "shell-harness".to_string(),
+            }],
+        );
+        let path = write_evidence(&valid_obs);
+        assert!(
+            attach_native_observations_for_required_check(
+                root.path(),
+                &store,
+                "verification",
+                "attempt-1",
+                "wrong-candidate-commit",
+                &check_id,
+                &path,
+            )
+            .is_err(),
+            "wrong candidate commit must be rejected"
+        );
+
+        // Reject: observations all use a different harness than the canonical command.
+        let wrong_harness = make_evidence(
+            &command,
+            "other-harness",
+            vec![work_model::NativeTestObservation {
+                id: "test1".to_string(),
+                harness: "completely-different-harness".to_string(),
+            }],
+        );
+        let path = write_evidence(&wrong_harness);
+        assert!(
+            attach_native_observations_for_required_check(
+                root.path(),
+                &store,
+                "verification",
+                "attempt-1",
+                &candidate,
+                &check_id,
+                &path,
+            )
+            .is_err(),
+            "harness mismatch must be rejected"
+        );
+    }
 }
 
 /// Attach one exact canonical command result through the existing targeted
@@ -5603,6 +5843,17 @@ pub fn attach_required_check(
     );
     let bytes = fs::read(evidence_file)?;
     let document = parse_evidence_document(&bytes)?;
+    if !document.native_observations.is_empty() {
+        return attach_native_observations_for_required_check(
+            project_root,
+            store,
+            work_item_id,
+            attempt_id,
+            candidate_commit,
+            required_check,
+            evidence_file,
+        );
+    }
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     let snapshot = snapshot_path(work_item_id, attempt_id, &digest)?;
     let operation = work_model::RecoveryOperationRequest::new(
@@ -5894,6 +6145,323 @@ pub fn attach_required_check(
             task.input_artifacts.extend([
                 ArtifactRef {
                     producer_id: "required-check".into(),
+                    path: binding_path.clone(),
+                },
+                ArtifactRef {
+                    producer_id: "host-evidence".into(),
+                    path: snapshot.clone(),
+                },
+            ]);
+            let recovery = attempt
+                .evidence_recoveries
+                .iter_mut()
+                .find(|recovery| recovery.id == recovery_id)
+                .unwrap();
+            recovery.targets[0].review_task_id = Some(task.id.clone());
+            task.evidence_review_context = Some(EvidenceReviewContext {
+                recovery_id,
+                candidate_commit: candidate_commit.into(),
+                attachment: recovery.attachment.clone(),
+                prior_review_artifact: binding_path,
+            });
+            attempt.pause_kind = None;
+            attempt.pause_recovery = None;
+            attempt.completed_at = None;
+            let result = recovery.clone();
+            let next = crate::work_status::derive_attempt_recovery_next_action(
+                Some(attempt),
+                Some(project_root),
+            );
+            attempt.record_recovery_operation(&operation, next)?;
+            Ok(result)
+        },
+    )?)
+}
+
+/// Attach explicit native test observations for an already-accepted canonical
+/// command. The evidence document must carry non-empty native_observations and
+/// name the exact accepted command. A new targeted Tests Review must pass before
+/// the observations can satisfy named-test references.
+///
+/// The earlier command-level recovery and its attachment remain intact.
+pub fn attach_native_observations_for_required_check(
+    project_root: &Path,
+    store: &WorkModelStore,
+    work_item_id: &str,
+    attempt_id: &str,
+    candidate_commit: &str,
+    required_check: &str,
+    evidence_file: &Path,
+) -> Result<EvidenceRecovery> {
+    anyhow::ensure!(
+        !fs::symlink_metadata(evidence_file)?
+            .file_type()
+            .is_symlink(),
+        "evidence file must not be a symlink"
+    );
+    let bytes = fs::read(evidence_file)?;
+    let document = parse_evidence_document(&bytes)?;
+    anyhow::ensure!(
+        !document.native_observations.is_empty(),
+        "native observation evidence must contain at least one observation"
+    );
+    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let snapshot = snapshot_path(work_item_id, attempt_id, &digest)?;
+    let operation = work_model::RecoveryOperationRequest::new(
+        "host-evidence-native-observation-attachment",
+        work_item_id,
+        attempt_id,
+        Some(candidate_commit.to_string()),
+        None,
+        Some(digest.clone()),
+        None,
+        None,
+        Some(format!(
+            "sha256:{:x}",
+            Sha256::digest(required_check.as_bytes())
+        )),
+    );
+    let _land_lock = crate::land_lock::acquire(&crate::land_lock::lock_path(project_root))?;
+    Ok(store.mutate_work_item_from_external(
+        work_item_id,
+        format!("attach native observations for required check {required_check}"),
+        Some(snapshot.clone()),
+        |item| {
+            let reject = |reason: String| WorkModelError::HostEvidenceRecoveryIneligible {
+                attempt_id: attempt_id.into(),
+                reason,
+            };
+            item.validate_recovery_operation(project_root, &operation)?;
+            let attempt = item
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .ok_or_else(|| reject("Attempt is missing".into()))?;
+            attempt.ensure_not_canceled()?;
+            let output = attempt
+                .tasks
+                .iter()
+                .rev()
+                .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+                .and_then(|task| task.output.as_ref())
+                .ok_or_else(|| reject("no completed Writer candidate".into()))?;
+            if output.commit != candidate_commit {
+                return Err(reject(
+                    "native observation evidence requires the unchanged candidate".into(),
+                ));
+            }
+            let assessment =
+                crate::recovery_contracts::assess_canonical_checks(project_root, attempt)
+                    .map_err(|error| reject(format!("{error:#}")))?;
+            let check = assessment
+                .checks
+                .iter()
+                .find(|check| check.id == required_check)
+                .ok_or_else(|| {
+                    reject(
+                        "required check is not in the current canonical configuration".into(),
+                    )
+                })?
+                .clone();
+            let work_model::RequiredCheckSource::CanonicalTester {
+                command_index,
+                results: source_results,
+                ..
+            } = &check.source
+            else {
+                return Err(reject(
+                    "required check selector must name a canonical Tester command".into(),
+                ));
+            };
+            let command_index = *command_index;
+            if document.check != check.command
+                || document.working_directory != check.working_directory
+            {
+                return Err(reject(
+                    "evidence must name the exact required command and working directory".into(),
+                ));
+            }
+            // The command must already be accepted at the command level.
+            if assessment.outstanding.contains(&command_index) {
+                return Err(reject(
+                    "required check has an outstanding failed command; attach command-level evidence first".into(),
+                ));
+            }
+            // Find the command-level (first) accepted recovery for this check.
+            let source_recovery = attempt
+                .evidence_recoveries
+                .iter()
+                .rev()
+                .find(|prior| {
+                    prior
+                        .required_check
+                        .as_ref()
+                        .map(|rc| rc.id.as_str())
+                        == Some(required_check)
+                        && prior.candidate_commit == candidate_commit
+                        && prior.state == EvidenceRecoveryState::Complete
+                })
+                .ok_or_else(|| {
+                    reject(
+                        "no accepted command-level recovery found for this required check".into(),
+                    )
+                })?;
+            // Determine the harness from the source Tester results.
+            let source_results_path = project_root.join(&source_results.path);
+            let source_results_bytes =
+                fs::read(&source_results_path)
+                    .map_err(|error| reject(format!("{error:#}")))?;
+            if format!("sha256:{:x}", Sha256::digest(&source_results_bytes))
+                != source_results.digest
+            {
+                return Err(reject("source Tester results digest changed".into()));
+            }
+            let tester_results: crate::tester::TesterResults =
+                serde_json::from_slice(&source_results_bytes)
+                    .map_err(|error| reject(format!("{error:#}")))?;
+            let tester_command = tester_results
+                .commands
+                .get(command_index)
+                .ok_or_else(|| {
+                    reject("source Tester results missing command entry".into())
+                })?;
+            let test_harness = tester_command.test_harness.clone();
+            // Every reported identity must belong to this command's harness.
+            if document
+                .native_observations
+                .iter()
+                .any(|obs| obs.harness != test_harness)
+            {
+                return Err(reject(format!(
+                    "native observation does not match the expected harness {test_harness:?}"
+                )));
+            }
+            let source_recovery_id = source_recovery.id.clone();
+            let binding =
+                crate::verification_assessment::NativeObservationRecoveryBinding {
+                    schema_version:
+                        crate::verification_assessment::NATIVE_OBSERVATION_BINDING_SCHEMA_VERSION,
+                    candidate_commit: candidate_commit.into(),
+                    source_recovery_id: source_recovery_id.clone(),
+                    required_check_id: required_check.into(),
+                    command_index,
+                    command: check.command.clone(),
+                    test_harness: test_harness.clone(),
+                    working_directory: check.working_directory.clone(),
+                    source_results: source_results.clone(),
+                };
+            let binding_bytes =
+                serde_json::to_vec_pretty(&binding)
+                    .map_err(|error| reject(error.to_string()))?;
+            let binding_digest = format!("sha256:{:x}", Sha256::digest(&binding_bytes));
+            let binding_path = snapshot_path(work_item_id, attempt_id, &binding_digest)
+                .map_err(|error| reject(error.to_string()))?;
+            // Idempotent replay: return existing recovery with matching binding.
+            if let Some(prior) = attempt.evidence_recoveries.iter().find(|prior| {
+                prior.required_check.is_none()
+                    && prior.attachment.digest == digest
+                    && prior.targets.iter().any(|target| {
+                        target.prior_review_artifact == binding_path
+                    })
+            }) {
+                for (path, expected) in [(&snapshot, &bytes), (&binding_path, &binding_bytes)] {
+                    let (_, actual) =
+                        crate::recovery_contracts::bound_recovery_artifact(project_root, path)
+                            .map_err(|error| reject(format!("{error:#}")))?;
+                    if actual != *expected {
+                        return Err(reject("recorded evidence bytes changed".into()));
+                    }
+                }
+                return Ok(prior.clone());
+            }
+            if attempt.active_evidence_recovery().is_some()
+                || attempt.tasks.iter().any(|task| task.status == TaskStatus::Planned)
+            {
+                return Err(reject(
+                    "another reserved Task or evidence review must settle first".into(),
+                ));
+            }
+            if !matches!(
+                attempt.status,
+                work_model::AttemptStatus::Reviewing
+                    | work_model::AttemptStatus::NeedsUser
+                    | work_model::AttemptStatus::Failed
+                    | work_model::AttemptStatus::Executing
+                    | work_model::AttemptStatus::Complete
+            ) {
+                return Err(reject(
+                    "Attempt is not eligible for evidence recovery".into(),
+                ));
+            }
+            if let Some(proof) = &assessment.reconstruction {
+                for (artifact, artifact_bytes) in [
+                    (&proof.manifest, &proof.manifest_bytes),
+                    (&proof.audit, &proof.audit_bytes),
+                ] {
+                    publish_snapshot(project_root, &artifact.path, artifact_bytes)
+                        .map_err(|error| reject(format!("{error:#}")))?;
+                }
+            }
+            let recovery_id = format!(
+                "native-obs-{:x}",
+                Sha256::digest(
+                    format!("{binding_digest}\0{digest}\0{source_recovery_id}").as_bytes()
+                )
+            );
+            for (path, content) in [(&snapshot, &bytes), (&binding_path, &binding_bytes)] {
+                publish_snapshot(project_root, path, content)
+                    .map_err(|error| reject(format!("{error:#}")))?;
+            }
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == attempt_id)
+                .unwrap();
+            if let Some(proof) = &assessment.reconstruction {
+                for artifact in [&proof.manifest, &proof.audit] {
+                    let reference = ArtifactRef {
+                        producer_id: "evidence-reconstruction".into(),
+                        path: artifact.path.clone(),
+                    };
+                    if !attempt.artifacts.contains(&reference) {
+                        attempt.artifacts.push(reference);
+                    }
+                }
+            }
+            attempt.resume_cancellation()?;
+            attempt.attach_evidence_recovery(EvidenceRecovery {
+                carried_finding: None,
+                required_check: None,
+                id: recovery_id.clone(),
+                candidate_commit: candidate_commit.into(),
+                attachment: EvidenceAttachment {
+                    snapshot_path: snapshot.clone(),
+                    digest: digest.clone(),
+                },
+                targets: vec![EvidenceReviewTarget {
+                    role: "tests".into(),
+                    prior_review_artifact: binding_path.clone(),
+                    review_task_id: None,
+                    review_digest: None,
+                }],
+                state: EvidenceRecoveryState::Reviewing,
+                created_at: work_model::now_iso8601(),
+                code_change_classification: None,
+            })?;
+            let task_ids = item.add_next_review_tasks(attempt_id, &["tests"])?;
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == attempt_id)
+                .unwrap();
+            let task = attempt
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_ids[0])
+                .unwrap();
+            task.input_artifacts.extend([
+                ArtifactRef {
+                    producer_id: "native-observation-binding".into(),
                     path: binding_path.clone(),
                 },
                 ArtifactRef {

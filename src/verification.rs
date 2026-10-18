@@ -284,6 +284,7 @@ pub fn accept(
             receipt.exit_status,
             digest(&bytes)
         ),
+        native_observations: vec![],
     };
     let document_path = project.join(area).join("evidence.json");
     let document_bytes = serde_json::to_vec_pretty(&document)?;
