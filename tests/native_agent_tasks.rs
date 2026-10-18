@@ -1924,6 +1924,11 @@ fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
     use std::time::Duration;
     use tungstenite::Message;
 
+    let response_sizes = [(0, 512 * 1024), (1, 15_897_799), (2, 15_897_799)];
+    // Construct the large payloads before opening sockets. Fixture CPU work
+    // must not consume the production display's bounded drain interval.
+    let responses = response_sizes
+        .map(|(id, bytes)| json!({"id":id,"result":{"data":"x".repeat(bytes)}}).to_string());
     let (tui_stream, relay_client) = UnixStream::pair().unwrap();
     let (relay_server, provider_stream) = UnixStream::pair().unwrap();
     // Keep the first ordinary response in flight while both app/read
@@ -1965,12 +1970,8 @@ fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
             assert_eq!(request["id"], id);
             assert_eq!(request["method"], method);
         }
-        for (id, bytes) in [(0, 512 * 1024), (1, 15_897_799), (2, 15_897_799)] {
-            socket
-                .send(Message::Text(
-                    json!({"id":id,"result":{"data":"x".repeat(bytes)}}).to_string(),
-                ))
-                .unwrap();
+        for response in responses {
+            socket.send(Message::Text(response)).unwrap();
         }
         socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
         for sequence in 0..8 {
@@ -2020,6 +2021,23 @@ fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
     // Provider evidence settles even though the display has not consumed
     // any responses. Opaque catalogs never become canonical turn evidence.
     let transcript = std::fs::read_to_string(evidence.path()).unwrap();
+    let trace_before_read = std::fs::read_to_string(trace.path()).unwrap();
+    // Drain the wire before parsing and comparing large JSON payloads. Keep
+    // the evidence snapshot from before the display consumed any frame.
+    let mut received = (0..response_sizes.len() + 10)
+        .map(|_| {
+            tui.read()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{error}; relay trace: {}",
+                        std::fs::read_to_string(trace.path()).unwrap()
+                    )
+                })
+                .into_text()
+                .unwrap()
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
     assert!(transcript.len() < 64 * 1024);
     let records: Vec<serde_json::Value> = transcript
         .lines()
@@ -2033,20 +2051,14 @@ fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
                 && record["input_sequence"] == 1)
     );
     assert_eq!(records.last().unwrap()["event"]["method"], "turn/completed");
-    assert!(
-        !std::fs::read_to_string(trace.path())
-            .unwrap()
-            .contains("display-detached")
-    );
-    for (id, bytes) in [(0, 512 * 1024), (1, 15_897_799), (2, 15_897_799)] {
-        let response: serde_json::Value =
-            serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
+    assert!(!trace_before_read.contains("display-detached"));
+    for (id, bytes) in response_sizes {
+        let response: serde_json::Value = serde_json::from_str(&received.next().unwrap()).unwrap();
         assert_eq!(response["id"], id);
         assert_eq!(response["result"]["data"], "x".repeat(bytes));
     }
-    let mut read_event = || -> serde_json::Value {
-        serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap()
-    };
+    let mut read_event =
+        || -> serde_json::Value { serde_json::from_str(&received.next().unwrap()).unwrap() };
     assert_eq!(read_event()["method"], "turn/started");
     for sequence in 0..8 {
         let event = read_event();
