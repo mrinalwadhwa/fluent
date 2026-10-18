@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import uuid
 
 
 def digest(data):
@@ -46,6 +47,37 @@ def cargo_cwd_config(build_cwd):
             if path.is_file():
                 config[str(path)] = checked_config_digest(path)
     return config
+
+
+def verified_entry(entry, identity):
+    binary = entry / "fluent"
+    provenance = entry / "provenance.json"
+    if not (entry.is_dir() and not entry.is_symlink() and binary.is_file()
+            and not binary.is_symlink() and provenance.is_file() and not provenance.is_symlink()):
+        return False
+    try:
+        recorded = json.loads(provenance.read_text())
+        return (recorded["identity"] == identity
+                and recorded["binary_sha256"] == digest(binary.read_bytes())
+                and os.access(binary, os.X_OK))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def selected_entry(cache, key, identity):
+    selector = cache / f"{key}.current"
+    if selector.is_symlink():
+        name = os.readlink(selector)
+        version = name.removeprefix(f"{key}.v")
+        if len(version) != 32 or any(char not in "0123456789abcdef" for char in version):
+            return None
+        entry = cache / name
+    elif selector.exists():
+        return None
+    else:
+        # Readers published before versioned entries remain valid and in place.
+        entry = cache / key
+    return entry if verified_entry(entry, identity) else None
 
 
 def main(repository, commit, reader_root, mode="offline", evidence="none"):
@@ -109,22 +141,8 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
         cache.mkdir(parents=True, exist_ok=True)
     with (cache / f"{key}.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        entry = cache / key
-        binary = entry / "fluent"
-        provenance = entry / "provenance.json"
-        valid = False
-        if entry.is_dir() and not entry.is_symlink() and binary.is_file() and not binary.is_symlink() and provenance.is_file() and not provenance.is_symlink():
-            try:
-                recorded = json.loads(provenance.read_text())
-                valid = recorded["identity"] == identity and recorded["binary_sha256"] == digest(binary.read_bytes()) and os.access(binary, os.X_OK)
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-        if not valid:
-            if entry.exists():
-                if entry.is_symlink() or not entry.is_dir():
-                    entry.unlink()
-                else:
-                    shutil.rmtree(entry)
+        entry = selected_entry(cache, key, identity)
+        if entry is None:
             with tempfile.TemporaryDirectory(prefix=f".{key}.", dir=cache) as temporary:
                 temporary = Path(temporary)
                 source_dir = temporary / "source"
@@ -146,7 +164,16 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 staged.mkdir()
                 shutil.copy2(built, staged / "fluent")
                 (staged / "provenance.json").write_text(json.dumps({"identity": identity, "binary_sha256": digest((staged / "fluent").read_bytes())}, indent=2) + "\n")
+                entry = cache / f"{key}.v{uuid.uuid4().hex}"
                 staged.rename(entry)
+                selector = cache / f"{key}.current"
+                staged_selector = cache / f".{key}.{uuid.uuid4().hex}.tmp"
+                try:
+                    staged_selector.symlink_to(entry.name)
+                    staged_selector.replace(selector)
+                finally:
+                    staged_selector.unlink(missing_ok=True)
+        binary = entry / "fluent"
         # Preserve the fixture path and identity fields consumed by compatibility tests.
         if evidence == "archive":
             write_proof(reader_root / "source.tar", archive)
@@ -156,15 +183,25 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 write_proof(reader_root / name, content)
         local_binary = reader_root / "target/debug/fluent"
         local_binary.parent.mkdir(parents=True, exist_ok=True)
-        link = local_binary.with_name(f"fluent.{os.getpid()}.tmp")
-        link.unlink(missing_ok=True)
-        link.symlink_to(binary)
-        link.replace(local_binary)
+        versioned_binary = local_binary.with_name(f"fluent.{entry.name}")
+        if versioned_binary.is_symlink():
+            if os.readlink(versioned_binary) != str(binary):
+                raise ValueError(f"build identity {key}: returned executable path changed: {versioned_binary}")
+        elif versioned_binary.exists():
+            raise ValueError(f"build identity {key}: returned executable path is not a link: {versioned_binary}")
+        else:
+            versioned_binary.symlink_to(binary)
+        # Older consumers inspect this conventional path after first preparation.
+        # Never repoint it: a prior caller may already hold the path.
+        try:
+            local_binary.symlink_to(binary)
+        except FileExistsError:
+            pass
         fixture_identity = {"source_commit": commit, "source_archive_sha256": identity["source_archive_sha256"],
                             "work_model_sha256": work_model_digest, "binary_sha256": digest(binary.read_bytes())}
         reader_root.mkdir(parents=True, exist_ok=True)
         (reader_root / "identity.json").write_text(json.dumps(fixture_identity, indent=2) + "\n")
-        print(local_binary)
+        print(versioned_binary)
 
 
 if __name__ == "__main__":

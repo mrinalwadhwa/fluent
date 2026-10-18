@@ -14,6 +14,10 @@ if [[ "${1-}" == --version ]]; then echo "${CARGO_VERSION:-cargo fixture}"; exit
 [[ "${1-}" == build ]] || exit 99
 printf 'build\n' >> "$BUILD_LOG"
 if [[ "${FAIL_BUILD:-0}" == 1 ]]; then echo 'fixture build failed' >&2; exit 1; fi
+if [[ -n "${BUILD_STARTED:-}" ]]; then
+  touch "$BUILD_STARTED"
+  until [[ -e "$BUILD_RELEASE" ]]; do sleep 0.01; done
+fi
 if [[ -n "${EXPECT_CARGO_CWD:-}" && "$(pwd -P)" != "$(cd "$EXPECT_CARGO_CWD" && pwd -P)" ]]; then
   echo "cargo ran from $PWD, expected $EXPECT_CARGO_CWD" >&2
   exit 1
@@ -85,7 +89,8 @@ assert path.is_symlink() and path.is_file() and os.access(path, os.X_OK)
 assert path.resolve() == expected_entry.resolve()
 recorded = json.loads((expected_entry.parent / 'provenance.json').read_text())
 identity = recorded['identity']
-assert expected_entry.parent.name == hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+assert expected_entry.parent.name == key or expected_entry.parent.name.startswith(key + '.v')
 assert recorded['binary_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
 expected = copy.deepcopy(baseline)
 if field == 'rustc':
@@ -155,16 +160,22 @@ verify_reader "$temporary/mode" "$(readlink "$(cat "$temporary/mode")")" build_c
 first_entry="$initial_entry"
 printf 'tampered\n' >> "$first_entry"
 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-binary"
-verify_reader "$temporary/rebuilt-binary" "$initial_entry" ''
+rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-binary")")"
+[[ "$rebuilt_entry" != "$first_entry" ]]
+verify_reader "$temporary/rebuilt-binary" "$rebuilt_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 8 ))
+first_entry="$rebuilt_entry"
 python3 - "$first_entry" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1]).with_name('provenance.json')
 path.write_text('{}')
 PY
 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-provenance"
-verify_reader "$temporary/rebuilt-provenance" "$initial_entry" ''
+rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-provenance")")"
+[[ "$rebuilt_entry" != "$first_entry" ]]
+verify_reader "$temporary/rebuilt-provenance" "$rebuilt_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 9 ))
+first_entry="$rebuilt_entry"
 
 # A failed rebuild leaves no usable stale reader; an orphan temporary entry is ignored.
 printf 'tampered\n' >> "$first_entry"
@@ -177,7 +188,9 @@ rg -q 'build identity [0-9a-f]{64} failed' "$temporary/failure.err"
 rg -q 'fixture build failed' "$temporary/failure.err"
 [[ ! -s "$temporary/failure.out" ]]
 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt-after-failure"
-verify_reader "$temporary/rebuilt-after-failure" "$initial_entry" ''
+rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-after-failure")")"
+[[ "$rebuilt_entry" != "$first_entry" ]]
+verify_reader "$temporary/rebuilt-after-failure" "$rebuilt_entry" ''
 (( $(wc -l < "$BUILD_LOG") == 11 ))
 
 # A successful Cargo exit without an executable must fail preparation.
@@ -288,6 +301,52 @@ builds_before="$(wc -l < "$BUILD_LOG")"
 )
 (( $(wc -l < "$BUILD_LOG") == builds_before ))
 verify_reader "$temporary/work-two-config-path" "$(readlink "$(cat "$temporary/work-one-path")")" ''
+
+# Repair keeps every previously returned path alive while a new version builds.
+rm -f "$CARGO_HOME/config.toml"
+mkdir -p "$temporary/retained-one" "$temporary/retained-two"
+RUSTC_VERSION='rustc retained' python3 "$helper" "$repository" "$commit" "$temporary/retained-one" > "$temporary/retained-original"
+retained_path="$(cat "$temporary/retained-original")"
+retained_entry="$(readlink "$retained_path")"
+printf '{}\n' > "$(dirname "$retained_entry")/provenance.json"
+builds_before="$(wc -l < "$BUILD_LOG")"
+RUSTC_VERSION='rustc retained' BUILD_STARTED="$temporary/repair-started" BUILD_RELEASE="$temporary/repair-release" \
+    python3 "$helper" "$repository" "$commit" "$temporary/retained-two" > "$temporary/retained-repaired" &
+repair_pid=$!
+for _ in {1..500}; do
+    [[ -e "$temporary/repair-started" ]] && break
+    sleep 0.01
+done
+if [[ ! -e "$temporary/repair-started" || ! -x "$retained_path" || "$("$retained_path" 2>/dev/null)" != fixture ]]; then
+    touch "$temporary/repair-release"
+    wait "$repair_pid" || true
+    echo 'repair removed an executable path already supplied to a reader' >&2
+    exit 1
+fi
+touch "$temporary/repair-release"
+wait "$repair_pid"
+repaired_path="$(cat "$temporary/retained-repaired")"
+repaired_entry="$(readlink "$repaired_path")"
+if [[ "$repaired_entry" == "$retained_entry" || ! -x "$retained_path" || "$("$retained_path")" != fixture ]]; then
+    echo 'repair did not retain the prior executable version' >&2
+    exit 1
+fi
+python3 - "$temporary/cache" "$repaired_entry" <<'PY'
+import pathlib, sys
+cache = pathlib.Path(sys.argv[1])
+entry = pathlib.Path(sys.argv[2]).parent
+key = entry.name.split('.v', 1)[0]
+assert (cache / f'{key}.current').resolve() == entry.resolve()
+PY
+RUSTC_VERSION='rustc retained' python3 "$helper" "$repository" "$commit" "$temporary/retained-one" > "$temporary/retained-same-root"
+if [[ "$retained_path" == "$(cat "$temporary/retained-same-root")" || "$(readlink "$retained_path")" != "$retained_entry" || "$("$retained_path")" != fixture ]]; then
+    echo 'preparing the repaired reader changed an earlier returned path' >&2
+    exit 1
+fi
+if (( $(wc -l < "$BUILD_LOG") != builds_before + 1 )); then
+    echo 'repair did not reuse the newly published version' >&2
+    exit 1
+fi
 
 # An unset CARGO_HOME uses an isolated, identified home instead of HOME/.cargo.
 mkdir -p "$temporary/implicit-home/.cargo"
