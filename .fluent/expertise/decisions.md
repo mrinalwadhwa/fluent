@@ -892,3 +892,43 @@ exit; normal cleanup reaps each child. Preserve the existing native ownership
 locks, immutable intent, exact evidence checks, cancellation, and replay gates.
 See [the prepared Git transaction pattern](persistence/patterns/hold-git-head-during-restoration.md)
 and `candidate_ancestry_recovery::interrupted::PreparedRefs`.
+
+## Keep Discord conversations and authority independent
+
+The local Discord runner supports one configured private server and selected
+text channels. Each public thread binds one checkout identity and one provider.
+Owner state stores routing and ingress; authoritative accepted history, provider
+sessions, pending turns, approvals, and delivery receipts live under the
+checkout's `.fluent/work/discord/` tree. Publish the initial project snapshot
+before the routing index. An indexed thread whose snapshot is missing fails
+closed; it cannot become a new conversation.
+
+`src/conversation.rs` owns the shared provider and Work contracts. Discord reuses
+the existing provider implementations, scheduler client, and `WorkControl` from
+the Slack module. Those implementation locations do not confer Slack identity:
+Discord selects a separate runtime namespace, request prefix, and actor identity.
+Keep Slack's persisted schemas and default `WorkControl::new` behavior stable.
+Provider authentication and sessions use private state per Discord thread so a
+conversation never implicitly inherits the owner's general provider session.
+
+Each thread owns one deterministic Work Item, `discord-<thread-id>`. Approving
+its Brief creates proposed Work; execution needs a separate approval after all
+planning stages. This avoids ambiguous selection among multiple Work Items
+inside one conversation and makes creation retries reconcile the same identity.
+
+External approvals bind an action identity and observed Work fingerprint. A
+Discord receipt records acceptance, not proof of effect. Planning and execution
+validate the fingerprint under the Work model lock and journal an immutable
+operation receipt with the effect. An existing receipt suppresses the effect
+without overwriting later revisions. Resume validates both Work and queue state
+under their existing locks, and saves the operation identity on the admitted
+dispatch; replay cannot authorize a subsequent cancellation. Landing checks the
+approved revision at the host admission boundary and continues through the
+existing candidate, evidence, cancellation, and durable landing-intent checks.
+Incomplete stale approvals fail closed and preserve newer pending controls.
+
+Production Gateway orchestration accepts injected providers and bounded loopback
+transports for deterministic tests. Admission, durable ingress, prompt REST
+acknowledgement, sequence persistence, worker scheduling, and attribution remain
+production code in those tests. Credentials stay in the host transport and never
+enter durable inputs or provider requests.

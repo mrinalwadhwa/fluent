@@ -97,7 +97,10 @@ In the bound thread, use:
 Consequential requests display a confirmation button. A changed Work state,
 a replaced planning revision, or revoked approver makes an old control invalid.
 Recovered consequential approvals require a fresh click. Resume and landing
-retain Fluent's existing readiness and recovery checks.
+retain Fluent's existing readiness and recovery checks. An interrupted accepted
+approval reconciles its exact saved effect; it cannot replace newer planning or
+authorize a later cancellation. If the action changed before its effect, request
+a fresh control. A stale recovery leaves the current pending control intact.
 
 The runner stores owner routing, Gateway state, and pending inputs under
 `~/.config/fluent/discord/`; project conversations, drafts, and Work bindings
@@ -114,7 +117,11 @@ that provider session before authorizing any new conversation. Recovery reads
 history in bounded pages; if outbound history exceeds the recovery bound, the
 runner pauses delivery for owner inspection. After reconnect it also scans accepted ordinary messages in bounded batches
 for edits and deletions, retaining a cursor between scans. A deletion retains the original
-author and does not claim to know who deleted the message.
+author and does not claim to know who deleted the message. Messages from revoked
+or unconfigured participants do not block recovery of later authorized replies.
+If an established thread's project snapshot is missing, restore that snapshot
+from backup before resuming; the runner will not rebuild accepted history by
+repeating provider turns.
 
 ## Optional owner-run smoke check
 
