@@ -9542,8 +9542,9 @@ struct BuildReclamationReport {
 }
 
 fn build_output_lease_path(project_root: &Path, work_id: &str, attempt_id: &str) -> PathBuf {
+    // Keep lease files outside Work state so rejected starts leave it untouched.
     project_root
-        .join(".fluent/work/locks/build-output")
+        .join(".fluent/build-output-locks")
         .join(work_id)
         .join(format!("{attempt_id}.lock"))
 }
@@ -9832,10 +9833,12 @@ fn reclaim_idle_build_output(
                         }
                     }
                 } else {
-                    reporter(&format!(
-                        "  Build output      skipped {}: active Task lease; unverified worktree",
-                        workspace.display()
-                    ));
+                    if fs::symlink_metadata(&workspace).is_ok() {
+                        reporter(&format!(
+                            "  Build output      skipped {}: active Task lease; unverified worktree",
+                            workspace.display()
+                        ));
+                    }
                 }
                 continue;
             }
@@ -9851,10 +9854,12 @@ fn reclaim_idle_build_output(
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
             || worktree::ensure_candidate_worktree(project_root, &workspace).is_err()
         {
-            reporter(&format!(
-                "  Build output      skipped {}: unverified managed worktree",
-                workspace.display()
-            ));
+            if fs::symlink_metadata(&workspace).is_ok() {
+                reporter(&format!(
+                    "  Build output      skipped {}: unverified managed worktree",
+                    workspace.display()
+                ));
+            }
             continue;
         }
         held_leases.push(lease);
@@ -11500,12 +11505,12 @@ mod tests {
         let idle_relative =
             crate::work_model::initial_candidate_workspace_path("work-2", "attempt-1");
         let idle = project.join(&idle_relative);
-        let output = std::process::Command::new("git")
-            .args(["worktree", "add", "-q", "--detach", idle.to_str().unwrap()])
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
+        git::run(
+            &project,
+            &["worktree", "add", "-q", "--detach", idle.to_str().unwrap()],
+            "create idle build fixture",
+        )
+        .unwrap();
         let idle = fs::canonicalize(idle).unwrap();
         let mut item = WorkItem {
             id: "work-2".into(),
@@ -11669,16 +11674,12 @@ mod tests {
         let old_relative =
             crate::work_model::initial_candidate_workspace_path("work-2", "attempt-1");
         let old = project.join(&old_relative);
-        let output = std::process::Command::new("git")
-            .args(["worktree", "add", "-q", "--detach", old.to_str().unwrap()])
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        git::run(
+            &project,
+            &["worktree", "add", "-q", "--detach", old.to_str().unwrap()],
+            "create retired build fixture",
+        )
+        .unwrap();
         let old = fs::canonicalize(old).unwrap();
         let mut retired = WorkItem {
             id: "work-2".into(),
@@ -11724,18 +11725,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("main");
         fs::create_dir_all(&project).unwrap();
-        let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(&project)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
+        let run = |args: &[&str]| git::run(&project, args, "create build fixture").unwrap();
         run(&["init", "-q"]);
         fs::write(project.join("README.md"), "fixture").unwrap();
         run(&["add", "README.md"]);
@@ -20737,6 +20727,9 @@ while time.monotonic() < deadline:
         let review_path = artifact_dir.join("review.md");
 
         let item = review_item_with_final_tester();
+        let shared_cache = candidate_reviewer_cache_dir(project_root, "abc123");
+        fs::create_dir_all(shared_cache.join("target")).unwrap();
+        fs::write(shared_cache.join("target/output"), b"admitted cache").unwrap();
         let prompts = build_work_review_prompts(WorkReviewPromptInput {
             item: &item,
             attempt_id: "attempt-1",
@@ -20755,7 +20748,6 @@ while time.monotonic() < deadline:
                 .review_prompt
                 .contains(&review_path.display().to_string())
         );
-        let shared_cache = candidate_reviewer_cache_dir(project_root, "abc123");
         assert!(prompts.review_prompt.contains("CARGO_TARGET_DIR"));
         assert!(prompts.review_prompt.contains("CARGO_HOME"));
         assert!(
