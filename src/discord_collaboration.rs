@@ -7,8 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::atomic_write::atomic_write;
-use crate::conversation::{Checkout, ConversationProvider, ProviderScope};
+use crate::conversation::{Checkout, ConversationProvider, ProviderScope, ProviderTurnRecovery};
 use crate::slack_collaboration::checkout_is_available;
+use sha2::{Digest, Sha256};
 mod gateway;
 mod service;
 mod transport;
@@ -95,6 +96,25 @@ pub enum InputKind {
     Message {
         text: String,
     },
+    Edit {
+        message: String,
+        revision: String,
+        text: String,
+    },
+    Delete {
+        message: String,
+    },
+}
+impl Input {
+    fn key(&self) -> String {
+        match &self.kind {
+            InputKind::Edit {
+                message, revision, ..
+            } => format!("edit:{message}:{revision}"),
+            InputKind::Delete { message } => format!("delete:{message}"),
+            _ => self.id.clone(),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delivery {
@@ -108,6 +128,38 @@ pub trait DiscordTransport {
     fn ensure_thread(&mut self, command: &str, channel: &str, project: &str) -> Result<String>;
     /// Reconcile an existing delivery identity before posting again.
     fn deliver(&mut self, delivery: &Delivery) -> Result<String>;
+    fn history(&mut self, _guild: &str, _thread: &str, _after: &str) -> Result<HistoryPage> {
+        Ok(HistoryPage::default())
+    }
+    fn corrections(
+        &mut self,
+        _guild: &str,
+        _thread: &str,
+        _inputs: &[Input],
+    ) -> Result<Vec<Input>> {
+        Ok(vec![])
+    }
+}
+#[derive(Default)]
+pub struct HistoryPage {
+    pub inputs: Vec<Input>,
+    pub last_message: Option<String>,
+    pub has_more: bool,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PendingTurn {
+    pub input: Input,
+    pub dispatched: bool,
+    pub accepted: Option<String>,
+}
+impl PendingTurn {
+    fn new(input: Input) -> Self {
+        Self {
+            input,
+            dispatched: false,
+            accepted: None,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Binding {
@@ -128,6 +180,10 @@ pub struct Thread {
     pub session: Option<String>,
     pub inputs: Vec<Input>,
     pub deliveries: Vec<Delivery>,
+    #[serde(default)]
+    pub pending: Option<PendingTurn>,
+    #[serde(default)]
+    pub history_cursor: String,
 }
 pub fn state_root(home: &Path) -> PathBuf {
     home.join(".config/fluent/discord")
@@ -167,7 +223,11 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
         &self.transport
     }
     pub fn ingest(&mut self, input: Input) -> Result<()> {
+        if config_path(&self.home).exists() {
+            self.config = read_config(&self.home)?;
+        }
         self.config.validate()?;
+        persist_ingress(&self.home, &self.config, &input)?;
         for id in [&input.id, &input.guild, &input.channel, &input.actor] {
             snowflake(id)?;
         }
@@ -209,7 +269,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                     binding
                 }
             }
-            InputKind::Message { .. } => index
+            _ => index
                 .threads
                 .get(&input.channel)
                 .context("Discord thread is not bound")?
@@ -226,7 +286,46 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             .join(".fluent/work/discord/threads")
             .join(format!("{}.json", binding.thread));
         let mut thread: Thread = read(&path)?;
-        if !thread.inputs.iter().any(|e| e.id == input.id) {
+        let key = input.key();
+        if thread
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.input.key() != key)
+        {
+            bail!("an earlier Discord turn needs recovery; this input remains queued");
+        }
+        if !thread.inputs.iter().any(|e| e.key() == key) || thread.pending.is_some() {
+            let contribution = match &input.kind {
+                InputKind::Command { text, .. } | InputKind::Message { text } => text.clone(),
+                InputKind::Edit { message, text, .. } => {
+                    let original = thread
+                        .inputs
+                        .iter()
+                        .find(|e| e.id == *message && matches!(e.kind, InputKind::Message { .. }))
+                        .context("edited message was not accepted")?;
+                    if original.actor != input.actor {
+                        bail!("edit author differs from accepted message author");
+                    }
+                    format!(
+                        "Correction to accepted message {message} by {}: {text}",
+                        input.actor
+                    )
+                }
+                InputKind::Delete { message } => {
+                    let original = thread
+                        .inputs
+                        .iter()
+                        .find(|e| e.id == *message && matches!(e.kind, InputKind::Message { .. }))
+                        .context("deleted message was not accepted")?;
+                    if original.actor != input.actor {
+                        bail!("deletion attribution differs from original author");
+                    }
+                    format!(
+                        "Accepted message {message} by {} was deleted. Discord did not identify who deleted it; retain the accepted history.",
+                        input.actor
+                    )
+                }
+            };
             self.provider.select(&binding.provider)?;
             let scope = ProviderScope {
                 checkout: project.checkout.path.clone(),
@@ -236,26 +335,46 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                     .join(".fluent/work/discord/drafts")
                     .join(&binding.thread),
             };
-            let text = match &input.kind {
-                InputKind::Command { text, .. } | InputKind::Message { text } => text,
-            };
-            if thread.session.is_none() {
-                thread.session = self.provider.prepare_session(&scope)?;
+            let action_id = format!("discord:{}:{key}", input.guild);
+            if thread.pending.is_none() {
+                thread.pending = Some(PendingTurn::new(input.clone()));
+                thread.inputs.push(input.clone());
                 write(&path, &thread)?;
             }
-            let (session, response) = self.provider.run_turn(
-                &format!("discord:{}:{}", input.guild, input.id),
-                thread.session.as_deref(),
-                &scope,
-                text,
-                &format!("discord:{}:{}", input.guild, input.actor),
-                &mut |_| Ok(()),
-            )?;
-            if session.is_some() {
-                thread.session = session;
-            }
+            let response = if thread.pending.as_ref().unwrap().dispatched {
+                let session = thread.session.as_deref().context("Provider acceptance is uncertain. The preserved turn needs owner inspection; it will not be repeated.")?;
+                match self.provider.recover_turn(&action_id, session, &scope)? {
+                    ProviderTurnRecovery::Completed { reply, .. } => reply,
+                    _ => bail!(
+                        "Provider turn is accepted or uncertain; wait for recovery. Fluent will not repeat it."
+                    ),
+                }
+            } else {
+                if thread.session.is_none() {
+                    thread.session = self.provider.prepare_session(&scope)?;
+                    write(&path, &thread)?;
+                }
+                let session = thread.session.clone();
+                thread.pending.as_mut().unwrap().dispatched = true;
+                write(&path, &thread)?;
+                let (new_session, response) = self.provider.run_turn(
+                    &action_id,
+                    session.as_deref(),
+                    &scope,
+                    &contribution,
+                    &format!("discord:{}:{}", input.guild, input.actor),
+                    &mut |turn| {
+                        thread.pending.as_mut().unwrap().accepted = Some(turn.into());
+                        write(&path, &thread)
+                    },
+                )?;
+                if new_session.is_some() {
+                    thread.session = new_session;
+                }
+                response
+            };
             thread.deliveries.push(Delivery {
-                id: format!("{}:reply", input.id),
+                id: format!("{key}:reply"),
                 channel: binding.thread.clone(),
                 text: format!(
                     "Project: {}\n\n{}",
@@ -267,7 +386,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 ),
                 message_id: None,
             });
-            thread.inputs.push(input);
+            thread.pending = None;
             write(&path, &thread)?;
         }
         for i in 0..thread.deliveries.len() {
@@ -275,6 +394,61 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 thread.deliveries[i].message_id =
                     Some(self.transport.deliver(&thread.deliveries[i])?);
                 write(&path, &thread)?;
+            }
+        }
+        Ok(())
+    }
+    pub fn recover(&mut self) -> Result<()> {
+        if config_path(&self.home).exists() {
+            self.config = read_config(&self.home)?;
+        }
+        let index: Index = read(&state_root(&self.home).join("index.json"))?;
+        for binding in index.threads.values() {
+            let Some(project) = self.config.projects.get(&binding.project) else {
+                continue;
+            };
+            if binding.checkout != project.checkout.identity
+                || !checkout_is_available(&project.checkout)
+            {
+                continue;
+            }
+            let path = project
+                .checkout
+                .path
+                .join(".fluent/work/discord/threads")
+                .join(format!("{}.json", binding.thread));
+            let thread: Thread = read(&path)?;
+            // An accepted turn precedes subsequent history. Ingest also reconciles its outbox.
+            if let Some(pending) = thread.pending {
+                self.ingest(pending.input)?;
+            } else if let Some(last) = thread.inputs.last() {
+                self.ingest(last.clone())?;
+            }
+            for _ in 0..100 {
+                let current: Thread = read(&path)?;
+                let page = self.transport.history(
+                    &binding.guild,
+                    &binding.thread,
+                    &current.history_cursor,
+                )?;
+                for input in page.inputs {
+                    self.ingest(input)?;
+                }
+                let mut current: Thread = read(&path)?;
+                if let Some(cursor) = page.last_message {
+                    current.history_cursor = cursor;
+                    write(&path, &current)?;
+                }
+                if !page.has_more {
+                    break;
+                }
+            }
+            let current: Thread = read(&path)?;
+            for input in
+                self.transport
+                    .corrections(&binding.guild, &binding.thread, &current.inputs)?
+            {
+                self.ingest(input)?;
             }
         }
         Ok(())

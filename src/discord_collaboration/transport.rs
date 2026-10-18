@@ -3,6 +3,18 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+#[derive(Debug)]
+pub struct DiscordHttpError(pub u16);
+impl std::fmt::Display for DiscordHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Discord API rejected request (HTTP {}); check bot permissions and setup",
+            self.0
+        )
+    }
+}
+impl std::error::Error for DiscordHttpError {}
 /// Keep credentials only in the host transport; errors never include URLs or response bodies.
 #[derive(Clone)]
 pub struct DiscordRest {
@@ -66,9 +78,7 @@ impl DiscordRest {
                     }
                     std::thread::sleep(Duration::from_secs_f64(seconds));
                 }
-                Err(ureq::Error::Status(code, _)) => bail!(
-                    "Discord API rejected request (HTTP {code}); check bot permissions and setup"
-                ),
+                Err(ureq::Error::Status(code, _)) => return Err(DiscordHttpError(code).into()),
                 Err(_) => bail!("Discord connection failed; request remains pending"),
             }
         }
@@ -100,10 +110,10 @@ impl DiscordRest {
                 &roles,
                 &info,
             );
-            let required = 1024 | 2048 | 65536 | (1 << 35) | (1 << 38);
+            let required = 1024 | 2048 | 16384 | 65536 | (1 << 35) | (1 << 38);
             if permissions & required != required {
                 bail!(
-                    "Discord bot needs View Channel, Send Messages, Read Message History, Create Public Threads, and Send Messages in Threads"
+                    "Discord bot needs View Channel, Send Messages, Embed Links, Read Message History, Create Public Threads, and Send Messages in Threads"
                 );
             }
         }
@@ -242,11 +252,18 @@ impl DiscordTransport for DiscordRest {
         };
         let message = self.deliver(&root)?;
         // Discord uses the root message id as the public thread id.
-        if let Ok(existing) = self.request("GET", &format!("/channels/{message}"), None) {
-            if existing["type"] == 11 && existing["parent_id"].as_str() == Some(channel) {
+        match self.request("GET", &format!("/channels/{message}"), None) {
+            Ok(existing)
+                if existing["type"] == 11 && existing["parent_id"].as_str() == Some(channel) =>
+            {
                 return Ok(message);
             }
-            bail!("Discord command thread has unexpected authority");
+            Ok(_) => bail!("Discord command thread has unexpected authority"),
+            Err(error)
+                if error
+                    .downcast_ref::<DiscordHttpError>()
+                    .is_some_and(|e| e.0 == 404) => {}
+            Err(error) => return Err(error),
         }
         let created = self.request(
             "POST",
@@ -254,6 +271,95 @@ impl DiscordTransport for DiscordRest {
             Some(json!({"name":format!("Fluent: {project}"),"auto_archive_duration":1440})),
         )?;
         field(&created, "id")
+    }
+    fn history(&mut self, guild: &str, thread: &str, after: &str) -> Result<HistoryPage> {
+        snowflake(thread)?;
+        let after = if after.is_empty() {
+            "0"
+        } else {
+            snowflake(after)?;
+            after
+        };
+        let value = self.request(
+            "GET",
+            &format!("/channels/{thread}/messages?limit=100&after={after}"),
+            None,
+        )?;
+        let mut messages = value.as_array().context("invalid Discord history")?.clone();
+        messages.sort_by_key(|message| {
+            message["id"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        });
+        let mut page = HistoryPage {
+            has_more: messages.len() == 100,
+            ..HistoryPage::default()
+        };
+        for mut message in messages {
+            page.last_message = Some(field(&message, "id")?);
+            message["guild_id"] = json!(guild);
+            message["channel_id"] = json!(thread);
+            if let Some(input) = decode_dispatch(&json!({"t":"MESSAGE_CREATE","d":message}))? {
+                page.inputs.push(input);
+            }
+        }
+        Ok(page)
+    }
+    fn corrections(&mut self, guild: &str, thread: &str, inputs: &[Input]) -> Result<Vec<Input>> {
+        let mut corrections = Vec::new();
+        for original in inputs
+            .iter()
+            .rev()
+            .filter(|input| matches!(input.kind, InputKind::Message { .. }))
+            .take(100)
+        {
+            if inputs
+                .iter()
+                .any(|i| matches!(&i.kind,InputKind::Delete {message} if message == &original.id))
+            {
+                continue;
+            }
+            let response = self.request(
+                "GET",
+                &format!("/channels/{thread}/messages/{}", original.id),
+                None,
+            );
+            let kind = match response {
+                Ok(message) => {
+                    let Some(revision) = message["edited_timestamp"].as_str() else {
+                        continue;
+                    };
+                    let text = message["content"]
+                        .as_str()
+                        .context("Discord Message Content is unavailable")?;
+                    InputKind::Edit {
+                        message: original.id.clone(),
+                        revision: revision.into(),
+                        text: text.into(),
+                    }
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<DiscordHttpError>()
+                        .is_some_and(|e| e.0 == 404) =>
+                {
+                    InputKind::Delete {
+                        message: original.id.clone(),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+            corrections.push(Input {
+                id: original.id.clone(),
+                guild: guild.into(),
+                channel: thread.into(),
+                actor: original.actor.clone(),
+                kind,
+            });
+        }
+        corrections.reverse();
+        Ok(corrections)
     }
     fn deliver(&mut self, delivery: &Delivery) -> Result<String> {
         snowflake(&delivery.channel)?;

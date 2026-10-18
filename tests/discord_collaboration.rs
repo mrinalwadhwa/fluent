@@ -393,3 +393,278 @@ fn discord_runner_cli_exposes_service_commands() {
         );
     }
 }
+
+#[test]
+fn discord_restart_reconciles_input_and_output_once() {
+    let (home, project, config) = fixture();
+    let mut first = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    first.ingest(command()).unwrap();
+    let mut recovered = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    recovered.recover().unwrap();
+    recovered.ingest(command()).unwrap();
+    recovered.ingest(reply()).unwrap();
+    assert_eq!(recovered.provider().calls.len(), 1);
+    assert_eq!(
+        recovered.provider().calls[0].1.as_deref(),
+        Some("session-1")
+    );
+    let path = project.path().join(".fluent/work/discord/threads/400.json");
+    let thread: Thread = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(thread.inputs.len(), 2);
+    assert_eq!(thread.deliveries.len(), 2);
+}
+#[test]
+fn discord_restart_recovers_accepted_provider_turn_without_repeating_it() {
+    use fluent::conversation::{ProviderError, ProviderTurnRecovery};
+    struct Interrupted {
+        dispatched: usize,
+        recover: bool,
+    }
+    impl ConversationProvider for Interrupted {
+        fn start(
+            &mut self,
+            _: &str,
+            _: &ProviderScope,
+            _: &str,
+            _: &str,
+        ) -> ProviderResult<(String, String)> {
+            panic!("use run_turn")
+        }
+        fn resume(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &ProviderScope,
+            _: &str,
+            _: &str,
+        ) -> ProviderResult<String> {
+            panic!("use run_turn")
+        }
+        fn prepare_session(&mut self, _: &ProviderScope) -> ProviderResult<Option<String>> {
+            Ok(Some("session".into()))
+        }
+        fn run_turn(
+            &mut self,
+            _: &str,
+            _: Option<&str>,
+            _: &ProviderScope,
+            _: &str,
+            _: &str,
+            accepted: &mut dyn FnMut(&str) -> Result<()>,
+        ) -> ProviderResult<(Option<String>, String)> {
+            self.dispatched += 1;
+            accepted("turn").unwrap();
+            Err(ProviderError::internal("connection lost after acceptance"))
+        }
+        fn recover_turn(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &ProviderScope,
+        ) -> ProviderResult<ProviderTurnRecovery> {
+            assert!(self.recover);
+            Ok(ProviderTurnRecovery::Completed {
+                turn_id: "turn".into(),
+                reply: "Recovered result".into(),
+            })
+        }
+    }
+    let (home, _project, config) = fixture();
+    let mut first = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Interrupted {
+            dispatched: 0,
+            recover: false,
+        },
+        Discord::default(),
+    )
+    .unwrap();
+    assert!(first.ingest(command()).is_err());
+    assert_eq!(first.provider().dispatched, 1);
+    let mut next = DiscordRunner::new(
+        home.path(),
+        config,
+        Interrupted {
+            dispatched: 0,
+            recover: true,
+        },
+        Discord::default(),
+    )
+    .unwrap();
+    next.recover().unwrap();
+    assert_eq!(next.provider().dispatched, 0);
+    assert!(
+        next.transport().messages[0]
+            .text
+            .contains("Recovered result")
+    );
+}
+#[test]
+fn discord_edits_preserve_accepted_history() {
+    let (home, project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    runner.ingest(reply()).unwrap();
+    let edit = Input {
+        kind: InputKind::Edit {
+            message: "601".into(),
+            revision: "2026-10-18T01:00:00Z".into(),
+            text: "correction".into(),
+        },
+        ..reply()
+    };
+    runner.ingest(edit.clone()).unwrap();
+    runner.ingest(edit).unwrap();
+    runner
+        .ingest(Input {
+            kind: InputKind::Delete {
+                message: "601".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let thread: Thread = serde_json::from_slice(
+        &fs::read(project.path().join(".fluent/work/discord/threads/400.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread.inputs.len(), 4);
+    assert_eq!(thread.inputs[1], reply());
+    assert!(runner.provider().calls[2].2.contains("correction"));
+    assert!(runner.provider().calls[3].2.contains("deleted"));
+    assert_eq!(runner.provider().calls[3].3, "discord:100:301");
+}
+#[test]
+fn discord_authority_denies_unconfigured_actors_and_channels() {
+    let (home, project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    for input in [
+        Input {
+            actor: "999".into(),
+            ..command()
+        },
+        Input {
+            channel: "999".into(),
+            ..command()
+        },
+        Input {
+            guild: "999".into(),
+            ..command()
+        },
+    ] {
+        assert!(runner.ingest(input).is_err());
+    }
+    assert!(runner.provider().calls.is_empty());
+    assert!(!project.path().join(".fluent/work/discord").exists());
+    runner.ingest(command()).unwrap();
+    let mut revoked = config;
+    revoked
+        .projects
+        .get_mut("app")
+        .unwrap()
+        .participants
+        .remove("301");
+    write_config(home.path(), &revoked).unwrap();
+    assert!(runner.ingest(reply()).is_err());
+    assert_eq!(runner.provider().calls.len(), 1);
+}
+
+#[test]
+fn discord_restart_reconciles_lost_delivery_ack_and_paginated_history() {
+    use std::sync::{Arc, Mutex};
+    #[derive(Default)]
+    struct Remote {
+        deliveries: BTreeMap<String, String>,
+        sends: usize,
+        fail: bool,
+        pages: std::collections::VecDeque<HistoryPage>,
+    }
+    struct Transport(Arc<Mutex<Remote>>);
+    impl DiscordTransport for Transport {
+        fn ensure_thread(&mut self, _: &str, _: &str, _: &str) -> Result<String> {
+            Ok("400".into())
+        }
+        fn deliver(&mut self, d: &Delivery) -> Result<String> {
+            let mut remote = self.0.lock().unwrap();
+            if let Some(id) = remote.deliveries.get(&d.id) {
+                return Ok(id.clone());
+            }
+            remote.sends += 1;
+            let id = (700 + remote.sends).to_string();
+            remote.deliveries.insert(d.id.clone(), id.clone());
+            if remote.fail {
+                remote.fail = false;
+                anyhow::bail!("lost acknowledgement")
+            }
+            Ok(id)
+        }
+        fn history(&mut self, _: &str, _: &str, _: &str) -> Result<HistoryPage> {
+            Ok(self.0.lock().unwrap().pages.pop_front().unwrap_or_default())
+        }
+    }
+    let (home, project, config) = fixture();
+    let remote = Arc::new(Mutex::new(Remote {
+        fail: true,
+        ..Remote::default()
+    }));
+    let mut first = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Transport(remote.clone()),
+    )
+    .unwrap();
+    assert!(first.ingest(command()).is_err());
+    remote.lock().unwrap().pages.extend([
+        HistoryPage {
+            inputs: vec![reply()],
+            last_message: Some("601".into()),
+            has_more: true,
+        },
+        HistoryPage {
+            inputs: vec![Input {
+                id: "602".into(),
+                ..reply()
+            }],
+            last_message: Some("602".into()),
+            has_more: false,
+        },
+    ]);
+    let mut next = DiscordRunner::new(
+        home.path(),
+        config,
+        Provider::default(),
+        Transport(remote.clone()),
+    )
+    .unwrap();
+    next.recover().unwrap();
+    next.recover().unwrap();
+    assert_eq!(next.provider().calls.len(), 2);
+    assert_eq!(remote.lock().unwrap().sends, 3);
+    let thread: Thread = serde_json::from_slice(
+        &fs::read(project.path().join(".fluent/work/discord/threads/400.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread.history_cursor, "602");
+    assert!(thread.deliveries.iter().all(|d| d.message_id.is_some()));
+}

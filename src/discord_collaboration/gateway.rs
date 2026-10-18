@@ -78,7 +78,10 @@ pub fn gateway_close_failure(code: u16) -> &'static str {
 pub fn decode_dispatch(payload: &Value) -> Result<Option<Input>> {
     let data = &payload["d"];
     let event = payload["t"].as_str().unwrap_or("");
-    if !matches!(event, "INTERACTION_CREATE" | "MESSAGE_CREATE") {
+    if !matches!(
+        event,
+        "INTERACTION_CREATE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE"
+    ) {
         return Ok(None);
     }
     if data["guild_id"].is_null() {
@@ -92,7 +95,28 @@ pub fn decode_dispatch(payload: &Value) -> Result<Option<Input>> {
     if actor["bot"] == true || !data["webhook_id"].is_null() {
         return Ok(None);
     }
-    let kind = if event == "INTERACTION_CREATE" {
+    let kind = if event == "MESSAGE_DELETE" {
+        InputKind::Delete {
+            message: data["id"]
+                .as_str()
+                .context("deleted message has no identity")?
+                .into(),
+        }
+    } else if event == "MESSAGE_UPDATE" {
+        let (Some(text), Some(revision)) =
+            (data["content"].as_str(), data["edited_timestamp"].as_str())
+        else {
+            return Ok(None);
+        };
+        InputKind::Edit {
+            message: data["id"]
+                .as_str()
+                .context("edited message has no identity")?
+                .into(),
+            revision: revision.into(),
+            text: text.into(),
+        }
+    } else if event == "INTERACTION_CREATE" {
         if data["type"] != 2 || data["data"]["name"] != "fluent" {
             return Ok(None);
         }
@@ -125,7 +149,13 @@ pub fn decode_dispatch(payload: &Value) -> Result<Option<Input>> {
         id: get(data, "id")?,
         guild: get(data, "guild_id")?,
         channel: get(data, "channel_id")?,
-        actor: get(actor, "id")?,
+        actor: if actor["id"].is_null()
+            && matches!(kind, InputKind::Edit { .. } | InputKind::Delete { .. })
+        {
+            String::new()
+        } else {
+            get(actor, "id")?
+        },
         kind,
     }))
 }

@@ -156,7 +156,7 @@ pub fn configured_client(home: &Path) -> Result<(DiscordConfig, DiscordRest)> {
     Ok((config, client))
 }
 /// Persist only normalized inputs. Interaction tokens never enter the inbox.
-pub fn persist_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<()> {
+fn authorize_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<()> {
     config.validate()?;
     if input.guild != config.guild_id {
         bail!("Discord server is not authorized");
@@ -183,12 +183,44 @@ pub fn persist_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Re
     {
         bail!("Discord actor or channel is not authorized");
     }
+    Ok(())
+}
+pub fn persist_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<()> {
+    authorize_ingress(home, config, input)?;
     snowflake(&input.id)?;
     let path = state_root(home)
         .join("inbox")
-        .join(format!("{}.json", input.id));
+        .join(format!("{:x}.json", Sha256::digest(input.key().as_bytes())));
     if !path.exists() {
         write(&path, input)?;
+    }
+    Ok(())
+}
+fn normalize_attribution(home: &Path, config: &DiscordConfig, input: &mut Input) -> Result<()> {
+    if input.actor.is_empty() {
+        let index: Index = read(&state_root(home).join("index.json"))?;
+        let binding = index
+            .threads
+            .get(&input.channel)
+            .context("unbound correction")?;
+        let project = config
+            .projects
+            .get(&binding.project)
+            .context("project was revoked")?;
+        let thread: Thread = read(
+            &project
+                .checkout
+                .path
+                .join(".fluent/work/discord/threads")
+                .join(format!("{}.json", binding.thread)),
+        )?;
+        input.actor = thread
+            .inputs
+            .iter()
+            .find(|i| i.id == input.id && matches!(i.kind, InputKind::Message { .. }))
+            .context("correction has no accepted original")?
+            .actor
+            .clone();
     }
     Ok(())
 }
@@ -201,16 +233,20 @@ fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
         .map(|entry| entry.map(|e| e.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
     paths.sort_by_key(|path| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
+        fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Input>(&bytes).ok())
+            .map(|input| (input.id.parse::<u64>().unwrap_or(0), input.key()))
     });
     for path in paths {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
         let input = serde_json::from_slice(&fs::read(&path)?)?;
+        if authorize_ingress(&runner.home, &runner.config, &input).is_err() {
+            fs::remove_file(path)?;
+            continue;
+        }
         runner.ingest(input)?;
         fs::remove_file(path)?;
     }
@@ -235,11 +271,16 @@ pub fn run_configured_runner(home: &Path) -> Result<()> {
     let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_connected = connected.clone();
     let worker = std::thread::spawn(move || {
+        let mut next_recovery = Instant::now();
         while !worker_stop.load(std::sync::atomic::Ordering::Relaxed) {
             if worker_connected.load(std::sync::atomic::Ordering::Relaxed)
                 && let Ok(config) = read_config(&worker_home)
             {
                 runner.config = config;
+                if Instant::now() >= next_recovery {
+                    let _ = runner.recover();
+                    next_recovery = Instant::now() + Duration::from_secs(30);
+                }
                 let _ = process_inbox(&mut runner);
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -331,9 +372,15 @@ fn run_gateway(
             let payload: serde_json::Value =
                 serde_json::from_str(&text).context("invalid Discord Gateway JSON")?;
             // Persist normalized ingress before advancing the resume sequence.
-            if let Some(input) = decode_dispatch(&payload)? {
+            if let Some(mut input) = decode_dispatch(&payload)? {
                 let config = read_config(home)?;
-                let accepted = persist_ingress(home, &config, &input).is_ok();
+                let authorized = normalize_attribution(home, &config, &mut input)
+                    .and_then(|_| authorize_ingress(home, &config, &input))
+                    .is_ok();
+                if authorized {
+                    persist_ingress(home, &config, &input)?;
+                }
+                let accepted = authorized;
                 if payload["t"] == "INTERACTION_CREATE" {
                     if let Some(token) = payload["d"]["token"].as_str() {
                         let _ = client.acknowledge(&input.id, token, accepted);
@@ -368,6 +415,7 @@ fn run_gateway(
                 )?;
             }
         }
+        write(&session_path, &session)?;
         connected.store(false, std::sync::atomic::Ordering::Relaxed);
         write(
             &state_root(home).join("status.json"),
