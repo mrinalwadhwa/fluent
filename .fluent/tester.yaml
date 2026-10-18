@@ -2,6 +2,7 @@ commands:
   - command: |
       set -eu
       bash scripts/prepare-terminal-deps.sh
+      export DYLD_LIBRARY_PATH="$(pwd)/target/terminal-deps/install/$(rustc -vV | sed -n 's/^host: //p')/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
       unset FLUENT_MAX_TOTAL_WRITE_ROUNDS
       FLUENT_RELEASED_050_BIN="$(bash tests/fixtures/prepare-released-predecessor.sh)"
       export FLUENT_RELEASED_050_BIN
@@ -48,7 +49,7 @@ commands:
       export FLUENT_BIN_OVERRIDE="$(pwd)/target/test-support/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
-      FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --message-format libtest-json 2>&1
+      FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --test-threads 4 --message-format libtest-json 2>&1
     test_harness: cargo-nextest
     reject_process_leaks: true
   - command: |
