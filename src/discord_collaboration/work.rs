@@ -3,6 +3,52 @@ use crate::conversation::{ArtifactRevision, PlannedWork};
 use crate::slack_collaboration::{LocalSchedulerClient, WorkControl};
 use crate::work_model::{MergeCandidateMergeStatus, WorkItem, WorkModelStore};
 
+/// Host execution effects. Conversation routing and approval checks stay in the runner.
+pub trait WorkEffects: Send {
+    fn submit(
+        &self,
+        home: &Path,
+        checkout: &Path,
+        request: &crate::conversation::WorkExecutionRequest,
+    ) -> Result<crate::conversation::WorkQueueOutcome>;
+    fn land(
+        &self,
+        config: crate::work_merge_executor::WorkMergeConfig<'_>,
+        approval: &crate::work_approval::WorkApproval,
+    ) -> Result<crate::work_merge_executor::WorkMergeOutcome>;
+}
+pub(super) struct LocalWorkEffects;
+impl WorkEffects for LocalWorkEffects {
+    fn submit(
+        &self,
+        home: &Path,
+        checkout: &Path,
+        request: &crate::conversation::WorkExecutionRequest,
+    ) -> Result<crate::conversation::WorkQueueOutcome> {
+        use crate::conversation::WorkScheduler;
+        LocalSchedulerClient::new(home, [checkout.to_path_buf()]).submit(request)
+    }
+    fn land(
+        &self,
+        config: crate::work_merge_executor::WorkMergeConfig<'_>,
+        approval: &crate::work_approval::WorkApproval,
+    ) -> Result<crate::work_merge_executor::WorkMergeOutcome> {
+        crate::work_merge_executor::merge_candidate_with_approval(config, approval)
+    }
+}
+struct SchedulerEffect<'a> {
+    home: &'a Path,
+    checkout: &'a Path,
+    effects: &'a dyn WorkEffects,
+}
+impl crate::conversation::WorkScheduler for SchedulerEffect<'_> {
+    fn submit(
+        &self,
+        request: &crate::conversation::WorkExecutionRequest,
+    ) -> Result<crate::conversation::WorkQueueOutcome> {
+        self.effects.submit(self.home, self.checkout, request)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalButton {
     pub action: String,
@@ -23,6 +69,8 @@ pub struct PendingApproval {
     pub action: WorkAction,
     pub work_id: String,
     pub expected_state: String,
+    #[serde(default)]
+    pub expected_dispatch: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptedApproval {
@@ -32,7 +80,7 @@ pub struct AcceptedApproval {
     pub completed: bool,
 }
 fn fingerprint(item: &WorkItem) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(item)?)))
+    Ok(crate::work_approval::WorkApproval::fingerprint(item))
 }
 fn current_state(checkout: &Path, id: &str) -> Result<String> {
     let store = WorkModelStore::new(checkout);
@@ -68,6 +116,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
         if config_path(&self.home).exists() {
             self.config = read_config(&self.home)?;
         }
+        let _lock = crate::lease::acquire_blocking(&state_root(&self.home).join("state.lock"))?;
         let binding = binding(&self.home, &self.config, thread_id)?;
         let checkout = self.config.projects[&binding.project].checkout.path.clone();
         let path = checkout
@@ -141,6 +190,13 @@ pub(super) fn offer_action(
         action,
         work_id,
         expected_state,
+        expected_dispatch: Some(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&crate::queue::read_ledger(
+                checkout,
+                &format!("discord-{}", binding.thread)
+            )?)?)
+        )),
     });
     thread.deliveries.push(Delivery {
         id: format!("approval:{id}"),
@@ -159,6 +215,7 @@ pub(super) fn process_work(
     input: &Input,
     path: &Path,
     recovered: bool,
+    effects: &dyn WorkEffects,
 ) -> Result<bool> {
     let work_id = format!("discord-{}", binding.thread);
     let control = WorkControl::for_discord(&project.checkout.path);
@@ -175,11 +232,22 @@ pub(super) fn process_work(
             if accepted.completed {
                 return Ok(true);
             }
+            let approval = work_approval(&accepted.pending);
+            let applied = approval.applied(&project.checkout.path, &accepted.pending.work_id)?;
+            if !applied
+                && !thread.approval.as_ref().is_some_and(|p| {
+                    p.button.action == accepted.pending.button.action
+                        && p.button.revision == accepted.pending.button.revision
+                })
+            {
+                bail!("approval is stale; a newer action is pending");
+            }
             apply_action(
                 home,
                 &project.checkout.path,
                 &accepted.pending,
                 &accepted.actor,
+                effects,
             )?;
             thread
                 .approvals
@@ -214,22 +282,36 @@ pub(super) fn process_work(
                 completed: false,
             });
             write(path, thread)?;
-            apply_action(home, &project.checkout.path, &pending, &actor)?;
+            apply_action(home, &project.checkout.path, &pending, &actor, effects)?;
             thread.approvals.last_mut().unwrap().completed = true;
         }
-        thread.approval = None;
-        thread.inputs.push(input.clone());
-        thread.deliveries.push(Delivery {
-            id: format!("{}:approved", input.id),
-            channel: binding.thread.clone(),
-            text: format!(
-                "Approved by Discord user {}. {}",
-                input.actor,
-                work_status(&control, &work_id)?
-            ),
-            message_id: None,
-            approval: None,
-        });
+        if thread
+            .approval
+            .as_ref()
+            .is_some_and(|p| p.button.action == *action && p.button.revision == *revision)
+        {
+            thread.approval = None;
+        }
+        if !thread.inputs.iter().any(|i| i.key() == input.key()) {
+            thread.inputs.push(input.clone());
+        }
+        if !thread
+            .deliveries
+            .iter()
+            .any(|d| d.id == format!("{}:approved", input.id))
+        {
+            thread.deliveries.push(Delivery {
+                id: format!("{}:approved", input.id),
+                channel: binding.thread.clone(),
+                text: format!(
+                    "Approved by Discord user {}. {}",
+                    input.actor,
+                    work_status(&control, &project.checkout.path, &work_id)?
+                ),
+                message_id: None,
+                approval: None,
+            });
+        }
         write(path, thread)?;
         return Ok(true);
     }
@@ -250,7 +332,7 @@ pub(super) fn process_work(
         thread.deliveries.push(Delivery {
             id: format!("{}:status", input.id),
             channel: binding.thread.clone(),
-            text: work_status(&control, &work_id)?,
+            text: work_status(&control, &project.checkout.path, &work_id)?,
             message_id: None,
             approval: None,
         });
@@ -312,9 +394,23 @@ pub(super) fn process_work(
     write(path, thread)?;
     Ok(true)
 }
-fn work_status(control: &WorkControl, id: &str) -> Result<String> {
+fn work_status(control: &WorkControl, checkout: &Path, id: &str) -> Result<String> {
     if control.slice(id)?.is_none() {
         return Ok(format!("Work {id} has not been created."));
+    }
+    let item = WorkModelStore::new(checkout).read_work_item(id)?;
+    if let Some(candidate) = item.merge_candidates.last()
+        && candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+    {
+        return Ok(format!(
+            "Work {id}: merged candidate {} at {}.",
+            candidate.id,
+            candidate
+                .merge_state
+                .merged_commit
+                .as_deref()
+                .unwrap_or(&candidate.candidate_commit)
+        ));
     }
     Ok(control
         .status(id)?
@@ -323,15 +419,26 @@ fn work_status(control: &WorkControl, id: &str) -> Result<String> {
         .collect::<Vec<_>>()
         .join("\n"))
 }
+fn work_approval(pending: &PendingApproval) -> crate::work_approval::WorkApproval {
+    crate::work_approval::WorkApproval {
+        operation: format!(
+            "discord:{}:{}",
+            pending.button.action, pending.button.revision
+        ),
+        expected_state: pending.expected_state.clone(),
+    }
+}
 fn apply_action(
     home: &Path,
     checkout: &Path,
     pending: &PendingApproval,
     actor: &str,
+    effects: &dyn WorkEffects,
 ) -> Result<()> {
     let control = WorkControl::for_discord(checkout);
     let store = WorkModelStore::new(checkout);
     let id = &pending.work_id;
+    let approval = work_approval(pending);
     match &pending.action {
         WorkAction::Create | WorkAction::Planning { .. } => {
             if control.slice(id)?.is_none() {
@@ -345,7 +452,7 @@ fn apply_action(
                 )?;
             }
             if let WorkAction::Planning { artifact } = &pending.action {
-                store.mutate_work_item(id, |item| {
+                approval.mutate(checkout, id, |item| {
                     item.approve_planning_revision(
                         &artifact.kind,
                         &artifact.id,
@@ -355,11 +462,24 @@ fn apply_action(
             }
         }
         WorkAction::Execute => {
-            let scheduler = LocalSchedulerClient::new(home, [checkout.to_path_buf()]);
-            control.authorize_execution(id, actor, &scheduler)?;
+            let scheduler = SchedulerEffect {
+                home,
+                checkout,
+                effects,
+            };
+            control.authorize_execution_with_approval(id, actor, &scheduler, Some(&approval))?;
         }
         WorkAction::Resume { attempt } => {
-            crate::queue::resume(checkout, id, attempt, None)?;
+            crate::queue::resume_with_approval(
+                checkout,
+                id,
+                attempt,
+                &approval,
+                pending
+                    .expected_dispatch
+                    .as_deref()
+                    .context("request fresh resume approval")?,
+            )?;
         }
         WorkAction::Land { candidate, commit } => {
             let item = store.read_work_item(id)?;
@@ -375,7 +495,8 @@ fn apply_action(
                 return Ok(());
             }
             let resolver = crate::content::ContentResolver::new(Some(checkout));
-            crate::work_merge_executor::merge_candidate(
+            approval.admit(checkout, id)?;
+            effects.land(
                 crate::work_merge_executor::WorkMergeConfig {
                     project_root: checkout,
                     store: &store,
@@ -391,6 +512,7 @@ fn apply_action(
                     no_sandbox: false,
                     run_post_merge_review: false,
                 },
+                &approval,
             )?;
         }
     }

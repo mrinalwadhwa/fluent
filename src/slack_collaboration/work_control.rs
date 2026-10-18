@@ -289,6 +289,15 @@ impl WorkControl {
         approver: &str,
         scheduler: &dyn WorkScheduler,
     ) -> Result<ExecutionApprovalReport> {
+        self.authorize_execution_with_approval(slice_id, approver, scheduler, None)
+    }
+    pub fn authorize_execution_with_approval(
+        &self,
+        slice_id: &str,
+        approver: &str,
+        scheduler: &dyn WorkScheduler,
+        approval: Option<&crate::work_approval::WorkApproval>,
+    ) -> Result<ExecutionApprovalReport> {
         let _slice_lock = crate::lease::acquire_blocking(&self.slice_lock_path(slice_id)?)
             .with_context(|| format!("lock approved Slice {slice_id}"))?;
         let mut slice = self
@@ -328,11 +337,16 @@ impl WorkControl {
                 reason: Some(format!("Execution approved by {approver}")),
                 evidence_ref: Some(format!("{}-slice:{slice_id}", self.namespace)),
             };
-            store.mutate_work_item_with_transition(work_item_id, &metadata, |item| {
+            let authorize = |item: &mut WorkItem| {
                 item.authorization =
                     ExecutionAuthorization::execution_ready(ExecutionAuthority::Human);
                 Ok(())
-            })?;
+            };
+            if let Some(approval) = approval {
+                approval.mutate(&self.project_root, work_item_id, authorize)?;
+            } else {
+                store.mutate_work_item_with_transition(work_item_id, &metadata, authorize)?;
+            }
             let outcome = if slice.acknowledged_request_ids.contains(&request.id) {
                 WorkQueueOutcome::Queued {
                     request_id: request.id.clone(),

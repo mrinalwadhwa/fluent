@@ -719,20 +719,65 @@ fn discord_approval_binds_current_action_and_revision() {
 }
 #[test]
 fn discord_work_controls_use_existing_boundaries() {
-    use fluent::conversation::{WorkExecutionRequest, WorkQueueOutcome, WorkScheduler};
+    use fluent::conversation::{WorkExecutionRequest, WorkQueueOutcome};
     #[derive(Default)]
-    struct Scheduler(std::sync::Mutex<Vec<WorkExecutionRequest>>);
-    impl WorkScheduler for Scheduler {
-        fn submit(&self, request: &WorkExecutionRequest) -> Result<WorkQueueOutcome> {
-            self.0.lock().unwrap().push(request.clone());
+    struct Effects {
+        requests: std::sync::Mutex<Vec<WorkExecutionRequest>>,
+        lands: std::sync::Mutex<Vec<(String, String)>>,
+    }
+    struct SharedEffects(std::sync::Arc<Effects>);
+    impl WorkEffects for SharedEffects {
+        fn submit(
+            &self,
+            _: &Path,
+            _: &Path,
+            request: &WorkExecutionRequest,
+        ) -> Result<WorkQueueOutcome> {
+            self.0.requests.lock().unwrap().push(request.clone());
             Ok(WorkQueueOutcome::Queued {
                 request_id: request.id.clone(),
             })
         }
+        fn land(
+            &self,
+            config: fluent::work_merge_executor::WorkMergeConfig<'_>,
+            approval: &fluent::work_approval::WorkApproval,
+        ) -> Result<fluent::work_merge_executor::WorkMergeOutcome> {
+            let item = config.store.read_work_item(config.work_item_id)?;
+            approval.check(&item)?;
+            let candidate = item
+                .merge_candidates
+                .iter()
+                .find(|c| c.id == config.merge_candidate_id)
+                .unwrap();
+            self.0
+                .lands
+                .lock()
+                .unwrap()
+                .push((candidate.id.clone(), candidate.candidate_commit.clone()));
+            let commit = candidate.candidate_commit.clone();
+            config.store.mutate_work_item(config.work_item_id, |item| {
+                let c = item
+                    .merge_candidates
+                    .iter_mut()
+                    .find(|c| c.id == config.merge_candidate_id)
+                    .unwrap();
+                c.merge_state.status = fluent::work_model::MergeCandidateMergeStatus::Merged;
+                c.merge_state.merged_commit = Some(commit.clone());
+                Ok(())
+            })?;
+            Ok(fluent::work_merge_executor::WorkMergeOutcome {
+                merge_candidate_id: config.merge_candidate_id.into(),
+                merged_commit: commit,
+            })
+        }
     }
+    let effects = std::sync::Arc::new(Effects::default());
     let (home, project, config) = fixture();
     let mut runner =
-        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default())
+            .unwrap()
+            .with_work_effects(SharedEffects(effects.clone()));
     runner.ingest(command()).unwrap();
     for (i, kind) in ["brief", "behaviors", "approach", "plan"]
         .iter()
@@ -754,17 +799,59 @@ fn discord_work_controls_use_existing_boundaries() {
             })
             .unwrap();
     }
-    let control = fluent::slack_collaboration::WorkControl::for_discord(project.path());
-    let scheduler = Scheduler::default();
-    control
-        .authorize_execution("discord-400", "discord:100:300", &scheduler)
+    runner
+        .ingest(Input {
+            id: "628".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work execute".into(),
+            },
+            ..reply()
+        })
         .unwrap();
-    control
-        .authorize_execution("discord-400", "discord:100:300", &scheduler)
+    let execute = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
         .unwrap();
-    assert_eq!(scheduler.0.lock().unwrap().len(), 1);
+    fluent::work_model::WorkModelStore::new(project.path())
+        .mutate_work_item("discord-400", |item| {
+            item.instructions = Some("Owner updated the Work instructions".into());
+            Ok(())
+        })
+        .unwrap();
+    assert!(runner.ingest(click("629", &execute)).is_err());
+    assert!(effects.requests.lock().unwrap().is_empty());
+    runner
+        .ingest(Input {
+            id: "6281".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work execute".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let execute = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
+        .unwrap();
+    runner.ingest(click("6291", &execute)).unwrap();
+    runner.ingest(click("6291", &execute)).unwrap();
+    assert_eq!(effects.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        effects.requests.lock().unwrap()[0].work_item_id,
+        "discord-400"
+    );
     assert!(
-        scheduler.0.lock().unwrap()[0]
+        effects.requests.lock().unwrap()[0]
             .id
             .starts_with("discord-work-")
     );
@@ -857,6 +944,116 @@ fn discord_work_controls_use_existing_boundaries() {
     assert_eq!(
         ledger.active().unwrap().bound_attempt_id.as_deref(),
         Some("attempt-1")
+    );
+    let mut interrupted = thread_snapshot(project.path());
+    interrupted.approvals.last_mut().unwrap().completed = false;
+    interrupted.approval = Some(interrupted.approvals.last().unwrap().pending.clone());
+    save_thread_snapshot(project.path(), &interrupted);
+    let resume_click = interrupted.inputs.last().unwrap().clone();
+    fluent::queue::reconcile_active(
+        project.path(),
+        "discord-400",
+        fluent::queue::DispatchStatus::Canceled,
+    )
+    .unwrap();
+    let before = fluent::queue::read_ledger(project.path(), "discord-400").unwrap();
+    runner.ingest_recovered(resume_click).unwrap();
+    assert_eq!(
+        fluent::queue::read_ledger(project.path(), "discord-400").unwrap(),
+        before
+    );
+
+    use fluent::work_model::{AttemptReviewState, MergeReviewState, TaskOutput};
+    store
+        .mutate_work_item("discord-400", |item| {
+            let attempt = &mut item.attempts[0];
+            attempt.status = AttemptStatus::Complete;
+            attempt.pause_kind = None;
+            attempt.review_state = Some(AttemptReviewState::Passed);
+            attempt.tasks[0].status = TaskStatus::Complete;
+            attempt.tasks[0].output = Some(TaskOutput {
+                workspace_id: "candidate".into(),
+                workspace_path: ".".into(),
+                source_branch: "main".into(),
+                base_commit: None,
+                commit: "candidate-one".into(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            item.create_or_get_merge_candidate("attempt-1")?;
+            item.merge_candidates[0].merge_review_state = MergeReviewState::Passed;
+            Ok(())
+        })
+        .unwrap();
+    runner
+        .ingest(Input {
+            id: "650".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work land".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let stale = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
+        .unwrap();
+    store
+        .mutate_work_item("discord-400", |item| {
+            item.merge_candidates[0].candidate_commit = "candidate-two".into();
+            item.attempts[0].tasks[0].output.as_mut().unwrap().commit = "candidate-two".into();
+            Ok(())
+        })
+        .unwrap();
+    assert!(runner.ingest(click("651", &stale)).is_err());
+    assert!(effects.lands.lock().unwrap().is_empty());
+    runner
+        .ingest(Input {
+            id: "652".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work land".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let land = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
+        .unwrap();
+    runner.ingest(click("653", &land)).unwrap();
+    runner.ingest(click("653", &land)).unwrap();
+    assert_eq!(
+        *effects.lands.lock().unwrap(),
+        vec![("attempt-1-merge-candidate".into(), "candidate-two".into())]
+    );
+    assert_eq!(
+        store
+            .read_work_item("discord-400")
+            .unwrap()
+            .merge_candidates[0]
+            .merge_state
+            .status,
+        fluent::work_model::MergeCandidateMergeStatus::Merged
+    );
+    assert_eq!(runner.transport().messages.last().unwrap().channel, "400");
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .contains("merged")
     );
 }
 
@@ -1287,34 +1484,39 @@ fn discord_restart_requires_established_snapshot() {
 
 #[test]
 fn discord_restart_recovers_initial_snapshot_before_index() {
-    let (home, project, config) = fixture();
-    let root = state_root(home.path());
-    fs::create_dir_all(&root).unwrap();
-    // Interrupted initialization: the project snapshot was written, but the routing
-    // index was not. No provider turn can have begun before index publication.
-    let binding = serde_json::json!({"guild":"100","parent":"200","project":"app",
+    for snapshot_exists in [false, true] {
+        let (home, project, config) = fixture();
+        let root = state_root(home.path());
+        fs::create_dir_all(&root).unwrap();
+        // Interrupted initialization: the project snapshot was written, but the routing
+        // index was not. No provider turn can have begun before index publication.
+        let binding = serde_json::json!({"guild":"100","parent":"200","project":"app",
         "checkout":config.projects["app"].checkout.identity,"provider":"codex","thread":"400"});
-    fs::write(
-        root.join("initializing.json"),
-        serde_json::to_vec(&serde_json::json!({"600":binding})).unwrap(),
-    )
-    .unwrap();
-    let path = project.path().join(".fluent/work/discord/threads/400.json");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, serde_json::to_vec(&Thread::default()).unwrap()).unwrap();
-    let mut runner =
-        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
-    runner.ingest(command()).unwrap();
-    runner.ingest(command()).unwrap();
-    assert_eq!(runner.provider().calls.len(), 1);
-    let journal: BTreeMap<String, serde_json::Value> =
-        serde_json::from_slice(&fs::read(root.join("initializing.json")).unwrap()).unwrap();
-    assert!(journal.is_empty());
+        fs::write(
+            root.join("initializing.json"),
+            serde_json::to_vec(&serde_json::json!({"600":binding})).unwrap(),
+        )
+        .unwrap();
+        let path = project.path().join(".fluent/work/discord/threads/400.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if snapshot_exists {
+            fs::write(&path, serde_json::to_vec(&Thread::default()).unwrap()).unwrap();
+        }
+        let mut runner =
+            DiscordRunner::new(home.path(), config, Provider::default(), Discord::default())
+                .unwrap();
+        runner.ingest(command()).unwrap();
+        runner.ingest(command()).unwrap();
+        assert_eq!(runner.provider().calls.len(), 1);
+        let journal: BTreeMap<String, serde_json::Value> =
+            serde_json::from_slice(&fs::read(root.join("initializing.json")).unwrap()).unwrap();
+        assert!(journal.is_empty());
+    }
 }
 
 #[test]
 fn discord_restart_skips_denied_history_and_isolates_threads() {
-    struct History(Discord);
+    struct History(Discord, std::sync::Arc<std::sync::Mutex<Vec<String>>>);
     impl DiscordTransport for History {
         fn ensure_thread(&mut self, command: &str, _: &str, _: &str) -> Result<String> {
             Ok(if command == "600" { "400" } else { "401" }.into())
@@ -1323,6 +1525,7 @@ fn discord_restart_skips_denied_history_and_isolates_threads() {
             self.0.deliver(d)
         }
         fn history(&mut self, _: &str, channel: &str, after: &str) -> Result<HistoryPage> {
+            self.1.lock().unwrap().push(channel.into());
             if !after.is_empty() {
                 return Ok(HistoryPage::default());
             }
@@ -1347,11 +1550,12 @@ fn discord_restart_skips_denied_history_and_isolates_threads() {
         }
     }
     let (home, project, mut config) = fixture();
+    let visited = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut runner = DiscordRunner::new(
         home.path(),
         config.clone(),
         Provider::default(),
-        History(Discord::default()),
+        History(Discord::default(), visited.clone()),
     )
     .unwrap();
     runner.ingest(command()).unwrap();
@@ -1393,6 +1597,181 @@ fn discord_restart_skips_denied_history_and_isolates_threads() {
     }
     // A retryable failure in one established thread must not suppress the other.
     fs::remove_file(project.path().join(".fluent/work/discord/threads/400.json")).unwrap();
+    visited.lock().unwrap().clear();
     assert!(runner.recover().is_err());
+    assert_eq!(*visited.lock().unwrap(), vec!["401"]);
     assert_eq!(runner.provider().calls.len(), 5);
+}
+
+fn click(id: &str, button: &ApprovalButton) -> Input {
+    Input {
+        id: id.into(),
+        actor: "300".into(),
+        kind: InputKind::Approval {
+            action: button.action.clone(),
+            revision: button.revision.clone(),
+        },
+        ..reply()
+    }
+}
+fn thread_snapshot(project: &Path) -> Thread {
+    serde_json::from_slice(
+        &fs::read(project.join(".fluent/work/discord/threads/400.json")).unwrap(),
+    )
+    .unwrap()
+}
+fn save_thread_snapshot(project: &Path, thread: &Thread) {
+    fs::write(
+        project.join(".fluent/work/discord/threads/400.json"),
+        serde_json::to_vec(thread).unwrap(),
+    )
+    .unwrap();
+}
+#[test]
+fn discord_approval_interruption_never_replaces_newer_planning() {
+    for effect_completed in [false, true] {
+        let (home, project, config) = fixture();
+        let mut runner =
+            DiscordRunner::new(home.path(), config, Provider::default(), Discord::default())
+                .unwrap();
+        runner.ingest(command()).unwrap();
+        let initial = runner
+            .present_planning("400", "brief", "Initial brief")
+            .unwrap();
+        runner.ingest(click("610", &initial)).unwrap();
+        let old = runner
+            .present_planning("400", "brief", "Old brief")
+            .unwrap();
+        if effect_completed {
+            runner.ingest(click("611", &old)).unwrap();
+            let mut thread = thread_snapshot(project.path());
+            thread.approvals.last_mut().unwrap().completed = false;
+            save_thread_snapshot(project.path(), &thread);
+        } else {
+            let mut thread = thread_snapshot(project.path());
+            thread.approvals.push(AcceptedApproval {
+                input: "611".into(),
+                actor: "discord:100:300".into(),
+                pending: thread.approval.clone().unwrap(),
+                completed: false,
+            });
+            save_thread_snapshot(project.path(), &thread);
+        }
+        let store = fluent::work_model::WorkModelStore::new(project.path());
+        store
+            .mutate_work_item("discord-400", |item| {
+                item.approve_planning_revision(
+                    "brief",
+                    &fluent::conversation::ArtifactRevision::new("brief", "New local brief").id,
+                    "New local brief".into(),
+                )
+            })
+            .unwrap();
+        let newer = runner
+            .present_planning("400", "brief", "Newest pending brief")
+            .unwrap();
+        let result = runner.ingest_recovered(click("611", &old));
+        if !effect_completed {
+            assert!(result.is_err());
+        }
+        assert_eq!(
+            store
+                .read_work_item("discord-400")
+                .unwrap()
+                .planning_context
+                .unwrap()
+                .brief
+                .as_deref(),
+            Some("New local brief")
+        );
+        assert_eq!(
+            thread_snapshot(project.path())
+                .approval
+                .unwrap()
+                .button
+                .action,
+            newer.action,
+            "old recovery cannot clear the new control"
+        );
+    }
+}
+
+#[test]
+fn discord_approval_checks_revision_inside_model_mutation() {
+    use fluent::work_approval::WorkApproval;
+    use fluent::work_model::{WorkItem, WorkModelStore};
+    let (_home, project, _) = fixture();
+    let store = WorkModelStore::new(project.path());
+    store
+        .create_work_item(&WorkItem {
+            id: "guarded".into(),
+            title: "Original".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let approval = WorkApproval {
+        operation: "discord-operation".into(),
+        expected_state: WorkApproval::fingerprint(&store.read_work_item("guarded").unwrap()),
+    };
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let path = project.path().to_path_buf();
+    let owner = std::thread::spawn(move || {
+        WorkModelStore::new(&path)
+            .mutate_work_item("guarded", |item| {
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                item.title = "Changed by owner".into();
+                Ok(())
+            })
+            .unwrap()
+    });
+    held.recv().unwrap();
+    let path = project.path().to_path_buf();
+    let checked = approval.clone();
+    let effect = std::thread::spawn(move || {
+        checked.mutate(&path, "guarded", |item| {
+            item.title = "Stale Discord change".into();
+            Ok(())
+        })
+    });
+    release.send(()).unwrap();
+    owner.join().unwrap();
+    assert!(effect.join().unwrap().is_err());
+    assert_eq!(
+        store.read_work_item("guarded").unwrap().title,
+        "Changed by owner"
+    );
+    assert!(!approval.applied(project.path(), "guarded").unwrap());
+}
+
+#[test]
+fn discord_approval_landing_admission_never_reauthorizes_changed_work() {
+    use fluent::work_approval::WorkApproval;
+    use fluent::work_model::{WorkItem, WorkModelStore};
+    let (_home, project, _) = fixture();
+    let store = WorkModelStore::new(project.path());
+    store
+        .create_work_item(&WorkItem {
+            id: "landing".into(),
+            title: "Approved".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let approval = WorkApproval {
+        operation: "land-operation".into(),
+        expected_state: WorkApproval::fingerprint(&store.read_work_item("landing").unwrap()),
+    };
+    approval.admit(project.path(), "landing").unwrap();
+    assert!(
+        !approval.applied(project.path(), "landing").unwrap(),
+        "admission is not effect completion"
+    );
+    store
+        .mutate_work_item("landing", |item| {
+            item.title = "Changed".into();
+            Ok(())
+        })
+        .unwrap();
+    assert!(approval.admit(project.path(), "landing").is_err());
 }

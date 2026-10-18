@@ -470,6 +470,18 @@ enum RebaseOutcome {
 }
 
 pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> {
+    merge_candidate_checked(config, None)
+}
+pub fn merge_candidate_with_approval(
+    config: WorkMergeConfig<'_>,
+    approval: &crate::work_approval::WorkApproval,
+) -> Result<WorkMergeOutcome> {
+    merge_candidate_checked(config, Some(approval))
+}
+fn merge_candidate_checked(
+    config: WorkMergeConfig<'_>,
+    approval: Option<&crate::work_approval::WorkApproval>,
+) -> Result<WorkMergeOutcome> {
     // Serialize the full land boundary against Learner retry: durable state
     // reads and writes, workspace resolution and cleanliness checks, rebase,
     // merge, and post-land recovery all observe one stable candidate state.
@@ -477,6 +489,9 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     let _land_lock = crate::land_lock::acquire(&land_lock_path)
         .map_err(|e| anyhow::anyhow!("failed to acquire land lock: {e}"))?;
 
+    if let Some(approval) = approval {
+        approval.admit(config.project_root, config.work_item_id)?;
+    }
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_mutation_compatible()?;
     item.ensure_not_abandoned()?;
@@ -704,6 +719,7 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
             &source_workspace,
             &target_workspace,
             &reviewed_sha,
+            approval,
         )?;
         prepare_landed_baseline_or_warn(&config, &candidate, &outcome);
         return Ok(outcome);
@@ -753,7 +769,7 @@ pub fn merge_candidate(config: WorkMergeConfig<'_>) -> Result<WorkMergeOutcome> 
     );
     fs::create_dir_all(&artifact_dir)?;
 
-    set_candidate_executing(config.store, config.work_item_id, &candidate.id)?;
+    set_candidate_executing_checked(config.store, config.work_item_id, &candidate.id, approval)?;
 
     let execution = execute_merge(
         &config,
@@ -1507,6 +1523,7 @@ fn land_frozen_no_expertise(
     source_workspace: &Path,
     target_workspace: &Path,
     reviewed_sha: &str,
+    approval: Option<&crate::work_approval::WorkApproval>,
 ) -> Result<WorkMergeOutcome> {
     ensure_same_git_repository(config.project_root, source_workspace)?;
     ensure_same_git_repository(config.project_root, target_workspace)?;
@@ -1537,7 +1554,7 @@ fn land_frozen_no_expertise(
         &candidate.id,
     );
     fs::create_dir_all(&artifact_dir)?;
-    set_candidate_executing(config.store, config.work_item_id, &candidate.id)?;
+    set_candidate_executing_checked(config.store, config.work_item_id, &candidate.id, approval)?;
 
     // Feed the exact-SHA execution and its pre-land base through the same durable
     // follow-up/scheduling coordinator capture landing uses (B4ab): recover the
@@ -2771,12 +2788,24 @@ fn check_artifacts_for_failure(project_root: &Path, artifact_dir: &Path) -> Vec<
     }
 }
 
+#[cfg(test)]
 fn set_candidate_executing(
     store: &WorkModelStore,
     work_item_id: &str,
     candidate_id: &str,
 ) -> Result<()> {
+    set_candidate_executing_checked(store, work_item_id, candidate_id, None)
+}
+fn set_candidate_executing_checked(
+    store: &WorkModelStore,
+    work_item_id: &str,
+    candidate_id: &str,
+    approval: Option<&crate::work_approval::WorkApproval>,
+) -> Result<()> {
     mutate_landing_work_item(store, work_item_id, |item| {
+        if let Some(approval) = approval {
+            approval.check(item)?;
+        }
         let candidate_index = item
             .merge_candidates
             .iter()
@@ -8493,6 +8522,43 @@ exit 0
         assert_eq!(
             events, "check\nfix\ncheck\n",
             "the capture route runs check, then fix, then a recheck"
+        );
+    }
+    #[test]
+    fn discord_landing_rechecks_revision_before_starting_effects() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = WorkModelStore::new(tmp.path());
+        let (mut item, _) = executing_candidate_item("work-1", tmp.path());
+        item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Pending;
+        store.create_work_item(&item).unwrap();
+        let approval = crate::work_approval::WorkApproval {
+            operation: "discord-land".into(),
+            expected_state: crate::work_approval::WorkApproval::fingerprint(
+                &store.read_work_item("work-1").unwrap(),
+            ),
+        };
+        // Simulate a local mutation during landing preflight, after admission.
+        approval.admit(tmp.path(), "work-1").unwrap();
+        store
+            .mutate_work_item("work-1", |item| {
+                item.title = "Owner changed Work".into();
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            set_candidate_executing_checked(
+                &store,
+                "work-1",
+                "attempt-1-merge-candidate",
+                Some(&approval)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            store.read_work_item("work-1").unwrap().merge_candidates[0]
+                .merge_state
+                .status,
+            MergeCandidateMergeStatus::Pending
         );
     }
 }

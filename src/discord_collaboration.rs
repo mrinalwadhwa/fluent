@@ -234,6 +234,7 @@ pub struct DiscordRunner<P, T> {
     provider: P,
     transport: T,
     recovered: bool,
+    effects: Box<dyn WorkEffects>,
 }
 impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
     pub fn new(home: &Path, config: DiscordConfig, provider: P, transport: T) -> Result<Self> {
@@ -244,7 +245,12 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             provider,
             transport,
             recovered: false,
+            effects: Box::new(work::LocalWorkEffects),
         })
+    }
+    pub fn with_work_effects(mut self, effects: impl WorkEffects + 'static) -> Self {
+        self.effects = Box::new(effects);
+        self
     }
     pub fn provider(&self) -> &P {
         &self.provider
@@ -349,6 +355,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             &input,
             &path,
             self.recovered,
+            self.effects.as_ref(),
         )? {
             rendering::prepare_deliveries(&mut thread, &project.checkout.path);
             write(&path, &thread)?;

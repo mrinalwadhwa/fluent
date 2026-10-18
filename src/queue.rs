@@ -687,6 +687,53 @@ pub fn resume_with_tester_no_sandbox(
     priority: Option<i64>,
     tester_no_sandbox: bool,
 ) -> Result<ResumeDispatchOutcome> {
+    resume_checked(
+        project_root,
+        id,
+        attempt_id,
+        priority,
+        tester_no_sandbox,
+        None,
+    )
+}
+
+pub fn resume_with_approval(
+    project_root: &Path,
+    id: &str,
+    attempt_id: &str,
+    approval: &crate::work_approval::WorkApproval,
+    expected_dispatch: &str,
+) -> Result<ResumeDispatchOutcome> {
+    resume_checked(
+        project_root,
+        id,
+        attempt_id,
+        None,
+        false,
+        Some((approval, expected_dispatch)),
+    )
+}
+fn resume_checked(
+    project_root: &Path,
+    id: &str,
+    attempt_id: &str,
+    priority: Option<i64>,
+    tester_no_sandbox: bool,
+    approval: Option<(&crate::work_approval::WorkApproval, &str)>,
+) -> Result<ResumeDispatchOutcome> {
+    if let Some((approval, _)) = approval {
+        // A durable dispatch proves admission even if it has since stopped again.
+        // Never let replay of that operation authorize a later suspension.
+        let _lock = lock_queue(project_root)?;
+        if read_ledger(project_root, id)?.is_some_and(|ledger| {
+            ledger
+                .dispatches
+                .iter()
+                .any(|d| d.origin_operation_id.as_deref() == Some(&approval.operation))
+        }) {
+            return Ok(ResumeDispatchOutcome::ExistingMatching);
+        }
+    }
     if !work_item_exists(project_root, id) {
         bail!("Work Item {id:?} not found");
     }
@@ -743,6 +790,10 @@ pub fn resume_with_tester_no_sandbox(
     )?;
     let _model_lock = store.lock_work_item_model(id)?;
     let item = store.read_work_item_under_model_lock(id)?;
+    if let Some((approval, _)) = approval {
+        approval.check(&item)?;
+    }
+
     // Queue admission and foreground execution recognize the same narrow
     // legacy presentation-only pause. A candidate-gate-shaped mismatch fails
     // before this command changes the dispatch ledger.
@@ -837,6 +888,21 @@ pub fn resume_with_tester_no_sandbox(
             continue;
         }
         let _lock = queue_lock;
+        if let Some((approval, expected)) = approval {
+            use sha2::{Digest, Sha256};
+            if ledger
+                .dispatches
+                .iter()
+                .any(|d| d.origin_operation_id.as_deref() == Some(&approval.operation))
+            {
+                return Ok(ResumeDispatchOutcome::ExistingMatching);
+            }
+            let current = read_ledger(project_root, id)?;
+            anyhow::ensure!(
+                format!("{:x}", Sha256::digest(serde_json::to_vec(&current)?)) == expected,
+                "Work dispatch changed; request fresh approval"
+            );
+        }
 
         if let Some(active) = ledger.active_mut() {
             if active.intent == DispatchIntent::ResumeAttempt
@@ -948,6 +1014,10 @@ pub fn resume_with_tester_no_sandbox(
                 .map(|stop| stop.requested_at.clone()),
             sequence,
         ));
+        if let Some((approval, _)) = approval {
+            ledger.dispatches.last_mut().unwrap().origin_operation_id =
+                Some(approval.operation.clone());
+        }
         write_ledger(project_root, &ledger)?;
         return Ok(ResumeDispatchOutcome::Created);
     }

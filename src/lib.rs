@@ -96,3 +96,5 @@ pub mod verification_reference;
 
 pub mod conversation;
 pub mod discord_collaboration;
+
+pub mod work_approval;

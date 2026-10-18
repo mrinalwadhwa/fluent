@@ -9258,6 +9258,7 @@ pub fn set_merge_candidate_terminal(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkModelError {
+    StaleExternalApproval,
     TransitionLedgerModified,
     AttemptResumeIneligible {
         attempt_id: String,
@@ -9498,6 +9499,7 @@ pub enum WorkModelError {
 impl fmt::Display for WorkModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StaleExternalApproval => f.write_str("Work changed; request a fresh approval"),
             Self::TransitionLedgerModified => {
                 f.write_str("durable transition history is append-only and host-owned")
             }
