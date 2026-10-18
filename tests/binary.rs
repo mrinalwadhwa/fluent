@@ -20041,7 +20041,8 @@ exit 0
     let value = work_item_value(&main_dir, "work-1");
     let attempt = &value["attempts"][0];
     let task = &attempt["tasks"][0];
-    assert_eq!(attempt["status"], "complete");
+    // Completing the Writer does not complete the later Attempt gates.
+    assert_eq!(attempt["status"], "executing");
     assert_eq!(task["status"], "complete");
     assert_eq!(task["output"]["workspace_id"], "candidate");
     assert_eq!(

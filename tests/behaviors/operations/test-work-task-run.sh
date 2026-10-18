@@ -280,7 +280,8 @@ test_clean_committed_task_completes() {
 
   COMMIT="$(show_json_value '.attempts[0].tasks[0].output.commit')"
   [ "$(show_json_value '.attempts[0].tasks[0].status')" = "complete" ] || RESULT=1
-  [ "$(show_json_value '.attempts[0].status')" = "complete" ] || RESULT=1
+  # The Writer is complete; the Attempt still owns the later gates.
+  [ "$(show_json_value '.attempts[0].status')" = "executing" ] || RESULT=1
   [ "$(show_json_value '.attempts[0].tasks[0].output.workspace_path')" = "$(workspace_path)" ] || RESULT=1
   [ "$COMMIT" != "null" ] && git -C "$(workspace_path)" cat-file -e "${COMMIT}^{commit}" || RESULT=1
   [ -z "$(git -C "$(workspace_path)" status --porcelain)" ] || RESULT=1
