@@ -1473,16 +1473,52 @@ fn discord_runner_honors_global_rate_limit_deadline() {
 #[test]
 fn discord_restart_requires_established_snapshot() {
     let (home, project, config) = fixture();
-    let mut runner =
-        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
-    runner.ingest(command()).unwrap();
-    fs::remove_file(project.path().join(".fluent/work/discord/threads/400.json")).unwrap();
-    assert!(
-        runner.ingest(command()).is_err(),
-        "missing established history must fail closed"
-    );
-    assert!(runner.recover().is_err());
+    write_config(home.path(), &config).unwrap();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    let live = std::sync::Mutex::new(BTreeSet::new());
+    persist_ingress(home.path(), &config, &command()).unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    let inbox = state_root(home.path()).join("inbox");
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    let path = project.path().join(".fluent/work/discord/threads/400.json");
+    let original = fs::read(&path).unwrap();
+    let deliveries = runner.transport().messages.len();
+    fs::remove_file(&path).unwrap();
+    persist_ingress(home.path(), &config, &command()).unwrap();
+    for _ in 0..3 {
+        let error = process_inbox(&mut runner, &live).unwrap_err();
+        assert!(error.to_string().contains("restore its project snapshot"));
+        assert!(
+            !path.exists(),
+            "failure reporting must not replace accepted history"
+        );
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 1);
+        assert!(runner.recover().is_err());
+        assert_eq!(runner.provider().calls.len(), 1);
+        assert_eq!(runner.transport().messages.len(), deliveries);
+    }
+    let status = runner_status(&config, &read_operational_state(home.path()).unwrap());
+    assert!(status.contains("restore its project snapshot"));
+    assert!(!status.contains(project.path().to_str().unwrap()));
+    // Restoring the authoritative snapshot reconciles the queued duplicate without
+    // a new provider turn, session, or outbound reply.
+    fs::write(&path, &original).unwrap();
+    runner.recover().unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    assert_eq!(fs::read(&path).unwrap(), original);
     assert_eq!(runner.provider().calls.len(), 1);
+    assert_eq!(runner.transport().messages.len(), deliveries);
+    assert!(
+        !runner_status(&config, &read_operational_state(home.path()).unwrap())
+            .contains("restore its project snapshot")
+    );
 }
 
 #[test]

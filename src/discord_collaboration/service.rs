@@ -9,6 +9,8 @@ use tungstenite::{Message, stream::MaybeTlsStream};
 
 pub const KEYCHAIN_SERVICE: &str = "dev.fluent.discord";
 pub const BOT_TOKEN_ACCOUNT: &str = "bot-token";
+const MISSING_SNAPSHOT_FAILURE: &str =
+    "bound Discord conversation state is unavailable; restore its project snapshot from backup";
 pub fn config_path(home: &Path) -> PathBuf {
     state_root(home).join("config.json")
 }
@@ -69,7 +71,9 @@ pub fn runner_status(config: &DiscordConfig, state: &OperationalState) -> String
             "disconnected"
         },
         projects,
-        if state.failure.is_some() {
+        if state.failure.as_deref() == Some(MISSING_SNAPSHOT_FAILURE) {
+            "; bound Discord conversation state is unavailable; restore its project snapshot from backup"
+        } else if state.failure.is_some() {
             "; setup or connection needs attention (run fluent discord check)"
         } else {
             ""
@@ -78,6 +82,21 @@ pub fn runner_status(config: &DiscordConfig, state: &OperationalState) -> String
 }
 pub fn read_operational_state(home: &Path) -> Result<OperationalState> {
     let mut state: OperationalState = read(&state_root(home).join("status.json"))?;
+    // Inspect authoritative snapshots without writing conversation state. Keep this
+    // diagnostic separate from Gateway status, which reconnects can overwrite.
+    if config_path(home).exists() {
+        let config = read_config(home)?;
+        let index: Index = read(&state_root(home).join("index.json"))?;
+        for binding in index.threads.values() {
+            if let Some(project) = config.projects.get(&binding.project)
+                && binding.checkout == project.checkout.identity
+                && !thread_path(project, binding).try_exists()?
+            {
+                state.failure = Some(MISSING_SNAPSHOT_FAILURE.into());
+                break;
+            }
+        }
+    }
     if !crate::lease::is_leased(&state_root(home).join("runner.lock")) {
         state.connected = false;
     }
@@ -313,7 +332,8 @@ fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
         .path
         .join(".fluent/work/discord/threads")
         .join(format!("{}.json", binding.thread));
-    let mut thread: Thread = read(&path)?;
+    let _lock = crate::lease::acquire_blocking(&state_root(&runner.home).join("state.lock"))?;
+    let mut thread = read_thread(&path)?;
     let id = format!("{}:failure", input.key());
     if !thread.deliveries.iter().any(|d| d.id == id) {
         let text = if let Some(provider) =
