@@ -161,7 +161,12 @@ pub(super) fn approval_matches_presented_action(
     recovered: bool,
 ) -> bool {
     match (&event.approval_action_id, &event.approval_artifact_revision) {
-        (Some(id), Some(revision)) => id == &action.id && revision == &action.artifact_revision,
+        (Some(id), Some(revision)) => crate::conversation::approval_matches_revision(
+            &action.id,
+            &action.artifact_revision,
+            id,
+            revision,
+        ),
         (None, None) if recovered => {
             slack_timestamp_is_at_or_after(&event.timestamp, &action.presented_at)
         }

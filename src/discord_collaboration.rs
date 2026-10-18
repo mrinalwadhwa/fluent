@@ -13,9 +13,11 @@ use sha2::{Digest, Sha256};
 mod gateway;
 mod service;
 mod transport;
+mod work;
 pub use gateway::*;
 pub use service::*;
 pub use transport::*;
+pub use work::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +106,10 @@ pub enum InputKind {
     Delete {
         message: String,
     },
+    Approval {
+        action: String,
+        revision: String,
+    },
 }
 impl Input {
     fn key(&self) -> String {
@@ -122,6 +128,8 @@ pub struct Delivery {
     pub channel: String,
     pub text: String,
     pub message_id: Option<String>,
+    #[serde(default)]
+    pub approval: Option<ApprovalButton>,
 }
 pub trait DiscordTransport {
     /// Reconcile the command's root message before creating its unique public thread.
@@ -184,6 +192,10 @@ pub struct Thread {
     pub pending: Option<PendingTurn>,
     #[serde(default)]
     pub history_cursor: String,
+    #[serde(default)]
+    pub approval: Option<PendingApproval>,
+    #[serde(default)]
+    pub approvals: Vec<AcceptedApproval>,
 }
 pub fn state_root(home: &Path) -> PathBuf {
     home.join(".config/fluent/discord")
@@ -205,6 +217,7 @@ pub struct DiscordRunner<P, T> {
     config: DiscordConfig,
     provider: P,
     transport: T,
+    recovered: bool,
 }
 impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
     pub fn new(home: &Path, config: DiscordConfig, provider: P, transport: T) -> Result<Self> {
@@ -214,6 +227,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             config,
             provider,
             transport,
+            recovered: false,
         })
     }
     pub fn provider(&self) -> &P {
@@ -221,6 +235,12 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
     }
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+    pub fn ingest_recovered(&mut self, input: Input) -> Result<()> {
+        self.recovered = true;
+        let result = self.ingest(input);
+        self.recovered = false;
+        result
     }
     pub fn ingest(&mut self, input: Input) -> Result<()> {
         if config_path(&self.home).exists() {
@@ -286,6 +306,24 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             .join(".fluent/work/discord/threads")
             .join(format!("{}.json", binding.thread));
         let mut thread: Thread = read(&path)?;
+        if work::process_work(
+            &self.home,
+            project,
+            &binding,
+            &mut thread,
+            &input,
+            &path,
+            self.recovered,
+        )? {
+            for i in 0..thread.deliveries.len() {
+                if thread.deliveries[i].message_id.is_none() {
+                    thread.deliveries[i].message_id =
+                        Some(self.transport.deliver(&thread.deliveries[i])?);
+                    write(&path, &thread)?;
+                }
+            }
+            return Ok(());
+        }
         let key = input.key();
         if thread
             .pending
@@ -296,6 +334,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
         }
         if !thread.inputs.iter().any(|e| e.key() == key) || thread.pending.is_some() {
             let contribution = match &input.kind {
+                InputKind::Approval { .. } => unreachable!("approvals cross the Work boundary"),
                 InputKind::Command { text, .. } | InputKind::Message { text } => text.clone(),
                 InputKind::Edit { message, text, .. } => {
                     let original = thread
@@ -373,19 +412,38 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 }
                 response
             };
-            thread.deliveries.push(Delivery {
-                id: format!("{key}:reply"),
-                channel: binding.thread.clone(),
-                text: format!(
-                    "Project: {}\n\n{}",
-                    binding.project,
-                    response.replace(
-                        project.checkout.path.to_string_lossy().as_ref(),
-                        "[checkout]"
-                    )
-                ),
-                message_id: None,
-            });
+            match serde_json::from_str::<crate::conversation::ProviderOutput>(&response) {
+                Ok(crate::conversation::ProviderOutput::PlanningArtifact { kind, markdown }) => {
+                    let artifact = crate::conversation::ArtifactRevision::new(&kind, &markdown);
+                    work::offer_action(
+                        &project.checkout.path,
+                        &binding,
+                        &mut thread,
+                        WorkAction::Planning { artifact },
+                        &markdown,
+                    )?;
+                }
+                output => {
+                    let text = match output {
+                        Ok(crate::conversation::ProviderOutput::Message { text, .. }) => text,
+                        _ => response,
+                    };
+                    thread.deliveries.push(Delivery {
+                        id: format!("{key}:reply"),
+                        channel: binding.thread.clone(),
+                        text: format!(
+                            "Project: {}\n\n{}",
+                            binding.project,
+                            text.replace(
+                                project.checkout.path.to_string_lossy().as_ref(),
+                                "[checkout]"
+                            )
+                        ),
+                        message_id: None,
+                        approval: None,
+                    });
+                }
+            }
             thread.pending = None;
             write(&path, &thread)?;
         }
@@ -420,9 +478,9 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             let thread: Thread = read(&path)?;
             // An accepted turn precedes subsequent history. Ingest also reconciles its outbox.
             if let Some(pending) = thread.pending {
-                self.ingest(pending.input)?;
+                self.ingest_recovered(pending.input)?;
             } else if let Some(last) = thread.inputs.last() {
-                self.ingest(last.clone())?;
+                self.ingest_recovered(last.clone())?;
             }
             for _ in 0..100 {
                 let current: Thread = read(&path)?;
@@ -432,7 +490,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                     &current.history_cursor,
                 )?;
                 for input in page.inputs {
-                    self.ingest(input)?;
+                    self.ingest_recovered(input)?;
                 }
                 let mut current: Thread = read(&path)?;
                 if let Some(cursor) = page.last_message {
@@ -448,7 +506,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 self.transport
                     .corrections(&binding.guild, &binding.thread, &current.inputs)?
             {
-                self.ingest(input)?;
+                self.ingest_recovered(input)?;
             }
         }
         Ok(())

@@ -24,45 +24,7 @@ use crate::work_model::{
     ExecutionAuthorization, WorkItem, WorkModelStore, validate_work_item_id,
 };
 
-/// A Work Item approved as part of one Slack Slice plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedWork {
-    pub id: String,
-    pub title: String,
-}
-
-impl PlannedWork {
-    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            title: title.into(),
-        }
-    }
-}
-
-/// Stable execution request submitted to the scheduler-owned boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkExecutionRequest {
-    pub version: u32,
-    pub id: String,
-    pub slice_id: String,
-    pub work_item_id: String,
-    pub authorized_by: String,
-    pub created_at: String,
-}
-
-/// Scheduler acknowledgement that is safe to report in a Slack thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkQueueOutcome {
-    Queued { request_id: String },
-    AlreadyQueued { request_id: String },
-}
-
-/// Typed scheduler boundary. Implementations own queue storage and capacity;
-/// Slack collaboration only submits a frozen request.
-pub trait WorkScheduler {
-    fn submit(&self, request: &WorkExecutionRequest) -> Result<WorkQueueOutcome>;
-}
+pub use crate::conversation::{PlannedWork, WorkExecutionRequest, WorkQueueOutcome, WorkScheduler};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovedPlanReport {
@@ -197,6 +159,7 @@ pub fn render_transition_reply(transition: &WorkTransition, evidence: &[String])
 /// authorizes their stable scheduler requests.
 pub struct WorkControl {
     project_root: PathBuf,
+    namespace: &'static str,
 }
 
 impl WorkControl {
@@ -205,6 +168,15 @@ impl WorkControl {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
+            namespace: "slack",
+        }
+    }
+
+    /// Keep Discord Work bindings separate while sharing the existing Work policy.
+    pub fn for_discord(project_root: impl Into<PathBuf>) -> Self {
+        Self {
+            project_root: project_root.into(),
+            namespace: "discord",
         }
     }
 
@@ -263,9 +235,13 @@ impl WorkControl {
 
         let store = WorkModelStore::new(&self.project_root);
         let metadata = DurableTransitionMetadata {
-            origin: DurableTransitionOrigin::SlackThread,
+            origin: if self.namespace == "slack" {
+                DurableTransitionOrigin::SlackThread
+            } else {
+                DurableTransitionOrigin::External
+            },
             reason: Some(format!("Plan approved by {approver}")),
-            evidence_ref: Some(format!("slack-slice:{slice_id}")),
+            evidence_ref: Some(format!("{}-slice:{slice_id}", self.namespace)),
         };
         for work in planned_work {
             let path = store.work_item_path(&work.id)?;
@@ -333,7 +309,7 @@ impl WorkControl {
                 .clone()
                 .unwrap_or_else(|| WorkExecutionRequest {
                     version: Self::REQUEST_VERSION,
-                    id: request_id(slice_id, work_item_id),
+                    id: request_id(self.namespace, slice_id, work_item_id),
                     slice_id: slice_id.into(),
                     work_item_id: work_item_id.clone(),
                     authorized_by: approver.into(),
@@ -344,9 +320,13 @@ impl WorkControl {
                 self.save_slice(&slice)?;
             }
             let metadata = DurableTransitionMetadata {
-                origin: DurableTransitionOrigin::SlackThread,
+                origin: if self.namespace == "slack" {
+                    DurableTransitionOrigin::SlackThread
+                } else {
+                    DurableTransitionOrigin::External
+                },
                 reason: Some(format!("Execution approved by {approver}")),
-                evidence_ref: Some(format!("slack-slice:{slice_id}")),
+                evidence_ref: Some(format!("{}-slice:{slice_id}", self.namespace)),
             };
             store.mutate_work_item_with_transition(work_item_id, &metadata, |item| {
                 item.authorization =
@@ -994,7 +974,7 @@ impl WorkControl {
         validate_slice_id(slice_id)?;
         Ok(self
             .project_root
-            .join(".fluent/work/slack/slices")
+            .join(format!(".fluent/work/{}/slices", self.namespace))
             .join(format!("{slice_id}.json")))
     }
 
@@ -1002,7 +982,7 @@ impl WorkControl {
         validate_slice_id(slice_id)?;
         Ok(self
             .project_root
-            .join(".fluent/work/slack/locks")
+            .join(format!(".fluent/work/{}/locks", self.namespace))
             .join(format!("{slice_id}.lock")))
     }
 }
@@ -1079,11 +1059,11 @@ fn validate_slice_id(slice_id: &str) -> Result<()> {
     validate_work_item_id(slice_id).map_err(Into::into)
 }
 
-fn request_id(slice_id: &str, work_item_id: &str) -> String {
+fn request_id(namespace: &str, slice_id: &str, work_item_id: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"fluent-slack-work-request-v1\0");
+    hasher.update(format!("fluent-{namespace}-work-request-v1\0").as_bytes());
     hasher.update(slice_id.as_bytes());
     hasher.update([0]);
     hasher.update(work_item_id.as_bytes());
-    format!("slack-work-{:x}", hasher.finalize())
+    format!("{namespace}-work-{:x}", hasher.finalize())
 }

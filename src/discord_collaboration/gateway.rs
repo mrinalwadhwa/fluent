@@ -117,6 +117,33 @@ pub fn decode_dispatch(payload: &Value) -> Result<Option<Input>> {
             text: text.into(),
         }
     } else if event == "INTERACTION_CREATE" {
+        if data["type"] == 3 {
+            let custom = data["data"]["custom_id"].as_str().unwrap_or("");
+            let parts = custom.split(':').collect::<Vec<_>>();
+            if parts.len() != 3
+                || parts[0] != "fluent"
+                || parts[1].len() != 16
+                || parts[2].len() != 64
+            {
+                return Ok(None);
+            }
+            return Ok(Some(Input {
+                id: data["id"]
+                    .as_str()
+                    .context("interaction id missing")?
+                    .into(),
+                guild: data["guild_id"].as_str().context("guild missing")?.into(),
+                channel: data["channel_id"]
+                    .as_str()
+                    .context("channel missing")?
+                    .into(),
+                actor: actor["id"].as_str().context("actor missing")?.into(),
+                kind: InputKind::Approval {
+                    action: parts[1].into(),
+                    revision: parts[2].into(),
+                },
+            }));
+        }
         if data["type"] != 2 || data["data"]["name"] != "fluent" {
             return Ok(None);
         }

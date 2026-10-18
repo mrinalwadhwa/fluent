@@ -226,6 +226,7 @@ fn normalize_attribution(home: &Path, config: &DiscordConfig, input: &mut Input)
 }
 fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
     runner: &mut DiscordRunner<P, T>,
+    live_inputs: &std::sync::Mutex<BTreeSet<String>>,
 ) -> Result<()> {
     let directory = state_root(&runner.home).join("inbox");
     fs::create_dir_all(&directory)?;
@@ -247,7 +248,13 @@ fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
             fs::remove_file(path)?;
             continue;
         }
-        runner.ingest(input)?;
+        let live = live_inputs.lock().unwrap().contains(&input.key());
+        if live {
+            runner.ingest(input.clone())?;
+        } else {
+            runner.ingest_recovered(input.clone())?;
+        }
+        live_inputs.lock().unwrap().remove(&input.key());
         fs::remove_file(path)?;
     }
     Ok(())
@@ -270,6 +277,8 @@ pub fn run_configured_runner(home: &Path) -> Result<()> {
     let worker_stop = stop.clone();
     let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_connected = connected.clone();
+    let live_inputs = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::<String>::new()));
+    let worker_inputs = live_inputs.clone();
     let worker = std::thread::spawn(move || {
         let mut next_recovery = Instant::now();
         while !worker_stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -281,12 +290,12 @@ pub fn run_configured_runner(home: &Path) -> Result<()> {
                     let _ = runner.recover();
                     next_recovery = Instant::now() + Duration::from_secs(30);
                 }
-                let _ = process_inbox(&mut runner);
+                let _ = process_inbox(&mut runner, &worker_inputs);
             }
             std::thread::sleep(Duration::from_millis(250));
         }
     });
-    let result = run_gateway(home, client, &token, &connected);
+    let result = run_gateway(home, client, &token, &connected, &live_inputs);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     // A provider turn owns its own settlement; never detach it during shutdown.
     let _ = worker.join();
@@ -297,6 +306,7 @@ fn run_gateway(
     client: DiscordRest,
     token: &str,
     connected: &std::sync::atomic::AtomicBool,
+    live_inputs: &std::sync::Mutex<BTreeSet<String>>,
 ) -> Result<()> {
     let session_path = state_root(home).join("gateway.json");
     let mut session: GatewaySession = read(&session_path)?;
@@ -379,6 +389,7 @@ fn run_gateway(
                     .is_ok();
                 if authorized {
                     persist_ingress(home, &config, &input)?;
+                    live_inputs.lock().unwrap().insert(input.key());
                 }
                 let accepted = authorized;
                 if payload["t"] == "INTERACTION_CREATE" {

@@ -102,7 +102,11 @@ impl WorkScheduler for LocalSchedulerClient {
         let scheduler_request = crate::scheduler_service::AttemptExecutionRequest {
             id: request.id.clone(),
             work_item_id: request.work_item_id.clone(),
-            attempt_id: format!("slack-{}", request.id),
+            attempt_id: if request.id.starts_with("discord-work-") {
+                format!("discord-{}", request.id)
+            } else {
+                format!("slack-{}", request.id)
+            },
             created_at: request.created_at.clone(),
         };
         let token = crate::scheduler_service::send_execution_request(

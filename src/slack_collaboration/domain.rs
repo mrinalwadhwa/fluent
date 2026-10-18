@@ -2,33 +2,11 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Largest Markdown payload sent in one Slack artifact delivery.
 pub const SLACK_MESSAGE_CONTENT_LIMIT: usize = 4_000;
 
-/// An immutable planning artifact accepted for review in a Fluent thread.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactRevision {
-    pub id: String,
-    pub kind: String,
-    pub markdown: String,
-    pub sha256: String,
-}
-
-impl ArtifactRevision {
-    pub fn new(kind: impl Into<String>, markdown: impl Into<String>) -> Self {
-        let kind = kind.into();
-        let markdown = markdown.into();
-        let sha256 = hex_digest(markdown.as_bytes());
-        Self {
-            id: format!("{kind}:{sha256}"),
-            kind,
-            markdown,
-            sha256,
-        }
-    }
-}
+pub use crate::conversation::ArtifactRevision;
 
 pub fn split_artifact_markdown(markdown: &str, limit: usize) -> Vec<String> {
     assert!(limit > 0, "Slack artifact content limit must be positive");
@@ -59,13 +37,6 @@ pub fn reassemble_artifact_parts(parts: &[&OutboundDelivery]) -> Result<String> 
                 .map(|(_, markdown)| markdown)
                 .context("artifact delivery lacks a revision header")
         })
-        .collect()
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 

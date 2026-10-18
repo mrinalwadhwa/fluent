@@ -1,6 +1,7 @@
 //! Shared conversation contracts. Platform payloads and persistence stay in their adapters.
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 /// Host checkout configuration resolved by persistence and provider adapters.
@@ -264,4 +265,84 @@ pub trait ConversationProvider: Send {
     fn ready(&self) -> ProviderResult<()> {
         Ok(())
     }
+}
+
+/// A Work Item approved as part of one conversation Slice plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedWork {
+    pub id: String,
+    pub title: String,
+}
+
+impl PlannedWork {
+    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+        }
+    }
+}
+
+/// Stable execution request submitted to the scheduler-owned boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkExecutionRequest {
+    pub version: u32,
+    pub id: String,
+    pub slice_id: String,
+    pub work_item_id: String,
+    pub authorized_by: String,
+    pub created_at: String,
+}
+
+/// Scheduler acknowledgement that is safe to report in a conversation thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkQueueOutcome {
+    Queued { request_id: String },
+    AlreadyQueued { request_id: String },
+}
+
+/// Typed scheduler boundary. Implementations own queue storage and capacity;
+/// Conversation coordination only submits a frozen request.
+pub trait WorkScheduler {
+    fn submit(&self, request: &WorkExecutionRequest) -> Result<WorkQueueOutcome>;
+}
+
+/// Compare complete opaque action and revision identities at the approval boundary.
+pub fn approval_matches_revision(
+    action: &str,
+    revision: &str,
+    offered_action: &str,
+    offered_revision: &str,
+) -> bool {
+    action == offered_action && revision == offered_revision
+}
+
+/// An immutable planning artifact accepted for review in a Fluent thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRevision {
+    pub id: String,
+    pub kind: String,
+    pub markdown: String,
+    pub sha256: String,
+}
+
+impl ArtifactRevision {
+    pub fn new(kind: impl Into<String>, markdown: impl Into<String>) -> Self {
+        let kind = kind.into();
+        let markdown = markdown.into();
+        let sha256 = hex_digest(markdown.as_bytes());
+        Self {
+            id: format!("{kind}:{sha256}"),
+            kind,
+            markdown,
+            sha256,
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

@@ -249,6 +249,7 @@ impl DiscordTransport for DiscordRest {
             channel: channel.into(),
             text: format!("Project: {project}"),
             message_id: None,
+            approval: None,
         };
         let message = self.deliver(&root)?;
         // Discord uses the root message id as the public thread id.
@@ -370,8 +371,11 @@ impl DiscordTransport for DiscordRest {
         if let Some(id) = self.find_delivery(&delivery.channel, &identity)? {
             return Ok(id);
         }
-        let payload = json!({"content":delivery.text,"allowed_mentions":{"parse":[],"replied_user":false},
+        let mut payload = json!({"content":delivery.text,"allowed_mentions":{"parse":[],"replied_user":false},
             "nonce": &identity[15..39], "enforce_nonce":true,"embeds":[{"footer":{"text":identity}}]});
+        if let Some(button) = &delivery.approval {
+            payload["components"] = json!([{"type":1,"components":[{"type":2,"style":1,"label":button.label,"custom_id":format!("fluent:{}:{}",button.action,button.revision)}]}]);
+        }
         let result = self.request(
             "POST",
             &format!("/channels/{}/messages", delivery.channel),

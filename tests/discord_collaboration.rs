@@ -668,3 +668,187 @@ fn discord_restart_reconciles_lost_delivery_ack_and_paginated_history() {
     assert_eq!(thread.history_cursor, "602");
     assert!(thread.deliveries.iter().all(|d| d.message_id.is_some()));
 }
+
+#[test]
+fn discord_approval_binds_current_action_and_revision() {
+    let (home, project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    runner.ingest(command()).unwrap();
+    let first = runner
+        .present_planning("400", "brief", "First brief")
+        .unwrap();
+    let second = runner
+        .present_planning("400", "brief", "Revised brief")
+        .unwrap();
+    let approve = |id: &str, control: &ApprovalButton, actor: &str| Input {
+        id: id.into(),
+        guild: "100".into(),
+        channel: "400".into(),
+        actor: actor.into(),
+        kind: InputKind::Approval {
+            action: control.action.clone(),
+            revision: control.revision.clone(),
+        },
+    };
+    assert!(runner.ingest(approve("610", &first, "300")).is_err());
+    assert!(runner.ingest(approve("611", &second, "301")).is_err());
+    runner.ingest(approve("612", &second, "300")).unwrap();
+    runner.ingest(approve("612", &second, "300")).unwrap();
+    let store = fluent::work_model::WorkModelStore::new(project.path());
+    let item = store.read_work_item("discord-400").unwrap();
+    assert_eq!(
+        item.planning_context.unwrap().brief.as_deref(),
+        Some("Revised brief")
+    );
+    assert!(!item.authorization.is_execution_ready());
+    let third = runner
+        .present_planning("400", "behaviors", "Expected behaviors")
+        .unwrap();
+    let mut revoked = config;
+    revoked.projects.get_mut("app").unwrap().approvers.clear();
+    write_config(home.path(), &revoked).unwrap();
+    assert!(runner.ingest(approve("613", &third, "300")).is_err());
+    assert!(!project.path().join(".fluent/work/slack").exists());
+}
+#[test]
+fn discord_work_controls_use_existing_boundaries() {
+    use fluent::conversation::{WorkExecutionRequest, WorkQueueOutcome, WorkScheduler};
+    #[derive(Default)]
+    struct Scheduler(std::sync::Mutex<Vec<WorkExecutionRequest>>);
+    impl WorkScheduler for Scheduler {
+        fn submit(&self, request: &WorkExecutionRequest) -> Result<WorkQueueOutcome> {
+            self.0.lock().unwrap().push(request.clone());
+            Ok(WorkQueueOutcome::Queued {
+                request_id: request.id.clone(),
+            })
+        }
+    }
+    let (home, project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    for (i, kind) in ["brief", "behaviors", "approach", "plan"]
+        .iter()
+        .enumerate()
+    {
+        let control = runner
+            .present_planning("400", kind, &format!("Approved {kind}"))
+            .unwrap();
+        runner
+            .ingest(Input {
+                id: (620 + i).to_string(),
+                guild: "100".into(),
+                channel: "400".into(),
+                actor: "300".into(),
+                kind: InputKind::Approval {
+                    action: control.action,
+                    revision: control.revision,
+                },
+            })
+            .unwrap();
+    }
+    let control = fluent::slack_collaboration::WorkControl::for_discord(project.path());
+    let scheduler = Scheduler::default();
+    control
+        .authorize_execution("discord-400", "discord:100:300", &scheduler)
+        .unwrap();
+    control
+        .authorize_execution("discord-400", "discord:100:300", &scheduler)
+        .unwrap();
+    assert_eq!(scheduler.0.lock().unwrap().len(), 1);
+    assert!(
+        scheduler.0.lock().unwrap()[0]
+            .id
+            .starts_with("discord-work-")
+    );
+    assert!(
+        fluent::work_model::WorkModelStore::new(project.path())
+            .read_work_item("discord-400")
+            .unwrap()
+            .authorization
+            .is_execution_ready()
+    );
+    runner
+        .ingest(Input {
+            id: "630".into(),
+            kind: InputKind::Message {
+                text: "work status".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .contains("discord-400")
+    );
+}
+
+#[test]
+fn discord_approval_recovery_requires_fresh_work_confirmation() {
+    let (home, project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    runner
+        .ingest(Input {
+            id: "650".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work create".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let button = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
+        .unwrap();
+    let approval = Input {
+        id: "651".into(),
+        actor: "300".into(),
+        kind: InputKind::Approval {
+            action: button.action,
+            revision: button.revision,
+        },
+        ..reply()
+    };
+    assert!(
+        runner
+            .ingest_recovered(approval.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("fresh")
+    );
+    assert!(
+        fluent::work_model::WorkModelStore::new(project.path())
+            .read_work_item("discord-400")
+            .is_err()
+    );
+    runner
+        .ingest(Input {
+            id: "652".into(),
+            ..approval
+        })
+        .unwrap();
+    assert!(
+        fluent::work_model::WorkModelStore::new(project.path())
+            .read_work_item("discord-400")
+            .is_ok()
+    );
+}
