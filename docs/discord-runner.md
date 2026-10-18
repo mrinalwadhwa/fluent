@@ -105,10 +105,14 @@ a fresh control. A stale recovery leaves the current pending control intact.
 The runner stores owner routing, Gateway state, and pending inputs under
 `~/.config/fluent/discord/`; project conversations, drafts, and Work bindings
 live under `.fluent/work/discord/`. Slack configuration and runtime state stay
-separate. Configuration changes take effect on the next input. If the bound
-checkout is replaced or its branch or commit changes, update its local
-configuration deliberately before resuming conversation access. This includes
-updating the pinned commit after an approved landing changes the checkout.
+separate. Configuration changes take effect on the next input. When the same
+checkout changes branch or commit, update those pins in its local configuration
+before resuming conversation access. This includes updating the pinned commit
+after an approved landing changes the checkout.
+
+Replacing a checkout changes its identity. Update the local project configuration
+and start a new `/fluent` thread for that replacement. Existing threads retain
+their original checkout identity; changing configuration does not rebind them.
 
 A disconnected runner reconciles provider results and bot delivery markers
 before retrying. If provider acceptance cannot be established, it preserves the
