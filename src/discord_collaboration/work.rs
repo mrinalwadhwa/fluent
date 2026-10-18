@@ -221,7 +221,9 @@ pub(super) fn process_work(
     let control = WorkControl::for_discord(&project.checkout.path);
     if let InputKind::Approval { action, revision } = &input.kind {
         if !project.approvers.contains(&input.actor) {
-            bail!("Discord approval was revoked or actor is not a project approver");
+            bail!(RejectedInput(
+                "Discord approval was revoked or actor is not a project approver"
+            ));
         }
         if let Some(accepted) = thread
             .approvals
@@ -240,7 +242,9 @@ pub(super) fn process_work(
                         && p.button.revision == accepted.pending.button.revision
                 })
             {
-                bail!("approval is stale; a newer action is pending");
+                bail!(RejectedInput(
+                    "approval is stale; a newer action is pending"
+                ));
             }
             apply_action(
                 home,
@@ -259,9 +263,11 @@ pub(super) fn process_work(
             let pending = thread
                 .approval
                 .clone()
-                .context("approval is stale; no action is pending")?;
+                .ok_or(RejectedInput("approval is stale; no action is pending"))?;
             if recovered && !matches!(pending.action, WorkAction::Planning { .. }) {
-                bail!("fresh confirmation is required for recovered Work approval");
+                bail!(RejectedInput(
+                    "fresh confirmation is required for recovered Work approval"
+                ));
             }
             if !crate::conversation::approval_matches_revision(
                 &pending.button.action,
@@ -269,10 +275,12 @@ pub(super) fn process_work(
                 action,
                 revision,
             ) {
-                bail!("approval is stale; review the current action and revision");
+                bail!(RejectedInput(
+                    "approval is stale; review the current action and revision"
+                ));
             }
             if current_state(&project.checkout.path, &work_id)? != pending.expected_state {
-                bail!("Work changed; request a fresh approval");
+                bail!(RejectedInput("Work changed; request a fresh approval"));
             }
             let actor = format!("discord:{}:{}", input.guild, input.actor);
             thread.approvals.push(AcceptedApproval {
@@ -338,7 +346,9 @@ pub(super) fn process_work(
         });
     } else {
         if !project.approvers.contains(&input.actor) {
-            bail!("only project approvers may request Work actions");
+            bail!(RejectedInput(
+                "only project approvers may request Work actions"
+            ));
         }
         let store = WorkModelStore::new(&project.checkout.path);
         let action = match command {

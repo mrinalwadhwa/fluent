@@ -185,6 +185,16 @@ struct Index {
     commands: BTreeMap<String, Binding>,
     threads: BTreeMap<String, Binding>,
 }
+/// A conclusive input rejection, distinct from a retryable processing failure.
+#[derive(Debug)]
+struct RejectedInput(&'static str);
+impl std::fmt::Display for RejectedInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for RejectedInput {}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Thread {
     pub session: Option<String>,
@@ -200,6 +210,8 @@ pub struct Thread {
     pub approval: Option<PendingApproval>,
     #[serde(default)]
     pub approvals: Vec<AcceptedApproval>,
+    #[serde(default)]
+    pub rejected_inputs: BTreeSet<String>,
 }
 pub fn state_root(home: &Path) -> PathBuf {
     home.join(".config/fluent/discord")
@@ -347,16 +359,18 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             .join(".fluent/work/discord/threads")
             .join(format!("{}.json", binding.thread));
         let mut thread = read_thread(&path)?;
-        if work::process_work(
-            &self.home,
-            project,
-            &binding,
-            &mut thread,
-            &input,
-            &path,
-            self.recovered,
-            self.effects.as_ref(),
-        )? {
+        if thread.rejected_inputs.contains(&input.key())
+            || work::process_work(
+                &self.home,
+                project,
+                &binding,
+                &mut thread,
+                &input,
+                &path,
+                self.recovered,
+                self.effects.as_ref(),
+            )?
+        {
             rendering::prepare_deliveries(&mut thread, &project.checkout.path);
             write(&path, &thread)?;
             for i in 0..thread.deliveries.len() {
@@ -553,7 +567,12 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
         if !service::admit_ingress(&self.home, &self.config, &input)? {
             return Ok(());
         }
-        self.ingest_recovered(input)
+        match self.ingest_recovered(input.clone()) {
+            Err(error) if error.is::<RejectedInput>() => {
+                service::report_input_failure(self, &input, &error)
+            }
+            result => result,
+        }
     }
     fn recover_thread(&mut self, binding: &Binding) -> Result<()> {
         let Some(project) = self.config.projects.get(&binding.project) else {

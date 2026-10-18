@@ -901,7 +901,14 @@ Owner state stores routing and ingress; authoritative accepted history, provider
 sessions, pending turns, approvals, and delivery receipts live under the
 checkout's `.fluent/work/discord/` tree. Publish the initial project snapshot
 before the routing index. An indexed thread whose snapshot is missing fails
-closed; it cannot become a new conversation.
+closed; it cannot become a new conversation. Failure reporting requires that
+same snapshot and status reports restoration guidance without creating state.
+
+Conclusive action rejections use a distinct error type so history recovery can
+advance past them and the inbox can consume them. Save their input identities
+in the project snapshot; later authority changes cannot make rejected messages
+execute on redelivery. Keep actual processing failures and incomplete accepted
+approval receipts pending for reconciliation.
 
 `src/conversation.rs` owns the shared provider and Work contracts. Discord reuses
 the existing provider implementations, scheduler client, and `WorkControl` from

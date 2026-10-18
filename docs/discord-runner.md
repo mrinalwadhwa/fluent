@@ -118,7 +118,10 @@ history in bounded pages; if outbound history exceeds the recovery bound, the
 runner pauses delivery for owner inspection. After reconnect it also scans accepted ordinary messages in bounded batches
 for edits and deletions, retaining a cursor between scans. A deletion retains the original
 author and does not claim to know who deleted the message. Messages from revoked
-or unconfigured participants do not block recovery of later authorized replies.
+or unconfigured participants, and Work requests from participants without
+approver authority, do not block recovery of later authorized replies. A rejected
+request stays consumed if that participant later becomes an approver; send a new
+request after the authority change. Processing failures remain queued for recovery.
 If an established thread's project snapshot is missing, restore that snapshot
 from backup before resuming; the runner will not rebuild accepted history by
 repeating provider turns.

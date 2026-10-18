@@ -477,7 +477,9 @@ fn discord_restart_recovers_accepted_provider_turn_without_repeating_it() {
             _: &str,
             _: &ProviderScope,
         ) -> ProviderResult<ProviderTurnRecovery> {
-            assert!(self.recover);
+            if !self.recover {
+                return Err(ProviderError::internal("provider temporarily unavailable"));
+            }
             Ok(ProviderTurnRecovery::Completed {
                 turn_id: "turn".into(),
                 reply: "Recovered result".into(),
@@ -497,6 +499,17 @@ fn discord_restart_recovers_accepted_provider_turn_without_repeating_it() {
     .unwrap();
     assert!(first.ingest(command()).is_err());
     assert_eq!(first.provider().dispatched, 1);
+    let live = std::sync::Mutex::new(BTreeSet::new());
+    for _ in 0..2 {
+        process_inbox(&mut first, &live).unwrap();
+        assert_eq!(
+            fs::read_dir(state_root(home.path()).join("inbox"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(first.provider().dispatched, 1);
+    }
     let mut next = DiscordRunner::new(
         home.path(),
         config,
@@ -508,6 +521,13 @@ fn discord_restart_recovers_accepted_provider_turn_without_repeating_it() {
     )
     .unwrap();
     next.recover().unwrap();
+    process_inbox(&mut next, &live).unwrap();
+    assert_eq!(
+        fs::read_dir(state_root(home.path()).join("inbox"))
+            .unwrap()
+            .count(),
+        0
+    );
     assert_eq!(next.provider().dispatched, 0);
     assert!(
         next.transport().messages[0]
@@ -1238,6 +1258,149 @@ fn discord_approval_rejection_reports_without_blocking_later_inputs() {
 }
 
 #[test]
+fn discord_restart_consumes_rejected_work_requests_once() {
+    let (home, project, mut config) = fixture();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    runner.ingest(command()).unwrap();
+    let inputs = ["work create", "work execute", "work resume", "work land"]
+        .into_iter()
+        .enumerate()
+        .map(|(n, text)| Input {
+            id: (700 + n).to_string(),
+            kind: InputKind::Message { text: text.into() },
+            ..reply()
+        })
+        .collect::<Vec<_>>();
+    for input in &inputs {
+        persist_ingress(home.path(), &config, input).unwrap();
+    }
+    persist_ingress(
+        home.path(),
+        &config,
+        &Input {
+            id: "704".into(),
+            ..reply()
+        },
+    )
+    .unwrap();
+    let live = std::sync::Mutex::new(BTreeSet::new());
+    process_inbox(&mut runner, &live).unwrap();
+    assert_eq!(
+        fs::read_dir(state_root(home.path()).join("inbox"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(runner.provider().calls.len(), 2);
+    assert!(thread_snapshot(project.path()).approval.is_none());
+    assert!(
+        !project
+            .path()
+            .join(".fluent/work/items/discord-400.json")
+            .exists()
+    );
+    let deliveries = runner.transport().messages.len();
+    // A rejected message remains consumed after an authority change and redelivery.
+    config
+        .projects
+        .get_mut("app")
+        .unwrap()
+        .approvers
+        .insert("301".into());
+    write_config(home.path(), &config).unwrap();
+    for input in &inputs {
+        persist_ingress(home.path(), &config, input).unwrap();
+    }
+    process_inbox(&mut runner, &live).unwrap();
+    assert_eq!(
+        fs::read_dir(state_root(home.path()).join("inbox"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(runner.provider().calls.len(), 2);
+    assert_eq!(runner.transport().messages.len(), deliveries);
+    assert!(thread_snapshot(project.path()).approval.is_none());
+    assert!(
+        !project
+            .path()
+            .join(".fluent/work/items/discord-400.json")
+            .exists()
+    );
+}
+
+#[test]
+fn discord_approval_retains_retryable_processing_failure() {
+    use fluent::work_model::WorkModelStore;
+    let (home, project, config) = fixture();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    let live = std::sync::Mutex::new(BTreeSet::new());
+    persist_ingress(home.path(), &config, &command()).unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    let button = runner
+        .present_planning("400", "brief", "The approved brief")
+        .unwrap();
+    let approval = click("710", &button);
+    persist_ingress(home.path(), &config, &approval).unwrap();
+    let store = WorkModelStore::new(project.path());
+    let path = store.work_item_path("discord-400").unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "unreadable Work state").unwrap();
+    for _ in 0..2 {
+        process_inbox(&mut runner, &live).unwrap();
+        assert_eq!(
+            fs::read_dir(state_root(home.path()).join("inbox"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert!(thread_snapshot(project.path()).approvals.is_empty());
+        assert!(thread_snapshot(project.path()).rejected_inputs.is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "unreadable Work state");
+    }
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .contains("input is preserved")
+    );
+    fs::remove_file(&path).unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    assert_eq!(
+        fs::read_dir(state_root(home.path()).join("inbox"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert!(thread_snapshot(project.path()).approvals[0].completed);
+    assert!(
+        store
+            .read_work_item("discord-400")
+            .unwrap()
+            .planning_context
+            .unwrap()
+            .brief
+            .is_some()
+    );
+    assert_eq!(runner.provider().calls.len(), 1);
+}
+
+#[test]
 fn discord_approval_out_of_order_artifact_keeps_conversation_usable() {
     struct PlanningProvider;
     impl ConversationProvider for PlanningProvider {
@@ -1578,17 +1741,32 @@ fn discord_restart_skips_denied_history_and_isolates_threads() {
                     },
                     Input {
                         id: "801".into(),
+                        actor: "302".into(),
+                        channel: channel.into(),
+                        kind: InputKind::Message {
+                            text: "work execute".into(),
+                        },
+                        ..reply()
+                    },
+                    Input {
+                        id: "802".into(),
                         actor: "300".into(),
                         channel: channel.into(),
                         ..reply()
                     },
                 ],
-                last_message: Some("801".into()),
+                last_message: Some("802".into()),
                 has_more: false,
             })
         }
     }
     let (home, project, mut config) = fixture();
+    config
+        .projects
+        .get_mut("app")
+        .unwrap()
+        .participants
+        .insert("302".into());
     let visited = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut runner = DiscordRunner::new(
         home.path(),
@@ -1632,8 +1810,27 @@ fn discord_restart_skips_denied_history_and_isolates_threads() {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(thread.history_cursor, "801");
+        assert_eq!(thread.history_cursor, "802");
+        assert!(!thread.inputs.iter().any(|i| i.id == "801"));
+        assert!(thread.approval.is_none());
     }
+    process_inbox(&mut runner, &std::sync::Mutex::new(BTreeSet::new())).unwrap();
+    assert_eq!(
+        fs::read_dir(state_root(home.path()).join("inbox"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        runner
+            .transport()
+            .0
+            .messages
+            .iter()
+            .filter(|m| m.text.contains("only project approvers"))
+            .count(),
+        2
+    );
     // A retryable failure in one established thread must not suppress the other.
     fs::remove_file(project.path().join(".fluent/work/discord/threads/400.json")).unwrap();
     visited.lock().unwrap().clear();

@@ -273,7 +273,7 @@ pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
             continue;
         }
         let input = serde_json::from_slice(&fs::read(&path)?)?;
-        if authorize_ingress(&runner.home, &runner.config, &input).is_err() {
+        if !admit_ingress(&runner.home, &runner.config, &input)? {
             fs::remove_file(path)?;
             continue;
         }
@@ -285,7 +285,7 @@ pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
         };
         if let Err(error) = result {
             report_input_failure(runner, &input, &error)?;
-            if !matches!(input.kind, InputKind::Approval { .. }) {
+            if !error.is::<RejectedInput>() {
                 continue;
             }
             // Keep a receipt whose effect needs reconciliation, but discard rejected approvals.
@@ -313,7 +313,7 @@ pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
     }
     Ok(())
 }
-fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
+pub(super) fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
     runner: &mut DiscordRunner<P, T>,
     input: &Input,
     error: &anyhow::Error,
@@ -334,14 +334,25 @@ fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
         .join(format!("{}.json", binding.thread));
     let _lock = crate::lease::acquire_blocking(&state_root(&runner.home).join("state.lock"))?;
     let mut thread = read_thread(&path)?;
+    let rejection = error.downcast_ref::<RejectedInput>();
+    if rejection.is_some()
+        && !thread
+            .approvals
+            .iter()
+            .any(|a| a.input == input.key() && !a.completed)
+    {
+        // Keep rejected identities consumed even if the actor gains authority later.
+        // Incomplete accepted effects retain their receipts for reconciliation.
+        thread.rejected_inputs.insert(input.key());
+    }
     let id = format!("{}:failure", input.key());
     if !thread.deliveries.iter().any(|d| d.id == id) {
-        let text = if let Some(provider) =
-            error.downcast_ref::<crate::conversation::ProviderError>()
-        {
+        let text = if let Some(rejection) = rejection {
+            format!("Input rejected: {rejection}. Request a new control from a project approver.")
+        } else if let Some(provider) = error.downcast_ref::<crate::conversation::ProviderError>() {
             crate::conversation::provider_recovery_message(&provider.failure, false)
         } else if matches!(input.kind, InputKind::Approval { .. }) {
-            "Approval is stale, revoked, or needs fresh confirmation from a project approver. Request work status and review a new control; accepted history is preserved.".into()
+            "This approval could not complete; its input is preserved for recovery. The owner should check local Fluent status. Accepted effects will be reconciled before retrying.".into()
         } else {
             "This input is preserved but could not complete. The owner should check provider login and local Fluent status. An accepted or uncertain provider turn will not be repeated.".into()
         };
