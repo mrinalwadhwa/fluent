@@ -280,6 +280,7 @@ fn main() -> Result<()> {
         Some(Commands::KeepAwake { command }) => {
             cmd_keep_awake(command)?;
         }
+        Some(Commands::Discord { command }) => cmd_discord(command)?,
         Some(Commands::Slack { command }) => cmd_slack(command)?,
         None => {
             let coder_kind = CoderKind::resolve(cli.coder.as_deref())?;
@@ -291,6 +292,49 @@ fn main() -> Result<()> {
         update::maybe_nudge();
     }
 
+    Ok(())
+}
+
+fn cmd_discord(command: fluent::cli::DiscordCommands) -> Result<()> {
+    use fluent::cli::DiscordCommands;
+    use fluent::discord_collaboration as discord;
+    use fluent::slack_collaboration::ServiceManager;
+    let home =
+        PathBuf::from(std::env::var("HOME").context("Discord runner requires the owner home")?);
+    match command {
+        DiscordCommands::Setup => print!("{}", include_str!("../docs/discord-runner.md")),
+        DiscordCommands::CheckoutIdentity { path } => {
+            println!("{}", slack_collaboration::checkout_identity(&path)?)
+        }
+        DiscordCommands::Check => {
+            discord::configured_client(&home)?;
+            println!("Discord setup is ready.");
+        }
+        DiscordCommands::Register => {
+            let (config, client) = discord::configured_client(&home)?;
+            client.register_command(&config.guild_id)?;
+            println!("Registered /fluent in the approved server.");
+        }
+        DiscordCommands::Enable => {
+            let (config, _) = discord::configured_client(&home)?;
+            discord::enable_runner(
+                &config,
+                &mut discord::DiscordServiceManager::new(&home),
+                &std::env::current_exe()?,
+            )?;
+            println!("Enabled Discord runner.");
+        }
+        DiscordCommands::Run => discord::run_configured_runner(&home)?,
+        DiscordCommands::Restart => discord::DiscordServiceManager::new(&home).restart()?,
+        DiscordCommands::Stop => discord::DiscordServiceManager::new(&home).stop()?,
+        DiscordCommands::Status => println!(
+            "{}",
+            discord::runner_status(
+                &discord::read_config(&home)?,
+                &discord::read_operational_state(&home)?
+            )
+        ),
+    }
     Ok(())
 }
 

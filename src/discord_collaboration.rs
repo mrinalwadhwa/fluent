@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::atomic_write::atomic_write;
 use crate::conversation::{Checkout, ConversationProvider, ProviderScope};
 use crate::slack_collaboration::checkout_is_available;
+mod gateway;
+mod service;
+mod transport;
+pub use gateway::*;
+pub use service::*;
+pub use transport::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -217,6 +217,12 @@ pub enum Commands {
         command: KeepAwakeCommands,
     },
 
+    /// Operate the local Discord runner
+    Discord {
+        #[command(subcommand)]
+        command: DiscordCommands,
+    },
+
     /// Print local Slack Socket Mode setup material
     Slack {
         #[command(subcommand)]
@@ -253,6 +259,28 @@ pub enum TerminalCommands {
         attempt_id: String,
         task_id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DiscordCommands {
+    /// Print configuration and private server setup instructions
+    Setup,
+    /// Validate credentials, Message Content access, and configured channels
+    Check,
+    /// Register /fluent in the configured server
+    Register,
+    /// Print the local checkout identity
+    CheckoutIdentity { path: PathBuf },
+    /// Install and start the local runner at login
+    Enable,
+    /// Run the Gateway connection in the foreground
+    Run,
+    /// Restart the login service
+    Restart,
+    /// Stop the login service
+    Stop,
+    /// Show safe connection and project status
+    Status,
 }
 
 #[derive(Subcommand)]

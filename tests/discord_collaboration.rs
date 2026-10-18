@@ -189,3 +189,207 @@ fn discord_reply_resumes_selected_provider() {
         assert!(runner.transport().messages[1].text.contains("Continued."));
     }
 }
+
+#[test]
+fn discord_runner_starts_with_scoped_config_and_safe_status() {
+    let (home, project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    assert_eq!(read_config(home.path()).unwrap().guild_id, "100");
+    let mut service = fluent::slack_collaboration::FakeServiceManager::default();
+    enable_runner(&config, &mut service, Path::new("/Applications/Fluent")).unwrap();
+    assert!(service.running);
+    let status = runner_status(&config, &OperationalState::default());
+    assert!(status.contains("app"));
+    assert!(!status.contains(project.path().to_str().unwrap()));
+    let mut manager = DiscordServiceManager::new(home.path());
+    use fluent::slack_collaboration::ServiceManager;
+    manager
+        .install(Path::new("/Applications/A&B/fluent"))
+        .unwrap();
+    let xml = fs::read_to_string(manager.plist()).unwrap();
+    assert!(xml.contains("<string>discord</string>"));
+    assert!(xml.contains("A&amp;B"));
+    service.restart().unwrap();
+    service.stop().unwrap();
+    assert!(!service.running);
+}
+#[test]
+fn discord_runner_rejects_missing_message_content_access() {
+    assert!(
+        validate_message_content_flags(0)
+            .unwrap_err()
+            .to_string()
+            .contains("Message Content")
+    );
+    validate_message_content_flags(1 << 18).unwrap();
+    validate_message_content_flags(1 << 19).unwrap();
+    assert!(gateway_close_failure(4014).contains("Message Content"));
+    let (home, project, mut config) = fixture();
+    config.channels.clear();
+    assert!(
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).is_err()
+    );
+    let (_, _, mut config) = fixture();
+    config.projects.get_mut("app").unwrap().checkout = Checkout {
+        path: project.path().join("missing"),
+        ..config.projects["app"].checkout.clone()
+    };
+    assert!(preflight_checkouts(&config).is_err());
+}
+#[test]
+fn discord_runner_gateway_heartbeats_and_resumes() {
+    use serde_json::json;
+    let mut gateway = GatewaySession::default();
+    let identify = gateway
+        .handle(&json!({"op":10,"d":{"heartbeat_interval":1000}}), "secret")
+        .unwrap();
+    assert_eq!(identify[0]["op"], 2);
+    assert_eq!(identify[0]["d"]["intents"], 1 | 512 | 32768);
+    gateway.handle(&json!({"op":0,"t":"READY","s":4,"d":{"session_id":"session","resume_gateway_url":"wss://gateway.discord.gg"}}), "secret").unwrap();
+    let heartbeat = gateway.heartbeat().unwrap();
+    assert_eq!(heartbeat["d"], 4);
+    assert!(
+        gateway.heartbeat().is_err(),
+        "missing heartbeat acknowledgement forces reconnect"
+    );
+    gateway.handle(&json!({"op":11}), "secret").unwrap();
+    assert!(gateway.heartbeat().is_ok());
+    let resume = gateway
+        .handle(&json!({"op":10,"d":{"heartbeat_interval":1000}}), "secret")
+        .unwrap();
+    assert_eq!(resume[0]["op"], 6);
+    assert_eq!(resume[0]["d"]["seq"], 4);
+    assert!(!serde_json::to_string(&gateway).unwrap().contains("secret"));
+}
+#[test]
+fn discord_runner_decodes_commands_without_persisting_tokens() {
+    use serde_json::json;
+    let payload = json!({"op":0,"t":"INTERACTION_CREATE","d":{"id":"600","guild_id":"100","channel_id":"200","token":"never-persist-this", "type":2,"member":{"user":{"id":"300"}},"data":{"name":"fluent","options":[{"name":"project","value":"app"},{"name":"message","value":"plan this"}]}}});
+    let decoded = decode_dispatch(&payload).unwrap().unwrap();
+    assert_eq!(decoded, command());
+    assert!(
+        !serde_json::to_string(&decoded)
+            .unwrap()
+            .contains("never-persist")
+    );
+    let bot = json!({"op":0,"t":"MESSAGE_CREATE","d":{"id":"601","guild_id":"100","channel_id":"400","author":{"id":"900","bot":true},"content":"ignore"}});
+    assert!(decode_dispatch(&bot).unwrap().is_none());
+}
+
+fn http_fixture(
+    responses: Vec<(&'static str, serde_json::Value)>,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (status, value) in responses {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "HTTP fixture was not called"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+                if bytes.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = String::from_utf8(bytes.clone()).unwrap();
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|n| n.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            bytes.extend(body);
+            requests.push(String::from_utf8(bytes).unwrap());
+            let body = value.to_string();
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        requests
+    });
+    (endpoint, worker)
+}
+#[test]
+fn discord_runner_preflight_uses_live_flags_and_channel_permissions() {
+    use serde_json::json;
+    let (_home, _project, config) = fixture();
+    let (endpoint, server) = http_fixture(vec![
+        ("200 OK", json!({"id":"800","flags":1<<19})),
+        ("200 OK", json!({"id":"900"})),
+        ("200 OK", json!({"owner_id":"999"})),
+        ("200 OK", json!({"roles":["101"]})),
+        ("200 OK", json!([{"id":"101","permissions":"8"}])),
+        (
+            "200 OK",
+            json!({"id":"200","type":0,"guild_id":"100","permission_overwrites":[]}),
+        ),
+    ]);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    rest.preflight(&config).unwrap();
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("GET /oauth2/applications/@me "));
+    assert!(requests[5].starts_with("GET /channels/200 "));
+    let (endpoint, server) = http_fixture(vec![("200 OK", json!({"flags":0}))]);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    assert!(
+        rest.preflight(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("Message Content")
+    );
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+#[test]
+fn discord_runner_rest_retries_rate_limits_without_leaking_credentials() {
+    use serde_json::json;
+    let (endpoint, server) = http_fixture(vec![
+        ("429 Too Many Requests", json!({"retry_after":0.0})),
+        ("200 OK", json!({"ok":true})),
+        (
+            "401 Unauthorized",
+            json!({"message":"secret-token /Users/private"}),
+        ),
+    ]);
+    let rest = DiscordRest::with_test_endpoint("secret-token".into(), endpoint).unwrap();
+    assert_eq!(rest.request("GET", "/test", None).unwrap()["ok"], true);
+    let error = rest.request("GET", "/test", None).unwrap_err().to_string();
+    assert!(!error.contains("secret-token"));
+    assert!(!error.contains("/Users"));
+    assert_eq!(server.join().unwrap().len(), 3);
+}
+#[test]
+fn discord_runner_cli_exposes_service_commands() {
+    use clap::Parser;
+    for name in [
+        "setup", "check", "register", "enable", "run", "restart", "stop", "status",
+    ] {
+        assert!(
+            fluent::cli::Cli::try_parse_from(["fluent", "discord", name]).is_ok(),
+            "{name}"
+        );
+    }
+}
