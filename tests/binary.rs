@@ -572,6 +572,36 @@ fn released_upgrade_preserves_landed_work() {
 }
 
 #[test]
+fn learner_land_mock_writes_review_to_assigned_artifact() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("source");
+    let artifact = tmp.path().join("review-artifact");
+    let review_path = artifact.join("review.md");
+    fs::create_dir_all(&project).unwrap();
+    let bin = tmp.path().join("bin");
+    write_mock_claude(
+        &bin,
+        &learner_land_mock_script(r#"{"learning_summary":"none","follow_ups":[]}"#),
+    );
+    let prompt = format!(
+        "You are the Reviewer.\nWrite your review report to {}. Format:\n",
+        review_path.display()
+    );
+    let output = Command::new(bin.join("claude"))
+        .current_dir(&project)
+        .args(["-p", &prompt])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(review_path.is_file());
+    assert!(!project.join("review.md").exists());
+}
+
+#[test]
 fn released_upgrade_preserves_running_before_stop() {
     let tmp = TempDir::new().unwrap();
     let release = released_050_binary(&tmp);
@@ -21561,7 +21591,13 @@ case "$PWD" in
     git commit -m "Add loop output" >/dev/null 2>&1
     ;;
   *)
-    printf 'Verdict: pass\n\nLoop review.\n' > review.md
+    REVIEW_PATH=$(printf '%s\n' "$PROMPT" | sed -n 's/^.*Write your review report to \(.*\/review\.md\)\. Format:$/\1/p' | head -1)
+    if [ -z "$REVIEW_PATH" ]; then
+      printf 'Mock Reviewer needs an assigned review path\n' >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$REVIEW_PATH")"
+    printf 'Verdict: pass\n\nLoop review.\n' > "$REVIEW_PATH"
     ;;
 esac
 exit 0
