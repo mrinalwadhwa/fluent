@@ -1954,6 +1954,25 @@ mod setup_cleanup_tests {
 
     #[cfg(feature = "test-support")]
     #[test]
+    fn nested_test_executable_loads_without_loader_override() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal_sessions::setup_cleanup_tests::nested_fullscreen_cancellation_child",
+            ])
+            .env_remove("DYLD_LIBRARY_PATH")
+            .env_remove("DYLD_FALLBACK_LIBRARY_PATH")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
     fn nested_fullscreen_cancellation_and_retry() {
         let output = Command::new("python3")
             .arg("tests/fixtures/dashboard-terminal-handoff.py")

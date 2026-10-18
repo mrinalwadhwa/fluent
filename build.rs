@@ -89,6 +89,12 @@ fn build_terminal_adapter() {
     );
     println!("cargo:rustc-link-lib=static=fluent-ghostty");
     println!("cargo:rustc-link-lib=static=ghostty-vt");
+    if env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            native.join("lib").display()
+        );
+    }
 }
 
 /// Embed exact historical bundle identities that may be adopted without a
