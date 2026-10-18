@@ -3978,6 +3978,11 @@ mod native_observation_tests {
         root: &std::path::Path,
         item: &mut work_model::WorkItem,
     ) -> (String, String, String) {
+        fs::write(
+            root.join(".git/info/exclude"),
+            ".fluent/work/\nnative-obs-evidence.json\n",
+        )
+        .unwrap();
         let candidate = item.attempts[0]
             .tasks
             .iter()
@@ -4066,8 +4071,10 @@ mod native_observation_tests {
             .as_mut()
             .unwrap()
             .requirements[0]
-            .verification_refs =
-            vec![r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.into()];
+            .verification_refs = vec![
+            r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.into(),
+            r#"{"kind":"named-test","path":"tests/native.sh","name":"unobserved-test"}"#.into(),
+        ];
 
         let (_, _, _recovery_id) = make_accepted_native_recovery(root.path(), &mut item);
 
@@ -4083,6 +4090,11 @@ mod native_observation_tests {
             assessment.references.iter().any(|r| r.satisfied),
             "reviewed native observation must satisfy its matching reference: {:?}",
             assessment.references
+        );
+
+        assert!(
+            assessment.references.iter().any(|row| !row.satisfied),
+            "unobserved named references must stay unresolved"
         );
 
         // The canonical Tester results file must be unmodified.
@@ -4126,6 +4138,91 @@ mod native_observation_tests {
 
         let assessment = assess_current_verification(root.path(), &stored.attempts[0]).unwrap();
         assert!(assessment.references.iter().all(|row| !row.satisfied));
+    }
+
+    #[test]
+    fn native_observations_reject_dirty_candidate_attachment() {
+        let (root, mut item) = unique_harness_fixture();
+        accept_first_check(root.path(), &mut item);
+        let (item_id, candidate, _) = make_accepted_native_recovery(root.path(), &mut item);
+        let store = WorkModelStore::new(root.path());
+        let stored = store.read_work_item(&item_id).unwrap();
+        let check = assess_canonical_checks(root.path(), &stored.attempts[0])
+            .unwrap()
+            .checks[0]
+            .id
+            .clone();
+        fs::write(
+            root.path().join("tests/native.sh"),
+            "changed candidate source\n",
+        )
+        .unwrap();
+        let error = attach_native_observations_for_required_check(
+            root.path(),
+            &store,
+            &item_id,
+            "attempt-1",
+            &candidate,
+            &check,
+            &root.path().join("native-obs-evidence.json"),
+        )
+        .expect_err("dirty candidate must not authorize an attachment or its replay");
+        assert!(format!("{error:#}").contains("unchanged clean candidate"));
+    }
+
+    #[test]
+    fn native_observations_reject_unsettled_execution() {
+        let (root, mut item) = unique_harness_fixture();
+        accept_first_check(root.path(), &mut item);
+        let (item_id, candidate, _) = make_accepted_native_recovery(root.path(), &mut item);
+        let store = WorkModelStore::new(root.path());
+        let stored = store.read_work_item(&item_id).unwrap();
+        let check = assess_canonical_checks(root.path(), &stored.attempts[0])
+            .unwrap()
+            .checks[0]
+            .id
+            .clone();
+        store
+            .mutate_work_item(&item_id, |item| {
+                item.attempts[0].tasks.last_mut().unwrap().status = TaskStatus::Executing;
+                Ok(())
+            })
+            .unwrap();
+        let error = attach_native_observations_for_required_check(
+            root.path(),
+            &store,
+            &item_id,
+            "attempt-1",
+            &candidate,
+            &check,
+            &root.path().join("native-obs-evidence.json"),
+        )
+        .expect_err("live execution must block an attachment or its replay");
+        assert!(format!("{error:#}").contains("owners are not settled"));
+    }
+
+    #[test]
+    fn native_observation_documents_reject_malformed_and_duplicate_entries() {
+        let base = serde_json::json!({
+            "schema_version": 1, "producer": "host", "check": "false",
+            "working_directory": ".", "result": "pass",
+            "run_at": "2026-10-18T00:00:00Z", "output": "ok"
+        });
+        for observations in [
+            serde_json::json!([{"id":" ","harness":"cargo-test"}]),
+            serde_json::json!([{"id":"case","harness":""}]),
+            serde_json::json!([{"id":"case","harness":"cargo-test","status":"fail"}]),
+            serde_json::json!([{"id":"case","harness":"cargo-test"},{"id":"case","harness":"cargo-test"}]),
+            serde_json::json!(
+                (0..=MAX_NATIVE_OBSERVATIONS)
+                    .map(|i| serde_json::json!({"id":format!("case-{i}"),"harness":"cargo-test"}))
+                    .collect::<Vec<_>>()
+            ),
+        ] {
+            let mut document = base.clone();
+            document["native_observations"] = observations;
+            assert!(parse_evidence_document(&serde_json::to_vec(&document).unwrap()).is_err());
+        }
     }
 
     #[test]

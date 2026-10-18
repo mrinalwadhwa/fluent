@@ -5605,6 +5605,11 @@ mod tests {
         let (root, mut item) =
             crate::recovery_contracts::verification_tests::unique_harness_fixture();
         crate::recovery_contracts::verification_tests::accept_first_check(root.path(), &mut item);
+        fs::write(
+            root.path().join(".git/info/exclude"),
+            ".fluent/work/\nnative-evidence.json\n",
+        )
+        .unwrap();
 
         let candidate = item.attempts[0]
             .tasks
@@ -5690,6 +5695,11 @@ mod tests {
         let (root, mut item) =
             crate::recovery_contracts::verification_tests::unique_harness_fixture();
         crate::recovery_contracts::verification_tests::accept_first_check(root.path(), &mut item);
+        fs::write(
+            root.path().join(".git/info/exclude"),
+            ".fluent/work/\nnative-evidence.json\n",
+        )
+        .unwrap();
         item.attempts[0].status = work_model::AttemptStatus::Complete;
 
         let candidate = item.attempts[0]
@@ -6339,6 +6349,25 @@ pub fn attach_native_observations_for_required_check(
                 .find(|attempt| attempt.id == attempt_id)
                 .ok_or_else(|| reject("Attempt is missing".into()))?;
             attempt.ensure_not_canceled()?;
+            if item.merge_candidates.iter().any(|candidate| candidate.attempt_id == attempt_id)
+                || attempt.tasks.iter().any(|task| {
+                    task.status == TaskStatus::Executing
+                        || crate::lease::is_leased(&crate::lease::task_lock_path(
+                            project_root, work_item_id, &task.id,
+                        ))
+                })
+            {
+                return Err(reject("candidate or execution owners are not settled".into()));
+            }
+            for task in &attempt.tasks {
+                if let Some(area) = &task.artifact_area {
+                    if crate::execution::execution_is_live(
+                        &crate::execution::record_path_for_artifact(project_root, &area.path),
+                    ).map_err(|error| reject(format!("cannot establish execution settlement: {error:#}")))? {
+                        return Err(reject("the Attempt has a live execution owner".into()));
+                    }
+                }
+            }
             let output = attempt
                 .tasks
                 .iter()
@@ -6346,9 +6375,13 @@ pub fn attach_native_observations_for_required_check(
                 .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
                 .and_then(|task| task.output.as_ref())
                 .ok_or_else(|| reject("no completed Writer candidate".into()))?;
-            if output.commit != candidate_commit {
+            if output.commit != candidate_commit
+                || !crate::recovery_contracts::candidate_workspace_is_clean_at_managed(
+                    project_root, output, candidate_commit,
+                )
+            {
                 return Err(reject(
-                    "native observation evidence requires the unchanged candidate".into(),
+                    "native observation evidence requires the unchanged clean candidate".into(),
                 ));
             }
             let assessment =
@@ -6388,6 +6421,13 @@ pub fn attach_native_observations_for_required_check(
                     "required check has an outstanding failed command; attach command-level evidence first".into(),
                 ));
             }
+            let now = crate::check_applicability::evaluation_time();
+            crate::recovery_contracts::validate_check_applicability_at(
+                &check.applicability, &document, now,
+            ).map_err(|error| reject(format!("{error:#}")))?;
+            crate::verification_assessment::validate_required_check_acceptance_at(
+                project_root, attempt, &check, now,
+            ).map_err(|error| reject(format!("{error:#}")))?;
             // Find the command-level (first) accepted recovery for this check.
             let source_recovery = attempt
                 .evidence_recoveries

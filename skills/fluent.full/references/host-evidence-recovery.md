@@ -54,6 +54,22 @@ failed result and reuses other valid results from the complete canonical run.
 A diagnostic command cannot replace the required command. Creating this result
 still requires the existing authorization to run on its host.
 
+If accepted command proof lacks named test results, attach another document
+with the same `--required-check` and unchanged clean candidate. Include
+`native_observations` with exact passing identities from the host log:
+
+```json
+"native_observations": [{"id":"fluent::host_evidence::tests::example","harness":"cargo-nextest"}]
+```
+
+The document must name the same command and working directory, retain supporting
+output, and use the canonical command's harness. Fluent limits the list to
+10,000 unique, nonempty identities within the existing document size limit.
+Only passing observations belong in this list. A new targeted Tests Review must
+accept the attachment before matching named references can pass. Earlier proof
+and canonical Tester results remain unchanged; a command pass alone supplies no
+named test identities.
+
 Use this path when the candidate does not need a source change and either a
 failed review asks for proof that a trusted host can run or the final candidate
 gate asks for one command-shaped `Test:` reference that canonical Tester did not
