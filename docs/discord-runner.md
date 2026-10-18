@@ -128,7 +128,8 @@ request stays consumed if that participant later becomes an approver; send a new
 request after the authority change. Processing failures remain queued for recovery.
 If an established thread's project snapshot is missing, restore that snapshot
 from backup before resuming; the runner will not rebuild accepted history by
-repeating provider turns.
+repeating provider turns. The affected input stays queued while new commands,
+replies, and approvals for healthy threads continue.
 
 ## Optional owner-run smoke check
 

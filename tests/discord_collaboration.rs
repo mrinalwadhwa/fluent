@@ -501,7 +501,7 @@ fn discord_restart_recovers_accepted_provider_turn_without_repeating_it() {
     assert_eq!(first.provider().dispatched, 1);
     let live = std::sync::Mutex::new(BTreeSet::new());
     for _ in 0..2 {
-        process_inbox(&mut first, &live).unwrap();
+        assert!(process_inbox(&mut first, &live).is_err());
         assert_eq!(
             fs::read_dir(state_root(home.path()).join("inbox"))
                 .unwrap()
@@ -1359,7 +1359,7 @@ fn discord_approval_retains_retryable_processing_failure() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "unreadable Work state").unwrap();
     for _ in 0..2 {
-        process_inbox(&mut runner, &live).unwrap();
+        assert!(process_inbox(&mut runner, &live).is_err());
         assert_eq!(
             fs::read_dir(state_root(home.path()).join("inbox"))
                 .unwrap()
@@ -1682,6 +1682,116 @@ fn discord_restart_requires_established_snapshot() {
         !runner_status(&config, &read_operational_state(home.path()).unwrap())
             .contains("restore its project snapshot")
     );
+}
+
+#[test]
+fn discord_restart_inbox_isolates_missing_snapshot() {
+    use fluent::work_model::WorkModelStore;
+    let (home, damaged, mut config) = fixture();
+    let (_other_home, healthy, other_config) = fixture();
+    config
+        .projects
+        .insert("healthy".into(), other_config.projects["app"].clone());
+    config
+        .channels
+        .get_mut("200")
+        .unwrap()
+        .insert("healthy".into());
+    write_config(home.path(), &config).unwrap();
+    let transport = Discord {
+        threads: BTreeMap::from([
+            ("600".into(), "400".into()),
+            ("601".into(), "401".into()),
+            ("602".into(), "402".into()),
+        ]),
+        ..Discord::default()
+    };
+    let mut runner =
+        DiscordRunner::new(home.path(), config.clone(), Provider::default(), transport).unwrap();
+    let healthy_command = Input {
+        id: "601".into(),
+        kind: InputKind::Command {
+            project: "healthy".into(),
+            provider: None,
+            text: "plan healthy work".into(),
+        },
+        ..command()
+    };
+    let live = std::sync::Mutex::new(BTreeSet::new());
+    persist_ingress(home.path(), &config, &command()).unwrap();
+    persist_ingress(home.path(), &config, &healthy_command).unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    let button = runner
+        .present_planning("401", "brief", "Healthy project brief")
+        .unwrap();
+    let approval = Input {
+        channel: "401".into(),
+        ..click("603", &button)
+    };
+    live.lock().unwrap().insert(approval.id.clone());
+    let new_command = Input {
+        id: "602".into(),
+        ..healthy_command
+    };
+    let damaged_path = damaged.path().join(".fluent/work/discord/threads/400.json");
+    let saved = fs::read(&damaged_path).unwrap();
+    fs::remove_file(&damaged_path).unwrap();
+    persist_ingress(home.path(), &config, &command()).unwrap();
+    let inbox = state_root(home.path()).join("inbox");
+    let before_deliveries = runner.transport().messages.len();
+    let store = WorkModelStore::new(healthy.path());
+    let mut accepted_work = None;
+    for _ in 0..3 {
+        // The damaged input sorts first. Requeue healthy duplicates to check that
+        // the same batch isolation also preserves provider and approval receipts.
+        persist_ingress(home.path(), &config, &new_command).unwrap();
+        persist_ingress(home.path(), &config, &approval).unwrap();
+        let error = process_inbox(&mut runner, &live).unwrap_err();
+        assert!(error.to_string().contains("restore its project snapshot"));
+        assert_eq!(
+            runner.provider().calls.len(),
+            3,
+            "healthy command must run despite the older damaged input"
+        );
+        assert_eq!(
+            runner.provider().calls.last().unwrap().4.checkout,
+            healthy.path()
+        );
+        assert_eq!(runner.transport().messages.len(), before_deliveries + 2);
+        assert!(!damaged_path.exists());
+        let pending = fs::read_dir(&inbox)
+            .unwrap()
+            .map(|entry| {
+                serde_json::from_slice::<Input>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pending, vec![command()]);
+        let thread: Thread = serde_json::from_slice(
+            &fs::read(healthy.path().join(".fluent/work/discord/threads/401.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(thread.approvals.len(), 1);
+        assert!(thread.approvals[0].completed);
+        assert_eq!(thread.approvals[0].input, approval.id);
+        let item = store.read_work_item("discord-401").unwrap();
+        assert!(item.planning_context.unwrap().brief.is_some());
+        let bytes = fs::read(store.work_item_path("discord-401").unwrap()).unwrap();
+        assert_eq!(accepted_work.get_or_insert(bytes.clone()), &bytes);
+        let new_thread: Thread = serde_json::from_slice(
+            &fs::read(healthy.path().join(".fluent/work/discord/threads/402.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(new_thread.inputs, vec![new_command.clone()]);
+        assert!(
+            runner_status(&config, &read_operational_state(home.path()).unwrap())
+                .contains("restore its project snapshot")
+        );
+    }
+    fs::write(&damaged_path, saved).unwrap();
+    process_inbox(&mut runner, &live).unwrap();
+    assert_eq!(fs::read_dir(inbox).unwrap().count(), 0);
+    assert_eq!(runner.provider().calls.len(), 3);
+    assert_eq!(runner.transport().messages.len(), before_deliveries + 2);
 }
 
 #[test]

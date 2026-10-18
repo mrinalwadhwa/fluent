@@ -268,51 +268,68 @@ pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
             .and_then(|bytes| serde_json::from_slice::<Input>(&bytes).ok())
             .map(|input| (input.id.parse::<u64>().unwrap_or(0), input.key()))
     });
+    let mut failure = None;
     for path in paths {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let input = serde_json::from_slice(&fs::read(&path)?)?;
-        if !admit_ingress(&runner.home, &runner.config, &input)? {
-            fs::remove_file(path)?;
-            continue;
+        // A damaged snapshot, input, or delivery must not block independent
+        // conversations. Preserve its input and report failure after this pass.
+        if let Err(error) = process_inbox_entry(runner, live_inputs, &path) {
+            failure.get_or_insert(error);
         }
-        let live = live_inputs.lock().unwrap().contains(&input.key());
-        let result = if live {
-            runner.ingest(input.clone())
-        } else {
-            runner.ingest_recovered(input.clone())
-        };
-        if let Err(error) = result {
-            report_input_failure(runner, &input, &error)?;
-            if !error.is::<RejectedInput>() {
-                continue;
-            }
-            // Keep a receipt whose effect needs reconciliation, but discard rejected approvals.
-            let index: Index = read(&state_root(&runner.home).join("index.json"))?;
-            if let Some(binding) = index.threads.get(&input.channel) {
-                let project = &runner.config.projects[&binding.project];
-                let thread = read_thread(
-                    &project
-                        .checkout
-                        .path
-                        .join(".fluent/work/discord/threads")
-                        .join(format!("{}.json", binding.thread)),
-                )?;
-                if thread
-                    .approvals
-                    .iter()
-                    .any(|a| a.input == input.key() && !a.completed)
-                {
-                    continue;
-                }
-            }
-        }
-        live_inputs.lock().unwrap().remove(&input.key());
-        fs::remove_file(path)?;
     }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+fn process_inbox_entry<P: ConversationProvider, T: DiscordTransport>(
+    runner: &mut DiscordRunner<P, T>,
+    live_inputs: &std::sync::Mutex<BTreeSet<String>>,
+    path: &Path,
+) -> Result<()> {
+    let input = serde_json::from_slice(&fs::read(path)?)?;
+    if !admit_ingress(&runner.home, &runner.config, &input)? {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    let live = live_inputs.lock().unwrap().contains(&input.key());
+    let result = if live {
+        runner.ingest(input.clone())
+    } else {
+        runner.ingest_recovered(input.clone())
+    };
+    if let Err(error) = result {
+        report_input_failure(runner, &input, &error)?;
+        if !error.is::<RejectedInput>() {
+            return Err(error);
+        }
+        // Keep a receipt whose effect needs reconciliation, but discard rejected approvals.
+        let index: Index = read(&state_root(&runner.home).join("index.json"))?;
+        if let Some(binding) = index.threads.get(&input.channel) {
+            let project = &runner.config.projects[&binding.project];
+            let thread = read_thread(
+                &project
+                    .checkout
+                    .path
+                    .join(".fluent/work/discord/threads")
+                    .join(format!("{}.json", binding.thread)),
+            )?;
+            if thread
+                .approvals
+                .iter()
+                .any(|a| a.input == input.key() && !a.completed)
+            {
+                return Err(error);
+            }
+        }
+    }
+    live_inputs.lock().unwrap().remove(&input.key());
+    fs::remove_file(path)?;
     Ok(())
 }
+
 pub(super) fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
     runner: &mut DiscordRunner<P, T>,
     input: &Input,

@@ -903,6 +903,9 @@ checkout's `.fluent/work/discord/` tree. Publish the initial project snapshot
 before the routing index. An indexed thread whose snapshot is missing fails
 closed; it cannot become a new conversation. Failure reporting requires that
 same snapshot and status reports restoration guidance without creating state.
+Process inbox entries independently and return failures after visiting the batch;
+a failed input or its failure report must not prevent commands or approval clicks
+for healthy threads from settling. Retain failed inputs for recovery.
 
 Conclusive action rejections use a distinct error type so history recovery can
 advance past them and the inbox can consume them. Save their input identities
