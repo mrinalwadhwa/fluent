@@ -346,17 +346,47 @@ fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
     Ok(())
 }
 pub fn run_configured_runner(home: &Path) -> Result<()> {
-    let _lease = crate::lease::acquire(&state_root(home).join("runner.lock"))
-        .context("Discord runner is already running")?;
-    let (config, client) = configured_client(home)?;
+    let config = read_config(home)?;
     let token = KeychainSecretStore::default()
         .read(KEYCHAIN_SERVICE, BOT_TOKEN_ACCOUNT)
         .map_err(|_| anyhow::anyhow!("Discord bot credential is unavailable"))?;
+    let client = DiscordRest::new(token.clone())?;
     let providers: Vec<Box<dyn ConversationProvider>> = vec![
         Box::new(CodexAppServerProvider::new_scoped("codex".into())),
         Box::new(ClaudeStructuredSessionProvider::new_scoped("claude".into())),
     ];
     let provider = ProviderRegistry::new(providers)?;
+    run_runner_with_dependencies(home, config, client, &token, provider, None)
+}
+/// Inject a bounded loopback Gateway without changing admission or worker behavior.
+#[doc(hidden)]
+pub struct GatewayFixture {
+    pub url: String,
+    pub connections: usize,
+}
+#[doc(hidden)]
+pub fn run_runner_with_dependencies<P: ConversationProvider + Send + 'static>(
+    home: &Path,
+    config: DiscordConfig,
+    mut client: DiscordRest,
+    token: &str,
+    provider: P,
+    fixture: Option<GatewayFixture>,
+) -> Result<()> {
+    if let Some(fixture) = &fixture {
+        let uri: tungstenite::http::Uri = fixture.url.parse()?;
+        anyhow::ensure!(
+            uri.scheme_str() == Some("ws")
+                && uri.host().is_some_and(|host| host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback()))
+                && (1..=10).contains(&fixture.connections),
+            "Gateway fixtures require a bounded loopback endpoint"
+        );
+    }
+    let _lease = crate::lease::acquire(&state_root(home).join("runner.lock"))
+        .context("Discord runner is already running")?;
+    client.preflight(&config)?;
     let mut runner = DiscordRunner::new(home, config, provider, client.clone())?;
     let worker_home = home.to_path_buf();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -381,7 +411,14 @@ pub fn run_configured_runner(home: &Path) -> Result<()> {
             std::thread::sleep(Duration::from_millis(250));
         }
     });
-    let result = run_gateway(home, client, &token, &connected, &live_inputs);
+    let result = run_gateway(
+        home,
+        client,
+        token,
+        &connected,
+        &live_inputs,
+        fixture.as_ref(),
+    );
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     // A provider turn owns its own settlement; never detach it during shutdown.
     let _ = worker.join();
@@ -393,6 +430,7 @@ fn run_gateway(
     token: &str,
     connected: &std::sync::atomic::AtomicBool,
     live_inputs: &std::sync::Mutex<BTreeSet<String>>,
+    fixture: Option<&GatewayFixture>,
 ) -> Result<()> {
     write(
         &state_root(home).join("status.json"),
@@ -405,9 +443,14 @@ fn run_gateway(
         .as_str()
         .context("Discord omitted Gateway URL")?
         .to_owned();
+    let mut connections = 0;
     loop {
-        let url = session.resume_url.as_deref().unwrap_or(&fallback);
-        let connection = tungstenite::connect(gateway_url(url)?);
+        let url = gateway_url(session.resume_url.as_deref().unwrap_or(&fallback))?;
+        if fixture.is_some_and(|fixture| connections >= fixture.connections) {
+            return Ok(());
+        }
+        connections += 1;
+        let connection = tungstenite::connect(fixture.map_or(url.as_str(), |f| f.url.as_str()));
         let (mut socket, _) = match connection {
             Ok(connection) => connection,
             Err(_) => {
@@ -531,7 +574,11 @@ fn run_gateway(
         if let Some(reason) = fatal {
             bail!(reason);
         }
-        std::thread::sleep(Duration::from_secs(5));
+        std::thread::sleep(if fixture.is_some() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(5)
+        });
     }
 }
 

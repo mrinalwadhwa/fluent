@@ -1914,6 +1914,379 @@ fn discord_restart_rest_fails_closed_at_delivery_history_bound() {
 }
 
 #[test]
+fn discord_runner_gateway_preflight_blocks_provider_dispatch() {
+    use serde_json::json;
+    let (home, _project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    let (endpoint, server) = http_fixture(vec![("200 OK", json!({"flags":0}))]);
+    let client = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    let error = run_runner_with_dependencies(
+        home.path(),
+        config,
+        client,
+        "test-token",
+        Provider::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Message Content"));
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert!(!state_root(home.path()).join("gateway.json").exists());
+}
+
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "local runner fixture timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+struct LiveHttp {
+    endpoint: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl LiveHttp {
+    fn new(mut handle: impl FnMut(&str) -> (u16, serde_json::Value) + Send + 'static) -> Self {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let worker = std::thread::spawn(move || {
+            while !stopped.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(v) => v,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => panic!("{e}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = vec![];
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                }
+                let header = String::from_utf8(bytes).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|n| n.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let mut bytes = vec![0; length];
+                stream.read_exact(&mut bytes).unwrap();
+                let request = format!("{header}{}", String::from_utf8(bytes).unwrap());
+                let (status, body) = handle(&request);
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+impl Drop for LiveHttp {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+#[test]
+fn discord_runner_gateway_admits_acknowledges_and_recovers() {
+    use serde_json::{Value, json};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tungstenite::{
+        Message,
+        protocol::{CloseFrame, frame::coding::CloseCode},
+    };
+    let (home, project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    let acknowledged = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(Mutex::new(Provider::default()));
+    struct SharedProvider(Arc<Mutex<Provider>>, Arc<AtomicBool>);
+    impl ConversationProvider for SharedProvider {
+        fn start(
+            &mut self,
+            key: &str,
+            scope: &ProviderScope,
+            text: &str,
+            actor: &str,
+        ) -> ProviderResult<(String, String)> {
+            assert!(
+                self.1.load(Ordering::SeqCst),
+                "provider ran before acknowledgement"
+            );
+            self.0.lock().unwrap().start(key, scope, text, actor)
+        }
+        fn resume(
+            &mut self,
+            key: &str,
+            session: &str,
+            scope: &ProviderScope,
+            text: &str,
+            actor: &str,
+        ) -> ProviderResult<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .resume(key, session, scope, text, actor)
+        }
+    }
+    let ack = acknowledged.clone();
+    let http_home = home.path().to_path_buf();
+    let http_project = project.path().to_path_buf();
+    let mut messages: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut created = false;
+    let http = LiveHttp::new(move |request| {
+        let words = request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let (method, path) = (words[0], words[1]);
+        let body: Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap_or(Value::Null);
+        if path.starts_with("/interactions/") {
+            let id = path.split('/').nth(2).unwrap();
+            let inbox = fs::read_dir(state_root(&http_home).join("inbox"))
+                .unwrap()
+                .map(|e| fs::read(e.unwrap().path()).unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                inbox
+                    .iter()
+                    .any(|bytes| serde_json::from_slice::<Input>(bytes).unwrap().id == id),
+                "ack preceded durable ingress"
+            );
+            assert!(
+                inbox
+                    .iter()
+                    .all(|bytes| !String::from_utf8_lossy(bytes).contains("test-token"))
+            );
+            assert_eq!(body["data"]["allowed_mentions"]["parse"], json!([]));
+            if id == "600" {
+                let session: GatewaySession = serde_json::from_slice(
+                    &fs::read(state_root(&http_home).join("gateway.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    session.sequence,
+                    Some(1),
+                    "sequence advanced before durable ingress and ack"
+                );
+                assert!(
+                    !http_project
+                        .join(".fluent/work/discord/threads/400.json")
+                        .exists()
+                );
+                ack.store(true, Ordering::SeqCst);
+            }
+            return (if path.contains("expired") { 404 } else { 200 }, json!({}));
+        }
+        match path {
+            "/oauth2/applications/@me" => return (200, json!({"flags":1<<19})),
+            "/users/@me" => return (200, json!({"id":"900"})),
+            "/guilds/100" => return (200, json!({"owner_id":"900"})),
+            "/guilds/100/members/900" => return (200, json!({"roles":[]})),
+            "/guilds/100/roles" => return (200, json!([])),
+            "/channels/200" => return (200, json!({"type":0,"guild_id":"100"})),
+            "/gateway/bot" => return (200, json!({"url":"wss://gateway.discord.gg"})),
+            "/channels/400" => {
+                return (
+                    if created { 200 } else { 404 },
+                    json!({"type":11,"parent_id":"200"}),
+                );
+            }
+            "/channels/200/messages/400/threads" => {
+                created = true;
+                return (200, json!({"id":"400"}));
+            }
+            _ => {}
+        }
+        let channel = path.split('/').nth(2).unwrap().to_owned();
+        if method == "GET" {
+            if path.contains("after=") {
+                return (200, json!([]));
+            }
+            return (
+                200,
+                json!(messages.get(&channel).cloned().unwrap_or_default()),
+            );
+        }
+        let mut message = body;
+        let id = if channel == "200" {
+            "400".into()
+        } else {
+            (700 + messages.get(&channel).map_or(0, Vec::len)).to_string()
+        };
+        message["id"] = json!(id);
+        message["author"] = json!({"id":"900","bot":true});
+        messages.entry(channel).or_default().push(message);
+        (200, json!({"id":id}))
+    });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+    let gateway_home = home.path().to_path_buf();
+    let gateway_project = project.path().to_path_buf();
+    let gateway = std::thread::spawn(move || {
+        let accept = || {
+            let mut accepted = None;
+            wait_until(|| {
+                accepted = listener.accept().ok();
+                accepted.is_some()
+            });
+            let stream = accepted.unwrap().0;
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            tungstenite::accept(stream).unwrap()
+        };
+        let send = |socket: &mut tungstenite::WebSocket<std::net::TcpStream>, value: Value| {
+            socket.send(Message::Text(value.to_string())).unwrap()
+        };
+        let mut socket = accept();
+        send(
+            &mut socket,
+            json!({"op":10,"d":{"heartbeat_interval":60000}}),
+        );
+        let identify: Value =
+            serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(identify["op"], 2);
+        send(
+            &mut socket,
+            json!({"op":0,"s":1,"t":"READY","d":{"session_id":"session","resume_gateway_url":"wss://gateway.discord.gg"}}),
+        );
+        send(
+            &mut socket,
+            json!({"op":0,"s":2,"t":"INTERACTION_CREATE","d":{"id":"600","guild_id":"100","channel_id":"200","token":"test-token","type":2,"member":{"user":{"id":"300"}},"data":{"name":"fluent","options":[{"name":"project","value":"app"},{"name":"message","value":"plan this"}]}}}),
+        );
+        let snapshot = || {
+            fs::read(gateway_project.join(".fluent/work/discord/threads/400.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Thread>(&bytes).ok())
+        };
+        wait_until(|| {
+            snapshot().is_some_and(|t| {
+                t.session.is_some() && t.deliveries.iter().all(|d| d.message_id.is_some())
+            })
+        });
+        assert!(read_operational_state(&gateway_home).unwrap().connected);
+        let reply = json!({"op":0,"s":3,"t":"MESSAGE_CREATE","d":{"id":"601","guild_id":"100","channel_id":"400","author":{"id":"301"},"content":"continue"}});
+        send(&mut socket, reply.clone());
+        wait_until(|| snapshot().is_some_and(|t| t.inputs.len() == 2 && t.pending.is_none()));
+        send(
+            &mut socket,
+            json!({"op":0,"s":4,"t":"MESSAGE_UPDATE","d":{"id":"601","guild_id":"100","channel_id":"400","content":"correction","edited_timestamp":"revision-1"}}),
+        );
+        wait_until(|| snapshot().is_some_and(|t| t.inputs.len() == 3 && t.pending.is_none()));
+        send(
+            &mut socket,
+            json!({"op":0,"s":5,"t":"MESSAGE_DELETE","d":{"id":"601","guild_id":"100","channel_id":"400"}}),
+        );
+        wait_until(|| snapshot().is_some_and(|t| t.inputs.len() == 4 && t.pending.is_none()));
+        send(
+            &mut socket,
+            json!({"op":0,"s":6,"t":"MESSAGE_CREATE","d":{"id":"610","guild_id":"100","channel_id":"400","author":{"id":"300"},"content":"work create"}}),
+        );
+        wait_until(|| snapshot().is_some_and(|t| t.approval.is_some()));
+        let button = snapshot().unwrap().approval.unwrap().button;
+        let component = |id: &str, token: &str, seq: u64| json!({"op":0,"s":seq,"t":"INTERACTION_CREATE","d":{"id":id,"guild_id":"100","channel_id":"400","token":token,"type":3,"member":{"user":{"id":"300"}},"data":{"custom_id":format!("fluent:{}:{}",button.action,button.revision)}}});
+        send(&mut socket, component("611", "expired", 7));
+        wait_until(|| {
+            snapshot().is_some_and(|t| {
+                t.deliveries
+                    .iter()
+                    .any(|d| d.id.contains("611") && d.message_id.is_some())
+            })
+        });
+        assert!(
+            !gateway_project
+                .join(".fluent/work/items/discord-400.json")
+                .exists()
+        );
+        send(&mut socket, component("612", "valid", 8));
+        wait_until(|| {
+            snapshot().is_some_and(|t| t.approvals.iter().any(|a| a.input == "612" && a.completed))
+        });
+        send(&mut socket, json!({"op":7}));
+        drop(socket);
+        let mut socket = accept();
+        send(
+            &mut socket,
+            json!({"op":10,"d":{"heartbeat_interval":60000}}),
+        );
+        let resume: Value =
+            serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(resume["op"], 6);
+        assert_eq!(resume["d"]["seq"], 8);
+        send(&mut socket, json!({"op":0,"s":9,"t":"RESUMED","d":{}}));
+        let mut reply = reply;
+        reply["s"] = json!(10);
+        send(&mut socket, reply);
+        wait_until(|| {
+            fs::read(state_root(&gateway_home).join("gateway.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<GatewaySession>(&b).ok())
+                .is_some_and(|s| s.sequence == Some(10))
+        });
+        socket
+            .close(Some(CloseFrame {
+                code: CloseCode::Library(4014),
+                reason: "Missing intent".into(),
+            }))
+            .unwrap();
+    });
+    let client =
+        DiscordRest::with_test_endpoint("test-token".into(), http.endpoint.clone()).unwrap();
+    let result = run_runner_with_dependencies(
+        home.path(),
+        config,
+        client,
+        "test-token",
+        SharedProvider(calls.clone(), acknowledged),
+        Some(GatewayFixture {
+            url: ws_url,
+            connections: 2,
+        }),
+    );
+    gateway.join().unwrap();
+    assert!(result.unwrap_err().to_string().contains("Message Content"));
+    assert!(!read_operational_state(home.path()).unwrap().connected);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.calls.len(), 4);
+    assert!(calls.calls[2].3.ends_with(":301"));
+    assert!(calls.calls[3].2.contains("deleted"));
+}
+
+#[test]
 fn discord_approval_checks_revision_inside_model_mutation() {
     use fluent::work_approval::WorkApproval;
     use fluent::work_model::{WorkItem, WorkModelStore};
