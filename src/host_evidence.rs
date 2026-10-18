@@ -5714,11 +5714,9 @@ mod tests {
             .as_mut()
             .unwrap()
             .requirements[0]
-            .verification_refs =
-            vec![
-                r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#
-                    .to_string(),
-            ];
+            .verification_refs = vec![
+            r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.to_string(),
+        ];
         let store = WorkModelStore::new(root.path());
         store.create_work_item(&item).unwrap();
 
@@ -5873,13 +5871,16 @@ mod tests {
         store
             .mutate_work_item("verification", |item| {
                 let attempt = &mut item.attempts[0];
-                let review_id =
-                    recovery.targets[0].review_task_id.as_ref().unwrap().clone();
-                let review =
-                    attempt.tasks.iter_mut().find(|t| t.id == review_id).unwrap();
+                let review_id = recovery.targets[0].review_task_id.as_ref().unwrap().clone();
+                let review = attempt
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == review_id)
+                    .unwrap();
                 work_model::set_task_terminal(review, TaskStatus::Complete);
-                let area =
-                    root.path().join(review.artifact_area.as_ref().unwrap().path.clone());
+                let area = root
+                    .path()
+                    .join(review.artifact_area.as_ref().unwrap().path.clone());
                 fs::create_dir_all(&area).unwrap();
                 fs::write(area.join("review.md"), "Verdict: fail\n").unwrap();
                 let nat_recovery = attempt
@@ -5918,8 +5919,7 @@ mod tests {
         )
         .expect("idempotent replay of an identical attachment must succeed");
         assert_eq!(
-            recovery2.id,
-            recovery.id,
+            recovery2.id, recovery.id,
             "idempotent replay must return the same recovery"
         );
     }
