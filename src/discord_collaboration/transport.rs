@@ -22,6 +22,7 @@ pub struct DiscordRest {
     token: String,
     base: String,
     bot_id: String,
+    retry_not_before: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
 }
 impl DiscordRest {
     pub fn new(token: String) -> Result<Self> {
@@ -36,6 +37,7 @@ impl DiscordRest {
             token,
             base: "https://discord.com/api/v10".into(),
             bot_id: String::new(),
+            retry_not_before: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
         })
     }
     #[doc(hidden)]
@@ -48,10 +50,16 @@ impl DiscordRest {
         Ok(client)
     }
     pub fn request(&self, method: &str, route: &str, body: Option<Value>) -> Result<Value> {
-        for _ in 0..4 {
+        let interaction = route.starts_with("/interactions/");
+        for _ in 0..if interaction { 1 } else { 4 } {
+            if !interaction && std::time::Instant::now() < *self.retry_not_before.lock().unwrap() {
+                bail!("Discord rate limit is still active; request remains pending");
+            }
+
             let request = self
                 .agent
                 .request(method, &format!("{}{route}", self.base))
+                .timeout(Duration::from_secs(if interaction { 2 } else { 30 }))
                 .set("Authorization", &format!("Bot {}", self.token))
                 .set("User-Agent", "DiscordBot (https://fluent.computer, 0.6)");
             let response = match body.as_ref() {
@@ -60,6 +68,17 @@ impl DiscordRest {
             };
             match response {
                 Ok(response) => {
+                    if !interaction && response.header("X-RateLimit-Remaining") == Some("0") {
+                        if let Some(seconds) = response
+                            .header("X-RateLimit-Reset-After")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .filter(|s| s.is_finite() && *s >= 0. && *s < 86400.)
+                        {
+                            *self.retry_not_before.lock().unwrap() =
+                                std::time::Instant::now() + Duration::from_secs_f64(seconds);
+                        }
+                    }
+
                     if response.status() == 204 {
                         return Ok(Value::Null);
                     }
@@ -73,6 +92,14 @@ impl DiscordRest {
                         .as_f64()
                         .filter(|s| s.is_finite() && *s >= 0.)
                         .context("Discord rate limit omitted retry_after")?;
+                    if interaction {
+                        bail!("Discord interaction acknowledgement was rate limited");
+                    }
+                    if seconds > 86400. {
+                        bail!("Discord returned an invalid rate limit");
+                    }
+                    *self.retry_not_before.lock().unwrap() =
+                        std::time::Instant::now() + Duration::from_secs_f64(seconds);
                     if seconds > 60. {
                         bail!("Discord rate limited; retry the durable request later");
                     }

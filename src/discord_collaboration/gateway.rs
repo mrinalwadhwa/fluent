@@ -186,3 +186,24 @@ pub fn decode_dispatch(payload: &Value) -> Result<Option<Input>> {
         kind,
     }))
 }
+
+/// Validate the TLS host before sending a bot token to a resumed Gateway.
+pub fn gateway_url(value: &str) -> Result<String> {
+    let uri: tungstenite::http::Uri = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Discord returned an invalid Gateway URL"))?;
+    let host = uri.host().unwrap_or("");
+    if uri.scheme_str() != Some("wss")
+        || !(host == "gateway.discord.gg" || host.ends_with(".discord.gg"))
+        || uri.authority().is_some_and(|a| a.as_str().contains('@'))
+        || uri.port_u16().is_some_and(|port| port != 443)
+        || !matches!(uri.path(), "" | "/")
+        || uri.query().is_some()
+    {
+        bail!("Discord returned an untrusted Gateway URL");
+    }
+    Ok(format!(
+        "{}/?v=10&encoding=json",
+        value.trim_end_matches('/')
+    ))
+}

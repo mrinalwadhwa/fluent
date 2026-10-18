@@ -74,14 +74,16 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             .join(".fluent/work/discord/threads")
             .join(format!("{thread_id}.json"));
         let mut thread: Thread = read(&path)?;
-        let artifact = ArtifactRevision::new(kind, markdown);
+        let markdown = crate::conversation::sanitize_provider_reply(markdown, &checkout);
+        let artifact = ArtifactRevision::new(kind, &markdown);
         let button = offer_action(
             &checkout,
             &binding,
             &mut thread,
             WorkAction::Planning { artifact },
-            markdown,
+            &markdown,
         )?;
+        super::rendering::prepare_deliveries(&mut thread, &checkout);
         write(&path, &thread)?;
         for i in 0..thread.deliveries.len() {
             if thread.deliveries[i].message_id.is_none() {

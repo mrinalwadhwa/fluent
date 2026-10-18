@@ -150,29 +150,7 @@ pub fn store_slack_credentials<S: SecretStore>(
 }
 
 /// Remove token-shaped strings before writing a diagnostic or Slack message.
-pub fn redact_secrets(message: &str) -> String {
-    let mut redacted = String::with_capacity(message.len());
-    let mut remainder = message;
-    while let Some(start) = [remainder.find("xapp-"), remainder.find("xoxb-")]
-        .into_iter()
-        .flatten()
-        .min()
-    {
-        redacted.push_str(&remainder[..start]);
-        redacted.push_str("[REDACTED]");
-        let token = &remainder[start..];
-        let end = token
-            .char_indices()
-            .find(|(_, character)| {
-                !character.is_ascii_alphanumeric() && *character != '-' && *character != '_'
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(token.len());
-        remainder = &token[end..];
-    }
-    redacted.push_str(remainder);
-    redacted
-}
+pub use crate::conversation::redact_secrets;
 
 /// Report a host action that the current sandbox cannot perform. This is not a
 /// Slack authentication failure: the owner must run the exact command outside

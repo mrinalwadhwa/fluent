@@ -76,6 +76,10 @@ changes, assurance limits, and recovery commands.
 For a transition from v0.5.0 with a shared scheduler, follow the
 [next-release transition procedure](documentation/releases/next.md).
 
+For a local conversation in an owner-approved private Discord server, see
+[Run Fluent in Discord](docs/discord-runner.md). The runner supports thread
+replies, planning approvals, and Work controls with Codex or Claude.
+
 ## How Fluent works
 
 Fluent separates work that needs human attention from work agents can do on their own. You can think of it as two conceptual queues. The first queue waits for people with the right context, judgment, expertise, or authority. The second waits on both agent and compute capacity: room to run an agent within subscription, rate, and budget limits, and a suitable environment with the models, tools, and hardware the work needs.

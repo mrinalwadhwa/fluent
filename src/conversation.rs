@@ -2,7 +2,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Host checkout configuration resolved by persistence and provider adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,5 +344,86 @@ fn hex_digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn redact_secrets(message: &str) -> String {
+    let mut redacted = String::with_capacity(message.len());
+    let mut remainder = message;
+    while let Some(start) = [remainder.find("xapp-"), remainder.find("xoxb-")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        redacted.push_str(&remainder[..start]);
+        redacted.push_str("[REDACTED]");
+        let token = &remainder[start..];
+        let end = token
+            .char_indices()
+            .find(|(_, character)| {
+                !character.is_ascii_alphanumeric() && *character != '-' && *character != '_'
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(token.len());
+        remainder = &token[end..];
+    }
+    redacted.push_str(remainder);
+    redacted
+}
+
+pub fn sanitize_provider_reply(reply: &str, checkout: &Path) -> String {
+    let reply = redact_secrets(reply);
+    let configured_root = checkout.to_string_lossy().trim_end_matches('/').to_owned();
+    let canonical_root = checkout
+        .canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().trim_end_matches('/').to_owned());
+    let mut roots = vec![configured_root];
+    if let Some(root) = canonical_root
+        && !roots.contains(&root)
+    {
+        roots.push(root);
+    }
+    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
+
+    reply
+        .split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let body_len = piece.trim_end_matches(char::is_whitespace).len();
+            let (body, whitespace) = piece.split_at(body_len);
+            let Some(slash) = body.char_indices().find_map(|(index, character)| {
+                if character != '/' {
+                    return None;
+                }
+                let begins_absolute_path = index == 0
+                    || body[..index].chars().next_back().is_some_and(|character| {
+                        !character.is_alphanumeric() && !"/\\._-".contains(character)
+                    });
+                begins_absolute_path.then_some(index)
+            }) else {
+                return piece.to_owned();
+            };
+            let prefix = &body[..slash];
+            if prefix.ends_with("http:") || prefix.ends_with("https:") {
+                return piece.to_owned();
+            }
+            let candidate_with_punctuation = &body[slash..];
+            let candidate = candidate_with_punctuation
+                .trim_end_matches([')', ']', '}', '>', ',', ';', '\'', '"', '`']);
+            let punctuation = &candidate_with_punctuation[candidate.len()..];
+            let replacement = roots
+                .iter()
+                .find_map(|root| {
+                    candidate.strip_prefix(root).and_then(|suffix| {
+                        if suffix.is_empty() {
+                            Some(".".to_owned())
+                        } else {
+                            suffix.strip_prefix('/').map(ToOwned::to_owned)
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "[REDACTED_PATH]".to_owned());
+            format!("{prefix}{replacement}{punctuation}{whitespace}")
+        })
         .collect()
 }

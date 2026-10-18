@@ -793,6 +793,71 @@ fn discord_work_controls_use_existing_boundaries() {
             .text
             .contains("discord-400")
     );
+    use fluent::work_model::{AttemptStatus, PauseKind, TaskStatus};
+    let store = fluent::work_model::WorkModelStore::new(project.path());
+    store
+        .mutate_work_item("discord-400", |item| {
+            item.add_initial_attempt("attempt-1").map(|_| ())
+        })
+        .unwrap();
+    fluent::queue::add(project.path(), "discord-400", None).unwrap();
+    fluent::queue::claim(project.path(), "discord-400", "attempt-1")
+        .unwrap()
+        .unwrap();
+    store
+        .mutate_work_item("discord-400", |item| {
+            item.attempts[0].status = AttemptStatus::NeedsUser;
+            item.attempts[0].pause_kind = Some(PauseKind::WriterCompletion);
+            item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+            Ok(())
+        })
+        .unwrap();
+    fluent::queue::reconcile_active(
+        project.path(),
+        "discord-400",
+        fluent::queue::DispatchStatus::NeedsUser,
+    )
+    .unwrap();
+    runner
+        .ingest(Input {
+            id: "640".into(),
+            actor: "300".into(),
+            kind: InputKind::Message {
+                text: "work resume".into(),
+            },
+            ..reply()
+        })
+        .unwrap();
+    let control = runner
+        .transport()
+        .messages
+        .last()
+        .unwrap()
+        .approval
+        .clone()
+        .unwrap();
+    runner
+        .ingest(Input {
+            id: "641".into(),
+            actor: "300".into(),
+            kind: InputKind::Approval {
+                action: control.action,
+                revision: control.revision,
+            },
+            ..reply()
+        })
+        .unwrap();
+    let ledger = fluent::queue::read_ledger(project.path(), "discord-400")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ledger.active().unwrap().intent,
+        fluent::queue::DispatchIntent::ResumeAttempt
+    );
+    assert_eq!(
+        ledger.active().unwrap().bound_attempt_id.as_deref(),
+        Some("attempt-1")
+    );
 }
 
 #[test]
@@ -851,4 +916,243 @@ fn discord_approval_recovery_requires_fresh_work_confirmation() {
             .read_work_item("discord-400")
             .is_ok()
     );
+}
+
+#[test]
+fn discord_delivery_splits_artifacts_and_suppresses_mentions() {
+    use serde_json::json;
+    let (home, project, config) = fixture();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        Discord::default(),
+    )
+    .unwrap();
+    runner.ingest(command()).unwrap();
+    let markdown = format!(
+        "@everyone <@300> <@&123>\n{}\n{}",
+        "🦀 readable text\n".repeat(500),
+        project.path().display()
+    );
+    runner.present_planning("400", "brief", &markdown).unwrap();
+    let parts = &runner.transport().messages[1..];
+    assert!(parts.len() > 2);
+    assert!(
+        parts
+            .iter()
+            .all(|part| part.text.encode_utf16().count() <= 2000)
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|part| !part.text.contains(project.path().to_str().unwrap()))
+    );
+    assert!(
+        parts[..parts.len() - 1]
+            .iter()
+            .all(|part| part.approval.is_none())
+    );
+    assert!(parts.last().unwrap().approval.is_some());
+    let (endpoint, server) = http_fixture(vec![
+        ("200 OK", json!({"id":"800","flags":1<<19})),
+        ("200 OK", json!({"id":"900"})),
+        ("200 OK", json!({"owner_id":"900"})),
+        ("200 OK", json!({"roles":[]})),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"200","type":0,"guild_id":"100"})),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"700"})),
+    ]);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    rest.preflight(&config).unwrap();
+    rest.deliver(parts.last().unwrap()).unwrap();
+    let requests = server.join().unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(requests.last().unwrap().split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+    assert_eq!(body["allowed_mentions"]["replied_user"], false);
+    assert_eq!(body["enforce_nonce"], true);
+    assert!(
+        body["components"][0]["components"][0]["custom_id"]
+            .as_str()
+            .unwrap()
+            .len()
+            <= 100
+    );
+}
+
+#[test]
+fn discord_runner_provider_login_uses_bound_private_state() {
+    use std::os::unix::fs::PermissionsExt;
+    let (home, project, config) = fixture();
+    write_config(home.path(), &config).unwrap();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    let executable = project.path().join("login-fixture");
+    fs::write(&executable,"#!/bin/sh\nprintf '%s\\n' \"$HOME\" \"$CODEX_HOME\" \"${DISCORD_BOT_TOKEN-unset}\" > login-environment\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    provider_login_with_executable(home.path(), "app", "400", "codex", &executable).unwrap();
+    let environment = fs::read_to_string(project.path().join("login-environment")).unwrap();
+    assert!(environment.contains(".fluent/work/discord/drafts/400/.provider-home"));
+    assert!(environment.contains(".fluent/work/discord/drafts/400/.codex-home"));
+    assert!(environment.ends_with("unset\n"));
+    assert!(
+        provider_login_with_executable(home.path(), "app", "401", "codex", &executable).is_err()
+    );
+}
+
+#[test]
+fn discord_approval_rejection_reports_without_blocking_later_inputs() {
+    let (home, _project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    let approval = runner.present_planning("400", "brief", "Plan").unwrap();
+    let stale = Input {
+        id: "670".into(),
+        actor: "301".into(),
+        kind: InputKind::Approval {
+            action: approval.action,
+            revision: approval.revision,
+        },
+        ..reply()
+    };
+    assert!(runner.ingest(stale).is_err());
+    runner
+        .ingest(Input {
+            id: "671".into(),
+            ..reply()
+        })
+        .unwrap();
+    process_inbox(&mut runner, &std::sync::Mutex::new(BTreeSet::new())).unwrap();
+    assert!(
+        runner
+            .transport()
+            .messages
+            .iter()
+            .any(|m| m.text.contains("approver"))
+    );
+    assert_eq!(runner.provider().calls.len(), 2);
+}
+
+#[test]
+fn discord_approval_out_of_order_artifact_keeps_conversation_usable() {
+    struct PlanningProvider;
+    impl ConversationProvider for PlanningProvider {
+        fn start(
+            &mut self,
+            _: &str,
+            _: &ProviderScope,
+            _: &str,
+            _: &str,
+        ) -> ProviderResult<(String, String)> {
+            Ok(("session".into(),serde_json::json!({"type":"planning_artifact","kind":"plan","markdown":"Premature plan"}).to_string()))
+        }
+        fn resume(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &ProviderScope,
+            _: &str,
+            _: &str,
+        ) -> ProviderResult<String> {
+            Ok(serde_json::json!({"type":"planning_artifact","kind":"brief","markdown":"Correct brief"}).to_string())
+        }
+    }
+    let (home, _project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, PlanningProvider, Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .contains("planning order")
+    );
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .approval
+            .is_none()
+    );
+    runner.ingest(reply()).unwrap();
+    assert!(
+        runner
+            .transport()
+            .messages
+            .last()
+            .unwrap()
+            .approval
+            .is_some()
+    );
+}
+
+#[test]
+fn discord_command_rest_reuses_the_existing_public_thread() {
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    let (_home, _project, config) = fixture();
+    let identity = format!("fluent-discord:{:x}", Sha256::digest(b"command:600"));
+    let (endpoint, server) = http_fixture(vec![
+        ("200 OK", json!({"id":"800","flags":1<<19})),
+        ("200 OK", json!({"id":"900"})),
+        ("200 OK", json!({"owner_id":"900"})),
+        ("200 OK", json!({"roles":[]})),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"200","type":0,"guild_id":"100"})),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"400"})),
+        ("404 Not Found", json!({"code":10003})),
+        ("200 OK", json!({"id":"400","type":11,"parent_id":"200"})),
+        (
+            "200 OK",
+            json!([{"id":"400","author":{"id":"900"},"embeds":[{"footer":{"text":identity}}]}]),
+        ),
+        ("200 OK", json!({"id":"400","type":11,"parent_id":"200"})),
+    ]);
+    let mut client = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    client.preflight(&config).unwrap();
+    assert_eq!(client.ensure_thread("600", "200", "app").unwrap(), "400");
+    assert_eq!(client.ensure_thread("600", "200", "app").unwrap(), "400");
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.starts_with("POST /channels/200/messages/400/threads "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.starts_with("POST /channels/200/messages "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn discord_runner_gateway_rejects_untrusted_resume_hosts() {
+    assert_eq!(
+        gateway_url("wss://gateway.discord.gg").unwrap(),
+        "wss://gateway.discord.gg/?v=10&encoding=json"
+    );
+    assert!(gateway_url("wss://gateway-us-east1-b.discord.gg").is_ok());
+    for url in [
+        "wss://gateway.discord.gg.attacker.invalid",
+        "ws://gateway.discord.gg",
+        "wss://gateway.discord.gg@attacker.invalid",
+        "wss://attacker.invalid/path",
+        "wss://gateway.discord.gg:1234",
+    ] {
+        assert!(gateway_url(url).is_err(), "{url}");
+    }
 }

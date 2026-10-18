@@ -77,7 +77,11 @@ pub fn runner_status(config: &DiscordConfig, state: &OperationalState) -> String
     )
 }
 pub fn read_operational_state(home: &Path) -> Result<OperationalState> {
-    read(&state_root(home).join("status.json"))
+    let mut state: OperationalState = read(&state_root(home).join("status.json"))?;
+    if !crate::lease::is_leased(&state_root(home).join("runner.lock")) {
+        state.connected = false;
+    }
+    Ok(state)
 }
 pub fn enable_runner(
     config: &DiscordConfig,
@@ -224,7 +228,8 @@ fn normalize_attribution(home: &Path, config: &DiscordConfig, input: &mut Input)
     }
     Ok(())
 }
-fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
+#[doc(hidden)]
+pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
     runner: &mut DiscordRunner<P, T>,
     live_inputs: &std::sync::Mutex<BTreeSet<String>>,
 ) -> Result<()> {
@@ -249,13 +254,89 @@ fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
             continue;
         }
         let live = live_inputs.lock().unwrap().contains(&input.key());
-        if live {
-            runner.ingest(input.clone())?;
+        let result = if live {
+            runner.ingest(input.clone())
         } else {
-            runner.ingest_recovered(input.clone())?;
+            runner.ingest_recovered(input.clone())
+        };
+        if let Err(error) = result {
+            report_input_failure(runner, &input, &error)?;
+            if !matches!(input.kind, InputKind::Approval { .. }) {
+                continue;
+            }
+            // Keep a receipt whose effect needs reconciliation, but discard rejected approvals.
+            let index: Index = read(&state_root(&runner.home).join("index.json"))?;
+            if let Some(binding) = index.threads.get(&input.channel) {
+                let project = &runner.config.projects[&binding.project];
+                let thread: Thread = read(
+                    &project
+                        .checkout
+                        .path
+                        .join(".fluent/work/discord/threads")
+                        .join(format!("{}.json", binding.thread)),
+                )?;
+                if thread
+                    .approvals
+                    .iter()
+                    .any(|a| a.input == input.key() && !a.completed)
+                {
+                    continue;
+                }
+            }
         }
         live_inputs.lock().unwrap().remove(&input.key());
         fs::remove_file(path)?;
+    }
+    Ok(())
+}
+fn report_input_failure<P: ConversationProvider, T: DiscordTransport>(
+    runner: &mut DiscordRunner<P, T>,
+    input: &Input,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let index: Index = read(&state_root(&runner.home).join("index.json"))?;
+    let binding = match &input.kind {
+        InputKind::Command { .. } => index.commands.get(&input.id),
+        _ => index.threads.get(&input.channel),
+    };
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    let project = &runner.config.projects[&binding.project];
+    let path = project
+        .checkout
+        .path
+        .join(".fluent/work/discord/threads")
+        .join(format!("{}.json", binding.thread));
+    let mut thread: Thread = read(&path)?;
+    let id = format!("{}:failure", input.key());
+    if !thread.deliveries.iter().any(|d| d.id == id) {
+        let text = if let Some(provider) =
+            error.downcast_ref::<crate::conversation::ProviderError>()
+        {
+            crate::conversation::provider_recovery_message(&provider.failure, false)
+        } else if matches!(input.kind, InputKind::Approval { .. }) {
+            "Approval is stale, revoked, or needs fresh confirmation from a project approver. Request work status and review a new control; accepted history is preserved.".into()
+        } else {
+            "This input is preserved but could not complete. The owner should check provider login and local Fluent status. An accepted or uncertain provider turn will not be repeated.".into()
+        };
+        thread.deliveries.push(Delivery {
+            id,
+            channel: binding.thread.clone(),
+            text,
+            message_id: None,
+            approval: None,
+        });
+        write(&path, &thread)?;
+    }
+    super::rendering::prepare_deliveries(&mut thread, &project.checkout.path);
+    write(&path, &thread)?;
+    for i in 0..thread.deliveries.len() {
+        if thread.deliveries[i].message_id.is_none() {
+            thread.deliveries[i].message_id =
+                Some(runner.transport.deliver(&thread.deliveries[i])?);
+            write(&path, &thread)?;
+        }
     }
     Ok(())
 }
@@ -308,6 +389,10 @@ fn run_gateway(
     connected: &std::sync::atomic::AtomicBool,
     live_inputs: &std::sync::Mutex<BTreeSet<String>>,
 ) -> Result<()> {
+    write(
+        &state_root(home).join("status.json"),
+        &OperationalState::default(),
+    )?;
     let session_path = state_root(home).join("gateway.json");
     let mut session: GatewaySession = read(&session_path)?;
     let gateway = client.request("GET", "/gateway/bot", None)?;
@@ -317,13 +402,7 @@ fn run_gateway(
         .to_owned();
     loop {
         let url = session.resume_url.as_deref().unwrap_or(&fallback);
-        if !url.starts_with("wss://gateway.discord.gg")
-            && !url.starts_with("wss://gateway-us-east1-b.discord.gg")
-        {
-            bail!("Discord returned an untrusted Gateway URL");
-        }
-        let connection =
-            tungstenite::connect(format!("{}/?v=10&encoding=json", url.trim_end_matches('/')));
+        let connection = tungstenite::connect(gateway_url(url)?);
         let (mut socket, _) = match connection {
             Ok(connection) => connection,
             Err(_) => {
@@ -387,15 +466,23 @@ fn run_gateway(
                 let authorized = normalize_attribution(home, &config, &mut input)
                     .and_then(|_| authorize_ingress(home, &config, &input))
                     .is_ok();
+                // Hold this small admission lock until acknowledgement resolves so the
+                // worker cannot mistake a just-persisted live control for a recovered one.
+                let mut live = live_inputs.lock().unwrap();
                 if authorized {
                     persist_ingress(home, &config, &input)?;
-                    live_inputs.lock().unwrap().insert(input.key());
                 }
-                let accepted = authorized;
                 if payload["t"] == "INTERACTION_CREATE" {
                     if let Some(token) = payload["d"]["token"].as_str() {
-                        let _ = client.acknowledge(&input.id, token, accepted);
+                        if client.acknowledge(&input.id, token, authorized).is_ok()
+                            && authorized
+                            && connected.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            live.insert(input.key());
+                        }
                     }
+                } else if authorized {
+                    live.insert(input.key());
                 }
             }
             let responses = match session.handle(&payload, token) {
@@ -441,4 +528,71 @@ fn run_gateway(
         }
         std::thread::sleep(Duration::from_secs(5));
     }
+}
+
+/// Authenticate the selected provider using only this bound thread's private state.
+pub fn provider_login(home: &Path, project: &str, thread: &str, provider: &str) -> Result<()> {
+    provider_login_with_executable(home, project, thread, provider, Path::new(provider))
+}
+#[doc(hidden)]
+pub fn provider_login_with_executable(
+    home: &Path,
+    label: &str,
+    thread: &str,
+    provider: &str,
+    executable: &Path,
+) -> Result<()> {
+    snowflake(thread)?;
+    let config = read_config(home)?;
+    let index: Index = read(&state_root(home).join("index.json"))?;
+    let binding = index
+        .threads
+        .get(thread)
+        .context("Discord thread is not bound")?;
+    let project = config
+        .projects
+        .get(label)
+        .context("project is unavailable")?;
+    if binding.project != label
+        || binding.provider != provider
+        || binding.checkout != project.checkout.identity
+        || !checkout_is_available(&project.checkout)
+    {
+        bail!("provider login does not match the bound project and provider");
+    }
+    let draft = project
+        .checkout
+        .path
+        .join(".fluent/work/discord/drafts")
+        .join(thread);
+    let private_home = draft.join(".provider-home");
+    fs::create_dir_all(&private_home)?;
+    let mut command = Command::new(executable);
+    command
+        .current_dir(&project.checkout.path)
+        .env("HOME", private_home)
+        .env_remove("DISCORD_BOT_TOKEN")
+        .env_remove("DISCORD_TOKEN");
+    match provider {
+        "codex" => {
+            let path = draft.join(".codex-home");
+            fs::create_dir_all(&path)?;
+            command
+                .env("CODEX_HOME", path)
+                .env_remove("CLAUDE_CONFIG_DIR")
+                .arg("login");
+        }
+        "claude" => {
+            let path = draft.join(".claude-home");
+            fs::create_dir_all(&path)?;
+            command
+                .env("CLAUDE_CONFIG_DIR", path)
+                .env_remove("CODEX_HOME");
+        }
+        _ => bail!("provider must be codex or claude"),
+    }
+    if !command.status()?.success() {
+        bail!("provider login did not complete");
+    }
+    Ok(())
 }

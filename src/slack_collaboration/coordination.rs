@@ -4,62 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-fn sanitize_provider_reply(reply: &str, checkout: &Path) -> String {
-    let reply = redact_secrets(reply);
-    let configured_root = checkout.to_string_lossy().trim_end_matches('/').to_owned();
-    let canonical_root = checkout
-        .canonicalize()
-        .ok()
-        .map(|path| path.to_string_lossy().trim_end_matches('/').to_owned());
-    let mut roots = vec![configured_root];
-    if let Some(root) = canonical_root
-        && !roots.contains(&root)
-    {
-        roots.push(root);
-    }
-    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
-
-    reply
-        .split_inclusive(char::is_whitespace)
-        .map(|piece| {
-            let body_len = piece.trim_end_matches(char::is_whitespace).len();
-            let (body, whitespace) = piece.split_at(body_len);
-            let Some(slash) = body.char_indices().find_map(|(index, character)| {
-                if character != '/' {
-                    return None;
-                }
-                let begins_absolute_path = index == 0
-                    || body[..index].chars().next_back().is_some_and(|character| {
-                        !character.is_alphanumeric() && !"/\\._-".contains(character)
-                    });
-                begins_absolute_path.then_some(index)
-            }) else {
-                return piece.to_owned();
-            };
-            let prefix = &body[..slash];
-            if prefix.ends_with("http:") || prefix.ends_with("https:") {
-                return piece.to_owned();
-            }
-            let candidate_with_punctuation = &body[slash..];
-            let candidate = candidate_with_punctuation
-                .trim_end_matches([')', ']', '}', '>', ',', ';', '\'', '"', '`']);
-            let punctuation = &candidate_with_punctuation[candidate.len()..];
-            let replacement = roots
-                .iter()
-                .find_map(|root| {
-                    candidate.strip_prefix(root).and_then(|suffix| {
-                        if suffix.is_empty() {
-                            Some(".".to_owned())
-                        } else {
-                            suffix.strip_prefix('/').map(ToOwned::to_owned)
-                        }
-                    })
-                })
-                .unwrap_or_else(|| "[REDACTED_PATH]".to_owned());
-            format!("{prefix}{replacement}{punctuation}{whitespace}")
-        })
-        .collect()
-}
+use crate::conversation::sanitize_provider_reply;
 
 fn project_enablement_request(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();

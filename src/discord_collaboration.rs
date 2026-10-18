@@ -11,10 +11,12 @@ use crate::conversation::{Checkout, ConversationProvider, ProviderScope, Provide
 use crate::slack_collaboration::checkout_is_available;
 use sha2::{Digest, Sha256};
 mod gateway;
+mod rendering;
 mod service;
 mod transport;
 mod work;
 pub use gateway::*;
+pub use rendering::render_delivery;
 pub use service::*;
 pub use transport::*;
 pub use work::*;
@@ -193,6 +195,8 @@ pub struct Thread {
     #[serde(default)]
     pub history_cursor: String,
     #[serde(default)]
+    pub correction_cursor: usize,
+    #[serde(default)]
     pub approval: Option<PendingApproval>,
     #[serde(default)]
     pub approvals: Vec<AcceptedApproval>,
@@ -315,6 +319,8 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             &path,
             self.recovered,
         )? {
+            rendering::prepare_deliveries(&mut thread, &project.checkout.path);
+            write(&path, &thread)?;
             for i in 0..thread.deliveries.len() {
                 if thread.deliveries[i].message_id.is_none() {
                     thread.deliveries[i].message_id =
@@ -366,6 +372,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 }
             };
             self.provider.select(&binding.provider)?;
+            self.provider.ready()?;
             let scope = ProviderScope {
                 checkout: project.checkout.path.clone(),
                 slice_draft: project
@@ -396,7 +403,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 let session = thread.session.clone();
                 thread.pending.as_mut().unwrap().dispatched = true;
                 write(&path, &thread)?;
-                let (new_session, response) = self.provider.run_turn(
+                let result = self.provider.run_turn(
                     &action_id,
                     session.as_deref(),
                     &scope,
@@ -406,7 +413,24 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                         thread.pending.as_mut().unwrap().accepted = Some(turn.into());
                         write(&path, &thread)
                     },
-                )?;
+                );
+                let (new_session, response) = match result {
+                    Ok(output) => output,
+                    Err(error) => {
+                        if thread.pending.as_ref().unwrap().accepted.is_none()
+                            && matches!(
+                                error.failure,
+                                crate::conversation::ProviderFailure::Authentication
+                                    | crate::conversation::ProviderFailure::HostCredentialDenied
+                            )
+                        {
+                            thread.pending.as_mut().unwrap().dispatched = false;
+                            write(&path, &thread)?;
+                        }
+                        return Err(error.into());
+                    }
+                };
+
                 if new_session.is_some() {
                     thread.session = new_session;
                 }
@@ -414,14 +438,23 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             };
             match serde_json::from_str::<crate::conversation::ProviderOutput>(&response) {
                 Ok(crate::conversation::ProviderOutput::PlanningArtifact { kind, markdown }) => {
+                    let markdown = crate::conversation::sanitize_provider_reply(
+                        &markdown,
+                        &project.checkout.path,
+                    );
                     let artifact = crate::conversation::ArtifactRevision::new(&kind, &markdown);
-                    work::offer_action(
+                    if let Err(error) = work::offer_action(
                         &project.checkout.path,
                         &binding,
                         &mut thread,
                         WorkAction::Planning { artifact },
                         &markdown,
-                    )?;
+                    ) {
+                        if !error.is::<crate::work_model::WorkModelError>() {
+                            return Err(error);
+                        }
+                        thread.deliveries.push(Delivery{id:format!("{key}:planning-order"),channel:binding.thread.clone(),text:format!("This artifact is outside the current planning order. Approve Brief, Behaviors, Approach, then Plan. Ask for the next stage.\n\n{markdown}"),message_id:None,approval:None});
+                    }
                 }
                 output => {
                     let text = match output {
@@ -447,6 +480,8 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             thread.pending = None;
             write(&path, &thread)?;
         }
+        rendering::prepare_deliveries(&mut thread, &project.checkout.path);
+        write(&path, &thread)?;
         for i in 0..thread.deliveries.len() {
             if thread.deliveries[i].message_id.is_none() {
                 thread.deliveries[i].message_id =
@@ -502,11 +537,25 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                 }
             }
             let current: Thread = read(&path)?;
-            for input in
-                self.transport
-                    .corrections(&binding.guild, &binding.thread, &current.inputs)?
-            {
-                self.ingest_recovered(input)?;
+            let messages = current
+                .inputs
+                .iter()
+                .filter(|i| matches!(i.kind, InputKind::Message { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !messages.is_empty() {
+                let offset = current.correction_cursor % messages.len();
+                let end = (offset + 100).min(messages.len());
+                for input in self.transport.corrections(
+                    &binding.guild,
+                    &binding.thread,
+                    &messages[offset..end],
+                )? {
+                    self.ingest_recovered(input)?;
+                }
+                let mut updated: Thread = read(&path)?;
+                updated.correction_cursor = end % messages.len();
+                write(&path, &updated)?;
             }
         }
         Ok(())

@@ -271,6 +271,15 @@ pub enum DiscordCommands {
     Register,
     /// Print the local checkout identity
     CheckoutIdentity { path: PathBuf },
+    /// Authenticate the provider in one bound thread's private state
+    ProviderLogin {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        provider: String,
+    },
     /// Install and start the local runner at login
     Enable,
     /// Run the Gateway connection in the foreground

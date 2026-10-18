@@ -315,6 +315,11 @@ fn cmd_discord(command: fluent::cli::DiscordCommands) -> Result<()> {
             client.register_command(&config.guild_id)?;
             println!("Registered /fluent in the approved server.");
         }
+        DiscordCommands::ProviderLogin {
+            project,
+            thread,
+            provider,
+        } => discord::provider_login(&home, &project, &thread, &provider)?,
         DiscordCommands::Enable => {
             let (config, _) = discord::configured_client(&home)?;
             discord::enable_runner(
