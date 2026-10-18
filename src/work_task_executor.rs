@@ -821,6 +821,7 @@ fn run_task_with_dispatch(
     let project_root = config.project_root;
     let store = config.store;
     let work_item_id = config.work_item_id;
+    let attempt_id = config.attempt_id;
     let task_id = config.task_id;
     let item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     item.ensure_mutation_compatible()?;
@@ -883,8 +884,38 @@ fn run_task_with_dispatch(
     let build_lease_path = build_output_lease_path(project_root, work_item_id, config.attempt_id);
     let build_lease = crate::lease::acquire_shared_blocking(&build_lease_path)
         .with_context(|| format!("reserve managed build output for Task {task_id}"))?;
+    let reviewer_scratch_lease = if task_kind == TaskKind::Review {
+        Some(crate::lease::acquire_shared_blocking(
+            &reviewer_scratch_lease_path(project_root, work_item_id, attempt_id, task_id),
+        )?)
+    } else {
+        None
+    };
     let result = dispatch(config, task_kind);
+    // Let settlement reclaim this Task's scratch without disturbing live peers.
+    drop(reviewer_scratch_lease);
     drop(build_lease);
+    if task_kind == TaskKind::Review {
+        let cleanup = (|| -> Result<()> {
+            let _lock = crate::lease::acquire_blocking(&reviewer_cache_lock_path(project_root))?;
+            reclaim_terminal_reviewer_caches(project_root, store)?;
+            let item = store.read_work_item(work_item_id)?;
+            if let Some(task) = item
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| attempt.tasks.iter().find(|task| task.id == task_id))
+                && task_is_terminal(task)
+            {
+                let artifact_dir = reviewer_cache_artifact_dir(project_root, task)?;
+                record_review_artifact_usage(&artifact_dir, &|message| eprintln!("{message}"))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = cleanup {
+            eprintln!("warning: could not reclaim settled Reviewer output: {error:#}");
+        }
+    }
     reclaim_managed_build_output(project_root, store);
     if let Err(error) = read_work_item_or_not_found(store, work_item_id).and_then(|item| {
         crate::work_status::refresh_persisted_task_metrics(project_root, &item, task_id)
@@ -9534,6 +9565,46 @@ fn reviewer_cache_artifact_dir(
     resolve_managed_artifact_area_path(project_root, &area.path)
 }
 
+fn verified_reviewer_scratch(artifact_dir: &Path) -> Result<Option<PathBuf>> {
+    let scratch = artifact_dir.join("scratch");
+    match fs::symlink_metadata(&scratch) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            Ok(Some(scratch))
+        }
+        Ok(_) => bail!(
+            "Reviewer scratch is not a regular directory: {}",
+            scratch.display()
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect Reviewer scratch {}", scratch.display()))
+        }
+    }
+}
+
+fn reviewer_scratch_cache_bytes(artifact_dir: &Path) -> Result<u64> {
+    match verified_reviewer_scratch(artifact_dir)? {
+        Some(scratch) => prep::managed_cache_bytes(&scratch),
+        None => Ok(0),
+    }
+}
+
+fn remove_reviewer_scratch_cache(artifact_dir: &Path, reporter: &dyn Fn(&str)) -> Result<()> {
+    let Some(scratch) = verified_reviewer_scratch(artifact_dir)? else {
+        return Ok(());
+    };
+    for path in prep::managed_cache_dirs(&scratch)? {
+        let bytes = prep::logical_bytes(&path)?;
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("remove settled Reviewer build output {}", path.display()))?;
+        reporter(&format!(
+            "  Reviewer cache    reclaimed {} ({bytes} bytes)",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct BuildReclamationReport {
     reclaimed_paths: Vec<PathBuf>,
@@ -9547,6 +9618,19 @@ fn build_output_lease_path(project_root: &Path, work_id: &str, attempt_id: &str)
         .join(".fluent/build-output-locks")
         .join(work_id)
         .join(format!("{attempt_id}.lock"))
+}
+
+fn reviewer_scratch_lease_path(
+    project_root: &Path,
+    work_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> PathBuf {
+    project_root
+        .join(".fluent/build-output-locks/reviewer-scratch")
+        .join(work_id)
+        .join(attempt_id)
+        .join(format!("{task_id}.lock"))
 }
 
 fn historical_fixture_name_is_managed(name: &str) -> bool {
@@ -9984,7 +10068,8 @@ fn protected_reviewer_cache_keys(
 }
 
 fn protected_reviewer_cache_bytes(project_root: &Path, store: &WorkModelStore) -> Result<u64> {
-    let keys = protected_reviewer_cache_keys(project_root, &store.list_work_items()?);
+    let items = store.list_work_items()?;
+    let keys = protected_reviewer_cache_keys(project_root, &items);
     let mut bytes = 0_u64;
     for key in keys {
         bytes = bytes
@@ -9992,6 +10077,21 @@ fn protected_reviewer_cache_bytes(project_root: &Path, store: &WorkModelStore) -
                 &reviewer_cache_root(project_root).join(key),
             )?)
             .ok_or_else(|| anyhow::anyhow!("protected reviewer cache size overflow"))?;
+    }
+    for task in items
+        .iter()
+        .flat_map(|item| &item.attempts)
+        .flat_map(|attempt| &attempt.tasks)
+        .filter(|task| task.kind == TaskKind::Review && task.status == TaskStatus::Executing)
+    {
+        if task.artifact_area.is_some() {
+            bytes = bytes
+                .checked_add(reviewer_scratch_cache_bytes(&reviewer_cache_artifact_dir(
+                    project_root,
+                    task,
+                )?)?)
+                .ok_or_else(|| anyhow::anyhow!("protected reviewer cache size overflow"))?;
+        }
     }
     Ok(bytes)
 }
@@ -10046,6 +10146,24 @@ fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore)
                 if artifact_dir.exists() {
                     prep::remove_managed_cache_dirs(&artifact_dir)?;
                 }
+                if verified_reviewer_scratch(&artifact_dir)?.is_some() {
+                    match crate::lease::try_acquire(&reviewer_scratch_lease_path(
+                        project_root,
+                        &item.id,
+                        &attempt.id,
+                        &task.id,
+                    ))? {
+                        crate::lease::LeaseAttempt::Acquired(_lease) => {
+                            remove_reviewer_scratch_cache(&artifact_dir, &|message| {
+                                eprintln!("{message}")
+                            })?;
+                        }
+                        crate::lease::LeaseAttempt::Contended => eprintln!(
+                            "  Reviewer cache    skipped {}: active Task lease",
+                            artifact_dir.join("scratch").display()
+                        ),
+                    }
+                }
             }
         }
     }
@@ -10054,14 +10172,13 @@ fn reclaim_terminal_reviewer_caches(project_root: &Path, store: &WorkModelStore)
 
 fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> Result<u64> {
     let mut total = 0_u64;
-    let _ = store;
     let root = reviewer_cache_root(project_root);
     let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("read candidate reviewer cache root"),
     };
-    for entry in entries {
+    for entry in entries.into_iter().flatten() {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
@@ -10075,6 +10192,20 @@ fn managed_reviewer_cache_total(project_root: &Path, store: &WorkModelStore) -> 
                 .checked_add(prep::managed_cache_bytes(&entry.path())?)
                 .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
         }
+    }
+    for task in store
+        .list_work_items()?
+        .iter()
+        .flat_map(|item| &item.attempts)
+        .flat_map(|attempt| &attempt.tasks)
+        .filter(|task| task.kind == TaskKind::Review && task.artifact_area.is_some())
+    {
+        total = total
+            .checked_add(reviewer_scratch_cache_bytes(&reviewer_cache_artifact_dir(
+                project_root,
+                task,
+            )?)?)
+            .ok_or_else(|| anyhow::anyhow!("managed reviewer cache total overflow"))?;
     }
     Ok(total)
 }
@@ -15317,6 +15448,42 @@ mod tests {
             self.run_with_messages(admission).0
         }
 
+        fn run_with_lifecycle(&self, admission: &dyn ReviewerCacheAdmission) -> bool {
+            let saw_warm_cache = Arc::new(Mutex::new(false));
+            let saw_warm_cache_for_coder = Arc::clone(&saw_warm_cache);
+            let make_coder = move |_sandbox: CoderSandbox| -> Box<dyn crate::coder::Coder> {
+                Box::new(CacheObservingReviewCoder {
+                    saw_warm_cache: Arc::clone(&saw_warm_cache_for_coder),
+                    cache_dir: self.cache_dir.clone(),
+                })
+            };
+            let resolver = ContentResolver::new(Some(&self.project_root));
+            run_task_with_dispatch(
+                WorkTaskRunConfig {
+                    project_root: &self.project_root,
+                    store: &self.store,
+                    work_item_id: "work-1",
+                    attempt_id: "attempt-1",
+                    task_id: &self.review_task_id,
+                    resolver: &resolver,
+                    extra_args: &[],
+                    no_sandbox: true,
+                    store_lock: None,
+                },
+                |config, kind| {
+                    assert_eq!(kind, TaskKind::Review);
+                    run_review_task_with_coder(
+                        config,
+                        Some(&make_coder),
+                        admission,
+                        &report_reviewer_cache,
+                    )
+                },
+            )
+            .unwrap();
+            *saw_warm_cache.lock().unwrap()
+        }
+
         fn review_status(&self) -> TaskStatus {
             self.store.read_work_item("work-1").unwrap().attempts[0]
                 .tasks
@@ -15601,6 +15768,29 @@ mod tests {
             profile.contains(&cache_write),
             "admitted Reviewer must receive the shared cache write grant"
         );
+    }
+
+    #[test]
+    fn cold_reviewer_route_clears_build_output_after_settlement() {
+        let fixture = ReviewerCacheRouteFixture::new(
+            "reviewer-cache:\n  max-project-gib: 1\n  min-free-gib: 0\n",
+        );
+        let scratch = fixture.artifact_dir.join("scratch");
+        fs::create_dir_all(scratch.join("target")).unwrap();
+        fs::write(scratch.join("target/output"), b"cold output").unwrap();
+        fs::create_dir_all(scratch.join("cargo-home")).unwrap();
+        fs::write(scratch.join("cargo-home/config"), b"private config").unwrap();
+        fs::create_dir_all(fixture.cache_dir.join("target")).unwrap();
+        fs::File::create(fixture.cache_dir.join("target/output"))
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+
+        assert!(!fixture.run_with_lifecycle(&FilesystemReviewerCacheAdmission));
+        assert_eq!(fixture.review_status(), TaskStatus::Complete);
+        assert!(!scratch.join("target").exists());
+        assert!(scratch.join("cargo-home/config").is_file());
+        assert!(fixture.artifact_dir.join("review.md").is_file());
     }
 
     #[test]
@@ -16238,6 +16428,90 @@ mod tests {
         reclaim_terminal_reviewer_caches(project, &store).unwrap();
         reclaim_terminal_reviewer_caches(project, &store).unwrap();
         assert!(!artifact.join("target").exists());
+    }
+
+    #[test]
+    fn cold_reviewer_scratch_is_accounted_and_reclaimed_after_settlement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let artifact_relative =
+            crate::work_model::work_artifact_path("work-1", "attempt-1", "review-1");
+        let artifact = project.join(&artifact_relative);
+        fs::create_dir_all(artifact.join("scratch/target")).unwrap();
+        fs::create_dir_all(artifact.join("scratch/cargo-home")).unwrap();
+        fs::write(artifact.join("scratch/target/output"), b"cold build").unwrap();
+        fs::write(
+            artifact.join("scratch/cargo-home/config"),
+            b"private cargo config",
+        )
+        .unwrap();
+        fs::write(artifact.join("review.md"), b"Verdict: pass\n").unwrap();
+
+        let store = WorkModelStore::new(project);
+        let mut item = WorkItem {
+            id: "work-1".into(),
+            title: "Cold reviewer".into(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut item.attempts[0].tasks[0];
+        task.id = "review-1".into();
+        task.kind = TaskKind::Review;
+        task.status = TaskStatus::Executing;
+        task.workspace_access.writes.clear();
+        task.workspace_access.reads.push(WorkspaceRef {
+            id: "candidate".into(),
+            path: "candidate".into(),
+        });
+        task.review_context = Some(crate::work_model::ReviewContext {
+            candidate_workspace_id: "candidate".into(),
+            candidate_workspace_path: "candidate".into(),
+            source_branch: "main".into(),
+            candidate_commit: "abc123".into(),
+            base_commit: None,
+        });
+        task.artifact_area = Some(crate::work_model::TaskArtifactArea {
+            path: artifact_relative,
+        });
+        store.create_work_item(&item).unwrap();
+
+        assert_eq!(managed_reviewer_cache_total(project, &store).unwrap(), 10);
+        assert_eq!(protected_reviewer_cache_bytes(project, &store).unwrap(), 10);
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        assert!(artifact.join("scratch/target/output").is_file());
+
+        store
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].tasks[0].status = TaskStatus::Complete;
+                Ok(())
+            })
+            .unwrap();
+        let lease = crate::lease::acquire_shared_blocking(&reviewer_scratch_lease_path(
+            project,
+            "work-1",
+            "attempt-1",
+            "review-1",
+        ))
+        .unwrap();
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        assert!(artifact.join("scratch/target/output").is_file());
+        drop(lease);
+        reclaim_terminal_reviewer_caches(project, &store).unwrap();
+        assert!(!artifact.join("scratch/target").exists());
+        assert!(artifact.join("scratch/cargo-home/config").is_file());
+        assert!(artifact.join("review.md").is_file());
+        assert_eq!(managed_reviewer_cache_total(project, &store).unwrap(), 0);
+
+        #[cfg(unix)]
+        {
+            let outside = project.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("output"), b"private").unwrap();
+            std::os::unix::fs::symlink(&outside, artifact.join("scratch/target")).unwrap();
+            assert!(reclaim_terminal_reviewer_caches(project, &store).is_err());
+            assert!(managed_reviewer_cache_total(project, &store).is_err());
+            assert!(outside.join("output").is_file());
+        }
     }
 
     #[test]

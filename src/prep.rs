@@ -100,7 +100,7 @@ pub fn populate_managed_cache(source: &Path, destination: &Path) -> Result<()> {
 }
 
 /// Return the canonical build-cache directories present directly under `root`.
-fn managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn managed_cache_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for name in TOOLCHAINS.iter().flat_map(|toolchain| toolchain.dirs) {
         let path = root.join(name);

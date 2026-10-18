@@ -4,6 +4,28 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Reserve managed build output through Task settlement
+
+Every Task launch takes a shared lease at
+`.fluent/build-output-locks/<work-id>/<attempt-id>.lock` before dispatch and
+holds it through Task settlement. The worktree reclaimer takes the exclusive
+lease before measuring or deleting output. It skips a contended lease and
+retains output when ownership or liveness is uncertain. Keep the lease files
+outside `.fluent/work` so rejected starts do not change durable Work state.
+New Task routes must use the common dispatch boundary or take the same shared
+lease for their full build-output lifetime.
+
+Cold Reviewer builds write canonical targets under their Task artifact's
+`scratch` directory. Count those targets in reviewer usage while the Task
+executes, then remove them after settlement while preserving review evidence
+and private Cargo configuration. Review Tasks also hold a shared lease at
+`.fluent/build-output-locks/reviewer-scratch/<work-id>/<attempt-id>/<task-id>.lock`
+through dispatch. The settlement path releases it before cleanup; a later
+admission may clear settled scratch only after it obtains that Task's
+exclusive scratch lease.
+
+---
+
 ## Reclaim only owned historical fixture targets
 
 Managed historical fixtures live under a candidate worktree's `.scratch`
