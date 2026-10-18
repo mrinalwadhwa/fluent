@@ -5707,6 +5707,18 @@ mod tests {
         let check_id = assessment.checks[0].id.clone();
         let command = assessment.checks[0].command.clone();
 
+        // Point the verification reference at the native test we will observe so the
+        // pending-review and failed-review sub-cases below test the right rejection path.
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements[0]
+            .verification_refs =
+            vec![
+                r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#
+                    .to_string(),
+            ];
         let store = WorkModelStore::new(root.path());
         store.create_work_item(&item).unwrap();
 
@@ -5820,6 +5832,95 @@ mod tests {
             )
             .is_err(),
             "harness mismatch must be rejected"
+        );
+
+        // Sub-case: valid attachment creates a Planned review; the named-test reference
+        // must stay unsatisfied until the review passes (unreviewed clause of Behavior B2).
+        let valid_obs_doc = make_evidence(
+            &command,
+            "shell-harness",
+            vec![work_model::NativeTestObservation {
+                id: "tests/native.sh::observed-test".to_string(),
+                harness: "shell-harness".to_string(),
+            }],
+        );
+        let obs_path = write_evidence(&valid_obs_doc);
+        let recovery = attach_native_observations_for_required_check(
+            root.path(),
+            &store,
+            "verification",
+            "attempt-1",
+            &candidate,
+            &check_id,
+            &obs_path,
+        )
+        .expect("valid observation attachment must succeed");
+        assert_eq!(recovery.state, EvidenceRecoveryState::Reviewing);
+
+        let item_snap = store.read_work_item("verification").unwrap();
+        let pending_assessment = crate::verification_assessment::assess_current_verification(
+            root.path(),
+            &item_snap.attempts[0],
+        )
+        .unwrap();
+        assert!(
+            pending_assessment.references.iter().all(|r| !r.satisfied),
+            "references must remain unsatisfied while Tests Review is pending: {:?}",
+            pending_assessment.references
+        );
+
+        // Sub-case: complete the review with a failing verdict; references still unsatisfied.
+        store
+            .mutate_work_item("verification", |item| {
+                let attempt = &mut item.attempts[0];
+                let review_id =
+                    recovery.targets[0].review_task_id.as_ref().unwrap().clone();
+                let review =
+                    attempt.tasks.iter_mut().find(|t| t.id == review_id).unwrap();
+                work_model::set_task_terminal(review, TaskStatus::Complete);
+                let area =
+                    root.path().join(review.artifact_area.as_ref().unwrap().path.clone());
+                fs::create_dir_all(&area).unwrap();
+                fs::write(area.join("review.md"), "Verdict: fail\n").unwrap();
+                let nat_recovery = attempt
+                    .evidence_recoveries
+                    .iter_mut()
+                    .find(|r| r.id == recovery.id)
+                    .unwrap();
+                nat_recovery.state = EvidenceRecoveryState::Complete;
+                nat_recovery.targets[0].review_digest =
+                    Some(crate::verification_policy::digest(b"Verdict: fail\n"));
+                Ok(())
+            })
+            .unwrap();
+
+        let item_snap = store.read_work_item("verification").unwrap();
+        let failed_assessment = crate::verification_assessment::assess_current_verification(
+            root.path(),
+            &item_snap.attempts[0],
+        )
+        .unwrap();
+        assert!(
+            failed_assessment.references.iter().all(|r| !r.satisfied),
+            "references must remain unsatisfied when Tests Review failed: {:?}",
+            failed_assessment.references
+        );
+
+        // Sub-case: idempotent replay of the same attachment returns the same recovery.
+        let recovery2 = attach_native_observations_for_required_check(
+            root.path(),
+            &store,
+            "verification",
+            "attempt-1",
+            &candidate,
+            &check_id,
+            &obs_path,
+        )
+        .expect("idempotent replay of an identical attachment must succeed");
+        assert_eq!(
+            recovery2.id,
+            recovery.id,
+            "idempotent replay must return the same recovery"
         );
     }
 }
