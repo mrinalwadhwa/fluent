@@ -3959,8 +3959,13 @@ pub(crate) fn failed_command_recheck_correction_artifacts(
 mod native_observation_tests {
     use super::*;
     use crate::{
-        host_evidence::{EvidenceDocument, EvidenceResult},
-        recovery_contracts::verification_tests::{accept_first_check, unique_harness_fixture},
+        host_evidence::{
+            EvidenceDocument, EvidenceResult, attach_native_observations_for_required_check,
+        },
+        recovery_contracts::{
+            assess_canonical_checks,
+            verification_tests::{accept_first_check, unique_harness_fixture},
+        },
         work_model::{
             EvidenceRecoveryState, NativeTestObservation, TaskKind, TaskStatus, WorkModelStore,
         },
@@ -3983,8 +3988,7 @@ mod native_observation_tests {
             .commit
             .clone();
         item.attempts[0].status = work_model::AttemptStatus::Complete;
-        let assessment =
-            crate::recovery_contracts::assess_canonical_checks(root, &item.attempts[0]).unwrap();
+        let assessment = assess_canonical_checks(root, &item.attempts[0]).unwrap();
         let check_id = assessment.checks[0].id.clone();
         let command = assessment.checks[0].command.clone();
 
@@ -4013,7 +4017,7 @@ mod native_observation_tests {
         )
         .unwrap();
 
-        let recovery = crate::host_evidence::attach_native_observations_for_required_check(
+        let recovery = attach_native_observations_for_required_check(
             root,
             &store,
             &item.id,
@@ -4082,8 +4086,7 @@ mod native_observation_tests {
         );
 
         // The canonical Tester results file must be unmodified.
-        let canonical =
-            crate::recovery_contracts::assess_canonical_checks(root.path(), attempt).unwrap();
+        let canonical = assess_canonical_checks(root.path(), attempt).unwrap();
         let original_bytes = fs::read(&canonical.results_path).unwrap();
         let results: crate::tester::TesterResults =
             serde_json::from_slice(&original_bytes).unwrap();
