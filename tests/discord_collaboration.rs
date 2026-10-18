@@ -1697,6 +1697,63 @@ fn discord_approval_interruption_never_replaces_newer_planning() {
 }
 
 #[test]
+fn discord_runner_preflight_checks_role_and_overwrite_permissions() {
+    use serde_json::json;
+    let (_home, _project, config) = fixture();
+    let required: u64 = 1024 | 2048 | 16384 | 65536 | (1 << 35) | (1 << 38);
+    let overwrite = |id: &str, kind: u8, allow: u64, deny: u64| json!({"id":id,"type":kind,"allow":allow.to_string(),"deny":deny.to_string()});
+    let mut cases = vec![(required, vec![], true)];
+    for bit in [1024, 2048, 16384, 65536, 1 << 35, 1 << 38] {
+        cases.push((required & !bit, vec![], false));
+    }
+    cases.extend([
+        (required, vec![overwrite("100", 0, 0, 1024)], false),
+        (
+            required,
+            vec![overwrite("100", 0, 0, 1024), overwrite("101", 0, 1024, 0)],
+            true,
+        ),
+        (
+            required,
+            vec![overwrite("101", 0, 0, 1024), overwrite("102", 0, 1024, 0)],
+            true,
+        ),
+        (
+            required,
+            vec![overwrite("101", 0, 1024, 0), overwrite("900", 1, 0, 1024)],
+            false,
+        ),
+        (
+            required,
+            vec![overwrite("101", 0, 0, 1024), overwrite("900", 1, 1024, 0)],
+            true,
+        ),
+        (required & !1024, vec![overwrite("999", 0, 1024, 0)], false),
+    ]);
+    for (permissions, overwrites, allowed) in cases {
+        let (endpoint, server) = http_fixture(vec![
+            ("200 OK", json!({"flags":1<<19})),
+            ("200 OK", json!({"id":"900"})),
+            ("200 OK", json!({"owner_id":"999"})),
+            ("200 OK", json!({"roles":["101","102"]})),
+            (
+                "200 OK",
+                json!([{"id":"100","permissions":permissions.to_string()},{"id":"101","permissions":"0"},{"id":"102","permissions":"0"}]),
+            ),
+            (
+                "200 OK",
+                json!({"id":"200","type":0,"guild_id":"100","permission_overwrites":overwrites}),
+            ),
+        ]);
+        let result = DiscordRest::with_test_endpoint("test-token".into(), endpoint)
+            .unwrap()
+            .preflight(&config);
+        assert_eq!(result.is_ok(), allowed, "{permissions}: {result:?}");
+        assert_eq!(server.join().unwrap().len(), 6);
+    }
+}
+
+#[test]
 fn discord_approval_checks_revision_inside_model_mutation() {
     use fluent::work_approval::WorkApproval;
     use fluent::work_model::{WorkItem, WorkModelStore};
