@@ -211,6 +211,18 @@ fn read<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
         Err(e) => Err(e.into()),
     }
 }
+fn read_thread(path: &Path) -> Result<Thread> {
+    let bytes = fs::read(path)
+        .context("bound Discord conversation state is unavailable; restore its project snapshot")?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+fn thread_path(project: &Project, binding: &Binding) -> PathBuf {
+    project
+        .checkout
+        .path
+        .join(".fluent/work/discord/threads")
+        .join(format!("{}.json", binding.thread))
+}
 fn write(path: &Path, value: &impl Serialize) -> Result<()> {
     fs::create_dir_all(path.parent().context("state requires a parent directory")?)?;
     atomic_write(path, &serde_json::to_vec_pretty(value)?)?;
@@ -287,9 +299,28 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
                         provider: provider.into(),
                         thread: thread.clone(),
                     };
+                    let journal_path = root.join("initializing.json");
+                    let mut initializing: BTreeMap<String, Binding> = read(&journal_path)?;
+                    let binding = initializing
+                        .entry(input.id.clone())
+                        .or_insert(binding)
+                        .clone();
+                    write(&journal_path, &initializing)?;
+                    let path = thread_path(configured, &binding);
+                    // Only an uncommitted initialization may create an empty snapshot.
+                    // Publish the routing index last, before any provider dispatch.
+                    if !path.try_exists()? {
+                        write(&path, &Thread::default())?;
+                    } else {
+                        read_thread(&path)?;
+                    }
                     index.commands.insert(input.id.clone(), binding.clone());
-                    index.threads.insert(thread, binding.clone());
+                    index
+                        .threads
+                        .insert(binding.thread.clone(), binding.clone());
                     write(&index_path, &index)?;
+                    initializing.remove(&input.id);
+                    write(&journal_path, &initializing)?;
                     binding
                 }
             }
@@ -309,7 +340,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             .path
             .join(".fluent/work/discord/threads")
             .join(format!("{}.json", binding.thread));
-        let mut thread: Thread = read(&path)?;
+        let mut thread = read_thread(&path)?;
         if work::process_work(
             &self.home,
             project,
@@ -496,67 +527,83 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
             self.config = read_config(&self.home)?;
         }
         let index: Index = read(&state_root(&self.home).join("index.json"))?;
+        let mut failure = None;
         for binding in index.threads.values() {
-            let Some(project) = self.config.projects.get(&binding.project) else {
-                continue;
-            };
-            if binding.checkout != project.checkout.identity
-                || !checkout_is_available(&project.checkout)
-            {
-                continue;
+            // A broken project or retryable provider failure must not prevent other
+            // conversations from recovering. Return failure after visiting each one.
+            if let Err(error) = self.recover_thread(binding) {
+                failure = Some(error);
             }
-            let path = project
-                .checkout
-                .path
-                .join(".fluent/work/discord/threads")
-                .join(format!("{}.json", binding.thread));
-            let thread: Thread = read(&path)?;
-            // An accepted turn precedes subsequent history. Ingest also reconciles its outbox.
-            if let Some(pending) = thread.pending {
-                self.ingest_recovered(pending.input)?;
-            } else if let Some(last) = thread.inputs.last() {
-                self.ingest_recovered(last.clone())?;
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+    fn recover_input(&mut self, input: Input) -> Result<()> {
+        // A conclusive authority denial consumes history without granting access.
+        // Processing failures for admitted inputs remain retryable at this cursor.
+        if !service::admit_ingress(&self.home, &self.config, &input)? {
+            return Ok(());
+        }
+        self.ingest_recovered(input)
+    }
+    fn recover_thread(&mut self, binding: &Binding) -> Result<()> {
+        let Some(project) = self.config.projects.get(&binding.project) else {
+            return Ok(());
+        };
+        if binding.checkout != project.checkout.identity
+            || !checkout_is_available(&project.checkout)
+        {
+            return Ok(());
+        }
+        let path = thread_path(project, binding);
+        let thread = read_thread(&path)?;
+        if let Some(pending) = thread.pending {
+            self.recover_input(pending.input)?;
+        } else if let Some(last) = thread.inputs.last() {
+            self.recover_input(last.clone())?;
+        }
+        for _ in 0..100 {
+            let current = read_thread(&path)?;
+            let page =
+                self.transport
+                    .history(&binding.guild, &binding.thread, &current.history_cursor)?;
+            for input in page.inputs {
+                self.recover_input(input)?;
             }
-            for _ in 0..100 {
-                let current: Thread = read(&path)?;
-                let page = self.transport.history(
-                    &binding.guild,
-                    &binding.thread,
-                    &current.history_cursor,
-                )?;
-                for input in page.inputs {
-                    self.ingest_recovered(input)?;
-                }
-                let mut current: Thread = read(&path)?;
-                if let Some(cursor) = page.last_message {
-                    current.history_cursor = cursor;
-                    write(&path, &current)?;
-                }
-                if !page.has_more {
-                    break;
-                }
+            // Serialize the cursor with live ingestion so it cannot overwrite a turn.
+            let _lock = crate::lease::acquire_blocking(&state_root(&self.home).join("state.lock"))?;
+            let mut current = read_thread(&path)?;
+            if let Some(cursor) = page.last_message {
+                current.history_cursor = cursor;
+                write(&path, &current)?;
             }
-            let current: Thread = read(&path)?;
-            let messages = current
-                .inputs
-                .iter()
-                .filter(|i| matches!(i.kind, InputKind::Message { .. }))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !messages.is_empty() {
-                let offset = current.correction_cursor % messages.len();
-                let end = (offset + 100).min(messages.len());
-                for input in self.transport.corrections(
-                    &binding.guild,
-                    &binding.thread,
-                    &messages[offset..end],
-                )? {
-                    self.ingest_recovered(input)?;
-                }
-                let mut updated: Thread = read(&path)?;
-                updated.correction_cursor = end % messages.len();
-                write(&path, &updated)?;
+            if !page.has_more {
+                break;
             }
+        }
+        let current = read_thread(&path)?;
+        let messages = current
+            .inputs
+            .iter()
+            .filter(|i| matches!(i.kind, InputKind::Message { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            let offset = current.correction_cursor % messages.len();
+            let end = (offset + 100).min(messages.len());
+            for input in self.transport.corrections(
+                &binding.guild,
+                &binding.thread,
+                &messages[offset..end],
+            )? {
+                self.recover_input(input)?;
+            }
+            let _lock = crate::lease::acquire_blocking(&state_root(&self.home).join("state.lock"))?;
+            let mut updated = read_thread(&path)?;
+            updated.correction_cursor = end % messages.len();
+            write(&path, &updated)?;
         }
         Ok(())
     }

@@ -1269,3 +1269,130 @@ fn discord_runner_honors_global_rate_limit_deadline() {
             .contains("rate limit is still active")
     );
 }
+
+#[test]
+fn discord_restart_requires_established_snapshot() {
+    let (home, project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    fs::remove_file(project.path().join(".fluent/work/discord/threads/400.json")).unwrap();
+    assert!(
+        runner.ingest(command()).is_err(),
+        "missing established history must fail closed"
+    );
+    assert!(runner.recover().is_err());
+    assert_eq!(runner.provider().calls.len(), 1);
+}
+
+#[test]
+fn discord_restart_recovers_initial_snapshot_before_index() {
+    let (home, project, config) = fixture();
+    let root = state_root(home.path());
+    fs::create_dir_all(&root).unwrap();
+    // Interrupted initialization: the project snapshot was written, but the routing
+    // index was not. No provider turn can have begun before index publication.
+    let binding = serde_json::json!({"guild":"100","parent":"200","project":"app",
+        "checkout":config.projects["app"].checkout.identity,"provider":"codex","thread":"400"});
+    fs::write(
+        root.join("initializing.json"),
+        serde_json::to_vec(&serde_json::json!({"600":binding})).unwrap(),
+    )
+    .unwrap();
+    let path = project.path().join(".fluent/work/discord/threads/400.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&Thread::default()).unwrap()).unwrap();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    runner.ingest(command()).unwrap();
+    assert_eq!(runner.provider().calls.len(), 1);
+    let journal: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&fs::read(root.join("initializing.json")).unwrap()).unwrap();
+    assert!(journal.is_empty());
+}
+
+#[test]
+fn discord_restart_skips_denied_history_and_isolates_threads() {
+    struct History(Discord);
+    impl DiscordTransport for History {
+        fn ensure_thread(&mut self, command: &str, _: &str, _: &str) -> Result<String> {
+            Ok(if command == "600" { "400" } else { "401" }.into())
+        }
+        fn deliver(&mut self, d: &Delivery) -> Result<String> {
+            self.0.deliver(d)
+        }
+        fn history(&mut self, _: &str, channel: &str, after: &str) -> Result<HistoryPage> {
+            if !after.is_empty() {
+                return Ok(HistoryPage::default());
+            }
+            Ok(HistoryPage {
+                inputs: vec![
+                    Input {
+                        id: "800".into(),
+                        actor: "999".into(),
+                        channel: channel.into(),
+                        ..reply()
+                    },
+                    Input {
+                        id: "801".into(),
+                        actor: "300".into(),
+                        channel: channel.into(),
+                        ..reply()
+                    },
+                ],
+                last_message: Some("801".into()),
+                has_more: false,
+            })
+        }
+    }
+    let (home, project, mut config) = fixture();
+    let mut runner = DiscordRunner::new(
+        home.path(),
+        config.clone(),
+        Provider::default(),
+        History(Discord::default()),
+    )
+    .unwrap();
+    runner.ingest(command()).unwrap();
+    runner
+        .ingest(Input {
+            id: "602".into(),
+            ..command()
+        })
+        .unwrap();
+    runner.ingest(reply()).unwrap();
+    config
+        .projects
+        .get_mut("app")
+        .unwrap()
+        .participants
+        .remove("301");
+    write_config(home.path(), &config).unwrap();
+    runner.recover().unwrap();
+    runner.recover().unwrap();
+    assert_eq!(runner.provider().calls.len(), 5);
+    assert!(
+        runner
+            .provider()
+            .calls
+            .iter()
+            .all(|c| !c.3.ends_with(":999"))
+    );
+    for id in ["400", "401"] {
+        let thread: Thread = serde_json::from_slice(
+            &fs::read(
+                project
+                    .path()
+                    .join(format!(".fluent/work/discord/threads/{id}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(thread.history_cursor, "801");
+    }
+    // A retryable failure in one established thread must not suppress the other.
+    fs::remove_file(project.path().join(".fluent/work/discord/threads/400.json")).unwrap();
+    assert!(runner.recover().is_err());
+    assert_eq!(runner.provider().calls.len(), 5);
+}

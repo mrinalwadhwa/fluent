@@ -73,7 +73,7 @@ impl<P: ConversationProvider, T: DiscordTransport> DiscordRunner<P, T> {
         let path = checkout
             .join(".fluent/work/discord/threads")
             .join(format!("{thread_id}.json"));
-        let mut thread: Thread = read(&path)?;
+        let mut thread = read_thread(&path)?;
         let markdown = crate::conversation::sanitize_provider_reply(markdown, &checkout);
         let artifact = ArtifactRevision::new(kind, &markdown);
         let button = offer_action(

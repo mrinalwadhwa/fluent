@@ -161,18 +161,23 @@ pub fn configured_client(home: &Path) -> Result<(DiscordConfig, DiscordRest)> {
 }
 /// Persist only normalized inputs. Interaction tokens never enter the inbox.
 fn authorize_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<()> {
+    if !admit_ingress(home, config, input)? {
+        bail!("Discord actor or channel is not authorized");
+    }
+    Ok(())
+}
+pub(super) fn admit_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<bool> {
     config.validate()?;
     if input.guild != config.guild_id {
-        bail!("Discord server is not authorized");
+        return Ok(false);
     }
     let (parent, label) = match &input.kind {
         InputKind::Command { project, .. } => (input.channel.clone(), project.clone()),
         _ => {
             let index: Index = read(&state_root(home).join("index.json"))?;
-            let binding = index
-                .threads
-                .get(&input.channel)
-                .context("Discord thread is not bound")?;
+            let Some(binding) = index.threads.get(&input.channel) else {
+                return Ok(false);
+            };
             (binding.parent.clone(), binding.project.clone())
         }
     };
@@ -185,9 +190,9 @@ fn authorize_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Resu
             .get(&label)
             .is_some_and(|p| p.participants.contains(&input.actor))
     {
-        bail!("Discord actor or channel is not authorized");
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
 pub fn persist_ingress(home: &Path, config: &DiscordConfig, input: &Input) -> Result<()> {
     authorize_ingress(home, config, input)?;
@@ -211,7 +216,7 @@ fn normalize_attribution(home: &Path, config: &DiscordConfig, input: &mut Input)
             .projects
             .get(&binding.project)
             .context("project was revoked")?;
-        let thread: Thread = read(
+        let thread = read_thread(
             &project
                 .checkout
                 .path
@@ -268,7 +273,7 @@ pub fn process_inbox<P: ConversationProvider, T: DiscordTransport>(
             let index: Index = read(&state_root(&runner.home).join("index.json"))?;
             if let Some(binding) = index.threads.get(&input.channel) {
                 let project = &runner.config.projects[&binding.project];
-                let thread: Thread = read(
+                let thread = read_thread(
                     &project
                         .checkout
                         .path
