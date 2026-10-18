@@ -18,15 +18,21 @@ and targeted Review. A later no-change Writer or unrelated Task does not itself
 invalidate those bindings. Preserve the original producer and Review as
 provenance, and reject reuse when a newer conflicting result remains unresolved.
 Candidate-code evidence has no age-only expiry; live-state evidence requires an
-explicit positive lifetime. Older-candidate evidence cannot satisfy a changed
-candidate, but it must also not prevent that candidate's initial reviews and
-complete Tester from producing fresh proof.
+explicit positive lifetime. Ordinary current-candidate assessment does not
+transfer older-candidate proof to a changed candidate, or prevent that
+candidate's initial reviews and complete Tester from producing fresh proof.
+Landing's narrow expertise-only reuse exception follows the
+[reviewed command proof decision](../decisions.md#reuse-reviewed-command-proof-only-for-unchanged-inputs).
 
-Credit a canonical replacement only to its bound command occurrence. A
-structured failure is covered only by its exact command-index, command, and
-harness attribution. Missing command results, unrelated structured failures,
-extractor errors, and unresolved process leaks remain blockers. Evaluate the
-original complete run plus applicable replacements without rewriting its bytes.
+Credit a canonical replacement only to its bound command occurrence. Native
+test results carry a harness without a command index, so attribute them to an
+accepted command only when that harness occurs once in the ordered
+configuration. Repeated harnesses require the exact synthetic command-index,
+command, and harness identity. Use the same attribution for canonical defects
+and named references; apply accepted coverage in a derived result view and
+preserve the original failed result bytes. Missing command results, unrelated
+structured failures, extractor errors, and unresolved process leaks remain
+blockers.
 
 Revalidate accepted carried-finding proof without returning overall recovery
 success. Its acceptance satisfies only that finding; the shared recovery

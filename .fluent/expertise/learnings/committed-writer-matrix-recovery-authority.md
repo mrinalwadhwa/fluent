@@ -23,9 +23,21 @@ Keep the completed source Task and its artifacts intact, and give the corrective
 Writer a fresh matrix from the contract. Approval schedules a Writer; a
 separate resume executes it.
 
-For a valid incomplete committed matrix, preserve the saved-history admission
+For a parseable incomplete committed matrix, preserve the saved-history admission
 contract recorded in [decisions.md](../decisions.md#keep-saved-writer-history-aligned-with-stagnation-recovery).
-The pause label and pending rows alone do not prove stagnation.
+The pause label and pending rows alone do not prove stagnation. An earlier
+continuation may be a verified no-change run, but its saved declaration must
+match its output and unchanged commit. Every later Writer's base must match
+the preceding Writer's commit; individually valid outputs do not establish a
+connected history.
+
+For stalled or unfinished no-change recovery, partial claims on pending
+Writer-owned rows do not grant completion credit or prevent eligibility by
+themselves. Validate a copy with those rows' claims cleared, while still
+checking immutable rows and completed claims against the contract and findings.
+Retain the original source bytes and their audit binding. This eligibility
+view neither repairs the published matrix nor relaxes the evidence required
+when the corrective Writer marks a row complete.
 
 A valid no-change output does not itself finish every completion requirement.
 Validate the matrix against the immutable contract and review findings, then

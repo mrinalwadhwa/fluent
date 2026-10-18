@@ -18,8 +18,10 @@ requirement to match the current Writer and completion matrix. Only fresh
 explicit Plan attachment may settle a completed older-candidate Review as
 history, after validating its original Writer, source, evidence, and Review.
 That settlement cannot credit the current candidate, which still needs fresh
-host proof. Reject changed evidence or previously recorded Review bytes even
-when the saved verdict still says pass.
+host proof. Historical settlement validates the source Writer's matrix and
+does not depend on the later Writer's matrix being ready; current admission
+still requires that later matrix. Reject changed evidence or previously
+recorded Review bytes even when the saved verdict still says pass.
 
 For a matching current candidate, the Attempt loop settles passing Plan Reviews
 inside a fresh Work-model mutation and records their digests. Queue admission

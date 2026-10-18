@@ -99,6 +99,7 @@
 - [native-codex-display-is-disposable](native-codex-display-is-disposable.md) — Keep Codex TUI display backpressure separate from native evidence capture and Task supervision
 - [native-input-settlement-binds-identity](native-input-settlement-binds-identity.md) — Settle native Tasks only for the current execution generation, assigned conversation, and latest admitted input
 - [native-pi-input-failures-return-handled](native-pi-input-failures-return-handled.md) — Reject unacknowledged Pi input with a handled result because its installed runner swallows callback exceptions
+- [native-relay-tests-drain-before-comparing](native-relay-tests-drain-before-comparing.md) — Keep large-payload fixture work outside the Codex relay's bounded display drain while proving evidence settles before display consumption
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [negative-test-cross-product-coverage](negative-test-cross-product-coverage.md) — Negative tests for a multi-condition gate must hold all other conditions fixed while varying only the dimension under test — independent variation misses cross-product gaps
 - [next-action-guidance-is-an-executable-interface](next-action-guidance-is-an-executable-interface.md) — Render exact eligible CLI commands and preserve recovery blockers through status and show without generic resume fallbacks
