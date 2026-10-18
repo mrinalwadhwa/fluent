@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset CARGO_BUILD_TARGET
 
 repository="$(git rev-parse --show-toplevel)"
 REAL_GIT="$(command -v git)"
@@ -30,10 +31,28 @@ while (( $# )); do
   if [[ "$1" == --target-dir ]]; then target="$2"; break; fi
   shift
 done
-mkdir -p "$target/debug"
+cargo_target="${CARGO_BUILD_TARGET:-}"
+if [[ -z "$cargo_target" && -f "$PWD/.cargo/config.toml" ]]; then
+  cargo_target="$(sed -n 's/^target = "\([^"]*\)"$/\1/p' "$PWD/.cargo/config.toml")"
+fi
+if [[ -z "$cargo_target" && -f "${CARGO_HOME:-}/config.toml" ]]; then
+  cargo_target="$(sed -n 's/^target = "\([^"]*\)"$/\1/p' "$CARGO_HOME/config.toml")"
+fi
+binary_dir="$target/debug"
+if [[ -n "$cargo_target" ]]; then binary_dir="$target/$cargo_target/debug"; fi
+mkdir -p "$binary_dir"
 if [[ "${OMIT_BINARY:-0}" == 1 ]]; then exit 0; fi
-printf '#!/bin/sh\necho fixture\n' > "$target/debug/fluent"
-chmod +x "$target/debug/fluent"
+if [[ -n "$cargo_target" ]]; then
+  printf '#!/bin/sh\necho fixture %s\n' "$cargo_target" > "$binary_dir/fluent"
+else
+  printf '#!/bin/sh\necho fixture\n' > "$binary_dir/fluent"
+fi
+chmod +x "$binary_dir/fluent"
+if [[ "${EXTRA_HOST_BINARY:-0}" == 1 ]]; then
+  mkdir -p "$target/debug"
+  printf '#!/bin/sh\necho stray host\n' > "$target/debug/fluent"
+  chmod +x "$target/debug/fluent"
+fi
 SH
 chmod +x "$temporary/bin/cargo"
 cat > "$temporary/bin/rustc" <<'SH'
@@ -98,6 +117,8 @@ if field == 'rustc':
     expected['build_options']['RUSTC_VERSION'] = 'rustc concurrent'
 elif field == 'rustc_host':
     expected['rustc'] = 'rustc fixture\nhost: alternate-target\n'
+elif field.startswith('cargo_build_target:'):
+    expected['build_options']['CARGO_BUILD_TARGET'] = field.partition(':')[2]
 elif field == 'build_options':
     expected['build_options']['RUSTFLAGS'] = '-Copt-level=1'
 elif field == 'cargo':
@@ -143,6 +164,43 @@ verify_reader "$temporary/concurrent-one" "$(readlink "$(cat "$temporary/concurr
 FAKE_RUSTC_HOST='alternate-target' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/target"
 verify_reader "$temporary/target" "$(readlink "$(cat "$temporary/target")")" rustc_host
 [[ "$(readlink "$(cat "$temporary/target")")" != "$initial_entry" ]]
+CARGO_BUILD_TARGET='other-target' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/explicit-target"
+verify_reader "$temporary/explicit-target" "$(readlink "$(cat "$temporary/explicit-target")")" cargo_build_target:other-target
+[[ "$(readlink "$(cat "$temporary/explicit-target")")" != "$initial_entry" ]]
+[[ "$("$(cat "$temporary/explicit-target")")" == 'fixture other-target' ]]
+CARGO_BUILD_TARGET='fixture-target' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/explicit-host"
+verify_reader "$temporary/explicit-host" "$(readlink "$(cat "$temporary/explicit-host")")" cargo_build_target:fixture-target
+[[ "$(readlink "$(cat "$temporary/explicit-host")")" != "$initial_entry" ]]
+[[ "$("$(cat "$temporary/explicit-host")")" == 'fixture fixture-target' ]]
+builds_before="$(wc -l < "$BUILD_LOG")"
+if CARGO_BUILD_TARGET='../outside' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/invalid-target.out" 2> "$temporary/invalid-target.err"; then
+    echo 'invalid target unexpectedly supplied a reader' >&2
+    exit 1
+fi
+rg -q 'invalid CARGO_BUILD_TARGET triple' "$temporary/invalid-target.err"
+[[ ! -s "$temporary/invalid-target.out" ]]
+(( $(wc -l < "$BUILD_LOG") == builds_before ))
+printf '[build]\ntarget = "config-target"\n' > "$CARGO_HOME/config.toml"
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/config-target"
+verify_reader "$temporary/config-target" "$(readlink "$(cat "$temporary/config-target")")" cargo_config
+[[ "$(readlink "$(cat "$temporary/config-target")")" != "$initial_entry" ]]
+[[ "$("$(cat "$temporary/config-target")")" == 'fixture config-target' ]]
+rm "$CARGO_HOME/config.toml"
+mkdir -p "$TMPDIR/.cargo"
+printf '[build]\ntarget = "cwd-target"\n' > "$TMPDIR/.cargo/config.toml"
+python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/cwd-target"
+verify_reader "$temporary/cwd-target" "$(readlink "$(cat "$temporary/cwd-target")")" cargo_cwd_config
+[[ "$(readlink "$(cat "$temporary/cwd-target")")" != "$initial_entry" ]]
+[[ "$("$(cat "$temporary/cwd-target")")" == 'fixture cwd-target' ]]
+rm "$TMPDIR/.cargo/config.toml"
+printf '[build]\ntarget = "ambiguous-target"\n' > "$CARGO_HOME/config.toml"
+if EXTRA_HOST_BINARY=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/ambiguous.out" 2> "$temporary/ambiguous.err"; then
+    echo 'ambiguous target output unexpectedly supplied a reader' >&2
+    exit 1
+fi
+rg -q 'executable verification failed' "$temporary/ambiguous.err"
+[[ ! -s "$temporary/ambiguous.out" ]]
+rm "$CARGO_HOME/config.toml"
 RUSTFLAGS='-Copt-level=1' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rustflags"
 verify_reader "$temporary/rustflags" "$(readlink "$(cat "$temporary/rustflags")")" build_options
 [[ "$(readlink "$(cat "$temporary/rustflags")")" != "$initial_entry" ]]
@@ -159,7 +217,7 @@ verify_reader "$temporary/lockfile" "$(readlink "$(cat "$temporary/lockfile")")"
 python3 "$helper" "$repository" "$commit" "$temporary/one" online > "$temporary/mode"
 verify_reader "$temporary/mode" "$(readlink "$(cat "$temporary/mode")")" build_command
 [[ "$(readlink "$(cat "$temporary/mode")")" != "$initial_entry" ]]
-(( $(wc -l < "$BUILD_LOG") == 8 ))
+(( $(wc -l < "$BUILD_LOG") == 13 ))
 
 # A changed executable or provenance is rebuilt before publication.
 first_entry="$initial_entry"
@@ -168,7 +226,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-binary")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-binary" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 9 ))
+(( $(wc -l < "$BUILD_LOG") == 14 ))
 first_entry="$rebuilt_entry"
 python3 - "$first_entry" <<'PY'
 import pathlib, sys
@@ -179,7 +237,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-provenance")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-provenance" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 10 ))
+(( $(wc -l < "$BUILD_LOG") == 15 ))
 first_entry="$rebuilt_entry"
 
 # A failed rebuild leaves no usable stale reader; an orphan temporary entry is ignored.
@@ -196,7 +254,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-after-failure")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-after-failure" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 12 ))
+(( $(wc -l < "$BUILD_LOG") == 17 ))
 
 # A successful Cargo exit without an executable must fail preparation.
 if RUSTC_VERSION='rustc no binary' OMIT_BINARY=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/missing.out" 2> "$temporary/missing.err"; then

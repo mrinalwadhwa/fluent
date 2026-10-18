@@ -104,6 +104,16 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
         root_files = {name: source.extractfile(name).read()
                       for name in ("Cargo.toml", "Cargo.lock", "src/main.rs")} if evidence == "root" else {}
     rustc = run("rustc", "-vV").decode()
+    host = next((line.removeprefix("host: ").strip() for line in rustc.splitlines()
+                 if line.startswith("host: ")), None)
+    if not host:
+        raise ValueError("rustc -vV did not report a host target")
+    configured_target = os.environ.get("CARGO_BUILD_TARGET")
+    if configured_target is not None and (not configured_target
+                                          or Path(configured_target).name != configured_target
+                                          or configured_target in {".", ".."}):
+        raise ValueError(f"invalid CARGO_BUILD_TARGET triple: {configured_target!r}")
+    build_target = configured_target if configured_target is not None else host
     cargo = run("cargo", "--version").decode()
     options = {key: value for key, value in os.environ.items()
                if key.startswith(("RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC",
@@ -157,8 +167,22 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                     subprocess.run([*build_command, "--manifest-path", str(source_dir / "Cargo.toml"), "--target-dir", str(target)], cwd=build_cwd, env=env, check=True, stdout=sys.stderr, stderr=sys.stderr)
                 except subprocess.CalledProcessError as error:
                     raise RuntimeError(f"build identity {key} failed: {error}") from error
-                built = target / "debug/fluent"
-                if not built.is_file() or not os.access(built, os.X_OK):
+                # Cargo nests artifacts under the target triple whenever the
+                # target is explicit, including when it equals the host.
+                output_root = target / build_target if configured_target is not None else target
+                built = output_root / "debug/fluent"
+                if configured_target is None:
+                    # Cargo configuration can also select a target. The fresh
+                    # target directory must contain exactly one reader binary.
+                    candidates = [path for path in (built, *target.glob("*/debug/fluent"))
+                                  if path.is_file()]
+                    if len(candidates) != 1:
+                        raise ValueError(
+                            f"build identity {key}: executable verification failed: "
+                            f"expected one Cargo reader, found {len(candidates)}")
+                    built = candidates[0]
+                if (not built.is_file() or not os.access(built, os.X_OK)
+                        or not built.resolve().is_relative_to(target.resolve())):
                     raise ValueError(f"build identity {key}: executable verification failed: {built}")
                 staged = temporary / "entry"
                 staged.mkdir()
