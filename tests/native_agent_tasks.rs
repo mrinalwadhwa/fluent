@@ -3422,6 +3422,15 @@ fn host_claude_race_observes_eof_before_reaping_attachment() {
 
 #[test]
 fn host_codex_race_submits_prepared_input_at_boundary() {
+    assert_host_codex_race_submits_prepared_input_at_boundary(0);
+}
+
+#[test]
+fn host_codex_race_submits_prepared_input_after_slow_startup() {
+    assert_host_codex_race_submits_prepared_input_at_boundary(4);
+}
+
+fn assert_host_codex_race_submits_prepared_input_at_boundary(startup_delay_secs: u64) {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
@@ -3435,11 +3444,12 @@ fn host_codex_race_submits_prepared_input_at_boundary() {
     std::fs::write(
         &terminal,
         r#"#!/usr/bin/env python3
-import os, select, sys, termios, tty
+import os, select, sys, termios, time, tty
 fd = sys.stdin.fileno()
 old = termios.tcgetattr(fd)
 try:
     tty.setraw(fd)
+    time.sleep(float(os.environ['FLUENT_NATIVE_STARTUP_DELAY']))
     print('›', flush=True)
     marker = os.environ['FLUENT_NATIVE_RACE_TEXT'].encode()
     data = bytearray()
@@ -3459,6 +3469,7 @@ finally:
     )
     .unwrap();
     std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let expect_output = std::fs::File::create(&expect_log).unwrap();
     let mut child = host_native_race_command("codex")
         .env("FLUENT_NATIVE_BINARY", &terminal)
         .env("FLUENT_NATIVE_SOURCE", root.path())
@@ -3468,15 +3479,28 @@ finally:
         .env("FLUENT_NATIVE_RACE_ATTEMPT", &attempt)
         .env("FLUENT_NATIVE_RACE_TEXT", "race-marker")
         .env("FLUENT_NATIVE_CAPTURE", &capture)
-        .stdout(std::process::Stdio::from(
-            std::fs::File::create(&expect_log).unwrap(),
-        ))
+        .env(
+            "FLUENT_NATIVE_STARTUP_DELAY",
+            startup_delay_secs.to_string(),
+        )
+        .stdout(expect_output.try_clone().unwrap())
+        .stderr(expect_output)
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !ready.exists() || !capture.exists() {
-        if Instant::now() >= deadline {
-            break;
+    // Startup does not measure the input race. Wait for both Expect's ready
+    // marker and the complete draft capture before releasing Enter.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready.is_file() || !std::fs::read_to_string(&capture).is_ok_and(|text| text == "before")
+    {
+        let exit = child.try_wait().unwrap();
+        if exit.is_some() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "Codex fixture did not prepare input: exit={exit:?}; capture={:?}; expect={}",
+                std::fs::read_to_string(&capture),
+                std::fs::read_to_string(&expect_log).unwrap()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
