@@ -2,7 +2,7 @@
 
 - [absolute-paths-in-persisted-manifests](absolute-paths-in-persisted-manifests.md) — Relative paths accepted by one phase must be resolved to absolute before being persisted for later phases
 - [accepted-proof-selection-revalidates-original-sources](accepted-proof-selection-revalidates-original-sources.md) — Pin ordinary Tests Review proof inputs without granting acceptance or reassigning historical findings
-- [approval-records-bind-current-authority](approval-records-bind-current-authority.md) — Evaluate approvals against freshly loaded project authority and persist a self-contained record of the exact action and revision
+- [approval-records-bind-current-authority](approval-records-bind-current-authority.md) — Bind approvals to current project authority and validate their exact Work revision at the host mutation boundary
 - [assert-persisted-message-equals-source](assert-persisted-message-equals-source.md) — A regression reading a persisted artifact must compare it for exact equality with the production source; a denylist plus positive-substring check passes even when the write path appends unintended fields
 - [atomic-manifest-within-smoke-root](atomic-manifest-within-smoke-root.md) — Shell atomic manifest writes must allocate the temp file beside the target, not in the global /tmp
 - [atomic-task-start-reservation](atomic-task-start-reservation.md) — Task starts run read-only preflight, then a single lock-held reservation that honors the precedence boundary, then CAS rollback — never mark Executing while discarding the transition verdict
@@ -17,7 +17,7 @@
 - [behavior-ids-must-be-numeric](behavior-ids-must-be-numeric.md) — Use numeric B headings in behaviors.md because completion-contract extraction ignores suffixed IDs
 - [behavior-script-guards-scan-fixture-text](behavior-script-guards-scan-fixture-text.md) — Operation-script binary-override guards scan embedded fixture text as well as real CLI invocations
 - [behaviors-test-citation-sync](behaviors-test-citation-sync.md) — Test renames must update all Test: citations in behaviors.md in the same commit
-- [bound-conversation-state-follows-project-authority](bound-conversation-state-follows-project-authority.md) — Keep bound conversation payloads and active state in the project runtime; the runner-owner root retains only routing, deduplication, and unbound ingress
+- [bound-conversation-state-follows-project-authority](bound-conversation-state-follows-project-authority.md) — Keep bound conversation state under project authority and require its snapshot through ingest, recovery, and failure reporting
 - [candidate-commits-should-use-separated-body](candidate-commits-should-use-separated-body.md) — Candidate commits should use a non-whitespace body separated from the subject by a blank line
 - [candidate-gate-owns-derived-recovery-policy](candidate-gate-owns-derived-recovery-policy.md) — Keep recovery eligibility classifiers at the host-owned candidate gate and keep recovery modules responsible for orchestration
 - [candidate-gate-source-binding-and-index](candidate-gate-source-binding-and-index.md) — A corrective Writer's candidate-gate input is its source binding, while the Attempt artifact entry is a matching aggregate projection
@@ -30,6 +30,7 @@
 - [classified-writer-inputs-revalidate-at-delivery](classified-writer-inputs-revalidate-at-delivery.md) — Deliver a classified Writer's current authorization and exact audit through its actual launch context, including resumed provider sessions
 - [cleanup-preserves-unverified-source](cleanup-preserves-unverified-source.md) — Assess all owned Git source before cleanup and retain the whole Work Item when any source cannot be proved safe to remove
 - [cleanup-protects-cross-record-eligibility](cleanup-protects-cross-record-eligibility.md) — Recheck cleanup eligibility under the locks for both the origin and its descendant recovery dependencies, then hold them through removal
+- [collaboration-inbox-isolates-thread-failures](collaboration-inbox-isolates-thread-failures.md) — Contain thread-local processing and failure-reporting errors while independent conversation inputs continue
 - [commit-body-bullet-point-convention](commit-body-bullet-point-convention.md) — Commit bodies should use "- prefix" bullets for multiple changes when practical
 - [commit-subject-line-fifty-char-limit](commit-subject-line-fifty-char-limit.md) — Commit subject lines should stay within 50 characters when practical
 - [committed-writer-matrix-recovery-authority](committed-writer-matrix-recovery-authority.md) — Distinguish matrix-bound Writer-completion recovery from older audits by its source digest and operation Task binding
@@ -136,7 +137,7 @@
 - [recoverable-parent-child-materialization](recoverable-parent-child-materialization.md) — Stage the exact parent intent before publishing multiple child records, resume matching partial publication, and gate downstream execution until materialization completes
 - [recovered-approvals-preserve-delay-provenance](recovered-approvals-preserve-delay-provenance.md) — Mark every reconnect replay source as recovered so delayed consequential approvals require fresh confirmation
 - [recovery-contracts-form-neutral-boundary](recovery-contracts-form-neutral-boundary.md) — Keep recovery admission and Writer completion above shared read-only verification facts, independent of lifecycle callers
-- [recovery-cursors-advance-after-durable-ingest](recovery-cursors-advance-after-durable-ingest.md) — Recover paginated event history from a durable high-water mark and advance it only after each event is durably processed
+- [recovery-cursors-advance-after-durable-ingest](recovery-cursors-advance-after-durable-ingest.md) — Advance recovery cursors after durable processing or conclusive rejection while retaining retryable failures
 - [recovery-receipts-separate-audit-from-live-policy](recovery-receipts-separate-audit-from-live-policy.md) — Replay recovery receipts against their recorded policy commit while revalidating the current descendant policy separately
 - [recovery-recognition-precedes-evidence-validation](recovery-recognition-precedes-evidence-validation.md) — Identify a lifecycle recovery family before validating its required evidence so malformed matches cannot fall through to generic resume
 - [registry-read-modify-write-needs-flock](registry-read-modify-write-needs-flock.md) — JSON registry read-modify-write operations need flock around the full read-write pair; atomic_write alone only protects the individual write

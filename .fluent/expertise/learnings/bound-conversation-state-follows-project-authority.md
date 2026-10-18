@@ -1,6 +1,6 @@
 ---
 name: bound-conversation-state-follows-project-authority
-description: Keep bound conversation payloads and active state in the project runtime; the runner-owner root retains only routing, deduplication, and unbound ingress
+description: Keep bound conversation state under project authority and require its snapshot through ingest, recovery, and failure reporting
 metadata:
   type: architecture
 ---
@@ -25,5 +25,21 @@ next index only when the project snapshot matches the recorded digest;
 otherwise it restores the previous index. Exercise crashes after either write
 order.
 
+The missing-snapshot rule also applies to Discord's separate project runtime.
+Require the authoritative snapshot in every path that writes conversation state,
+including inbox failure reporting. A defaulting reader in an error handler can
+recreate an empty conversation after ingest correctly refused it, allowing the
+next retry to repeat accepted provider turns. Status inspection may report
+restoration guidance without manufacturing conversation state. Only an explicit
+unfinished initialization may create an initial empty snapshot; an established
+routing binding is not initialization authority.
+
+Test this through the production inbox processor, not only direct ingest and
+recovery helpers. Remove an established snapshot, enqueue an accepted input's
+redelivery, and repeat processing. Assert that the file remains absent and the
+input remains pending, with no new provider call or delivery. Restore the
+original bytes and verify that the duplicate settles without replaying effects.
+
 Related: [[atomic-write-replace-through-utility]],
-[[registry-read-modify-write-needs-flock]].
+[[registry-read-modify-write-needs-flock]],
+[[collaboration-inbox-isolates-thread-failures]].
