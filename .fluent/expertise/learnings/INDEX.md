@@ -30,6 +30,7 @@
 - [classified-writer-inputs-revalidate-at-delivery](classified-writer-inputs-revalidate-at-delivery.md) — Deliver a classified Writer's current authorization and exact audit through its actual launch context, including resumed provider sessions
 - [cleanup-preserves-unverified-source](cleanup-preserves-unverified-source.md) — Assess all owned Git source before cleanup and retain the whole Work Item when any source cannot be proved safe to remove
 - [cleanup-protects-cross-record-eligibility](cleanup-protects-cross-record-eligibility.md) — Recheck cleanup eligibility under the locks for both the origin and its descendant recovery dependencies, then hold them through removal
+- [cold-reviewer-build-area-binds-sandbox](cold-reviewer-build-area-binds-sandbox.md) — Select the Reviewer's build area and sandbox write grants together, then account for cold scratch output until settlement
 - [collaboration-inbox-isolates-thread-failures](collaboration-inbox-isolates-thread-failures.md) — Contain thread-local processing and failure-reporting errors while independent conversation inputs continue
 - [commit-body-bullet-point-convention](commit-body-bullet-point-convention.md) — Commit bodies should use "- prefix" bullets for multiple changes when practical
 - [commit-subject-line-fifty-char-limit](commit-subject-line-fifty-char-limit.md) — Commit subject lines should stay within 50 characters when practical
@@ -104,6 +105,7 @@
 - [native-relay-tests-drain-before-comparing](native-relay-tests-drain-before-comparing.md) — Keep large-payload fixture work outside the Codex relay's bounded display drain while proving evidence settles before display consumption
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [negative-test-cross-product-coverage](negative-test-cross-product-coverage.md) — Negative tests for a multi-condition gate must hold all other conditions fixed while varying only the dimension under test — independent variation misses cross-product gaps
+- [nested-terminal-tests-need-rpath](nested-terminal-tests-need-rpath.md) — Embed the prepared Ghostty library path in test-support executables that tmux launches
 - [next-action-guidance-is-an-executable-interface](next-action-guidance-is-an-executable-interface.md) — Render exact eligible CLI commands and preserve recovery blockers through status and show without generic resume fallbacks
 - [no-change-completion-retry-binds-original-handoff](no-change-completion-retry-binds-original-handoff.md) — Retry an unchanged Writer's invalid handoff from its retained failure and host-owned baseline, without granting verification credit
 - [no-change-output-binds-preserved-commit](no-change-output-binds-preserved-commit.md) — A no-change Writer preserves its verified base commit; capture Learning may advance the current commit only with typed, post-acceptance canonicalization provenance
