@@ -326,6 +326,9 @@ fn http_fixture(
             stream.read_exact(&mut body).unwrap();
             bytes.extend(body);
             requests.push(String::from_utf8(bytes).unwrap());
+            if status == "DROP" {
+                continue;
+            }
             let body = value.to_string();
             write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         }
@@ -1751,6 +1754,163 @@ fn discord_runner_preflight_checks_role_and_overwrite_permissions() {
         assert_eq!(result.is_ok(), allowed, "{permissions}: {result:?}");
         assert_eq!(server.join().unwrap().len(), 6);
     }
+}
+
+fn rest_preflight_responses() -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    vec![
+        ("200 OK", json!({"flags":1<<19})),
+        ("200 OK", json!({"id":"900"})),
+        ("200 OK", json!({"owner_id":"900"})),
+        ("200 OK", json!({"roles":[]})),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"type":0,"guild_id":"100"})),
+    ]
+}
+#[test]
+fn discord_restart_rest_recovers_partial_multipart_delivery() {
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    let (_home, project, config) = fixture();
+    let delivery = Delivery {
+        id: "artifact".into(),
+        channel: "400".into(),
+        text: "Readable artifact.\n".repeat(240),
+        message_id: None,
+        approval: Some(ApprovalButton {
+            action: "a".repeat(16),
+            revision: "b".repeat(64),
+            label: "Approve".into(),
+        }),
+    };
+    let parts = render_delivery(&delivery, project.path());
+    assert_eq!(parts.len(), 3);
+    let marker = format!(
+        "fluent-discord:{:x}",
+        Sha256::digest(parts[1].id.as_bytes())
+    );
+    let page = (1000..1100).rev().map(|id| json!({"id":id.to_string(),"author":{"id":"999"},"embeds":[{"footer":{"text":marker}}]})).collect::<Vec<_>>();
+    let mut responses = rest_preflight_responses();
+    responses.extend([
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"800"})),
+        ("200 OK", json!([])),
+        ("DROP", json!(null)),
+    ]);
+    responses.extend(rest_preflight_responses());
+    responses.extend([
+        ("200 OK", json!(page)),
+        (
+            "200 OK",
+            json!([{"id":"801","author":{"id":"900"},"embeds":[{"footer":{"text":marker}}]}]),
+        ),
+        ("200 OK", json!([])),
+        ("200 OK", json!({"id":"802"})),
+    ]);
+    let (endpoint, server) = http_fixture(responses);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint.clone()).unwrap();
+    rest.preflight(&config).unwrap();
+    assert_eq!(rest.deliver(&parts[0]).unwrap(), "800");
+    assert!(rest.deliver(&parts[1]).is_err());
+    drop(rest);
+    let mut restarted = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    restarted.preflight(&config).unwrap();
+    // The first receipt was saved; the second POST reached Discord but its
+    // response was lost. Production history must find it beyond an impostor page.
+    assert_eq!(restarted.deliver(&parts[1]).unwrap(), "801");
+    assert_eq!(restarted.deliver(&parts[2]).unwrap(), "802");
+    let requests = server.join().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.starts_with("GET /channels/400/messages?limit=100&before=1000 "))
+    );
+    let posts = requests
+        .iter()
+        .filter(|r| r.starts_with("POST /channels/400/messages "))
+        .collect::<Vec<_>>();
+    assert_eq!(posts.len(), 3);
+    for (i, post) in posts.iter().enumerate() {
+        let payload: serde_json::Value =
+            serde_json::from_str(post.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(payload["content"], parts[i].text);
+        assert_eq!(payload["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(!payload["components"].is_null(), i == 2);
+    }
+}
+#[test]
+fn discord_restart_rest_reads_cursors_and_attributed_corrections() {
+    use serde_json::json;
+    let mut page = (1000..1100)
+        .rev()
+        .map(|id| json!({"id":id.to_string(),"author":{"id":"900","bot":true},"content":"bot"}))
+        .collect::<Vec<_>>();
+    page[0] = json!({"id":"1099","author":{"id":"301"},"content":"First recovered reply"});
+    let (endpoint, server) = http_fixture(vec![
+        ("200 OK", json!(page)),
+        (
+            "200 OK",
+            json!([{"id":"1100","author":{"id":"300"},"content":"Second recovered reply"}]),
+        ),
+        ("404 Not Found", json!({})),
+        (
+            "200 OK",
+            json!({"id":"1099","content":"Corrected reply","edited_timestamp":"2026-10-17T23:12:00Z"}),
+        ),
+    ]);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    let first = rest.history("100", "400", "").unwrap();
+    assert!(first.has_more);
+    assert_eq!(first.inputs.len(), 1);
+    assert_eq!(first.last_message.as_deref(), Some("1099"));
+    let second = rest
+        .history("100", "400", first.last_message.as_deref().unwrap())
+        .unwrap();
+    assert!(!second.has_more);
+    let originals = [first.inputs, second.inputs].concat();
+    let corrections = rest.corrections("100", "400", &originals).unwrap();
+    assert!(matches!(&corrections[1].kind, InputKind::Delete { message } if message == "1100"));
+    assert_eq!(corrections[1].actor, "300");
+    assert!(
+        matches!(&corrections[0].kind, InputKind::Edit { message, text, .. } if message == "1099" && text == "Corrected reply")
+    );
+    assert_eq!(corrections[0].actor, "301");
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("GET /channels/400/messages?limit=100&after=0 "));
+    assert!(requests[1].starts_with("GET /channels/400/messages?limit=100&after=1099 "));
+    let (home, project, config) = fixture();
+    let mut runner =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    runner.ingest(command()).unwrap();
+    for input in originals.iter().chain(corrections.iter()) {
+        runner.ingest_recovered(input.clone()).unwrap();
+    }
+    for input in originals.iter().chain(corrections.iter()) {
+        runner.ingest_recovered(input.clone()).unwrap();
+    }
+    assert_eq!(runner.provider().calls.len(), 5);
+    assert_eq!(thread_snapshot(project.path()).inputs[1].actor, "301");
+}
+#[test]
+fn discord_restart_rest_fails_closed_at_delivery_history_bound() {
+    use serde_json::json;
+    let page = (1000..1100)
+        .rev()
+        .map(|id| json!({"id":id.to_string(),"author":{"id":"900"}}))
+        .collect::<Vec<_>>();
+    let (endpoint, server) = http_fixture(vec![("200 OK", json!(page)); 100]);
+    let mut rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    let error = rest
+        .deliver(&Delivery {
+            id: "missing".into(),
+            channel: "400".into(),
+            text: "Pending".into(),
+            message_id: None,
+            approval: None,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("recovery bound"));
+    assert_eq!(server.join().unwrap().len(), 100);
 }
 
 #[test]
