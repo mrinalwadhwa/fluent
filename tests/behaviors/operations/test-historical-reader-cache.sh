@@ -38,7 +38,7 @@ SH
 chmod +x "$temporary/bin/cargo"
 cat > "$temporary/bin/rustc" <<'SH'
 #!/usr/bin/env bash
-echo "${RUSTC_VERSION:-rustc fixture}"
+printf '%s\nhost: %s\n' "${RUSTC_VERSION:-rustc fixture}" "${FAKE_RUSTC_HOST:-fixture-target}"
 SH
 chmod +x "$temporary/bin/rustc"
 cat > "$temporary/bin/git" <<'SH'
@@ -94,8 +94,10 @@ assert expected_entry.parent.name == key or expected_entry.parent.name.startswit
 assert recorded['binary_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
 expected = copy.deepcopy(baseline)
 if field == 'rustc':
-    expected['rustc'] = 'rustc concurrent\n'
+    expected['rustc'] = 'rustc concurrent\nhost: fixture-target\n'
     expected['build_options']['RUSTC_VERSION'] = 'rustc concurrent'
+elif field == 'rustc_host':
+    expected['rustc'] = 'rustc fixture\nhost: alternate-target\n'
 elif field == 'build_options':
     expected['build_options']['RUSTFLAGS'] = '-Copt-level=1'
 elif field == 'cargo':
@@ -138,6 +140,9 @@ verify_reader "$temporary/concurrent-one" "$(readlink "$(cat "$temporary/concurr
 [[ "$(readlink "$(cat "$temporary/concurrent-one")")" != "$initial_entry" ]]
 
 # Each input changes the key independently.
+FAKE_RUSTC_HOST='alternate-target' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/target"
+verify_reader "$temporary/target" "$(readlink "$(cat "$temporary/target")")" rustc_host
+[[ "$(readlink "$(cat "$temporary/target")")" != "$initial_entry" ]]
 RUSTFLAGS='-Copt-level=1' python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rustflags"
 verify_reader "$temporary/rustflags" "$(readlink "$(cat "$temporary/rustflags")")" build_options
 [[ "$(readlink "$(cat "$temporary/rustflags")")" != "$initial_entry" ]]
@@ -154,7 +159,7 @@ verify_reader "$temporary/lockfile" "$(readlink "$(cat "$temporary/lockfile")")"
 python3 "$helper" "$repository" "$commit" "$temporary/one" online > "$temporary/mode"
 verify_reader "$temporary/mode" "$(readlink "$(cat "$temporary/mode")")" build_command
 [[ "$(readlink "$(cat "$temporary/mode")")" != "$initial_entry" ]]
-(( $(wc -l < "$BUILD_LOG") == 7 ))
+(( $(wc -l < "$BUILD_LOG") == 8 ))
 
 # A changed executable or provenance is rebuilt before publication.
 first_entry="$initial_entry"
@@ -163,7 +168,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-binary")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-binary" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 8 ))
+(( $(wc -l < "$BUILD_LOG") == 9 ))
 first_entry="$rebuilt_entry"
 python3 - "$first_entry" <<'PY'
 import pathlib, sys
@@ -174,7 +179,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-provenance")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-provenance" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 9 ))
+(( $(wc -l < "$BUILD_LOG") == 10 ))
 first_entry="$rebuilt_entry"
 
 # A failed rebuild leaves no usable stale reader; an orphan temporary entry is ignored.
@@ -191,7 +196,7 @@ python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/rebuilt
 rebuilt_entry="$(readlink "$(cat "$temporary/rebuilt-after-failure")")"
 [[ "$rebuilt_entry" != "$first_entry" ]]
 verify_reader "$temporary/rebuilt-after-failure" "$rebuilt_entry" ''
-(( $(wc -l < "$BUILD_LOG") == 11 ))
+(( $(wc -l < "$BUILD_LOG") == 12 ))
 
 # A successful Cargo exit without an executable must fail preparation.
 if RUSTC_VERSION='rustc no binary' OMIT_BINARY=1 python3 "$helper" "$repository" "$commit" "$temporary/one" > "$temporary/missing.out" 2> "$temporary/missing.err"; then
