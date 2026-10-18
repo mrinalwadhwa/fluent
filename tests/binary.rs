@@ -58331,7 +58331,9 @@ fn attempt_cancel_stops_each_stage_without_downstream_launch() {
         let mut worker = OwnedFixtureProcess::spawn(&mut command);
         let mut record_path = None;
         let mut execution_cleanup = None;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        // Worktree preparation and baseline extraction precede the worker.
+        // Bound setup separately from the eight-second cancellation deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             let current = store.read_work_item(&id).unwrap();
             let paths = if stage == "learner" {
