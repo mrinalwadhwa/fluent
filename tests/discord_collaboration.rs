@@ -1156,3 +1156,80 @@ fn discord_runner_gateway_rejects_untrusted_resume_hosts() {
         assert!(gateway_url(url).is_err(), "{url}");
     }
 }
+
+#[test]
+fn discord_state_never_changes_existing_slack_runtime() {
+    use fluent::slack_collaboration as slack;
+    fn snapshot(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, files)
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().into(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+    let (home, project, config) = fixture();
+    let slack_config = slack::RunnerConfig {
+        workspace: "workspace".into(),
+        projects: BTreeMap::from([(
+            "app".into(),
+            slack::ConfiguredProject {
+                label: "app".into(),
+                checkout: config.projects["app"].checkout.clone(),
+                allowed_participants: BTreeSet::from(["U1".into()]),
+                default_provider: "codex".into(),
+                enabled_providers: BTreeSet::from(["codex".into()]),
+                project_approvers: BTreeSet::from(["U1".into()]),
+                github_remote: None,
+            },
+        )]),
+        channel_defaults: BTreeMap::from([("CSLACK".into(), "app".into())]),
+        direct_message_defaults: BTreeMap::new(),
+        enabled_providers: BTreeSet::from(["codex".into()]),
+    };
+    let mut slack_runner = slack::CollaborationRunner::new(
+        home.path(),
+        slack_config,
+        slack::InMemoryProvider::default(),
+        slack::InMemorySlack::default(),
+    );
+    slack_runner
+        .ingest(slack::InboundEnvelope {
+            id: "E1".into(),
+            acknowledgement_id: "E1".into(),
+            channel: "CSLACK".into(),
+            timestamp: "400".into(),
+            thread_timestamp: None,
+            user: "U1".into(),
+            text: "@Fluent discuss".into(),
+            change: slack::InboundChange::Message,
+            approval_action_id: None,
+            approval_artifact_revision: None,
+        })
+        .unwrap();
+    let owner_root = slack::state_root(home.path());
+    let project_root = project.path().join(".fluent/work/slack");
+    let owner_before = snapshot(&owner_root);
+    let project_before = snapshot(&project_root);
+    let mut discord =
+        DiscordRunner::new(home.path(), config, Provider::default(), Discord::default()).unwrap();
+    discord.ingest(command()).unwrap();
+    discord.ingest(reply()).unwrap();
+    discord
+        .present_planning("400", "brief", "A Discord brief")
+        .unwrap();
+    assert_eq!(snapshot(&owner_root), owner_before);
+    assert_eq!(snapshot(&project_root), project_before);
+    assert_eq!(slack_runner.provider().calls.len(), 1);
+    assert_eq!(discord.provider().calls.len(), 2);
+}
