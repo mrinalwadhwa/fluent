@@ -41663,30 +41663,41 @@ fn second_scheduler_run_reuses_live_coordinator() {
 
 #[test]
 fn scheduler_status_and_stop_use_exact_live_instance() {
+    assert_scheduler_status_and_stop_use_exact_live_instance(0);
+}
+
+#[test]
+fn scheduler_status_and_stop_use_exact_live_instance_after_slow_startup() {
+    assert_scheduler_status_and_stop_use_exact_live_instance(11);
+}
+
+fn assert_scheduler_status_and_stop_use_exact_live_instance(startup_delay_secs: u64) {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     fs::create_dir_all(project.join(".fluent/work/items")).unwrap();
+    let stderr_path = project.join("coordinator.stderr.log");
 
     let mut coordinator = {
-        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        let mut command = scheduler_fixture_command(startup_delay_secs);
         command
             .current_dir(project)
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
             .args(["scheduler", "run", "--poll-seconds", "30"])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(fs::File::create(&stderr_path).unwrap());
         OwnedFixtureProcess::spawn(&mut command)
     };
 
     let metadata_path = project.join(".fluent/work/scheduler/coordinator.json");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !metadata_path.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "coordinator did not publish metadata"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    poll_until(SCHEDULER_STARTUP_TIMEOUT, || {
+        metadata_path.is_file() || coordinator.try_wait().unwrap().is_some()
+    });
+    let exit = coordinator.try_wait().unwrap();
+    assert!(
+        metadata_path.is_file() && exit.is_none(),
+        "coordinator did not publish live metadata: exit={exit:?}; stderr={}",
+        fs::read_to_string(&stderr_path).unwrap()
+    );
     let metadata: serde_json::Value =
         serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
     let instance = metadata["instance_id"].as_str().unwrap().to_string();
@@ -41708,6 +41719,14 @@ fn scheduler_status_and_stop_use_exact_live_instance() {
         .assert()
         .success()
         .stdout(predicate::str::contains(&instance));
+    // Observe the bound stop before fixture cleanup can terminate the process.
+    assert!(
+        poll_until(std::time::Duration::from_secs(10), || {
+            coordinator.try_wait().unwrap().is_some()
+        }),
+        "coordinator did not exit after its bound stop request: stderr={}",
+        fs::read_to_string(&stderr_path).unwrap()
+    );
     assert!(
         coordinator.wait().unwrap().success(),
         "coordinator should exit after its bound stop request"
