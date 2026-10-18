@@ -93,3 +93,6 @@ pub(crate) mod verification_policy;
 
 pub mod verification_assessment;
 pub mod verification_reference;
+
+pub mod conversation;
+pub mod discord_collaboration;
