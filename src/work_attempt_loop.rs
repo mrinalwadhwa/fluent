@@ -11725,6 +11725,319 @@ fn read_work_item_or_not_found(store: &WorkModelStore, id: &str) -> Result<WorkI
 mod tests {
     use super::*;
 
+    mod native_observation_recovery {
+        use super::*;
+        use crate::candidate_gate::{
+            CandidateGateDisposition, CandidateGatePhase, CandidateGateRequest, run_candidate_gate,
+        };
+        use crate::verification_assessment::{
+            NativeObservationRecoveryBinding, assess_current_verification,
+        };
+        use crate::work_model::{self, EvidenceRecovery, now_iso8601};
+
+        fn pending_recovery() -> (
+            tempfile::TempDir,
+            WorkModelStore,
+            String,
+            EvidenceRecovery,
+            Vec<(PathBuf, Vec<u8>)>,
+        ) {
+            let (root, mut item) =
+                crate::recovery_contracts::verification_tests::unique_harness_fixture();
+            // Identical command text must not make occurrences interchangeable.
+            fs::write(root.path().join(".fluent/tester.yaml"),
+                "commands:\n  - command: 'false'\n    test_harness: shell-harness\n  - command: 'false'\n    test_harness: shell-harness\n").unwrap();
+            crate::git::run(
+                root.path(),
+                &["add", ".fluent/tester.yaml"],
+                "stage repeated command",
+            )
+            .unwrap();
+            crate::git::run(
+                root.path(),
+                &["commit", "-qm", "Add repeated command"],
+                "commit repeated command",
+            )
+            .unwrap();
+            let candidate =
+                crate::git::run_stdout(root.path(), &["rev-parse", "HEAD"], "read candidate")
+                    .unwrap();
+            for task in &mut item.attempts[0].tasks {
+                if let Some(output) = &mut task.output {
+                    output.commit = candidate.clone();
+                }
+                if let Some(context) = &mut task.review_context {
+                    context.candidate_commit = candidate.clone();
+                }
+            }
+            let tester = item.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.kind == TaskKind::Tester)
+                .unwrap();
+            let area = root
+                .path()
+                .join(&tester.artifact_area.as_ref().unwrap().path);
+            crate::tester::run(
+                root.path(),
+                &area,
+                true,
+                &crate::content::ContentResolver::new(Some(root.path())),
+            )
+            .unwrap();
+            crate::tester::bind_candidate_commit(&area, &candidate).unwrap();
+            crate::recovery_contracts::verification_tests::accept_first_check(
+                root.path(),
+                &mut item,
+            );
+            let attempt = &mut item.attempts[0];
+            attempt.status = AttemptStatus::Complete;
+            attempt
+                .writer_completion_contract
+                .as_mut()
+                .unwrap()
+                .requirements[0]
+                .verification_refs = vec![
+                r#"{"kind":"named-test","path":"tests/native.sh","name":"observed-test"}"#.into(),
+                r#"{"kind":"named-test","path":"tests/native.sh","name":"unobserved-test"}"#.into(),
+            ];
+            fs::write(root.path().join(".git/info/exclude"), ".fluent/work/\n").unwrap();
+            let check = crate::recovery_contracts::assess_canonical_checks(root.path(), attempt)
+                .unwrap()
+                .checks[0]
+                .clone();
+            let store = WorkModelStore::new(root.path());
+            store.create_work_item(&item).unwrap();
+            let proof = root.path().join(".fluent/work/native-observations.json");
+            fs::write(
+                &proof,
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version":1, "producer":"authorized host", "check":check.command,
+                    "working_directory":".", "result":"pass", "run_at":now_iso8601(),
+                    "output":"ok observed-test", "native_observations":[
+                        {"id":"tests/native.sh::observed-test", "harness":"shell-harness"}
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let original = retained_proof(root.path(), &store);
+            let recovery = crate::host_evidence::attach_required_check(
+                root.path(),
+                &store,
+                &item.id,
+                "attempt-1",
+                &candidate,
+                &check.id,
+                &proof,
+            )
+            .unwrap();
+            assert_retained(root.path(), &original);
+            (root, store, candidate, recovery, original)
+        }
+
+        fn settle_review(root: &Path, store: &WorkModelStore, recovery: &EvidenceRecovery) {
+            store
+                .mutate_work_item("verification", |item| {
+                    let task = item.attempts[0]
+                        .tasks
+                        .iter_mut()
+                        .find(|task| Some(&task.id) == recovery.targets[0].review_task_id.as_ref())
+                        .unwrap();
+                    work_model::set_task_terminal(task, TaskStatus::Complete);
+                    let area = root.join(&task.artifact_area.as_ref().unwrap().path);
+                    fs::create_dir_all(&area).unwrap();
+                    fs::write(area.join("review.md"), "Verdict: pass\n").unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            // Let the production review interpreter bind the verdict and complete
+            // the recovery; the fixture never sets its state or review digest.
+            let item = store.read_work_item("verification").unwrap();
+            interpret_reviews(root, store, item, "attempt-1", true, None).unwrap();
+            let item = store.read_work_item("verification").unwrap();
+            let accepted = item.attempts[0]
+                .evidence_recoveries
+                .iter()
+                .find(|entry| entry.id == recovery.id)
+                .unwrap();
+            assert_eq!(accepted.state, EvidenceRecoveryState::Complete);
+            assert_eq!(
+                accepted.targets[0].review_digest.as_deref(),
+                Some(crate::verification_policy::digest(b"Verdict: pass\n").as_str())
+            );
+        }
+
+        fn retained_proof(root: &Path, store: &WorkModelStore) -> Vec<(PathBuf, Vec<u8>)> {
+            let item = store.read_work_item("verification").unwrap();
+            let attempt = &item.attempts[0];
+            let canonical =
+                crate::recovery_contracts::assess_canonical_checks(root, attempt).unwrap();
+            let first = attempt
+                .evidence_recoveries
+                .iter()
+                .find(|entry| entry.required_check.is_some())
+                .unwrap();
+            [
+                canonical.results_path,
+                root.join(&first.attachment.snapshot_path),
+            ]
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect()
+        }
+
+        fn assert_retained(root: &Path, proof: &[(PathBuf, Vec<u8>)]) {
+            let item = WorkModelStore::new(root)
+                .read_work_item("verification")
+                .unwrap();
+            let first = item.attempts[0]
+                .evidence_recoveries
+                .iter()
+                .find(|entry| entry.required_check.is_some())
+                .unwrap();
+            assert_eq!(root.join(&first.attachment.snapshot_path), proof[1].0);
+            assert_eq!(
+                first.attachment.digest,
+                crate::verification_policy::digest(&proof[1].1)
+            );
+            let crate::work_model::RequiredCheckSource::CanonicalTester { results, .. } =
+                &first.required_check.as_ref().unwrap().source
+            else {
+                panic!("expected canonical source")
+            };
+            assert_eq!(root.join(&results.path), proof[0].0);
+            assert_eq!(
+                results.digest,
+                crate::verification_policy::digest(&proof[0].1)
+            );
+            for (path, bytes) in proof {
+                assert_eq!(
+                    &fs::read(path).unwrap(),
+                    bytes,
+                    "changed earlier proof: {}",
+                    path.display()
+                );
+            }
+        }
+
+        #[test]
+        fn reviewed_native_observations_pass_candidate_gate_after_review_only() {
+            let (root, store, candidate, recovery, original) = pending_recovery();
+            let pending = store.read_work_item("verification").unwrap();
+            let contract = pending.attempts[0]
+                .writer_completion_contract
+                .as_ref()
+                .unwrap();
+            let mut matching = contract.clone();
+            matching.requirements[0].verification_refs.truncate(1);
+            let mut unobserved = contract.clone();
+            unobserved.requirements[0].verification_refs.remove(0);
+            let results = &original[0].0;
+            let artifact = root.path().join(".fluent/work/native-gate.json");
+            let gate = |contract| {
+                run_candidate_gate(CandidateGateRequest {
+                    project_root: root.path(),
+                    workspace: root.path(),
+                    work_item_id: "verification",
+                    attempt_id: "attempt-1",
+                    task_id: None,
+                    phase: CandidateGatePhase::FinalTester,
+                    base_commit: &candidate,
+                    candidate_commit: &candidate,
+                    completion_contract: Some(contract),
+                    allow_tree_identical_metadata_rewrite: false,
+                    metadata_rewrite_authorization: None,
+                    tester_results_path: Some(results),
+                    accepted_tester_commands: &[],
+                    artifact_path: &artifact,
+                })
+                .unwrap()
+            };
+            let before = assess_current_verification(root.path(), &pending.attempts[0]).unwrap();
+            assert!(before.references.iter().all(|row| !row.satisfied));
+            let before_gate = gate(&matching);
+            assert_eq!(
+                before_gate.disposition,
+                CandidateGateDisposition::Rejected,
+                "{before_gate:?}"
+            );
+            settle_review(root.path(), &store, &recovery);
+            let accepted = store.read_work_item("verification").unwrap();
+            let after = assess_current_verification(root.path(), &accepted.attempts[0]).unwrap();
+            assert!(after.references[0].satisfied, "{after:?}");
+            assert!(!after.references[1].satisfied, "{after:?}");
+            let after_gate = gate(&matching);
+            assert_eq!(
+                after_gate.disposition,
+                CandidateGateDisposition::Passed,
+                "{after_gate:?}"
+            );
+            assert_eq!(
+                gate(&unobserved).disposition,
+                CandidateGateDisposition::Rejected
+            );
+            assert_retained(root.path(), &original);
+        }
+
+        #[test]
+        fn native_observations_reject_directory_and_repeated_command_occurrence() {
+            let (root, store, candidate, recovery, original) = pending_recovery();
+            settle_review(root.path(), &store, &recovery);
+            let stored = store.read_work_item("verification").unwrap();
+            let attempt = &stored.attempts[0];
+            assert!(
+                assess_current_verification(root.path(), attempt)
+                    .unwrap()
+                    .references[0]
+                    .satisfied
+            );
+            let binding_path = root.path().join(&recovery.targets[0].prior_review_artifact);
+            let original_binding = fs::read(&binding_path).unwrap();
+            let binding: NativeObservationRecoveryBinding =
+                serde_json::from_slice(&original_binding).unwrap();
+            let canonical =
+                crate::recovery_contracts::assess_canonical_checks(root.path(), attempt).unwrap();
+            assert_eq!(canonical.checks[0].command, canonical.checks[1].command);
+            for mismatch in ["working-directory", "command-occurrence"] {
+                let mut changed = binding.clone();
+                match mismatch {
+                    "working-directory" => changed.working_directory = "tests".into(),
+                    _ => changed.command_index = 1,
+                }
+                fs::write(&binding_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+                let assessment = assess_current_verification(root.path(), attempt).unwrap();
+                assert!(
+                    assessment.references.iter().all(|row| !row.satisfied),
+                    "credited {mismatch}: {assessment:?}"
+                );
+                assert_retained(root.path(), &original);
+            }
+            fs::write(&binding_path, &original_binding).unwrap();
+            // Also reject the wrong directory at the public attachment boundary.
+            let proof_path = root.path().join(".fluent/work/native-observations.json");
+            let mut proof: serde_json::Value =
+                serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+            proof["working_directory"] = "tests".into();
+            fs::write(&proof_path, serde_json::to_vec(&proof).unwrap()).unwrap();
+            let error = crate::host_evidence::attach_required_check(
+                root.path(),
+                &store,
+                "verification",
+                "attempt-1",
+                &candidate,
+                &binding.required_check_id,
+                &proof_path,
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("working directory"));
+            assert_retained(root.path(), &original);
+        }
+    }
+
     #[test]
     fn native_learner_uses_a_managed_task_artifact() {
         let identity = native_learner_identity(
