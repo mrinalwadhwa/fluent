@@ -1233,3 +1233,39 @@ fn discord_state_never_changes_existing_slack_runtime() {
     assert_eq!(slack_runner.provider().calls.len(), 1);
     assert_eq!(discord.provider().calls.len(), 2);
 }
+
+#[test]
+fn discord_runner_rate_limit_keeps_other_routes_available() {
+    use serde_json::json;
+    let (endpoint, server) = http_fixture(vec![
+        (
+            "429 Too Many Requests",
+            json!({"retry_after":65.0,"global":false}),
+        ),
+        ("200 OK", json!({"ok":true})),
+    ]);
+    let rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    assert!(rest.request("GET", "/channels/200/messages", None).is_err());
+    let unrelated = rest.request("GET", "/gateway/bot", None);
+    let requests = server.join();
+    assert_eq!(unrelated.unwrap()["ok"], true);
+    assert_eq!(requests.unwrap().len(), 2);
+}
+
+#[test]
+fn discord_runner_honors_global_rate_limit_deadline() {
+    use serde_json::json;
+    let (endpoint, server) = http_fixture(vec![(
+        "429 Too Many Requests",
+        json!({"retry_after":65.0,"global":true}),
+    )]);
+    let rest = DiscordRest::with_test_endpoint("test-token".into(), endpoint).unwrap();
+    assert!(rest.request("GET", "/channels/200/messages", None).is_err());
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert!(
+        rest.request("GET", "/gateway/bot", None)
+            .unwrap_err()
+            .to_string()
+            .contains("rate limit is still active")
+    );
+}

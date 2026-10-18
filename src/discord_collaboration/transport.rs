@@ -22,7 +22,7 @@ pub struct DiscordRest {
     token: String,
     base: String,
     bot_id: String,
-    retry_not_before: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+    cooldowns: std::sync::Arc<std::sync::Mutex<BTreeMap<String, std::time::Instant>>>,
 }
 impl DiscordRest {
     pub fn new(token: String) -> Result<Self> {
@@ -37,7 +37,7 @@ impl DiscordRest {
             token,
             base: "https://discord.com/api/v10".into(),
             bot_id: String::new(),
-            retry_not_before: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+            cooldowns: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         })
     }
     #[doc(hidden)]
@@ -51,8 +51,34 @@ impl DiscordRest {
     }
     pub fn request(&self, method: &str, route: &str, body: Option<Value>) -> Result<Value> {
         let interaction = route.starts_with("/interactions/");
+        // Preserve the major resource id and group message/member ids by route.
+        let path = route
+            .split('?')
+            .next()
+            .unwrap_or(route)
+            .split('/')
+            .enumerate()
+            .map(|(index, part)| {
+                if index > 2 && !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+                    ":id"
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let route_key = format!("{method}:{path}");
         for _ in 0..if interaction { 1 } else { 4 } {
-            if !interaction && std::time::Instant::now() < *self.retry_not_before.lock().unwrap() {
+            if !interaction
+                && self
+                    .cooldowns
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(key, deadline)| {
+                        (key == "*" || key == &route_key) && std::time::Instant::now() < *deadline
+                    })
+            {
                 bail!("Discord rate limit is still active; request remains pending");
             }
 
@@ -74,8 +100,10 @@ impl DiscordRest {
                             .and_then(|s| s.parse::<f64>().ok())
                             .filter(|s| s.is_finite() && *s >= 0. && *s < 86400.)
                         {
-                            *self.retry_not_before.lock().unwrap() =
-                                std::time::Instant::now() + Duration::from_secs_f64(seconds);
+                            self.cooldowns.lock().unwrap().insert(
+                                route_key.clone(),
+                                std::time::Instant::now() + Duration::from_secs_f64(seconds),
+                            );
                         }
                     }
 
@@ -98,8 +126,15 @@ impl DiscordRest {
                     if seconds > 86400. {
                         bail!("Discord returned an invalid rate limit");
                     }
-                    *self.retry_not_before.lock().unwrap() =
-                        std::time::Instant::now() + Duration::from_secs_f64(seconds);
+                    let key = if body["global"] == true {
+                        "*".into()
+                    } else {
+                        route_key.clone()
+                    };
+                    self.cooldowns.lock().unwrap().insert(
+                        key,
+                        std::time::Instant::now() + Duration::from_secs_f64(seconds),
+                    );
                     if seconds > 60. {
                         bail!("Discord rate limited; retry the durable request later");
                     }
