@@ -98,10 +98,6 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 "cargo_cwd_config": cargo_cwd_config(build_cwd),
                 "build_command": build_command}
     key = digest(json.dumps(identity, sort_keys=True).encode())
-    if not cargo_home:
-        # Without an admitted Cargo home, local Cargo configuration cannot be
-        # verified without reading the operator's global store.
-        cache = reader_root / "cache"
     try:
         cache.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=cache):

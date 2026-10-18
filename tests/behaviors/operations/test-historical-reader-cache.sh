@@ -256,6 +256,28 @@ assert identity['cargo_home'] is None
 assert identity['cargo_config'] == {}
 PY
 
+# Unset CARGO_HOME still reuses the project cache across worktrees.
+builds_before="$(wc -l < "$BUILD_LOG")"
+(
+    unset CARGO_HOME FLUENT_HISTORICAL_READER_CACHE
+    one_root="$temporary/work-one/.scratch/implicit-reader"
+    two_root="$temporary/work-two/.scratch/implicit-reader"
+    EXPECT_CARGO_HOME="$one_root/cargo-home" RUSTC_VERSION='rustc implicit homes' \
+        python3 "$helper" "$temporary/work-one" "$commit" "$one_root" > "$temporary/implicit-work-one-path"
+    EXPECT_CARGO_HOME="$two_root/cargo-home" RUSTC_VERSION='rustc implicit homes' \
+        python3 "$helper" "$temporary/work-two" "$commit" "$two_root" > "$temporary/implicit-work-two-path"
+)
+if (( $(wc -l < "$BUILD_LOG") != builds_before + 1 )); then
+    echo 'unset CARGO_HOME rebuilt the reader in the second worktree' >&2
+    exit 1
+fi
+implicit_one="$(readlink "$(cat "$temporary/implicit-work-one-path")")"
+implicit_two="$(readlink "$(cat "$temporary/implicit-work-two-path")")"
+if [[ "$implicit_one" != "$implicit_two" || "$implicit_one" != *"/project/.fluent/work/cache/historical-readers/"* ]]; then
+    echo 'unset CARGO_HOME did not reuse the project cache' >&2
+    exit 1
+fi
+
 # The calling worktree's Cargo configuration cannot affect an isolated build.
 mkdir -p "$temporary/work-two/.cargo"
 printf '[build]\nrustflags = ["-Copt-level=1"]\n' > "$temporary/work-two/.cargo/config.toml"
