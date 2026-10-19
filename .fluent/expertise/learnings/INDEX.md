@@ -157,6 +157,7 @@
 - [retired-persisted-fields-canonicalize-on-save](retired-persisted-fields-canonicalize-on-save.md) — Retired persisted JSON fields must remain readable and disappear when a record is next saved
 - [reused-recovery-authority-revalidates-publication](reused-recovery-authority-revalidates-publication.md) — Revalidate reused recovery authority before journal publication whenever an existing Task reopens
 - [reviewed-git-tree-uses-isolated-index](reviewed-git-tree-uses-isolated-index.md) — Build an exact approved Git tree through a temporary index so unrelated staged, unstaged, and untracked work remains untouched
+- [reviewed-host-proof-keeps-baseline-attribution](reviewed-host-proof-keeps-baseline-attribution.md) — Compose reviewed host proof with target-baseline failures while checking original and landing results independently
 - [round-cap-extensions-bind-preextension-frontier](round-cap-extensions-bind-preextension-frontier.md) — Validate round-cap chains against approval-time Writer counts while keeping legacy readability separate from recovery authority
 - [route-tests-drive-real-launch-wiring](route-tests-drive-real-launch-wiring.md) — A launch-route regression must drive the real phase or resume path and observe what reaches the coder; helper or persistence-only assertions do not verify execution wiring
 - [rust-test-evidence-preserves-native-qualifiers](rust-test-evidence-preserves-native-qualifiers.md) — Resolve Rust test evidence with every supplied path, binary, and module qualifier before requiring passing results
