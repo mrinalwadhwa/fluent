@@ -11232,6 +11232,34 @@ SHALL block reuse.
 Test: src/tester_evidence.rs (accepted_command_covers_only_its_original_failed_tests)
 Test: src/tester_evidence.rs (reviewed_host_proof_binds_source_and_expertise_ancestry)
 
+## Landing with reviewed host proof
+
+### B1
+
+WHEN an exact landing candidate has accepted, candidate-bound host proof for a
+canonical Tester command that fails in the landing sandbox, and every other
+failed command matches the target baseline by command identity, harness, exit
+code, and native failing test IDs,
+THE SYSTEM SHALL accept the landing Tester comparison only when every native
+failure in the original and current Tester results is covered by the baseline
+or attributable to the reviewed command, and every current failure attributed
+to that command outside the baseline was present in its original Tester result.
+Test: src/work_merge_executor.rs (landing_accepts_reviewed_host_command_with_other_baseline_failures)
+Test: src/work_merge_executor.rs (landing_rejects_original_native_failure_with_passing_command)
+
+### B2
+
+IF another failed command does not match the target baseline, a native failure
+is outside both the baseline and the reviewed command's original failures, or
+the reviewed command, candidate, applicability, manifest, or process settlement
+differs from the accepted proof,
+THEN THE SYSTEM SHALL reject the landing Tester comparison and retained
+post-land verification.
+Test: src/work_merge_executor.rs (landing_accepts_reviewed_host_command_with_other_baseline_failures)
+Test: src/work_merge_executor.rs (landing_rejects_original_native_failure_with_passing_command)
+Test: src/work_merge_executor.rs (retained_history_checks_reviewed_host_proof_with_baseline_failures)
+Test: src/tester_evidence.rs (reviewed_host_proof_binds_landing_comparison_inputs)
+
 ## Retry an interrupted landing
 
 ### B1

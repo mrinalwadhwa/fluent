@@ -845,6 +845,13 @@ The assessment applies accepted coverage to named references in a copy of the
 Tester results and retains the original artifact. Landing may carry this proof
 across an expertise-only descendant commit after revalidating the original
 failures, command identities, source artifacts, and passing Review. The landing
+comparison and retained history may also accept unrelated failed commands when
+they match the retained target baseline through the shared native-failure
+classification. Every original and current native failure must belong to that
+baseline or the reviewed command; a current failure of the reviewed command
+outside the baseline must already appear in its original Tester result. A
+passing command exit does not excuse an unrelated native failure in either
+result. The landing
 command's resolved applicability in `canonical-run.json` must equal the accepted
 proof's applicability, including comparison commits. Landing includes that
 manifest in its evidence digest so historical inspection uses the recorded

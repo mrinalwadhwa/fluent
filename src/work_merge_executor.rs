@@ -4333,8 +4333,15 @@ mod tests {
         WorkItem,
     };
 
-    #[test]
-    fn landing_accepts_reviewed_host_command_with_other_baseline_failures() {
+    struct ReviewedHostLandingFixture {
+        root: tempfile::TempDir,
+        item: WorkItem,
+        candidate: MergeCandidate,
+        current_path: PathBuf,
+        baseline_path: PathBuf,
+    }
+
+    fn reviewed_host_landing_fixture(unrelated_source_failure: bool) -> ReviewedHostLandingFixture {
         use crate::recovery_contracts::verification_tests::{
             accept_first_check, unique_harness_fixture,
         };
@@ -4344,12 +4351,22 @@ mod tests {
         let (root, mut item) = unique_harness_fixture();
         fs::write(
             root.path().join(".fluent/tester.yaml"),
-            "commands:\n  - command: 'false'\n    test_harness: shell-harness\n  - command: 'sh -c false'\n    test_harness: cargo-nextest\n",
+            "commands:\n  - command: 'false'\n    test_harness: shell-harness\n  - command: 'sh -c false'\n    test_harness: cargo-nextest\n  - command: 'true'\n    test_harness: cargo-test\n",
         )
         .unwrap();
+        let mut failures = vec![
+            serde_json::json!({"id":"reviewed::failure","test_harness":"shell-harness","status":"fail"}),
+            serde_json::json!({"id":"baseline::failure","test_harness":"cargo-nextest","status":"fail"}),
+        ];
+        if unrelated_source_failure {
+            failures.push(serde_json::json!({"id":"unrelated::new_failure","test_harness":"cargo-test","status":"fail"}));
+        }
         fs::write(
             root.path().join(".fluent/extract-tester-results"),
-            "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"baseline::failure\",\"test_harness\":\"cargo-nextest\",\"status\":\"fail\",\"failure_excerpt\":\"baseline\"}]'\n",
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::to_string(&failures).unwrap()
+            ),
         )
         .unwrap();
         crate::git::run(
@@ -4427,23 +4444,107 @@ mod tests {
         let mut current: TesterResults =
             serde_json::from_slice(&fs::read(&source_path).unwrap()).unwrap();
         current.candidate_commit = Some(merged.clone());
-        let landing = root.path().join("landing");
-        fs::create_dir(&landing).unwrap();
+        // The third command's failure belongs only to the original bound result.
+        current
+            .tests
+            .retain(|test| test.id != "unrelated::new_failure");
+        current.summary.total = current.tests.len();
+        current.summary.fail = current.tests.len();
+        let mut candidate = merge_candidate_fixture(root.path());
+        candidate.candidate_commit = merged.clone();
+        let verification = root
+            .path()
+            .join(work_artifact_path(
+                &item.id,
+                &candidate.attempt_id,
+                &candidate.id,
+            ))
+            .join("merge/verification-1");
+        let landing = verification.join("tester");
+        fs::create_dir_all(landing.join("commands")).unwrap();
         let current_path = landing.join("tester-results.json");
         fs::copy(
             source_path.with_file_name("canonical-run.json"),
             landing.join("canonical-run.json"),
         )
         .unwrap();
+        for command in &current.commands {
+            for log in [&command.stdout_log, &command.stderr_log] {
+                fs::copy(source_path.parent().unwrap().join(log), landing.join(log)).unwrap();
+            }
+        }
         fs::write(&current_path, serde_json::to_vec(&current).unwrap()).unwrap();
 
         let mut baseline = current.clone();
+        baseline.candidate_commit = Some(source_commit.clone());
         baseline.commands[0].exit_code = 0;
-        let baseline_path = root.path().join("baseline.json");
+        baseline.tests.retain(|test| test.id == "baseline::failure");
+        baseline.summary.total = baseline.tests.len();
+        baseline.summary.fail = baseline.tests.len();
+        fs::create_dir(verification.join("target-baseline")).unwrap();
+        let baseline_path = verification.join("target-baseline/tester-results.json");
         fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        candidate.merge_state.status = MergeCandidateMergeStatus::Merged;
+        candidate.merge_state.merged_commit = Some(merged.clone());
+        candidate.merge_state.check_artifacts = [
+            ("merge-tester", current_path.clone()),
+            ("merge-tester-manifest", landing.join("canonical-run.json")),
+            ("merge-target-baseline", baseline_path.clone()),
+        ]
+        .into_iter()
+        .map(|(producer_id, path)| ArtifactRef {
+            producer_id: producer_id.into(),
+            path: path_for_model(root.path(), &path),
+        })
+        .collect();
+        candidate.merge_state.landing_intent = Some(LandingIntent {
+            schema_version: 1,
+            operation_id: "reviewed-host-landing".into(),
+            work_item_id: item.id.clone(),
+            attempt_id: candidate.attempt_id.clone(),
+            merge_candidate_id: candidate.id.clone(),
+            learner_mode: item.learner_mode,
+            repository: root.path().display().to_string(),
+            target_branch: candidate.target_branch.clone(),
+            target_workspace: root.path().display().to_string(),
+            target_before: source_commit,
+            verified_commit: merged,
+            evidence_digest: crate::verification_assessment::landing_evidence_digest(
+                root.path(),
+                &candidate.merge_state.check_artifacts,
+                &[],
+            )
+            .unwrap(),
+            accepted_model_digest: "unused-by-history".into(),
+            authorization_digest: "unused-by-history".into(),
+            check_artifacts: candidate.merge_state.check_artifacts.clone(),
+            review_artifacts: vec![],
+        });
+        ReviewedHostLandingFixture {
+            root,
+            item,
+            candidate,
+            current_path,
+            baseline_path,
+        }
+    }
+
+    #[test]
+    fn landing_accepts_reviewed_host_command_with_other_baseline_failures() {
+        use crate::tester::TesterResults;
+
+        let fixture = reviewed_host_landing_fixture(false);
+        let ReviewedHostLandingFixture {
+            root,
+            item,
+            candidate,
+            current_path,
+            baseline_path,
+        } = fixture;
+        let merged = &candidate.candidate_commit;
         assert_eq!(
             crate::tester_evidence::introduced_tester_failures(&current_path, Some(&baseline_path),),
-            0
+            1
         );
         assert_eq!(
             crate::tester_evidence::unexplained_failed_tester_commands(
@@ -4455,24 +4556,129 @@ mod tests {
         compare_merge_tester(
             &current_path,
             &baseline_path,
-            &merged,
+            merged,
             root.path(),
             &item.attempts[0],
         )
         .unwrap();
 
+        let current: TesterResults =
+            serde_json::from_slice(&fs::read(&current_path).unwrap()).unwrap();
+        for (id, harness) in [
+            ("baseline::new_failure", "cargo-nextest"),
+            ("unrelated::new_failure", "cargo-test"),
+            ("reviewed::new_failure", "shell-harness"),
+        ] {
+            let mut changed = current.clone();
+            let mut failure = changed.tests[0].clone();
+            failure.id = id.into();
+            failure.test_harness = harness.into();
+            changed.tests.push(failure);
+            changed.summary.total += 1;
+            changed.summary.fail += 1;
+            fs::write(&current_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let error = compare_merge_tester(
+                &current_path,
+                &baseline_path,
+                merged,
+                root.path(),
+                &item.attempts[0],
+            )
+            .expect_err(&format!("the reviewed proof must not cover {id}"));
+            assert!(
+                error.to_string().contains("newly failing tests"),
+                "{id}: {error}"
+            );
+        }
+        fs::write(&current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+        let mut baseline: TesterResults =
+            serde_json::from_slice(&fs::read(&baseline_path).unwrap()).unwrap();
         baseline.commands[1].exit_code = 0;
         fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
         assert!(
             compare_merge_tester(
                 &current_path,
                 &baseline_path,
-                &merged,
+                merged,
                 root.path(),
                 &item.attempts[0],
             )
             .is_err(),
             "the reviewed host check cannot cover a second new failed command"
+        );
+    }
+
+    #[test]
+    fn landing_rejects_original_native_failure_with_passing_command() {
+        let fixture = reviewed_host_landing_fixture(true);
+        let attempt = &fixture.item.attempts[0];
+        let check = attempt.evidence_recoveries[0]
+            .required_check
+            .as_ref()
+            .unwrap();
+        crate::verification_assessment::validate_required_check_acceptance_at(
+            fixture.root.path(),
+            attempt,
+            check,
+            crate::check_applicability::evaluation_time(),
+        )
+        .unwrap();
+        let error = compare_merge_tester(
+            &fixture.current_path,
+            &fixture.baseline_path,
+            &fixture.candidate.candidate_commit,
+            fixture.root.path(),
+            attempt,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("newly failing tests"), "{error}");
+    }
+
+    #[test]
+    fn retained_history_checks_reviewed_host_proof_with_baseline_failures() {
+        use crate::tester::TesterResults;
+        use crate::verification_assessment::{LandedTesterSource, assess_landed_tester_history};
+
+        let mut fixture = reviewed_host_landing_fixture(false);
+        let assess = |candidate: &MergeCandidate| {
+            assess_landed_tester_history(
+                fixture.root.path(),
+                &fixture.item.attempts[0],
+                candidate,
+                &candidate.candidate_commit,
+                LandedTesterSource::MergeCandidate,
+            )
+        };
+        assert_eq!(
+            assess(&fixture.candidate).unwrap(),
+            path_for_model(fixture.root.path(), &fixture.current_path)
+        );
+        let mut current: TesterResults =
+            serde_json::from_slice(&fs::read(&fixture.current_path).unwrap()).unwrap();
+        let mut failure = current.tests[0].clone();
+        failure.id = "unrelated::new_failure".into();
+        failure.test_harness = "cargo-test".into();
+        current.tests.push(failure);
+        current.summary.total += 1;
+        current.summary.fail += 1;
+        fs::write(&fixture.current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+        // Rebind the changed result so stale evidence cannot mask native rejection.
+        let evidence_digest = crate::verification_assessment::landing_evidence_digest(
+            fixture.root.path(),
+            &fixture.candidate.merge_state.check_artifacts,
+            &[],
+        )
+        .unwrap();
+        fixture
+            .candidate
+            .merge_state
+            .landing_intent
+            .as_mut()
+            .unwrap()
+            .evidence_digest = evidence_digest;
+        assert_eq!(
+            assess(&fixture.candidate).unwrap_err().to_string(),
+            "retained Tester result has new failures or unexplained failed commands"
         );
     }
 
