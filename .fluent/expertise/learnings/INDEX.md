@@ -101,6 +101,7 @@
 - [model-owned-lifecycle-transition-ledger](model-owned-lifecycle-transition-ledger.md) — Record lifecycle transitions inside the Work model transaction, preserve typed owner attribution and object-specific reasons, and separate in-memory dashboard views from durable delivery cursors
 - [native-codex-display-is-disposable](native-codex-display-is-disposable.md) — Keep Codex TUI display backpressure separate from native evidence capture and Task supervision
 - [native-input-settlement-binds-identity](native-input-settlement-binds-identity.md) — Settle native Tasks only for the current execution generation, assigned conversation, and latest admitted input
+- [native-observations-supplement-command-proof](native-observations-supplement-command-proof.md) — Preserve command acceptance when separately reviewed native observations supply named-test evidence
 - [native-pi-input-failures-return-handled](native-pi-input-failures-return-handled.md) — Reject unacknowledged Pi input with a handled result because its installed runner swallows callback exceptions
 - [native-relay-tests-drain-before-comparing](native-relay-tests-drain-before-comparing.md) — Keep large-payload fixture work outside the Codex relay's bounded display drain while proving evidence settles before display consumption
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
