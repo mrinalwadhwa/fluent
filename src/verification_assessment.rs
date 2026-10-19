@@ -237,6 +237,7 @@ pub(crate) fn assess_landed_tester_history(
                     attempt,
                     merged_commit,
                     &root.join(&path),
+                    Some(&root.join(baseline)),
                 )?,
             "retained Tester result has new failures or unexplained failed commands"
         );

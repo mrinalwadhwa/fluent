@@ -8,9 +8,10 @@ use anyhow::Result;
 
 use crate::work_model::{Attempt, RequiredCheckSource, work_artifact_path};
 
-/// A reviewed host pass for the Writer's canonical command can cover the same
-/// sandbox-only failures after Learning adds expertise. Bind the allowance to
-/// the original Tester failures and recorded comparison inputs, and reject any
+/// A reviewed host pass for the Writer's canonical command can cover that
+/// command's sandbox failure after Learning adds expertise. Other failed
+/// commands must match the target baseline when one is supplied. Bind the
+/// allowance to the original Tester and comparison inputs, and reject any
 /// executable or check change. Historical inspection uses the landing snapshot,
 /// since mutable comparison refs may have moved after that run.
 pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
@@ -18,9 +19,18 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
     attempt: &Attempt,
     merged_commit: &str,
     current_path: &Path,
+    baseline_path: Option<&Path>,
 ) -> Result<bool> {
     let current: crate::tester::TesterResults = serde_json::from_slice(&fs::read(current_path)?)?;
+    let baseline = baseline_path
+        .map(|path| -> Result<crate::tester::TesterResults> {
+            Ok(serde_json::from_slice(&fs::read(path)?)?)
+        })
+        .transpose()?;
     if current.error.is_some()
+        || baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.error.is_some())
         || current.candidate_commit.as_deref() != Some(merged_commit)
         || current.commands.iter().any(|command| {
             command
@@ -137,6 +147,7 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
                     &current,
                     *command_index,
                     &check.command,
+                    baseline.as_ref(),
                 ),
         );
     }
@@ -148,6 +159,7 @@ fn reviewed_command_covers_failures(
     current: &crate::tester::TesterResults,
     command_index: usize,
     command: &str,
+    baseline: Option<&crate::tester::TesterResults>,
 ) -> bool {
     let Some((source_command, current_command)) = source
         .commands
@@ -161,6 +173,8 @@ fn reviewed_command_covers_failures(
         .iter()
         .map(|entry| (entry.command.as_str(), entry.test_harness.as_str()))
         .collect::<Vec<_>>();
+    let source_preexisting = preexisting_failed_tester_commands(source, baseline);
+    let current_preexisting = preexisting_failed_tester_commands(current, baseline);
     if source.error.is_some()
         || current.error.is_some()
         || !command_identities.iter().copied().eq(current
@@ -172,9 +186,14 @@ fn reviewed_command_covers_failures(
         || current_command.test_harness != source_command.test_harness
         || source_command.exit_code == 0
         || current_command.exit_code == 0
-        || [source, current].iter().any(|results| {
+        || [
+            (source, &source_preexisting),
+            (current, &current_preexisting),
+        ]
+        .iter()
+        .any(|(results, preexisting)| {
             results.commands.iter().enumerate().any(|(index, command)| {
-                (command.exit_code != 0 && index != command_index)
+                (command.exit_code != 0 && index != command_index && !preexisting.contains(&index))
                     || command
                         .process_settlement
                         .as_ref()
@@ -188,20 +207,39 @@ fn reviewed_command_covers_failures(
         .tests
         .iter()
         .filter(|test| test.status == "fail" && test.test_harness == source_command.test_harness)
-        .map(|test| test.id.as_str())
+        .map(|test| (test.id.as_str(), test.test_harness.as_str()))
         .collect::<HashSet<_>>();
     let current_failures = current
         .tests
         .iter()
         .filter(|test| test.status == "fail")
         .collect::<Vec<_>>();
-    !current_failures.is_empty()
+    let baseline_failures = baseline
+        .into_iter()
+        .flat_map(|results| results.tests.iter())
+        .filter(|test| test.status == "fail")
+        .map(|test| (test.id.as_str(), test.test_harness.as_str()))
+        .collect::<HashSet<_>>();
+    (baseline.is_some() || !current_failures.is_empty())
+        && source
+            .tests
+            .iter()
+            .filter(|test| test.status == "fail")
+            .all(|test| {
+                baseline_failures.contains(&(test.id.as_str(), test.test_harness.as_str()))
+                    || crate::verification_assessment::failed_test_covered_by_accepted_command(
+                        &command_identities,
+                        &[command_index],
+                        test,
+                    )
+            })
         && current_failures.iter().all(|test| {
-            crate::verification_assessment::failed_test_covered_by_accepted_command(
-                &command_identities,
-                &[command_index],
-                test,
-            ) && source_failures.contains(test.id.as_str())
+            baseline_failures.contains(&(test.id.as_str(), test.test_harness.as_str()))
+                || (crate::verification_assessment::failed_test_covered_by_accepted_command(
+                    &command_identities,
+                    &[command_index],
+                    test,
+                ) && source_failures.contains(&(test.id.as_str(), test.test_harness.as_str())))
         })
 }
 
@@ -436,6 +474,7 @@ mod reviewed_host_proof_tests {
                     attempt,
                     candidate,
                     &current_path,
+                    None,
                 )
                 .unwrap_or(false)
             };
@@ -575,6 +614,7 @@ mod reviewed_host_proof_tests {
                 attempt,
                 &merged,
                 &results_path,
+                None,
             )
             .unwrap()
         };
@@ -704,7 +744,8 @@ mod reviewed_host_proof_tests {
             &source,
             &same,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
 
         let new_failure = result(&[
@@ -715,14 +756,16 @@ mod reviewed_host_proof_tests {
             &source,
             &new_failure,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
         let other_harness = result(&[("terminal::control", "shell-harness")]);
         assert!(!super::reviewed_command_covers_failures(
             &source,
             &other_harness,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
         let mut other_command = same.clone();
         other_command.commands[1].exit_code = 1;
@@ -730,7 +773,8 @@ mod reviewed_host_proof_tests {
             &source,
             &other_command,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
         let mut changed_command = same;
         changed_command.commands[0]
@@ -740,7 +784,8 @@ mod reviewed_host_proof_tests {
             &source,
             &changed_command,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
 
         let mut duplicate = source.clone();
@@ -749,14 +794,16 @@ mod reviewed_host_proof_tests {
             &duplicate,
             &duplicate,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
         duplicate.tests[0].id = "command-0:cargo nextest run".into();
         assert!(super::reviewed_command_covers_failures(
             &duplicate,
             &duplicate,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
         let mut missing_command = source.clone();
         missing_command.commands.pop();
@@ -764,7 +811,8 @@ mod reviewed_host_proof_tests {
             &source,
             &missing_command,
             0,
-            "cargo nextest run"
+            "cargo nextest run",
+            None,
         ));
     }
 }

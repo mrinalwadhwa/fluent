@@ -2395,6 +2395,7 @@ fn compare_merge_tester(
                 attempt,
                 candidate_commit,
                 results_path,
+                Some(baseline_path),
             )?,
             "Tester found {introduced} newly failing tests and {unexplained} unexplained failed commands"
         );
@@ -4331,6 +4332,149 @@ mod tests {
         NoChangeVerification, NoChangeVerificationResult, TaskArtifactArea, TaskOutput, TaskStatus,
         WorkItem,
     };
+
+    #[test]
+    fn landing_accepts_reviewed_host_command_with_other_baseline_failures() {
+        use crate::recovery_contracts::verification_tests::{
+            accept_first_check, unique_harness_fixture,
+        };
+        use crate::tester::TesterResults;
+        use crate::verification_assessment::assess_canonical_checks;
+
+        let (root, mut item) = unique_harness_fixture();
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: 'false'\n    test_harness: shell-harness\n  - command: 'sh -c false'\n    test_harness: cargo-nextest\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(".fluent/extract-tester-results"),
+            "#!/bin/sh\nprintf '%s\\n' '[{\"id\":\"baseline::failure\",\"test_harness\":\"cargo-nextest\",\"status\":\"fail\",\"failure_excerpt\":\"baseline\"}]'\n",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &[
+                "add",
+                ".fluent/tester.yaml",
+                ".fluent/extract-tester-results",
+            ],
+            "stage landing fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Add independent baseline failure"],
+            "commit landing fixture",
+        )
+        .unwrap();
+        let source_commit =
+            crate::git::run_stdout(root.path(), &["rev-parse", "HEAD"], "read landing source")
+                .unwrap();
+        for task in &mut item.attempts[0].tasks {
+            if let Some(output) = &mut task.output {
+                output.commit = source_commit.clone();
+            }
+            if let Some(context) = &mut task.review_context {
+                context.candidate_commit = source_commit.clone();
+            }
+        }
+        let tester = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap();
+        let area = root
+            .path()
+            .join(&tester.artifact_area.as_ref().unwrap().path);
+        crate::tester::run(
+            root.path(),
+            &area,
+            true,
+            &ContentResolver::new(Some(root.path())),
+        )
+        .unwrap();
+        crate::tester::bind_candidate_commit(&area, &source_commit).unwrap();
+        accept_first_check(root.path(), &mut item);
+
+        fs::create_dir_all(root.path().join(".fluent/expertise")).unwrap();
+        fs::write(
+            root.path().join(".fluent/expertise/lesson.md"),
+            "Learned.\n",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["add", ".fluent/expertise/lesson.md"],
+            "stage lesson",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Record lesson"],
+            "commit lesson",
+        )
+        .unwrap();
+        let merged = crate::git::run_stdout(
+            root.path(),
+            &["rev-parse", "HEAD"],
+            "read landing candidate",
+        )
+        .unwrap();
+        let source_path = assess_canonical_checks(root.path(), &item.attempts[0])
+            .unwrap()
+            .results_path;
+        let mut current: TesterResults =
+            serde_json::from_slice(&fs::read(&source_path).unwrap()).unwrap();
+        current.candidate_commit = Some(merged.clone());
+        let landing = root.path().join("landing");
+        fs::create_dir(&landing).unwrap();
+        let current_path = landing.join("tester-results.json");
+        fs::copy(
+            source_path.with_file_name("canonical-run.json"),
+            landing.join("canonical-run.json"),
+        )
+        .unwrap();
+        fs::write(&current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+
+        let mut baseline = current.clone();
+        baseline.commands[0].exit_code = 0;
+        let baseline_path = root.path().join("baseline.json");
+        fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert_eq!(
+            crate::tester_evidence::introduced_tester_failures(&current_path, Some(&baseline_path),),
+            0
+        );
+        assert_eq!(
+            crate::tester_evidence::unexplained_failed_tester_commands(
+                &current_path,
+                Some(&baseline_path),
+            ),
+            1
+        );
+        compare_merge_tester(
+            &current_path,
+            &baseline_path,
+            &merged,
+            root.path(),
+            &item.attempts[0],
+        )
+        .unwrap();
+
+        baseline.commands[1].exit_code = 0;
+        fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert!(
+            compare_merge_tester(
+                &current_path,
+                &baseline_path,
+                &merged,
+                root.path(),
+                &item.attempts[0],
+            )
+            .is_err(),
+            "the reviewed host check cannot cover a second new failed command"
+        );
+    }
 
     #[test]
     fn non_codex_rebase_sandbox_retains_shared_temp_write_grants() {
