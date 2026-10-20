@@ -3155,30 +3155,119 @@ struct HostTaskChildGuard {
 }
 
 fn host_first_turn_record(transcript: &str, generation: &str) -> Option<serde_json::Value> {
-    transcript
+    let mut records = transcript
         .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|record| {
-            record["execution_generation"] == generation
-                && record["event"]["method"] == "turn/started"
-                && record["input_sequence"] == 1
-                && record["turn_id"].as_str().is_some_and(|id| !id.is_empty())
-                && record["assigned_conversation_id"]
-                    .as_str()
-                    .is_some_and(|id| !id.is_empty())
-                && record["event"]["params"]["threadId"] == record["assigned_conversation_id"]
-        })
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    let belongs_to_first_turn = |record: &serde_json::Value| {
+        record["format"] == "fluent-native-agent-event"
+            && record["schema_version"] == 1
+            && record["provider"] == "codex"
+            && record["execution_generation"] == generation
+            && record["input_sequence"] == 1
+            && record["turn_id"].as_str().is_some_and(|id| !id.is_empty())
+            && record["assigned_conversation_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+            && record["conversation_id"] == record["assigned_conversation_id"]
+            && record["event"]["params"]["threadId"] == record["assigned_conversation_id"]
+            && record["event"]["params"]["turn"]["id"] == record["turn_id"]
+    };
+    let started = records.find(|record| {
+        belongs_to_first_turn(record) && record["event"]["method"] == "turn/started"
+    })?;
+    records.find(|record| {
+        belongs_to_first_turn(record)
+            && record["assigned_conversation_id"] == started["assigned_conversation_id"]
+            && record["turn_id"] == started["turn_id"]
+            && record["event"]["method"] == "turn/completed"
+            && record["event"]["params"]["turn"]["status"] == "completed"
+    })
+}
+
+fn host_first_turn_fixture(method: &str) -> serde_json::Value {
+    json!({
+        "format": "fluent-native-agent-event", "schema_version": 1, "provider": "codex",
+        "execution_generation": "current-generation", "assigned_conversation_id": "thread-1",
+        "conversation_id": "thread-1", "input_sequence": 1, "turn_id": "first-turn",
+        "event": {"method": method, "params": {"threadId": "thread-1",
+            "turn": {"id": "first-turn", "status": if method == "turn/started" { "inProgress" } else { "completed" }}}}
+    })
+}
+
+#[test]
+fn host_first_turn_probe_requires_successful_completion() {
+    let started = host_first_turn_fixture("turn/started");
+    let completed = host_first_turn_fixture("turn/completed");
+    assert!(host_first_turn_record(&started.to_string(), "current-generation").is_none());
+    assert!(host_first_turn_record(&completed.to_string(), "current-generation").is_none());
+    assert!(
+        host_first_turn_record(&format!("{completed}\n{started}"), "current-generation").is_none()
+    );
+    let transcript = format!("{started}\n{completed}");
+    let record = host_first_turn_record(&transcript, "current-generation").unwrap();
+    assert_eq!(record["event"]["method"], "turn/completed");
+    assert_eq!(record["event"]["params"]["turn"]["status"], "completed");
+}
+
+#[test]
+fn host_first_turn_probe_rejects_failed_or_uncorrelated_completion() {
+    let started = host_first_turn_fixture("turn/started");
+    for (pointer, value) in [
+        ("/event/params/turn/status", json!("failed")),
+        ("/event/params/turn/status", json!("interrupted")),
+        ("/event/params/turn/status", serde_json::Value::Null),
+        ("/execution_generation", json!("old-generation")),
+        ("/assigned_conversation_id", json!("other-thread")),
+        ("/conversation_id", json!("other-thread")),
+        ("/event/params/threadId", json!("other-thread")),
+        ("/turn_id", json!("other-turn")),
+        ("/event/params/turn/id", json!("other-turn")),
+        ("/input_sequence", json!(2)),
+        ("/format", json!("other-format")),
+        ("/provider", json!("other-provider")),
+        ("/schema_version", json!(2)),
+    ] {
+        let mut completed = host_first_turn_fixture("turn/completed");
+        *completed.pointer_mut(pointer).unwrap() = value;
+        let transcript = format!("{started}\n{completed}");
+        assert!(
+            host_first_turn_record(&transcript, "current-generation").is_none(),
+            "accepted mismatch at {pointer}: {completed}"
+        );
+    }
+    // Internally consistent records from another conversation or turn also fail.
+    for pointers in [
+        vec![
+            "/assigned_conversation_id",
+            "/conversation_id",
+            "/event/params/threadId",
+        ],
+        vec!["/turn_id", "/event/params/turn/id"],
+    ] {
+        let mut completed = host_first_turn_fixture("turn/completed");
+        for pointer in pointers {
+            *completed.pointer_mut(pointer).unwrap() = json!("unrelated");
+        }
+        assert!(
+            host_first_turn_record(&format!("{started}\n{completed}"), "current-generation")
+                .is_none()
+        );
+    }
 }
 
 #[test]
 fn host_first_turn_probe_ignores_prior_generation() {
-    let transcript = [
-        json!({"execution_generation":"old-generation","assigned_conversation_id":"thread-1","input_sequence":1,"turn_id":"old-turn","event":{"method":"turn/started","params":{"threadId":"thread-1"}}}).to_string(),
-        json!({"execution_generation":"current-generation","assigned_conversation_id":"thread-1","input_sequence":1,"turn_id":"current-turn","event":{"method":"turn/started","params":{"threadId":"thread-1"}}}).to_string(),
-    ].join("\n");
+    let mut old_start = host_first_turn_fixture("turn/started");
+    let mut old_end = host_first_turn_fixture("turn/completed");
+    old_start["execution_generation"] = json!("old-generation");
+    old_end["execution_generation"] = json!("old-generation");
+    let started = host_first_turn_fixture("turn/started");
+    let completed = host_first_turn_fixture("turn/completed");
+    let transcript = format!("{old_start}\n{old_end}\n{started}\n{completed}");
     assert!(host_first_turn_record(&transcript, "other-generation").is_none());
     let record = host_first_turn_record(&transcript, "current-generation").unwrap();
-    assert_eq!(record["turn_id"], "current-turn");
+    assert_eq!(record["execution_generation"], "current-generation");
+    assert_eq!(record["event"]["method"], "turn/completed");
 }
 
 impl Drop for HostTaskChildGuard {
@@ -3875,6 +3964,8 @@ fn host_native_agent_acceptance() {
                             "assigned_conversation_id": record["assigned_conversation_id"],
                             "turn_id": record["turn_id"],
                             "input_sequence": record["input_sequence"],
+                            "completion_status": record["event"]["params"]["turn"]["status"],
+                            "completion_event": record["event"],
                             "terminal_session": session,
                         }))
                         .unwrap(),
@@ -3884,13 +3975,13 @@ fn host_native_agent_acceptance() {
                 }
                 assert!(
                     child.child.try_wait().unwrap().is_none(),
-                    "Codex exited before turn/started; inspect {} and {}",
+                    "Codex exited before successful first-turn completion; inspect {} and {}",
                     artifact.display(),
                     runtime.display()
                 );
                 assert!(
                     Instant::now() < first_turn_deadline,
-                    "Codex did not start its first turn; inspect {} and {}",
+                    "Codex did not complete its first turn successfully; inspect {} and {}",
                     artifact.display(),
                     runtime.display()
                 );

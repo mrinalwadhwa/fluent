@@ -3,6 +3,19 @@
 Observable behaviors of the fluent system. Each statement describes what
 the system does, not how. EARS format.
 
+## Native Codex startup
+
+### B1
+
+WHEN a native Codex Task starts its first authenticated turn on macOS,
+THE SYSTEM SHALL complete that turn successfully inside the production worker
+sandbox, retaining the interactive-home and Keychain denials, and record the
+successful completion for the same execution generation, assigned conversation,
+and first turn that started.
+Test: tests/native_agent_tasks.rs (host_first_turn_probe_requires_successful_completion)
+Test: tests/native_agent_tasks.rs (host_first_turn_probe_rejects_failed_or_uncorrelated_completion)
+Test: {"kind":"command","command":"bash tests/host/check-native-codex-first-turn.sh","command_index":2,"description":"authenticated first-turn completion under the production macOS worker sandbox"}
+
 ## Dashboard operator console
 
 ### B1
