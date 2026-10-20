@@ -229,7 +229,7 @@ fn restrict_trusted_coder_env(cmd: &mut Command) {
     cmd.envs(retained);
 }
 
-fn codex_ca_bundle() -> Option<PathBuf> {
+pub(crate) fn codex_ca_bundle() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("FLUENT_CODEX_CA_BUNDLE") {
         let path = PathBuf::from(path);
         if path.is_file() {

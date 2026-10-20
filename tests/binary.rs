@@ -14143,7 +14143,12 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     let config: serde_yaml::Value = serde_yaml::from_str(&tester_yaml).unwrap();
     let commands = config["commands"].as_sequence().unwrap();
 
-    assert_eq!(commands.len(), 2);
+    assert_eq!(commands.len(), 3);
+    assert_eq!(
+        commands[2]["command"].as_str(),
+        Some("bash tests/host/check-native-codex-first-turn.sh")
+    );
+    assert_eq!(commands[2]["test_harness"].as_str(), Some("shell-harness"));
     assert!(commands.iter().all(|command| {
         command["reject_process_leaks"]
             .as_bool()
@@ -39221,6 +39226,8 @@ if [ "$COUNT" = 1 ]; then
   sleep 5
   exit 1
 fi
+# The recovered provider makes progress before it performs Writer work.
+printf '%s\n' '{{"type":"assistant","message":{{"content":[]}}}}'
 if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
   DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
   mkdir -p "$(dirname "$DRAFT")"
@@ -39229,6 +39236,8 @@ if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
 fi
 case "$PWD" in
   */work-6-work-1-attempt-1)
+    # Keep the successful launch alive past the no-progress deadline.
+    sleep 2
     printf 'scheduler recovery\n' > scheduler-recovery.txt
     git add scheduler-recovery.txt
     git commit -m "Recover scheduler launch" >/dev/null 2>&1

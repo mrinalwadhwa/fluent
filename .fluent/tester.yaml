@@ -75,3 +75,6 @@ commands:
       '
     test_harness: shell-harness
     reject_process_leaks: true
+  - command: bash tests/host/check-native-codex-first-turn.sh
+    test_harness: shell-harness
+    reject_process_leaks: true

@@ -480,6 +480,18 @@ fn bootstrap(
     Ok((thread_id, result, initialized, socket))
 }
 
+/// Return a CA bundle to supply as `SSL_CERT_FILE` only when the caller has not
+/// already provided one through the process environment or `launch_env`.
+fn select_ca_bundle_for_environment(launch_env: &[(String, String)]) -> Option<OsString> {
+    if std::env::var_os("SSL_CERT_FILE").is_some() {
+        return None;
+    }
+    if launch_env.iter().any(|(k, _)| k == "SSL_CERT_FILE") {
+        return None;
+    }
+    crate::coder::codex_ca_bundle().map(|p| p.into_os_string())
+}
+
 fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
     let mut values: Vec<(OsString, OsString)> = [
         "PATH",
@@ -509,6 +521,9 @@ fn environment(task: &CodexNativeTask<'_>) -> Vec<(OsString, OsString)> {
             .filter(|(key, _)| !matches!(key.as_str(), "HOME" | "CODEX_HOME" | "PWD"))
             .map(|(key, value)| (key.into(), value.into())),
     );
+    if let Some(bundle) = select_ca_bundle_for_environment(task.launch_env) {
+        values.push(("SSL_CERT_FILE".into(), bundle));
+    }
     values.push(("HOME".into(), task.private_home.as_os_str().to_owned()));
     values.push((
         "CODEX_HOME".into(),
@@ -524,7 +539,6 @@ fn provider_startup_log(socket_dir: &Path) -> PathBuf {
 
 fn archive_provider_startup_log(log: &Path, artifact: &Path) -> Result<PathBuf> {
     const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
-    let archived = artifact.join("native-provider-stderr.log");
     let source = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -534,11 +548,28 @@ fn archive_provider_startup_log(log: &Path, artifact: &Path) -> Result<PathBuf> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("open native Codex provider stderr"),
     };
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&archived)
-        .context("create archived native Codex provider stderr")?;
+    let (archived, mut destination) = {
+        let mut n = 1u64;
+        loop {
+            let name = if n == 1 {
+                "native-provider-stderr.log".to_owned()
+            } else {
+                format!("native-provider-stderr-{n}.log")
+            };
+            let path = artifact.join(&name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => break (path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    n = n
+                        .checked_add(1)
+                        .context("native Codex stderr archive index overflow")?;
+                }
+                Err(error) => {
+                    return Err(error).context("create archived native Codex provider stderr");
+                }
+            }
+        }
+    };
     if let Some(source) = source {
         ensure!(
             source.metadata()?.file_type().is_file(),
@@ -1899,7 +1930,11 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
     if outcome.is_err() {
         let _ = terminal.stop();
     }
-    let archived = archive_provider_startup_log(&provider_log, artifact);
+    archive_native_result(outcome, &provider_log, artifact)
+}
+
+fn archive_native_result(outcome: Result<()>, provider_log: &Path, artifact: &Path) -> Result<()> {
+    let archived = archive_provider_startup_log(provider_log, artifact);
     match (outcome, archived) {
         (Ok(()), Ok(_)) => Ok(()),
         (Ok(()), Err(error)) => Err(error),
@@ -2134,6 +2169,117 @@ mod tests {
         std::os::unix::fs::symlink(&log, &linked_log).unwrap();
         let second_artifact = tempfile::tempdir().unwrap();
         assert!(archive_provider_startup_log(&linked_log, second_artifact.path()).is_err());
+    }
+
+    #[test]
+    fn native_codex_archives_stderr_for_each_failed_generation() {
+        let invocation = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let log = provider_startup_log(invocation.path());
+
+        let mut archives = Vec::new();
+        for generation in 1..=12 {
+            let diagnostic = format!("generation {generation} error\n");
+            fs::write(&log, &diagnostic).unwrap();
+            let error = archive_native_result(
+                Err(anyhow::anyhow!("primary startup error {generation}")),
+                &log,
+                artifact.path(),
+            )
+            .unwrap_err();
+            let archived = artifact.path().join(if generation == 1 {
+                "native-provider-stderr.log".to_owned()
+            } else {
+                format!("native-provider-stderr-{generation}.log")
+            });
+            assert_eq!(
+                error.root_cause().to_string(),
+                format!("primary startup error {generation}")
+            );
+            assert!(error.to_string().contains(&archived.display().to_string()));
+            assert!(!archives.iter().any(|(path, _)| path == &archived));
+            archives.push((archived, diagnostic));
+        }
+        assert_eq!(
+            archives[0].0,
+            artifact.path().join("native-provider-stderr.log")
+        );
+        for (path, diagnostic) in archives {
+            assert_eq!(fs::read_to_string(path).unwrap(), diagnostic);
+        }
+    }
+
+    #[test]
+    fn native_codex_success_after_ten_failed_generations_keeps_stderr() {
+        let invocation = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let log = provider_startup_log(invocation.path());
+        for generation in 1..=10 {
+            fs::write(&log, format!("generation {generation} error\n")).unwrap();
+            archive_provider_startup_log(&log, artifact.path()).unwrap();
+        }
+        fs::write(&log, "successful generation diagnostic\n").unwrap();
+        archive_native_result(Ok(()), &log, artifact.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(artifact.path().join("native-provider-stderr-11.log")).unwrap(),
+            "successful generation diagnostic\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.path().join("native-provider-stderr.log")).unwrap(),
+            "generation 1 error\n"
+        );
+    }
+
+    #[test]
+    fn native_codex_stderr_archive_remains_bounded() {
+        let invocation = tempfile::tempdir().unwrap();
+        let artifact = tempfile::tempdir().unwrap();
+        let log = provider_startup_log(invocation.path());
+        let limit = 1024 * 1024;
+        fs::write(&log, vec![b'x'; limit + 100]).unwrap();
+        let archived = archive_provider_startup_log(&log, artifact.path()).unwrap();
+        let bytes = fs::read(archived).unwrap();
+        assert_eq!(&bytes[..limit], vec![b'x'; limit]);
+        assert_eq!(&bytes[limit..], b"\n[provider stderr truncated]\n");
+    }
+
+    // Static mutex serialises the env-var manipulation across concurrent tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn native_codex_environment_uses_existing_ca_bundle_when_unset() {
+        let bundle = tempfile::NamedTempFile::new().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_ssl = std::env::var_os("SSL_CERT_FILE");
+        let saved_bundle = std::env::var_os("FLUENT_CODEX_CA_BUNDLE");
+        unsafe { std::env::remove_var("SSL_CERT_FILE") };
+        unsafe { std::env::set_var("FLUENT_CODEX_CA_BUNDLE", bundle.path()) };
+        let result = select_ca_bundle_for_environment(&[]);
+        unsafe { std::env::remove_var("FLUENT_CODEX_CA_BUNDLE") };
+        match saved_bundle {
+            Some(v) => unsafe { std::env::set_var("FLUENT_CODEX_CA_BUNDLE", v) },
+            None => {}
+        }
+        match saved_ssl {
+            Some(v) => unsafe { std::env::set_var("SSL_CERT_FILE", v) },
+            None => {}
+        }
+        assert_eq!(
+            result,
+            Some(bundle.path().as_os_str().to_owned()),
+            "CA bundle must be supplied when SSL_CERT_FILE is unset"
+        );
+    }
+
+    #[test]
+    fn native_codex_environment_preserves_explicit_ca_bundle() {
+        let explicit = "/explicit/ca-bundle.pem";
+        let launch_env = vec![("SSL_CERT_FILE".to_owned(), explicit.to_owned())];
+        let result = select_ca_bundle_for_environment(&launch_env);
+        assert!(
+            result.is_none(),
+            "CA bundle fallback must not override an explicit SSL_CERT_FILE"
+        );
     }
 
     #[cfg(unix)]
