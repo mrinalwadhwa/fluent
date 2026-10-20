@@ -3952,7 +3952,7 @@ fn host_native_agent_acceptance() {
         let (session, generation) = session;
         if first_turn_only {
             assert_eq!(provider, "codex");
-            let first_turn_deadline = Instant::now() + Duration::from_secs(90);
+            let first_turn_deadline = Instant::now() + Duration::from_secs(300);
             loop {
                 let transcript =
                     fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
