@@ -473,11 +473,25 @@ fn bootstrap(
     let stream = UnixStream::connect(app_socket).context("connect to private Codex app-server")?;
     stream.set_read_timeout(Some(Duration::from_secs(12)))?;
     stream.set_write_timeout(Some(Duration::from_secs(12)))?;
-    let (mut socket, _) = tungstenite::client("ws://localhost/", stream)
-        .map_err(|error| anyhow::anyhow!("Codex app-server WebSocket handshake failed: {error}"))?;
+    let (mut socket, _) = tungstenite::client::client_with_config(
+        "ws://localhost/",
+        stream,
+        Some(native_websocket_config()),
+    )
+    .map_err(|error| anyhow::anyhow!("Codex app-server WebSocket handshake failed: {error}"))?;
     let (thread_id, result, initialized) =
         bootstrap_protocol(&mut socket, workspace, model, effort, session)?;
     Ok((thread_id, result, initialized, socket))
+}
+
+fn native_websocket_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig {
+        // Native Codex has emitted app-server frames above tungstenite's
+        // 16 MiB default. Keep the existing 64 MiB message and display spool
+        // bounds while allowing a frame to use that full allowance.
+        max_frame_size: Some(64 * 1024 * 1024),
+        ..Default::default()
+    }
 }
 
 /// Return a CA bundle to supply as `SSL_CERT_FILE` only when the caller has not
@@ -1801,9 +1815,11 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     0,
                 )?;
                 client.set_read_timeout(Some(Duration::from_secs(12)))?;
-                let client = tungstenite::accept(client).map_err(|error| {
-                    anyhow::anyhow!("Codex native TUI WebSocket handshake failed: {error}")
-                })?;
+                let client =
+                    tungstenite::accept_with_config(client, Some(native_websocket_config()))
+                        .map_err(|error| {
+                            anyhow::anyhow!("Codex native TUI WebSocket handshake failed: {error}")
+                        })?;
                 trace_relay(
                     &boundary,
                     &generation_for_relay,
@@ -3119,6 +3135,28 @@ mod tests {
         assert!(text.starts_with("TUI protocol send failed"), "{text}");
         assert!(text.contains("TUI protocol send failed"), "{text}");
         assert!(text.contains("generation-specific sandbox grant"), "{text}");
+    }
+
+    #[test]
+    fn native_websocket_reads_large_app_server_frame() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let sender = std::thread::spawn(move || {
+            let mut server = tungstenite::accept(server_stream).unwrap();
+            server
+                .send(Message::Text("x".repeat(17 * 1024 * 1024)))
+                .unwrap();
+        });
+        let (mut client, _) = tungstenite::client::client_with_config(
+            "ws://localhost/",
+            client_stream,
+            Some(native_websocket_config()),
+        )
+        .unwrap();
+        assert_eq!(
+            client.read().unwrap().into_text().unwrap().len(),
+            17 * 1024 * 1024
+        );
+        sender.join().unwrap();
     }
 
     #[test]
