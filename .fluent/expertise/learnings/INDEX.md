@@ -99,6 +99,7 @@
 - [mixed-attempt-upgrades-use-child-schemas](mixed-attempt-upgrades-use-child-schemas.md) — Compare each split Attempt record with the schema its own authority requires when upgrading a Work Item
 - [mode-specific-prompts-replace-conflicting-base-instructions](mode-specific-prompts-replace-conflicting-base-instructions.md) — A mode-specific prohibition must replace the contradictory shared instruction, not merely append after it; shared prompt prose stays capability-neutral and the per-mode render owns the allowed action
 - [model-owned-lifecycle-transition-ledger](model-owned-lifecycle-transition-ledger.md) — Record lifecycle transitions inside the Work model transaction, preserve typed owner attribution and object-specific reasons, and separate in-memory dashboard views from durable delivery cursors
+- [native-codex-ca-precedence](native-codex-ca-precedence.md) — Native Codex preserves explicit SSL_CERT_FILE settings before selecting a shared file-based CA bundle
 - [native-codex-display-is-disposable](native-codex-display-is-disposable.md) — Keep Codex TUI display backpressure separate from native evidence capture and Task supervision
 - [native-input-settlement-binds-identity](native-input-settlement-binds-identity.md) — Settle native Tasks only for the current execution generation, assigned conversation, and latest admitted input
 - [native-observations-supplement-command-proof](native-observations-supplement-command-proof.md) — Preserve command acceptance when separately reviewed native observations supply named-test evidence

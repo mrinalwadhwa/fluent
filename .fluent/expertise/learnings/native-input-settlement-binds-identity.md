@@ -18,5 +18,16 @@ receive a new execution generation and terminal. Review, Learner, and rebase
 Tasks use fresh conversations. Provider notifications alone do not determine
 which Work Task has completed.
 
+Native Codex first-turn host acceptance must observe an ordered `turn/started`
+and successful `turn/completed` for the same execution generation, assigned
+conversation, turn, and first input sequence. Validate the canonical event
+envelope and agreement between its identities and the provider event payload.
+A start notification, completed item, or absence of provider errors does not
+prove successful authenticated completion. Negative controls must reject
+completion without a preceding start, failed or interrupted turns, stale
+generations, and internally consistent records for an unrelated turn or
+conversation. Adjusting a host deadline must retain these assertions and the
+production sandbox boundary.
+
 Related: [[native-pi-input-failures-return-handled]],
-[[terminal-control-lease-follows-client]].
+[[terminal-control-lease-follows-client]], [[native-codex-ca-precedence]].

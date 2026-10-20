@@ -29,3 +29,11 @@ Keep the startup classifier narrow: require the Bun `fstat` denial together with
 standard-stream construction evidence. An unrelated workspace permission error
 is not a host-sandbox launch failure. The typed launch failure bypasses generic
 coder retries and resumes the same Task without charging a Writer round.
+
+Native Codex can retry execution generations within one Task artifact directory.
+Archive each invocation's provider stderr with exclusive creation at a distinct
+available path so a later failure or success preserves earlier diagnostics.
+Keep each archive byte-bounded, and retain the primary provider error when
+adding archive context. A later successful generation must not fail merely
+because an earlier generation already published an archive. Test repeated
+failures followed by success and verify the retained contents of earlier files.
