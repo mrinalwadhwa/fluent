@@ -14143,12 +14143,17 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     let config: serde_yaml::Value = serde_yaml::from_str(&tester_yaml).unwrap();
     let commands = config["commands"].as_sequence().unwrap();
 
-    assert_eq!(commands.len(), 3);
+    assert_eq!(commands.len(), 4);
     assert_eq!(
         commands[2]["command"].as_str(),
         Some("bash tests/host/check-native-codex-first-turn.sh")
     );
     assert_eq!(commands[2]["test_harness"].as_str(), Some("shell-harness"));
+    assert_eq!(
+        commands[3]["command"].as_str(),
+        Some("bash tests/host/check-ssh-agent-terminal.sh")
+    );
+    assert_eq!(commands[3]["test_harness"].as_str(), Some("shell-harness"));
     assert!(commands.iter().all(|command| {
         command["reject_process_leaks"]
             .as_bool()
