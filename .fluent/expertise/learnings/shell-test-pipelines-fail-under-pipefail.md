@@ -1,6 +1,6 @@
 ---
 name: shell-test-pipelines-fail-under-pipefail
-description: Shell behavior tests run under set -euo pipefail, so a short-circuiting consumer like grep -q gives the producer SIGPIPE (exit 141) and fails the pipeline; match in-process instead
+description: Avoid false failures under pipefail by matching captured strings in Bash or consuming streamed command output completely
 metadata:
   type: gotcha
 ---
@@ -18,6 +18,14 @@ containment checks: `[[ "$1" == *"$2"* ]]` (and `!=` for the inverse). Quote the
 needle (`"$2"`) so pattern metacharacters like `*` and `[` stay literal, and
 leave the surrounding `*` unquoted so they remain the wildcards that span the
 haystack. No pipeline means nothing to receive `SIGPIPE`.
+
+For streamed command output, keep a consumer that reads the complete stream.
+The smoke harness checks Git commit subjects with
+`git log --format=%s | grep -Fx -- "$subject" > /dev/null`: omitting `-q`
+lets Git finish writing while `-F` and `-x` preserve literal whole-line matching.
+Do not suppress the pipeline status, which must still expose a failed producer
+or missing match. Exercise this form with an early matching subject followed
+by history larger than a pipe buffer; a short log can conceal the failure.
 
 When regression-testing this class of fix, make it mutation-sensitive: build a
 deterministic haystack larger than a pipe buffer (>1 MiB via a doubling loop)

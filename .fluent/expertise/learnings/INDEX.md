@@ -61,6 +61,7 @@
 - [external-review-feedback-binds-source-candidate](external-review-feedback-binds-source-candidate.md) — Persist immutable review-thread identities and an explicit source commit so selected feedback routes to the candidate it actually reviewed
 - [extract-logic-to-avoid-test-duplication](extract-logic-to-avoid-test-duplication.md) — Extract multi-step logic into standalone functions so integration tests call real code rather than reimplementing it
 - [first-writer-binds-committed-source](first-writer-binds-committed-source.md) — A missing initial Writer workspace binds only from committed source; non-Fluent dirt rejects before reservation, Git setup, baseline persistence, or coder launch
+- [fixture-output-capture-precedes-polling](fixture-output-capture-precedes-polling.md) — Capture scheduler fixture output while polling progress so unread pipes cannot block completion or exit
 - [follow-up-journal-schema-boundary](follow-up-journal-schema-boundary.md) — Keep post-land journal interpretation in follow_up so cleanup does not become a second schema owner
 - [formal-workflow-bounds-need-witnesses](formal-workflow-bounds-need-witnesses.md) — Require reachable witnesses and successor coverage for bounded workflow safety searches
 - [framed-protocol-frame-size-cap](framed-protocol-frame-size-cap.md) — Framed protocol readers must cap the maximum frame size before allocating to prevent multi-GB allocations from a u32 length field
@@ -180,7 +181,7 @@
 - [shell-phase-failure-all-exit-paths](shell-phase-failure-all-exit-paths.md) — Every exit path in a shell multi-phase workflow must route through fail_phase, not bare set -e
 - [shell-printed-commands-quote-paths](shell-printed-commands-quote-paths.md) — Shell paths interpolated into user-facing commands must be escaped with printf %q
 - [shell-test-evidence-uses-script-path](shell-test-evidence-uses-script-path.md) — Match shell Test references by exact committed script path while treating parentheticals and harness labels as descriptive text
-- [shell-test-pipelines-fail-under-pipefail](shell-test-pipelines-fail-under-pipefail.md) — Shell behavior tests run under set -euo pipefail, so a short-circuiting consumer like grep -q gives the producer SIGPIPE (exit 141); match in-process with `[[ "$1" == *"$2"* ]]` (quoted needle) instead
+- [shell-test-pipelines-fail-under-pipefail](shell-test-pipelines-fail-under-pipefail.md) — Avoid false failures under pipefail by matching captured strings in Bash or consuming streamed command output completely
 - [shell-tests-invisible-to-compiler](shell-tests-invisible-to-compiler.md) — Shell behavior tests query JSON via jq and are not caught by the compiler when serialized field names change
 - [skill-reference-files-keep-main-bundle-small](skill-reference-files-keep-main-bundle-small.md) — Keep the full skill under its line budget and move low-frequency procedures into explicitly discoverable reference files
 - [smoke-root-identity-binding](smoke-root-identity-binding.md) — A multi-phase manifest must record and verify the smoke root so copied or moved roots are rejected
