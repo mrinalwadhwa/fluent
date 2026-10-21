@@ -29,11 +29,32 @@ MOCK_SCRIPT
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -Fq -- "$2"; then
+  # Match in the shell so an early grep exit cannot fail printf under pipefail.
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
   fi
+}
+
+test_assert_contains_handles_large_output() {
+  local output
+  local result=0
+  # Check an early match with output larger than the pipe buffer.
+  printf -v output 'first literal [*?] match\n%*s\nlast match' 1048576 ''
+
+  assert_contains "$output" 'first literal [*?] match' || result=1
+  assert_contains "$output" 'last match' || result=1
+  if assert_contains "$output" 'missing [*?] match' > /dev/null; then
+    printf '    FAIL: accepted missing literal text\n'
+    result=1
+  fi
+  if assert_contains 'first literal x match' 'first literal [*?] match' > /dev/null; then
+    printf '    FAIL: interpreted literal text as a pattern\n'
+    result=1
+  fi
+
+  return "$result"
 }
 
 test_script_uses_fluent_bin_override() {
@@ -119,6 +140,8 @@ test_operation_scripts_do_not_use_cargo_run_for_fluent() {
 
 printf 'test-behavior-bin-override\n\n'
 
+run_test "Contains assertion handles large output and literal text" \
+  test_assert_contains_handles_large_output
 run_test "Work task instructions script uses FLUENT_BIN_OVERRIDE" \
   test_work_task_instructions_uses_fluent_bin_override
 run_test "Work task run script uses FLUENT_BIN_OVERRIDE" \
