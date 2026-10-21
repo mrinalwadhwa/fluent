@@ -3,7 +3,9 @@ use crate::dashboard_sources::{OpenSsh, RemoteConnection, SshSource};
 use crate::terminal_sessions::TerminalDescriptor;
 use anyhow::{Context, Result, ensure};
 use crossterm::event::Event;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::Duration;
 
 pub struct SshTerminal {
@@ -262,33 +264,27 @@ impl SshTerminal {
 }
 
 struct RawInput {
-    input: std::io::Stdin,
-    flags: i32,
+    input: File,
     raw: bool,
 }
 impl RawInput {
     fn new() -> Result<Self> {
-        let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
-        ensure!(flags >= 0, "reading terminal flags failed");
-        let mut guard = Self {
-            input: std::io::stdin(),
-            flags,
-            raw: false,
-        };
+        // PTY stdin and stdout can share an open file description. Changing
+        // stdin's flags would also make repaint writes fail under backpressure.
+        // Open the controlling terminal separately to poll only input.
+        let input = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open("/dev/tty")
+            .context("opening full-screen terminal input")?;
+        let mut guard = Self { input, raw: false };
         crossterm::terminal::enable_raw_mode()?;
         guard.raw = true;
-        ensure!(
-            unsafe { libc::fcntl(0, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
-            "setting terminal nonblocking mode failed"
-        );
         Ok(guard)
     }
 }
 impl Drop for RawInput {
     fn drop(&mut self) {
-        unsafe {
-            libc::fcntl(0, libc::F_SETFL, self.flags);
-        }
         if self.raw {
             let _ = crossterm::terminal::disable_raw_mode();
         }

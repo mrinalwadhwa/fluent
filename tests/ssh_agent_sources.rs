@@ -297,14 +297,30 @@ fn ssh_fullscreen_pty_child() {
     if mode == "control" {
         view.acquire_control().unwrap();
     }
-    let _terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
+    let mut terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
+    // Initialize the dashboard event reader before handing stdin to full-screen.
+    // The real dashboard enters this path after reading the operator's f key.
+    println!("SSH_DASHBOARD_READY");
+    assert!(crossterm::event::poll(std::time::Duration::from_secs(5)).unwrap());
+    assert!(matches!(
+        crossterm::event::read().unwrap(),
+        crossterm::event::Event::Key(key) if key.code == crossterm::event::KeyCode::Char('f')
+    ));
     // A separate process probes the real remote lease while full-screen IO runs.
     let mut competitor =
         RemoteConnection::open(ssh, config, owner.descriptor().clone(), 40, 8).unwrap();
     if mode == "control" {
         assert!(competitor.acquire_control().is_err());
     }
-    assert_eq!(view.fullscreen(100, 30).unwrap(), 0);
+    let stdin_flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
+    let stdout_flags = unsafe { libc::fcntl(1, libc::F_GETFL) };
+    assert_eq!(terminal.handoff(|| view.fullscreen(100, 30)).unwrap(), 0);
+    println!("SSH_FULLSCREEN_RETURNED");
+    assert!(!view.display().state.contains("Disconnected"));
+    assert_eq!(view.descriptor(), owner.descriptor());
+    assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+    assert_eq!(unsafe { libc::fcntl(0, libc::F_GETFL) }, stdin_flags);
+    assert_eq!(unsafe { libc::fcntl(1, libc::F_GETFL) }, stdout_flags);
     assert_eq!(view.has_control(), mode == "control");
     if mode == "control" {
         assert!(competitor.acquire_control().is_err());

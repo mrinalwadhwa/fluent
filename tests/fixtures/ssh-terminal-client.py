@@ -6,6 +6,12 @@ import tty
 
 tty.setraw(0)
 os.write(1, b"\x1b[2J\x1b[HSSH_FULLSCREEN_PAINT\r\n# ")
+if "FLUENT_SSH_FULLSCREEN_CHILD" in os.environ:
+    # A native interface can repaint more than the local PTY output buffer.
+    paint = (b"X" * 98 + b"\r\n") * 1280
+    while paint:
+        paint = paint[os.write(1, paint):]
+    os.write(1, b"SSH_FULLSCREEN_PAINT_END\r\n")
 prefix = False
 while True:
     data = os.read(0, 8192)

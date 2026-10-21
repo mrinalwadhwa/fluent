@@ -19,6 +19,8 @@ if pid == 0:
 output = bytearray()
 status = None
 sent = False
+opened = False
+detach_at = None
 eof = False
 deadline = time.monotonic() + 25
 try:
@@ -32,10 +34,21 @@ try:
                 chunk = b""
             eof = not chunk
             output.extend(chunk)
-            if not sent and b"SSH_FULLSCREEN_PAINT" in output:
-                os.write(master, b"\x02d")
-                sent = True
+            if not opened and b"SSH_DASHBOARD_READY" in output:
+                os.write(master, b"f")
+                opened = True
+            if detach_at is None and b"SSH_FULLSCREEN_PAINT" in output:
+                # Pause display consumption long enough to fill the output PTY.
+                # Idle input must not make stdout nonblocking and abort repaint.
+                time.sleep(0.4)
+                detach_at = time.monotonic() + 0.5
+            if not sent:
+                assert b"SSH_FULLSCREEN_RETURNED" not in output, output.decode(errors="replace")
             assert len(output) < 1024 * 1024, "display flood"
+        if (not sent and detach_at is not None and time.monotonic() >= detach_at
+                and b"SSH_FULLSCREEN_PAINT_END" in output):
+            os.write(master, b"\x02d")
+            sent = True
         if status is None:
             done, result = os.waitpid(pid, os.WNOHANG)
             if done:
