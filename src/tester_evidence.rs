@@ -227,6 +227,8 @@ fn reviewed_commands_cover_failures(
         && current_failures.iter().all(|test| {
             baseline_failures.contains(&(test.id.as_str(), test.test_harness.as_str()))
                 || sources.iter().any(|(index, source)| {
+                    // Keep the owning command's original result attached to its
+                    // attribution; a different proof's failures cannot replace it.
                     crate::verification_assessment::failed_test_covered_by_accepted_command(
                         &command_identities,
                         &[*index],
@@ -414,6 +416,102 @@ pub(crate) use crate::verification_assessment::failed_command_recheck_correction
 #[cfg(test)]
 mod reviewed_host_proof_tests {
     use crate::tester::{CommandResult, Summary, TestResult, TesterResults};
+
+    #[test]
+    fn reviewed_host_proof_rejects_ambiguous_native_failures() {
+        use std::collections::BTreeMap;
+
+        let mut current = result(&[
+            ("native::first", "cargo-nextest"),
+            ("native::second", "shell-harness"),
+        ]);
+        current.commands[1].exit_code = 1;
+        let sources = BTreeMap::from([(0, current.clone()), (1, current.clone())]);
+        let mut baseline = current.clone();
+        baseline
+            .commands
+            .iter_mut()
+            .for_each(|command| command.exit_code = 0);
+        baseline.tests.clear();
+        assert!(super::reviewed_commands_cover_failures(
+            &sources,
+            &current,
+            Some(&baseline)
+        ));
+
+        for index in 0..2 {
+            let mut changed = sources.clone();
+            // The other original result still contains the failure, but cannot
+            // supply it on behalf of the proof for this command.
+            changed.get_mut(&index).unwrap().tests.remove(index);
+            assert!(
+                !super::reviewed_commands_cover_failures(&changed, &current, Some(&baseline)),
+                "command {index} needs its own original failure"
+            );
+            let mut changed = sources.clone();
+            let mut unexpected = current.tests[index].clone();
+            unexpected.id = "unrelated::new_failure".into();
+            unexpected.test_harness = "cargo-test".into();
+            changed.get_mut(&index).unwrap().tests.push(unexpected);
+            assert!(
+                !super::reviewed_commands_cover_failures(&changed, &current, Some(&baseline)),
+                "an unrelated original failure blocks even when it disappears at landing"
+            );
+        }
+        let mut new_failure = current.clone();
+        new_failure.tests[1].id = "native::new_failure".into();
+        assert!(!super::reviewed_commands_cover_failures(
+            &sources,
+            &new_failure,
+            Some(&baseline)
+        ));
+
+        current.commands[0].test_harness = "shell-harness".into();
+        current.tests[0].test_harness = "shell-harness".into();
+        let sources = BTreeMap::from([(0, current.clone()), (1, current.clone())]);
+        assert!(
+            !super::reviewed_commands_cover_failures(&sources, &current, Some(&baseline)),
+            "accepting both commands cannot disambiguate a shared harness"
+        );
+        let mut no_current_failures = current.clone();
+        no_current_failures.tests.clear();
+        assert!(
+            !super::reviewed_commands_cover_failures(
+                &sources,
+                &no_current_failures,
+                Some(&baseline)
+            ),
+            "ambiguous original failures still block"
+        );
+
+        // Baseline identities include the harness as well as the test id.
+        baseline.tests = current.tests.clone();
+        assert!(super::reviewed_commands_cover_failures(
+            &sources,
+            &current,
+            Some(&baseline)
+        ));
+        baseline.tests[1].test_harness = "cargo-test".into();
+        assert!(!super::reviewed_commands_cover_failures(
+            &sources,
+            &current,
+            Some(&baseline)
+        ));
+
+        // Even identical command text has a distinct synthetic occurrence.
+        current.commands[1].command = current.commands[0].command.clone();
+        for (index, test) in current.tests.iter_mut().enumerate() {
+            test.id = format!("command-{index}:{}", current.commands[index].command);
+        }
+        let mut sources = BTreeMap::from([(0, current.clone()), (1, current.clone())]);
+        assert!(super::reviewed_commands_cover_failures(
+            &sources, &current, None
+        ));
+        sources.get_mut(&1).unwrap().tests.pop();
+        assert!(!super::reviewed_commands_cover_failures(
+            &sources, &current, None
+        ));
+    }
 
     #[test]
     fn reviewed_host_proof_covers_multiple_commands() {
