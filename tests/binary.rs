@@ -31390,8 +31390,8 @@ fn refresh_timeout_preserves_provider_paused_attempt() {
         r##"#!/bin/bash
 if [ "$1" = "--version" ]; then exit 0; fi
 if [ "$1" = "--safe-mode" ] && [ "$2" = "-p" ] && [ "$3" = "ok" ]; then
-  sleep 2
-  exit 0
+  # Keep the probe alive well beyond the deadline even if its supervisor is delayed.
+  exec sleep 60
 fi
 echo '{"type":"result","api_error_status":401,"request_id":"req-refresh-timeout"}'
 exit 1
