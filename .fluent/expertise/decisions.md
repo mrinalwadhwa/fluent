@@ -569,7 +569,12 @@ named references in a derived view; retain the original Tester result unchanged.
 descendant only when every changed path is under `.fluent/expertise/`. Require
 the same ordered commands, harnesses, configuration and extractor, only
 originally covered failures, and identical resolved applicability, including
-comparison commits.
+comparison commits. Collect separately accepted proofs by canonical command
+index before classifying failures in every original result and the landing
+result. Each failed command needs its own proof or native baseline attribution.
+Several accepted commands sharing a harness do not make native attribution
+unambiguous. Each current failure outside the baseline must occur in the
+original result bound to the proof for its owning command.
 Revalidate the original artifact bindings, targeted Tests Review, environment
 requirements, and freshness. `work_merge_executor` includes the landing
 `canonical-run.json` in the evidence digest; `verification_assessment` checks

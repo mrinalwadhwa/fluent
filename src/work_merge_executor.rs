@@ -4341,7 +4341,10 @@ mod tests {
         baseline_path: PathBuf,
     }
 
-    fn reviewed_host_landing_fixture(unrelated_source_failure: bool) -> ReviewedHostLandingFixture {
+    fn reviewed_host_landing_fixture(
+        unrelated_source_failure: bool,
+        multiple_commands: bool,
+    ) -> ReviewedHostLandingFixture {
         use crate::recovery_contracts::verification_tests::{
             accept_first_check, unique_harness_fixture,
         };
@@ -4358,6 +4361,13 @@ mod tests {
             serde_json::json!({"id":"reviewed::failure","test_harness":"shell-harness","status":"fail"}),
             serde_json::json!({"id":"baseline::failure","test_harness":"cargo-nextest","status":"fail"}),
         ];
+        if multiple_commands {
+            let config_path = root.path().join(".fluent/tester.yaml");
+            let mut config = fs::read_to_string(&config_path).unwrap();
+            config.push_str("  - command: sh -c 'exit 2'\n    test_harness: shell-harness\n");
+            fs::write(config_path, config).unwrap();
+            failures.remove(0);
+        }
         if unrelated_source_failure {
             failures.push(serde_json::json!({"id":"unrelated::new_failure","test_harness":"cargo-test","status":"fail"}));
         }
@@ -4413,6 +4423,9 @@ mod tests {
         .unwrap();
         crate::tester::bind_candidate_commit(&area, &source_commit).unwrap();
         accept_first_check(root.path(), &mut item);
+        if multiple_commands {
+            crate::recovery_contracts::verification_tests::accept_check(root.path(), &mut item, 3);
+        }
 
         fs::create_dir_all(root.path().join(".fluent/expertise")).unwrap();
         fs::write(
@@ -4478,6 +4491,9 @@ mod tests {
         let mut baseline = current.clone();
         baseline.candidate_commit = Some(source_commit.clone());
         baseline.commands[0].exit_code = 0;
+        if multiple_commands {
+            baseline.commands[3].exit_code = 0;
+        }
         baseline.tests.retain(|test| test.id == "baseline::failure");
         baseline.summary.total = baseline.tests.len();
         baseline.summary.fail = baseline.tests.len();
@@ -4533,7 +4549,7 @@ mod tests {
     fn landing_accepts_reviewed_host_command_with_other_baseline_failures() {
         use crate::tester::TesterResults;
 
-        let fixture = reviewed_host_landing_fixture(false);
+        let fixture = reviewed_host_landing_fixture(false, false);
         let ReviewedHostLandingFixture {
             root,
             item,
@@ -4610,7 +4626,7 @@ mod tests {
 
     #[test]
     fn landing_rejects_original_native_failure_with_passing_command() {
-        let fixture = reviewed_host_landing_fixture(true);
+        let fixture = reviewed_host_landing_fixture(true, false);
         let attempt = &fixture.item.attempts[0];
         let check = attempt.evidence_recoveries[0]
             .required_check
@@ -4635,11 +4651,147 @@ mod tests {
     }
 
     #[test]
+    fn retained_history_checks_multiple_reviewed_host_proofs() {
+        use crate::tester::{CanonicalRunManifest, TesterResults};
+        use crate::verification_assessment::{LandedTesterSource, assess_landed_tester_history};
+
+        let mut fixture = reviewed_host_landing_fixture(false, true);
+        let attempt = &fixture.item.attempts[0];
+        let source =
+            crate::verification_assessment::assess_canonical_checks(fixture.root.path(), attempt)
+                .unwrap();
+        let mut retained_paths = vec![
+            source.results_path.clone(),
+            source.results_path.with_file_name("canonical-run.json"),
+        ];
+        retained_paths.extend(
+            attempt
+                .evidence_recoveries
+                .iter()
+                .map(|recovery| fixture.root.path().join(&recovery.attachment.snapshot_path)),
+        );
+        let retained = retained_paths
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let check =
+            |attempt: &crate::work_model::Attempt, candidate: &MergeCandidate, accepted: bool| {
+                let landing = compare_merge_tester(
+                    &fixture.current_path,
+                    &fixture.baseline_path,
+                    &candidate.candidate_commit,
+                    fixture.root.path(),
+                    attempt,
+                );
+                let history = assess_landed_tester_history(
+                    fixture.root.path(),
+                    attempt,
+                    candidate,
+                    &candidate.candidate_commit,
+                    LandedTesterSource::MergeCandidate,
+                );
+                assert_eq!(landing.is_ok(), accepted, "landing: {landing:?}");
+                if accepted {
+                    assert_eq!(
+                        history.unwrap(),
+                        path_for_model(fixture.root.path(), &fixture.current_path)
+                    );
+                } else {
+                    assert_eq!(
+                        history.unwrap_err().to_string(),
+                        "retained Tester result has new failures or unexplained failed commands"
+                    );
+                }
+            };
+        let rebind = |candidate: &mut MergeCandidate| {
+            candidate
+                .merge_state
+                .landing_intent
+                .as_mut()
+                .unwrap()
+                .evidence_digest = crate::verification_assessment::landing_evidence_digest(
+                fixture.root.path(),
+                &candidate.merge_state.check_artifacts,
+                &[],
+            )
+            .unwrap();
+        };
+        check(attempt, &fixture.candidate, true);
+        for index in 0..2 {
+            let mut missing = attempt.clone();
+            missing.evidence_recoveries.remove(index);
+            check(&missing, &fixture.candidate, false);
+        }
+
+        // Rebind modified landing artifacts so integrity checks cannot mask
+        // the shared command and native-failure classification.
+        let current_bytes = fs::read(&fixture.current_path).unwrap();
+        let current: TesterResults = serde_json::from_slice(&current_bytes).unwrap();
+        for harness in ["shell-harness", "cargo-nextest", "cargo-test"] {
+            let mut changed = current.clone();
+            let mut failure = changed.tests[0].clone();
+            failure.id = "new::failure".into();
+            failure.test_harness = harness.into();
+            changed.tests.push(failure);
+            changed.summary.total += 1;
+            changed.summary.fail += 1;
+            fs::write(&fixture.current_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            rebind(&mut fixture.candidate);
+            check(attempt, &fixture.candidate, false);
+        }
+        fs::write(&fixture.current_path, &current_bytes).unwrap();
+
+        let baseline_bytes = fs::read(&fixture.baseline_path).unwrap();
+        let mut baseline: TesterResults = serde_json::from_slice(&baseline_bytes).unwrap();
+        baseline.commands[1].exit_code = 0;
+        fs::write(
+            &fixture.baseline_path,
+            serde_json::to_vec(&baseline).unwrap(),
+        )
+        .unwrap();
+        rebind(&mut fixture.candidate);
+        check(attempt, &fixture.candidate, false);
+        fs::write(&fixture.baseline_path, baseline_bytes).unwrap();
+
+        let manifest_path = fixture.current_path.with_file_name("canonical-run.json");
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        let mut manifest: CanonicalRunManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        manifest.applicability[3]
+            .comparison_commits
+            .insert("baseline".into(), "changed".into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        rebind(&mut fixture.candidate);
+        check(attempt, &fixture.candidate, false);
+        fs::write(manifest_path, manifest_bytes).unwrap();
+        rebind(&mut fixture.candidate);
+        check(attempt, &fixture.candidate, true);
+        for (path, bytes) in retained {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+
+        let original_failure = reviewed_host_landing_fixture(true, true);
+        let history = assess_landed_tester_history(
+            original_failure.root.path(),
+            &original_failure.item.attempts[0],
+            &original_failure.candidate,
+            &original_failure.candidate.candidate_commit,
+            LandedTesterSource::MergeCandidate,
+        );
+        assert_eq!(
+            history.unwrap_err().to_string(),
+            "retained Tester result has new failures or unexplained failed commands"
+        );
+    }
+
+    #[test]
     fn retained_history_checks_reviewed_host_proof_with_baseline_failures() {
         use crate::tester::TesterResults;
         use crate::verification_assessment::{LandedTesterSource, assess_landed_tester_history};
 
-        let mut fixture = reviewed_host_landing_fixture(false);
+        let mut fixture = reviewed_host_landing_fixture(false, false);
         let assess = |candidate: &MergeCandidate| {
             assess_landed_tester_history(
                 fixture.root.path(),

@@ -11249,29 +11249,42 @@ Test: src/tester_evidence.rs (reviewed_host_proof_binds_source_and_expertise_anc
 
 ### B1
 
-WHEN an exact landing candidate has accepted, candidate-bound host proof for a
-canonical Tester command that fails in the landing sandbox, and every other
-failed command matches the target baseline by command identity, harness, exit
-code, and native failing test IDs,
-THE SYSTEM SHALL accept the landing Tester comparison only when every native
-failure in the original and current Tester results is covered by the baseline
-or attributable to the reviewed command, and every current failure attributed
-to that command outside the baseline was present in its original Tester result.
+WHEN a post-rebase landing Tester has several failed canonical commands, each
+with accepted host proof for its exact command occurrence and candidate, and
+every remaining failure matches the accepted target baseline,
+THE SYSTEM SHALL allow the landing comparison to continue if no native test
+failure is new or lacks permitted attribution.
+Test: src/tester_evidence.rs (reviewed_host_proof_covers_multiple_commands)
 Test: src/work_merge_executor.rs (landing_accepts_reviewed_host_command_with_other_baseline_failures)
-Test: src/work_merge_executor.rs (landing_rejects_original_native_failure_with_passing_command)
 
 ### B2
 
-IF another failed command does not match the target baseline, a native failure
-is outside both the baseline and the reviewed command's original failures, or
-the reviewed command, candidate, applicability, manifest, or process settlement
-differs from the accepted proof,
-THEN THE SYSTEM SHALL reject the landing Tester comparison and retained
-post-land verification.
-Test: src/work_merge_executor.rs (landing_accepts_reviewed_host_command_with_other_baseline_failures)
-Test: src/work_merge_executor.rs (landing_rejects_original_native_failure_with_passing_command)
-Test: src/work_merge_executor.rs (retained_history_checks_reviewed_host_proof_with_baseline_failures)
+IF any failed canonical command lacks its own accepted proof or matching baseline
+result, or any credited proof has a changed candidate, command occurrence,
+manifest, applicability, source artifact, review state, or process settlement,
+THEN THE SYSTEM SHALL reject the landing comparison before fast-forward and
+retain the failed Merge Candidate for repair.
+Test: src/tester_evidence.rs (reviewed_host_proof_rejects_missing_or_changed_command)
 Test: src/tester_evidence.rs (reviewed_host_proof_binds_landing_comparison_inputs)
+
+### B3
+
+IF the landing Tester or an original Tester result bound to credited proof
+contains a native failing test outside the accepted target baseline,
+THEN THE SYSTEM SHALL reject landing unless that failure can be attributed
+unambiguously to one reviewed command and each current failure was present in
+that command's original Tester result.
+Test: src/tester_evidence.rs (reviewed_host_proof_rejects_ambiguous_native_failures)
+Test: src/work_merge_executor.rs (landing_rejects_original_native_failure_with_passing_command)
+
+### B4
+
+WHEN Fluent later validates retained evidence for a landed candidate that used
+several reviewed host proofs,
+THE SYSTEM SHALL apply the same command and native-failure rules against the
+recorded landing Tester, target baseline, and manifest.
+Test: src/work_merge_executor.rs (retained_history_checks_multiple_reviewed_host_proofs)
+Test: src/work_merge_executor.rs (retained_history_checks_reviewed_host_proof_with_baseline_failures)
 
 ## Retry an interrupted landing
 

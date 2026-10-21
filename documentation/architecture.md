@@ -838,22 +838,28 @@ follow that Writer. If an unchanged candidate first passes a failed-command
 recheck, the recheck result replaces the older failure for review; later
 unrelated correction rounds do not inherit stale Tester evidence.
 
-A targeted Tests Review may accept host proof for one canonical command.
-Native failures belong to that command only when its harness is unique in the
-configuration; repeated harnesses require an exact synthetic command identity.
-The assessment applies accepted coverage to named references in a copy of the
-Tester results and retains the original artifact. Landing may carry this proof
-across an expertise-only descendant commit after revalidating the original
-failures, command identities, source artifacts, and passing Review. The landing
-comparison and retained history may also accept unrelated failed commands when
-they match the retained target baseline through the shared native-failure
-classification. Every original and current native failure must belong to that
-baseline or the reviewed command; a current failure of the reviewed command
-outside the baseline must already appear in its original Tester result. A
-passing command exit does not excuse an unrelated native failure in either
-result. The landing
-command's resolved applicability in `canonical-run.json` must equal the accepted
-proof's applicability, including comparison commits. Landing includes that
+A targeted Tests Review accepts host proof for one canonical command occurrence.
+Landing may credit several independently accepted proofs, keyed by command index,
+after validating every proof's candidate ancestry, original Tester artifacts,
+passing Review, manifest, process settlement, and resolved applicability. Proof
+may carry across an expertise-only descendant commit; executable changes require
+fresh proof. The assessment retains the original Tester and host evidence bytes.
+
+After collecting valid proofs, the shared `tester_evidence` assessment checks
+both the landing result and each proof's original result. Every failed command
+must have its own proof or match the retained target baseline through the shared
+native-failure classifier. Every native failure must belong to that baseline or
+be attributable unambiguously to a reviewed command. A harness identifies the
+command only when it is unique in the ordered configuration; repeated harnesses
+require an exact synthetic command identity, even if all those commands have
+accepted proof. Each current failure outside the baseline must also appear in
+the original result bound to its owning command's proof. Another proof's original
+result cannot supply that failure. A passing command exit does not excuse an
+unrelated native failure in either original or current results.
+
+The landing comparison and retained history use this same assessment. Each
+credited command's resolved applicability in `canonical-run.json` must equal
+its proof's applicability, including comparison commits. Landing includes that
 manifest in its evidence digest so historical inspection uses the recorded
 inputs and rejects changed artifact bytes rather than resolving today's refs.
 Changed executable paths, comparison inputs, or newly failing tests block that

@@ -5,23 +5,26 @@ metadata:
   type: architecture
 ---
 
-Capture landing may combine accepted host proof for one canonical Tester
-command with unrelated failures explained by the retained target baseline.
+Capture landing may combine independently accepted host proofs for several
+canonical Tester commands with failures explained by the retained target baseline.
 Both the live landing comparison and retained post-land assessment pass that
 baseline to the shared proof check in `tester_evidence`. Preserve the
 expertise-only ancestry and unchanged-input restrictions described in
 [[required-checks-outlive-individual-results]].
 
-Check the original proof-bound Tester result and the current landing result
-independently. Every other failed command must satisfy the shared baseline
+Collect valid proofs by command index, then check every original proof-bound
+Tester result and the current landing result independently. Every failed command
+without its own accepted proof must satisfy the shared baseline
 classifier, including its command occurrence, text, harness, exit code, native
 failures, and process settlement. Host proof for one command cannot explain a
 second command's new failure.
 
 Check native failures independently of command exits, using both test ID and
 harness. Every original and current native failure must belong to the baseline
-or be attributable to the reviewed command. Outside the baseline, a current
-failure attributed to that command must also appear in its original result.
+or be attributable unambiguously to a reviewed command. Several accepted commands
+sharing a harness cannot disambiguate a native failure. Outside the baseline, a
+current failure must appear in the original result bound to its owning command;
+its presence in another proof's original result does not suffice.
 An unrelated original failure still blocks reuse when the landing result no
 longer contains it, including when its command reports exit zero.
 
