@@ -775,6 +775,11 @@ test_run_configures_init_and_commits_before_attempt() {
   printf 'secret credential\n' > "$codex_home/auth.json"
   run_harness prepare "$ROOT" --binary "$FAKE_FLUENT_SRC" \
     --codex-home "$codex_home" > /dev/null 2>&1
+  # Keep older history larger than a pipe buffer so checking the initialization
+  # commit also verifies that the assertion lets git finish writing its log.
+  printf 'Seed older history %1048576s\n' '' > "$WORK/older-commit-message"
+  git -C "$ROOT/project/main" commit --allow-empty --cleanup=verbatim \
+    -F "$WORK/older-commit-message" > /dev/null 2>&1
   local codex_home_log="$WORK/codex-home-log"
   FAKE_CODEX_HOME_LOG="$codex_home_log" run_harness run "$ROOT" > "$WORK/run.out" 2>&1
 
@@ -792,7 +797,8 @@ test_run_configures_init_and_commits_before_attempt() {
     || { printf '    FAIL: configured init did not generate instructions\n'; rc=1; }
   [ -z "$(git -C "$ROOT/project/main" status --porcelain)" ] \
     || { printf '    FAIL: attempt started from a dirty checkout\n'; rc=1; }
-  git -C "$ROOT/project/main" log --format=%s | grep -Fxq 'Initialize Fluent smoke fixture' \
+  # Consume all history so an early match cannot fail git with SIGPIPE.
+  git -C "$ROOT/project/main" log --format=%s | grep -Fx 'Initialize Fluent smoke fixture' > /dev/null \
     || { printf '    FAIL: initialization changes were not committed\n'; rc=1; }
   [ -f "$ROOT/project/main/.agents/skills/fluent/.fluent-managed.json" ] \
     || { printf '    FAIL: run did not adopt the bootstrap skill\n'; rc=1; }
