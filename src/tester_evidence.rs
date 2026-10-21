@@ -1,6 +1,6 @@
 //! Classify immutable Tester results and failed-command recheck artifacts.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,9 +8,9 @@ use anyhow::Result;
 
 use crate::work_model::{Attempt, RequiredCheckSource, work_artifact_path};
 
-/// A reviewed host pass for the Writer's canonical command can cover that
-/// command's sandbox failure after Learning adds expertise. Other failed
-/// commands must match the target baseline when one is supplied. Bind the
+/// Reviewed host passes can cover their exact canonical command failures after
+/// Learning adds expertise. Other failed commands must match the target baseline
+/// when one is supplied. Validate every proof before classifying failures. Bind the
 /// allowance to the original Tester and comparison inputs, and reject any
 /// executable or check change. Historical inspection uses the landing snapshot,
 /// since mutable comparison refs may have moved after that run.
@@ -41,6 +41,7 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
     {
         return Ok(false);
     }
+    let mut reviewed_sources = BTreeMap::new();
     for recovery in attempt.evidence_recoveries.iter().rev() {
         let Some(check) = recovery.required_check.as_ref() else {
             continue;
@@ -57,6 +58,9 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
         else {
             continue;
         };
+        if reviewed_sources.contains_key(command_index) {
+            continue;
+        }
         if current
             .commands
             .get(*command_index)
@@ -140,106 +144,99 @@ pub(crate) fn reviewed_host_proof_covers_expertise_only_merge(
             return Ok(false);
         }
         let source: crate::tester::TesterResults = serde_json::from_slice(&source_bytes)?;
-        return Ok(
-            source.candidate_commit.as_deref() == Some(check.candidate_commit.as_str())
-                && reviewed_command_covers_failures(
-                    &source,
-                    &current,
-                    *command_index,
-                    &check.command,
-                    baseline.as_ref(),
-                ),
-        );
+        if source.candidate_commit.as_deref() != Some(check.candidate_commit.as_str()) {
+            return Ok(false);
+        }
+        reviewed_sources.insert(*command_index, source);
     }
-    Ok(false)
+    Ok(reviewed_commands_cover_failures(
+        &reviewed_sources,
+        &current,
+        baseline.as_ref(),
+    ))
 }
 
-fn reviewed_command_covers_failures(
-    source: &crate::tester::TesterResults,
+fn reviewed_commands_cover_failures(
+    sources: &BTreeMap<usize, crate::tester::TesterResults>,
     current: &crate::tester::TesterResults,
-    command_index: usize,
-    command: &str,
     baseline: Option<&crate::tester::TesterResults>,
 ) -> bool {
-    let Some((source_command, current_command)) = source
-        .commands
-        .get(command_index)
-        .zip(current.commands.get(command_index))
-    else {
-        return false;
-    };
-    let command_identities = source
+    let command_identities = current
         .commands
         .iter()
         .map(|entry| (entry.command.as_str(), entry.test_harness.as_str()))
         .collect::<Vec<_>>();
-    let source_preexisting = preexisting_failed_tester_commands(source, baseline);
-    let current_preexisting = preexisting_failed_tester_commands(current, baseline);
-    if source.error.is_some()
-        || current.error.is_some()
-        || !command_identities.iter().copied().eq(current
-            .commands
-            .iter()
-            .map(|entry| (entry.command.as_str(), entry.test_harness.as_str())))
-        || command != source_command.command
-        || current_command.command != source_command.command
-        || current_command.test_harness != source_command.test_harness
-        || source_command.exit_code == 0
-        || current_command.exit_code == 0
-        || [
-            (source, &source_preexisting),
-            (current, &current_preexisting),
-        ]
-        .iter()
-        .any(|(results, preexisting)| {
-            results.commands.iter().enumerate().any(|(index, command)| {
-                (command.exit_code != 0 && index != command_index && !preexisting.contains(&index))
-                    || command
-                        .process_settlement
-                        .as_ref()
-                        .is_some_and(|settlement| !settlement.leaks.is_empty())
-            })
+    if sources.is_empty()
+        || sources.iter().any(|(index, source)| {
+            source
+                .commands
+                .get(*index)
+                .zip(current.commands.get(*index))
+                .is_none_or(|(source_command, current_command)| {
+                    source_command.exit_code == 0 || current_command.exit_code == 0
+                })
         })
+        || sources
+            .values()
+            .chain(std::iter::once(current))
+            .any(|results| {
+                let preexisting = preexisting_failed_tester_commands(results, baseline);
+                results.error.is_some()
+                    || !command_identities.iter().copied().eq(results
+                        .commands
+                        .iter()
+                        .map(|entry| (entry.command.as_str(), entry.test_harness.as_str())))
+                    || results.commands.iter().enumerate().any(|(index, command)| {
+                        (command.exit_code != 0
+                            && !sources.contains_key(&index)
+                            && !preexisting.contains(&index))
+                            || command
+                                .process_settlement
+                                .as_ref()
+                                .is_some_and(|settlement| !settlement.leaks.is_empty())
+                    })
+            })
     {
         return false;
     }
-    let source_failures = source
-        .tests
-        .iter()
-        .filter(|test| test.status == "fail" && test.test_harness == source_command.test_harness)
-        .map(|test| (test.id.as_str(), test.test_harness.as_str()))
-        .collect::<HashSet<_>>();
-    let current_failures = current
-        .tests
-        .iter()
-        .filter(|test| test.status == "fail")
-        .collect::<Vec<_>>();
     let baseline_failures = baseline
         .into_iter()
         .flat_map(|results| results.tests.iter())
         .filter(|test| test.status == "fail")
         .map(|test| (test.id.as_str(), test.test_harness.as_str()))
         .collect::<HashSet<_>>();
+    let accepted = sources.keys().copied().collect::<Vec<_>>();
+    let current_failures = current
+        .tests
+        .iter()
+        .filter(|test| test.status == "fail")
+        .collect::<Vec<_>>();
     (baseline.is_some() || !current_failures.is_empty())
-        && source
-            .tests
-            .iter()
+        && sources
+            .values()
+            .flat_map(|source| &source.tests)
             .filter(|test| test.status == "fail")
             .all(|test| {
                 baseline_failures.contains(&(test.id.as_str(), test.test_harness.as_str()))
                     || crate::verification_assessment::failed_test_covered_by_accepted_command(
                         &command_identities,
-                        &[command_index],
+                        &accepted,
                         test,
                     )
             })
         && current_failures.iter().all(|test| {
             baseline_failures.contains(&(test.id.as_str(), test.test_harness.as_str()))
-                || (crate::verification_assessment::failed_test_covered_by_accepted_command(
-                    &command_identities,
-                    &[command_index],
-                    test,
-                ) && source_failures.contains(&(test.id.as_str(), test.test_harness.as_str())))
+                || sources.iter().any(|(index, source)| {
+                    crate::verification_assessment::failed_test_covered_by_accepted_command(
+                        &command_identities,
+                        &[*index],
+                        test,
+                    ) && source.tests.iter().any(|original| {
+                        original.status == "fail"
+                            && original.id == test.id
+                            && original.test_harness == test.test_harness
+                    })
+                })
         })
 }
 
@@ -417,6 +414,247 @@ pub(crate) use crate::verification_assessment::failed_command_recheck_correction
 #[cfg(test)]
 mod reviewed_host_proof_tests {
     use crate::tester::{CommandResult, Summary, TestResult, TesterResults};
+
+    #[test]
+    fn reviewed_host_proof_covers_multiple_commands() {
+        use crate::recovery_contracts::verification_tests::{accept_check, fixture};
+        use crate::verification_assessment::assess_canonical_checks;
+
+        let (root, mut item) = fixture(false);
+        accept_check(root.path(), &mut item, 0);
+        accept_check(root.path(), &mut item, 1);
+        let attempt = &item.attempts[0];
+        let assessment = assess_canonical_checks(root.path(), attempt).unwrap();
+        let original = std::fs::read(&assessment.results_path).unwrap();
+        let candidate = &assessment.checks[0].candidate_commit;
+        let baseline_path = root.path().join("baseline.json");
+        let mut baseline: TesterResults = serde_json::from_slice(&original).unwrap();
+        baseline
+            .commands
+            .iter_mut()
+            .for_each(|command| command.exit_code = 0);
+        std::fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert!(
+            super::reviewed_host_proof_covers_expertise_only_merge(
+                root.path(),
+                attempt,
+                candidate,
+                &assessment.results_path,
+                Some(&baseline_path),
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(&assessment.results_path).unwrap(), original);
+
+        // The remaining canonical command needs native baseline attribution.
+        let mut current = result(&[("baseline::failure", "cargo-test")]);
+        current.commands[1].exit_code = 1;
+        let mut third = current.commands[0].clone();
+        third.command = "cargo test".into();
+        third.test_harness = "cargo-test".into();
+        current.commands.push(third);
+        let sources =
+            std::collections::BTreeMap::from([(0, current.clone()), (1, current.clone())]);
+        let mut baseline = current.clone();
+        baseline.commands[0].exit_code = 0;
+        baseline.commands[1].exit_code = 0;
+        assert!(super::reviewed_commands_cover_failures(
+            &sources,
+            &current,
+            Some(&baseline)
+        ));
+        baseline.commands[2].exit_code = 0;
+        assert!(
+            !super::reviewed_commands_cover_failures(&sources, &current, Some(&baseline)),
+            "an unreviewed third command cannot borrow the other proofs"
+        );
+    }
+
+    #[test]
+    fn reviewed_host_proof_rejects_missing_or_changed_command() {
+        use crate::recovery_contracts::verification_tests::{accept_check, fixture};
+        use crate::verification_assessment::assess_canonical_checks;
+        use crate::work_model::{EvidenceRecoveryState, RequiredCheckSource, TaskStatus};
+        use std::fs;
+
+        let (root, mut item) = fixture(false);
+        accept_check(root.path(), &mut item, 0);
+        accept_check(root.path(), &mut item, 1);
+        let attempt = &item.attempts[0];
+        let assessment = assess_canonical_checks(root.path(), attempt).unwrap();
+        let source_bytes = fs::read(&assessment.results_path).unwrap();
+        let current_path = root.path().join("landing-results.json");
+        let manifest_path = current_path.with_file_name("canonical-run.json");
+        let manifest_bytes =
+            fs::read(assessment.results_path.with_file_name("canonical-run.json")).unwrap();
+        fs::write(&manifest_path, &manifest_bytes).unwrap();
+        let current: TesterResults = serde_json::from_slice(&source_bytes).unwrap();
+        let baseline_path = root.path().join("baseline.json");
+        let mut baseline = current.clone();
+        baseline
+            .commands
+            .iter_mut()
+            .for_each(|command| command.exit_code = 0);
+        fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        let covered = |attempt: &crate::work_model::Attempt, current: &TesterResults| {
+            fs::write(&current_path, serde_json::to_vec(current).unwrap()).unwrap();
+            super::reviewed_host_proof_covers_expertise_only_merge(
+                root.path(),
+                attempt,
+                current.candidate_commit.as_deref().unwrap(),
+                &current_path,
+                Some(&baseline_path),
+            )
+            .unwrap_or(false)
+        };
+        assert!(covered(attempt, &current));
+        // Change each proof independently so iteration order cannot hide a bad binding.
+        for index in 0..2 {
+            for change in ["missing", "unreviewed", "candidate", "position", "review"] {
+                let mut changed = attempt.clone();
+                match change {
+                    "missing" => {
+                        changed.evidence_recoveries.remove(index);
+                    }
+                    "unreviewed" => {
+                        changed.evidence_recoveries[index].state = EvidenceRecoveryState::Reviewing
+                    }
+                    "candidate" => {
+                        changed.evidence_recoveries[index]
+                            .required_check
+                            .as_mut()
+                            .unwrap()
+                            .candidate_commit = "0000000000000000000000000000000000000000".into()
+                    }
+                    "position" => {
+                        let RequiredCheckSource::CanonicalTester { command_index, .. } =
+                            &mut changed.evidence_recoveries[index]
+                                .required_check
+                                .as_mut()
+                                .unwrap()
+                                .source
+                        else {
+                            unreachable!()
+                        };
+                        *command_index = 1 - index;
+                    }
+                    "review" => {
+                        let id = changed.evidence_recoveries[index].targets[0]
+                            .review_task_id
+                            .as_ref()
+                            .unwrap();
+                        changed
+                            .tasks
+                            .iter_mut()
+                            .find(|task| &task.id == id)
+                            .unwrap()
+                            .status = TaskStatus::Failed;
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!covered(&changed, &current), "proof {index}: {change}");
+            }
+            let recovery = &attempt.evidence_recoveries[index];
+            let review = attempt
+                .tasks
+                .iter()
+                .find(|task| Some(&task.id) == recovery.targets[0].review_task_id.as_ref())
+                .unwrap();
+            for path in [
+                root.path().join(&recovery.attachment.snapshot_path),
+                root.path()
+                    .join(&review.artifact_area.as_ref().unwrap().path)
+                    .join("review.md"),
+            ] {
+                let bytes = fs::read(&path).unwrap();
+                fs::write(&path, b"changed evidence").unwrap();
+                assert!(!covered(attempt, &current), "{}", path.display());
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        for change in ["config", "extractor", "order", "applicability"] {
+            let mut manifest: crate::tester::CanonicalRunManifest =
+                serde_json::from_slice(&manifest_bytes).unwrap();
+            match change {
+                "config" => manifest.config_digest.push_str("changed"),
+                "extractor" => manifest.extractor_digest = "changed".into(),
+                "order" => manifest.commands.swap(0, 1),
+                "applicability" => {
+                    manifest.applicability[1]
+                        .comparison_commits
+                        .insert("baseline".into(), "changed".into());
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(!covered(attempt, &current), "{change}");
+        }
+        fs::write(&manifest_path, &manifest_bytes).unwrap();
+        let mut third = current.clone();
+        third.commands.push(current.commands[1].clone());
+        assert!(
+            !covered(attempt, &third),
+            "a third command needs its own proof"
+        );
+        let mut leaking = current.clone();
+        leaking.commands[1].process_settlement = Some(crate::tester::ProcessSettlementEvidence {
+            settlement_directory: "settlement".into(),
+            leaks: vec![crate::tester::ProcessLeak {
+                pid: 123,
+                kind: "descendant".into(),
+                settlement_directory: "settlement".into(),
+            }],
+        });
+        assert!(!covered(attempt, &leaking));
+        fs::write(&assessment.results_path, b"changed source").unwrap();
+        assert!(!covered(attempt, &current));
+        fs::write(&assessment.results_path, &source_bytes).unwrap();
+        assert!(covered(attempt, &current));
+
+        // Keep the evidence and Review attachment consistent while expiring one proof.
+        let (live_root, mut live) =
+            crate::recovery_contracts::verification_tests::fixture_with_lifetime(false, Some(60));
+        accept_check(live_root.path(), &mut live, 0);
+        accept_check(live_root.path(), &mut live, 1);
+        let assessment = assess_canonical_checks(live_root.path(), &live.attempts[0]).unwrap();
+        let candidate = assessment.checks[0].candidate_commit.clone();
+        let attempt = &mut live.attempts[0];
+        let recovery = &mut attempt.evidence_recoveries[0];
+        let proof_path = live_root.path().join(&recovery.attachment.snapshot_path);
+        let mut proof: serde_json::Value =
+            serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+        proof["run_at"] = "2000-01-01T00:00:00Z".into();
+        let bytes = serde_json::to_vec(&proof).unwrap();
+        fs::write(proof_path, &bytes).unwrap();
+        recovery.attachment.digest = crate::verification_policy::digest(&bytes);
+        attempt
+            .tasks
+            .iter_mut()
+            .find(|task| Some(&task.id) == recovery.targets[0].review_task_id.as_ref())
+            .unwrap()
+            .evidence_review_context
+            .as_mut()
+            .unwrap()
+            .attachment = recovery.attachment.clone();
+        let error = crate::verification_assessment::validate_required_check_acceptance_at(
+            live_root.path(),
+            attempt,
+            &assessment.checks[0],
+            crate::check_applicability::evaluation_time(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("expired"), "{error}");
+        assert!(
+            !super::reviewed_host_proof_covers_expertise_only_merge(
+                live_root.path(),
+                attempt,
+                &candidate,
+                &assessment.results_path,
+                Some(&baseline_path),
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn reviewed_host_proof_binds_source_and_expertise_ancestry() {
@@ -740,11 +978,9 @@ mod reviewed_host_proof_tests {
     fn accepted_command_covers_only_its_original_failed_tests() {
         let source = result(&[("terminal::control", "cargo-nextest")]);
         let same = result(&[("terminal::control", "cargo-nextest")]);
-        assert!(super::reviewed_command_covers_failures(
-            &source,
+        assert!(super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &same,
-            0,
-            "cargo nextest run",
             None,
         ));
 
@@ -752,66 +988,52 @@ mod reviewed_host_proof_tests {
             ("terminal::control", "cargo-nextest"),
             ("terminal::new_regression", "cargo-nextest"),
         ]);
-        assert!(!super::reviewed_command_covers_failures(
-            &source,
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &new_failure,
-            0,
-            "cargo nextest run",
             None,
         ));
         let other_harness = result(&[("terminal::control", "shell-harness")]);
-        assert!(!super::reviewed_command_covers_failures(
-            &source,
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &other_harness,
-            0,
-            "cargo nextest run",
             None,
         ));
         let mut other_command = same.clone();
         other_command.commands[1].exit_code = 1;
-        assert!(!super::reviewed_command_covers_failures(
-            &source,
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &other_command,
-            0,
-            "cargo nextest run",
             None,
         ));
         let mut changed_command = same;
         changed_command.commands[0]
             .command
             .push_str(" --skip regression");
-        assert!(!super::reviewed_command_covers_failures(
-            &source,
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &changed_command,
-            0,
-            "cargo nextest run",
             None,
         ));
 
         let mut duplicate = source.clone();
         duplicate.commands[1].test_harness = "cargo-nextest".into();
-        assert!(!super::reviewed_command_covers_failures(
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, duplicate.clone())]),
             &duplicate,
-            &duplicate,
-            0,
-            "cargo nextest run",
             None,
         ));
         duplicate.tests[0].id = "command-0:cargo nextest run".into();
-        assert!(super::reviewed_command_covers_failures(
+        assert!(super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, duplicate.clone())]),
             &duplicate,
-            &duplicate,
-            0,
-            "cargo nextest run",
             None,
         ));
         let mut missing_command = source.clone();
         missing_command.commands.pop();
-        assert!(!super::reviewed_command_covers_failures(
-            &source,
+        assert!(!super::reviewed_commands_cover_failures(
+            &std::collections::BTreeMap::from([(0, source.clone())]),
             &missing_command,
-            0,
-            "cargo nextest run",
             None,
         ));
     }

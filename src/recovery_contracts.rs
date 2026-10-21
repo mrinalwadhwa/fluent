@@ -6668,7 +6668,7 @@ pub(crate) mod verification_tests {
         fixture_with_lifetime(failed_test, None)
     }
 
-    fn fixture_with_lifetime(
+    pub(crate) fn fixture_with_lifetime(
         failed_test: bool,
         lifetime: Option<u64>,
     ) -> (tempfile::TempDir, WorkItem) {
@@ -6911,9 +6911,19 @@ pub(crate) mod verification_tests {
     }
 
     pub(crate) fn accept_first_check(root: &Path, item: &mut WorkItem) {
+        accept_check(root, item, 0);
+    }
+
+    pub(crate) fn accept_check(root: &Path, item: &mut WorkItem, index: usize) {
         let attempt = &mut item.attempts[0];
-        let check = assess_canonical_checks(root, attempt).unwrap().checks[0].clone();
-        let area = work_artifact_path(&item.id, &attempt.id, "accepted-proof");
+        let check = assess_canonical_checks(root, attempt).unwrap().checks[index].clone();
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!("-{index}")
+        };
+        let recovery_id = format!("accepted{suffix}");
+        let area = work_artifact_path(&item.id, &attempt.id, &format!("accepted-proof{suffix}"));
         fs::create_dir_all(root.join(&area)).unwrap();
         let prior = format!("{area}/check.json");
         fs::write(root.join(&prior), serde_json::to_vec(&check).unwrap()).unwrap();
@@ -6930,7 +6940,7 @@ pub(crate) mod verification_tests {
             .find(|task| task.kind == TaskKind::Review && task.role == "tests")
             .unwrap()
             .clone();
-        review.id = "accepted-tests-review".into();
+        review.id = format!("accepted-tests-review{suffix}");
         review.artifact_area.as_mut().unwrap().path = format!("{area}/review");
         fs::create_dir_all(root.join(format!("{area}/review"))).unwrap();
         fs::write(
@@ -6939,14 +6949,14 @@ pub(crate) mod verification_tests {
         )
         .unwrap();
         review.evidence_review_context = Some(EvidenceReviewContext {
-            recovery_id: "accepted".into(),
+            recovery_id: recovery_id.clone(),
             candidate_commit: check.candidate_commit.clone(),
             attachment: attachment.clone(),
             prior_review_artifact: prior.clone(),
         });
         attempt.evidence_recoveries.push(EvidenceRecovery {
             carried_finding: None,
-            id: "accepted".into(),
+            id: recovery_id,
             candidate_commit: check.candidate_commit.clone(),
             attachment,
             targets: vec![EvidenceReviewTarget {
