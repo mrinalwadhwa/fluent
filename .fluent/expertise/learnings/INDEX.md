@@ -191,9 +191,10 @@
 - [strict-sandbox-capability-selection](strict-sandbox-capability-selection.md) — Select shared-temp-free sandbox profiles only for launches that receive an explicit private replacement boundary; preserve standard grants for other coders
 - [superseded-history-requires-recovery-provenance](superseded-history-requires-recovery-provenance.md) — Admit retained Superseded Tasks to Learner retry only when recovery authority, operation, and replacement account for every one
 - [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
-- [terminal-control-lease-follows-client](terminal-control-lease-follows-client.md) — Hold a managed terminal's Control lease in the writable tmux client for its full attachment lifetime
+- [terminal-control-lease-follows-client](terminal-control-lease-follows-client.md) — Keep Control in writable tmux clients and retain the SSH helper's lease across display handoffs
 - [terminal-focus-requires-visible-identity](terminal-focus-requires-visible-identity.md) — Grant embedded input focus only when the dashboard shows the selected invocation identity and Control state
 - [terminal-host-tests-exercise-live-boundaries](terminal-host-tests-exercise-live-boundaries.md) — Prove managed terminal attachment and settlement with live PTY clients, tmux, and macOS sandbox behavior
+- [terminal-input-flags-use-independent-description](terminal-input-flags-use-independent-description.md) — Open full-screen input separately so nonblocking reads cannot change PTY output flags
 - [terminal-revocation-precedes-cleanup](terminal-revocation-precedes-cleanup.md) — Revoke attachment access before terminal cleanup waits for Control, retaining execution authority until settlement is verified
 - [terminal-session-cleanup-covers-partial-setup](terminal-session-cleanup-covers-partial-setup.md) — Arm terminal cleanup before enabling raw mode or alternate-screen features so every setup failure restores prior terminal state
 - [test-fixtures-use-production-state](test-fixtures-use-production-state.md) — Reproduce production states and persisted aggregates in lifecycle fixtures; use explicit historical evidence for compatibility tests

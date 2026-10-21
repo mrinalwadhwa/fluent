@@ -56,6 +56,19 @@ the ordering and cancellation/retry regressions.
 
 ---
 
+## Retain the SSH helper across display handoffs
+
+Embedded/full-screen handoff keeps the remote helper and its Control lease
+alive while repaint replaces only the tmux display client. Reconnect creates a
+new Observe attachment to the saved invocation. Preserve this distinction to
+avoid a Control reacquisition gap. See the
+[attachment lifetime](learnings/terminal-control-lease-follows-client.md), the
+[dashboard architecture](../../documentation/architecture.md), and
+`ssh_fullscreen_handoff_keeps_remote_control_lease` in
+[`tests/ssh_agent_sources.rs`](../../tests/ssh_agent_sources.rs).
+
+---
+
 ## Preserve manual sizing for managed terminals
 
 Managed tmux windows use manual sizing from creation because `ignore-size`
