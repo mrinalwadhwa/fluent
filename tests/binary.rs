@@ -14772,10 +14772,23 @@ exit 70
 struct OwnedFixtureProcess {
     child: Option<Child>,
     group: i32,
+    output_dir: Option<TempDir>,
 }
 
 #[cfg(unix)]
 impl OwnedFixtureProcess {
+    fn spawn_with_output(command: &mut Command) -> Self {
+        // Polling fixtures must let the child keep writing before wait_with_output.
+        // Files retain diagnostics without blocking on a full stdout/stderr pipe.
+        let output_dir = TempDir::new().unwrap();
+        command
+            .stdout(fs::File::create(output_dir.path().join("stdout")).unwrap())
+            .stderr(fs::File::create(output_dir.path().join("stderr")).unwrap());
+        let mut process = Self::spawn(command);
+        process.output_dir = Some(output_dir);
+        process
+    }
+
     fn spawn(command: &mut Command) -> Self {
         use std::os::unix::process::CommandExt;
 
@@ -14785,6 +14798,7 @@ impl OwnedFixtureProcess {
         Self {
             child: Some(child),
             group,
+            output_dir: None,
         }
     }
 
@@ -14812,7 +14826,12 @@ impl OwnedFixtureProcess {
             .expect("fixture child is available")
             .wait_with_output();
         self.terminate_and_wait();
-        result
+        let mut output = result?;
+        if let Some(directory) = &self.output_dir {
+            output.stdout = fs::read(directory.path().join("stdout"))?;
+            output.stderr = fs::read(directory.path().join("stderr"))?;
+        }
+        Ok(output)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
@@ -15003,6 +15022,55 @@ fn completed_fixture_process_reaps_remaining_group() {
         (unsafe { libc::kill(descendant, 0) }) == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }));
+}
+
+#[cfg(unix)]
+#[test]
+fn scheduler_fixture_publishes_completion_with_full_output() {
+    let tmp = TempDir::new().unwrap();
+    let completed = tmp.path().join("completed");
+    let mut command = Command::new("python3");
+    command
+        .args([
+            "-c",
+            "import pathlib, sys; sys.stdout.buffer.write(b'o' * 1048576); sys.stdout.flush(); sys.stderr.buffer.write(b'e' * 1048576); sys.stderr.flush(); pathlib.Path(sys.argv[1]).write_text('candidate-ready')",
+        ])
+        .arg(&completed);
+    let mut process = OwnedFixtureProcess::spawn_with_output(&mut command);
+    let published = poll_until(std::time::Duration::from_secs(5), || completed.exists());
+    if !published {
+        process.terminate_and_wait();
+    }
+    let output = process.wait_with_output().unwrap();
+    assert!(
+        published,
+        "captured output must not block completion publication"
+    );
+    assert!(output.status.success());
+    assert_eq!(output.stdout, vec![b'o'; 1048576]);
+    assert_eq!(output.stderr, vec![b'e'; 1048576]);
+}
+
+#[cfg(unix)]
+#[test]
+fn scheduler_fixture_exits_with_full_error_output() {
+    let mut command = Command::new("python3");
+    command.args([
+        "-c",
+        "import sys; sys.stderr.buffer.write(b'e' * 1048576); sys.stderr.flush(); sys.exit(1)",
+    ]);
+    let mut process = OwnedFixtureProcess::spawn_with_output(&mut command);
+    let exited = poll_until(std::time::Duration::from_secs(5), || {
+        process.try_wait().unwrap().is_some()
+    });
+    if !exited {
+        process.terminate_and_wait();
+    }
+    let output = process.wait_with_output().unwrap();
+    assert!(exited, "captured error output must not block process exit");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, vec![b'e'; 1048576]);
 }
 
 #[test]
@@ -38722,10 +38790,8 @@ fn run_scheduler_until_dispatch_status(
             .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
             .env("FLUENT_MAX_TASK_RETRIES", "0")
             .env_remove("FLUENT_TASK_KIND")
-            .args(["scheduler", "run", "--poll-seconds", "1"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        OwnedFixtureProcess::spawn(&mut command)
+            .args(["scheduler", "run", "--poll-seconds", "1"]);
+        OwnedFixtureProcess::spawn_with_output(&mut command)
     };
     let reached_terminal = poll_until(std::time::Duration::from_secs(60), || {
         matches!(
@@ -41372,9 +41438,8 @@ fn assert_scheduler_checks_host_sandbox_before_claiming(startup_delay_secs: u64)
         .current_dir(tmp.path())
         .env("HOME", &inaccessible_home)
         .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "fail")
-        .args(["scheduler", "run", "--poll-seconds", "1"])
-        .stderr(std::process::Stdio::piped());
-    let mut child = OwnedFixtureProcess::spawn(&mut command);
+        .args(["scheduler", "run", "--poll-seconds", "1"]);
+    let mut child = OwnedFixtureProcess::spawn_with_output(&mut command);
     let exited = poll_until(SCHEDULER_STARTUP_TIMEOUT, || {
         child.try_wait().unwrap().is_some()
     });
