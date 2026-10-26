@@ -1933,82 +1933,135 @@ fn arrow_drill_requires_selected_available_worker() {
 #[test]
 #[cfg(feature = "test-support")]
 fn arrow_drill_observes_without_retargeting_on_selection() {
-    use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
-    use crossterm::event::KeyEvent;
-    let root = tempfile::tempdir().unwrap();
-    let mut item = crate::work_model::WorkItem::planned("work", "Two workers");
-    item.add_review_only_attempt("attempt-1", &["architecture", "tests"], "main", "abc", true)
-        .unwrap();
-    let tasks = item.attempts[0]
-        .tasks
-        .iter()
-        .map(|task| task.id.clone())
-        .collect::<Vec<_>>();
-    crate::work_model::WorkModelStore::new(root.path())
-        .create_work_item(&item)
-        .unwrap();
-    let mut sessions = tasks
-        .iter()
-        .map(|task| {
-            TerminalSession::start_tmux_fixture(TerminalIdentity::fixture(
-                root.path(),
-                "work",
+    with_terminal_client(
+        "arrow_drill_observes_without_retargeting_on_selection",
+        || {
+            use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
+            use crossterm::event::KeyEvent;
+            let root = tempfile::tempdir().unwrap();
+            let mut item = crate::work_model::WorkItem::planned("work", "Two workers");
+            item.add_review_only_attempt(
                 "attempt-1",
-                task,
-            ))
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let source = project::SourceSnapshot::load(root.path()).unwrap();
-    let mut app = project_app(vec![source]);
-    let mut embedded = None;
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    handle_terminal_key(
-        &mut app,
-        &mut embedded,
-        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-        |_| Ok(()),
+                &["architecture", "tests"],
+                "main",
+                "abc",
+                true,
+            )
+            .unwrap();
+            let tasks = item.attempts[0]
+                .tasks
+                .iter()
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>();
+            crate::work_model::WorkModelStore::new(root.path())
+                .create_work_item(&item)
+                .unwrap();
+            let mut sessions = tasks
+                .iter()
+                .map(|task| {
+                    TerminalSession::start_fixture(
+                        TerminalIdentity::fixture(root.path(), "work", "attempt-1", task),
+                        "sleep 30",
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let source = project::SourceSnapshot::load(root.path()).unwrap();
+            let mut app = project_app(vec![source]);
+            let mut embedded = None;
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            handle_terminal_key(
+                &mut app,
+                &mut embedded,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                |_| Ok(()),
+            );
+            assert!(
+                embedded.is_some(),
+                "open failed: {:?}; selected: {:?}",
+                app.stale_error,
+                app.selected_key
+            );
+            let terminal = embedded.as_mut().unwrap();
+            assert_terminal_client_ready(terminal);
+            assert_eq!(terminal.descriptor(), sessions[0].descriptor());
+            assert!(terminal.state_label().starts_with("Observe"));
+            assert!(!terminal.focused());
+            assert!(!terminal.has_control());
+            app.pane = app::Pane::List;
+            handle_terminal_key(
+                &mut app,
+                &mut embedded,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                |_| Ok(()),
+            );
+            assert!(
+                embedded.is_none(),
+                "moving selection must wait for Right before opening another worker"
+            );
+            assert!(app.terminal.is_none());
+            handle_terminal_key(
+                &mut app,
+                &mut embedded,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                |_| Ok(()),
+            );
+            let terminal = embedded.as_mut().unwrap();
+            assert_terminal_client_ready(terminal);
+            assert_eq!(terminal.descriptor(), sessions[1].descriptor());
+            assert!(terminal.state_label().starts_with("Observe"));
+            assert!(!terminal.has_control());
+            drop(embedded);
+            for session in &mut sessions {
+                session.stop().unwrap();
+            }
+        },
     );
+}
+
+#[cfg(feature = "test-support")]
+fn with_terminal_client(test: &str, check: impl FnOnce()) {
+    if std::env::var("FLUENT_DASHBOARD_TERMINAL_TEST").as_deref() == Ok(test) {
+        check();
+        return;
+    }
+    // Isolate the existing client seam from parallel libtest cases. Runtime
+    // admission, PTYs and Control leases stay real; only tmux is substituted.
+    let root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("dashboard::tests::{test}"),
+            "--nocapture",
+        ])
+        .env("FLUENT_DASHBOARD_TERMINAL_TEST", test)
+        .env(
+            "FLUENT_TEST_TERMINAL_CLIENT",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ssh-terminal-client.py"),
+        )
+        .env("FLUENT_TEST_TERMINAL_CLIENT_LOG", root.path().join("input"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        embedded.is_some(),
-        "open failed: {:?}; selected: {:?}",
-        app.stale_error,
-        app.selected_key
+        output.status.success() && stdout.contains("1 passed;"),
+        "{test}: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let terminal = embedded.as_ref().unwrap();
-    assert!(terminal.identity().contains(&tasks[0]));
-    assert!(terminal.state_label().starts_with("Observe"));
-    assert!(!terminal.focused());
-    app.pane = app::Pane::List;
-    handle_terminal_key(
-        &mut app,
-        &mut embedded,
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        |_| Ok(()),
-    );
-    assert!(
-        embedded.is_none(),
-        "moving selection must wait for Right before opening another worker"
-    );
-    assert!(app.terminal.is_none());
-    handle_terminal_key(
-        &mut app,
-        &mut embedded,
-        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
-        |_| Ok(()),
-    );
-    assert!(embedded.as_ref().unwrap().identity().contains(&tasks[1]));
-    assert!(
-        embedded
-            .as_ref()
-            .unwrap()
-            .state_label()
-            .starts_with("Observe")
-    );
-    drop(embedded);
-    for session in &mut sessions {
-        session.stop().unwrap();
+}
+
+#[cfg(feature = "test-support")]
+fn assert_terminal_client_ready(terminal: &mut crate::terminal_view::EmbeddedTerminal) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        terminal.refresh();
+        if terminal.frame().text().contains("SSH_FULLSCREEN_PAINT") {
+            return;
+        }
+        assert!(Instant::now() < deadline, "terminal client did not paint");
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -2090,8 +2143,10 @@ fn hidden_terminal_releases_input_focus() {
         assert!(terminal_input_event(&app, Event::Paste("hidden".into())).is_none());
     }
     #[cfg(feature = "test-support")]
-    {
-        use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
+    with_terminal_client("hidden_terminal_releases_input_focus", || {
+        use crate::terminal_sessions::{
+            ControlOutcome, TerminalIdentity, TerminalSession, resolve,
+        };
         let root = tempfile::tempdir().unwrap();
         let mut item = crate::work_model::WorkItem::planned("work", "Hidden control");
         item.add_initial_attempt("attempt-1").unwrap();
@@ -2099,12 +2154,10 @@ fn hidden_terminal_releases_input_focus() {
         crate::work_model::WorkModelStore::new(root.path())
             .create_work_item(&item)
             .unwrap();
-        let mut session = TerminalSession::start_tmux_fixture(TerminalIdentity::fixture(
-            root.path(),
-            "work",
-            "attempt-1",
-            &task,
-        ))
+        let mut session = TerminalSession::start_fixture(
+            TerminalIdentity::fixture(root.path(), "work", "attempt-1", &task),
+            "sleep 30",
+        )
         .unwrap();
         let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -2122,7 +2175,13 @@ fn hidden_terminal_releases_input_focus() {
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
             |_| Ok(()),
         );
+        assert_terminal_client_ready(embedded.as_mut().unwrap());
         assert!(embedded.as_ref().unwrap().focused());
+        let mut competing = resolve(root.path(), &session.descriptor().session_id).unwrap();
+        assert_eq!(
+            competing.acquire_control().unwrap(),
+            ControlOutcome::Occupied
+        );
         resize_terminal(&mut app, embedded.as_mut(), 59, 24);
         assert!(!embedded.as_ref().unwrap().focused());
         assert!(embedded.as_ref().unwrap().has_control());
@@ -2135,9 +2194,18 @@ fn hidden_terminal_releases_input_focus() {
                 .send(Event::Paste("hidden".into()))
                 .is_err()
         );
+        assert_eq!(
+            competing.acquire_control().unwrap(),
+            ControlOutcome::Occupied
+        );
         drop(embedded);
+        assert_eq!(
+            competing.acquire_control().unwrap(),
+            ControlOutcome::Acquired
+        );
+        drop(competing);
         session.stop().unwrap();
-    }
+    });
 }
 
 #[test]
