@@ -20,15 +20,16 @@ Test: {"kind":"command","command":"bash tests/host/check-native-codex-first-turn
 
 ### B1
 
-WHEN `fluent dashboard` opens, THE SYSTEM SHALL show grouped Current Work and
-select the first Work Item that needs attention, is running, or is ready.
+WHEN the internal compatibility snapshot opens, THE SYSTEM SHALL show grouped
+Current Work and select the first Work Item that needs attention, is running, or
+is ready. The project dashboard follows the project layout and navigation below.
 Test: src/dashboard/tests.rs (dashboard_opens_on_current_work)
 
 ### B2
 
 WHEN an operator navigates, filters, refreshes, or resizes the dashboard, THE
-SYSTEM SHALL preserve its selected Work Item when it remains visible and select
-the nearest remaining row when it does not.
+SYSTEM SHALL preserve its selected Work Item or worker when it remains visible
+in the counted view and select the nearest remaining row when it does not.
 Test: src/dashboard/tests.rs (selection_survives_refresh_reorder_and_filter)
 
 ### B3
@@ -39,9 +40,74 @@ Test: src/dashboard/tests.rs (failed_poll_keeps_snapshot_and_marks_it_stale)
 
 ### B4
 
-WHEN the dashboard receives navigation, view, help, copy, or refresh input,
-THE SYSTEM SHALL not modify stored Work state.
+WHEN the dashboard receives navigation, filtering, selection, detail or terminal
+inspection, help, copy, or refresh input, THE SYSTEM SHALL not modify stored Work
+state.
 Test: src/dashboard/tests.rs (dashboard_controls_leave_work_state_unchanged)
+
+## Project dashboard layout and navigation
+
+### B1
+
+WHEN the project dashboard renders at 100 columns or wider, THE SYSTEM SHALL
+show two compact header lines with counted All, Needs you, Running, Ready,
+Waiting, and History views, one horizontal rule, and one continuous divider
+between the project list and details or terminal, without pane boxes.
+Test: src/dashboard/tests.rs (project_layout_uses_header_rule_and_one_pane_divider)
+
+### B2
+
+WHEN project work renders, THE SYSTEM SHALL use compact aligned rows with exact
+categories, recorded update times when available, a highlighted selection marker,
+and stale identification beside the source group. Ready SHALL include Ready and
+Ready to land; Waiting SHALL include Queued and Planned.
+Test: src/dashboard/tests.rs (project_rows_preserve_exact_status_and_selection_cues)
+Test: src/dashboard/tests.rs (project_rows_show_recorded_update_times)
+
+### B3
+
+WHEN a Work Item or worker is selected, THE SYSTEM SHALL prioritize identity,
+reason or state, and canonical next action without repeating the selected title
+and category; worker Task, invocation, and terminal availability SHALL remain
+available in details.
+Test: src/dashboard/tests.rs (project_details_prioritize_action_without_redundant_row_copy)
+
+### B4
+
+WHEN navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHALL
+cycle counted views forward or backward and preserve a selection that remains
+visible.
+Test: src/dashboard/tests.rs (tab_views_preserve_selection_and_exact_categories)
+
+### B5
+
+WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL expand or collapse its
+workers. WHEN Right is pressed on a worker, THE SYSTEM SHALL open only that
+worker's available session in Observe or show why it is unavailable, without
+starting or retargeting Work.
+Test: src/dashboard/tests.rs (arrow_drill_requires_selected_available_worker)
+Test: src/dashboard/tests.rs (arrow_drill_observes_without_retargeting_on_selection)
+
+### B6
+
+WHEN the project dashboard has room for one pane, THE SYSTEM SHALL show the list
+first, use Right to inspect details, and use Left/Esc to return while retaining
+Tab/Shift+Tab for views when navigation owns input.
+Test: src/dashboard/tests.rs (narrow_view_keeps_filter_and_return_keys_distinct)
+
+### B7
+
+WHEN an agent terminal is displayed, THE SYSTEM SHALL keep its Observe, Control,
+or navigation-with-Control state and the relevant return command visible.
+Test: src/dashboard/tests.rs (terminal_mode_and_focus_remain_explicit)
+
+### B8
+
+WHEN a terminal pane becomes hidden or too small, THE SYSTEM SHALL release input
+focus and retain the existing Control lease rules; enlarging the pane SHALL not
+restore focus automatically.
+Test: src/dashboard/tests.rs (hidden_terminal_releases_input_focus)
+Test: src/dashboard/tests.rs (hidden_terminal_rejects_native_input)
 
 ## Scheduled public verification
 

@@ -2107,7 +2107,12 @@ only when visible state changes. `dashboard.rs` owns terminal setup and the
 event loop; `dashboard/snapshot.rs`, `dashboard/app.rs`, and
 `dashboard/render.rs` respectively own projection, interaction state, and pure
 Ratatui rendering. `dashboard/layout.rs` computes shared wrapping and scroll
-bounds without depending on interaction state or rendering. The `e` control
+bounds and project detail text without depending on interaction state or rendering.
+The terminal renderer consumes the same unboxed geometry for viewport size and
+mouse routing. Tab/Shift+Tab cycle views, Enter toggles workers, Right inspects
+details or an available selected session, and Left/Esc returns to the list.
+Moving selection drops the old terminal attachment; opening another invocation
+requires an explicit Right or `t`. The `e` control
 opens a scrollable view of all Work read errors, including errors that overflow
 the list. `e` or Esc returns to the preserved selection. Help wraps navigation
 instructions and closes with `?` or Esc. Both controls leave Work files unchanged.

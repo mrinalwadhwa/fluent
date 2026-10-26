@@ -311,9 +311,9 @@ test_dashboard_refreshes_work_items_on_poll() {
   "$FLUENT_BIN" work-item create work-polled --title "Polled Work" > /dev/null
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "rk" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)"
   assert_contains "$OUTPUT" "All2" || RESULT=1
-  assert_contains "$OUTPUT" "work-polled" || RESULT=1
+  assert_contains "$OUTPUT" "Planned" || RESULT=1
   assert_contains "$OUTPUT" "PolledWork" || RESULT=1
   return $RESULT
 }
@@ -329,7 +329,7 @@ test_dashboard_surfaces_actionable_work() {
   assert_contains "$OUTPUT" "work-action" || RESULT=1
   assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
   assert_contains "$OUTPUT" "Readytoland" || RESULT=1
-  assert_contains "$OUTPUT" "Nextaction:fluentmerge-candidatelandwork-action" || RESULT=1
+  assert_contains "$OUTPUT" "Nextaction:fluentmerge-candidateshowwork-action" || RESULT=1
   return $RESULT
 }
 
