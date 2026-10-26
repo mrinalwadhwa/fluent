@@ -116,6 +116,17 @@ to project snapshots.
 
 ---
 
+## Keep dashboard update times local to preserve the SSH snapshot
+
+The current SSH snapshot omits update times. Local Work and worker rows derive
+them from recorded lifecycle events; remote rows show an unavailable value.
+Because SSH snapshot types reject unknown fields, transmitting timestamps needs
+an explicit protocol compatibility change. Preserve the
+[display metadata boundary](learnings/dashboard-display-metadata-preserves-ssh-schema.md)
+when extending the shared worker type.
+
+---
+
 ## Inventory terminal descendants by owned handle and Seatbelt grant
 
 Terminal cancellation inventories pane descendants and process sessions, then
