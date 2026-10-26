@@ -42,12 +42,14 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
     snapshot.sources.extend(remote.snapshots());
     let mut session = DashboardTerminal::open()?;
     let mut app = App::new(snapshot);
+    let mut local = LocalRefresh::new(search_root, explicit, &home);
     let size = session.terminal.size()?;
     app.resize(size.width, size.height);
     let mut next_poll = Instant::now() + DATA_POLL_INTERVAL;
     let mut embedded: Option<crate::terminal_view::EmbeddedTerminal> = None;
 
     loop {
+        local.poll(&mut app);
         if remote.poll() {
             let mut snapshot = app.snapshot.clone();
             snapshot.sources.retain(|s| !s.id.starts_with("ssh:"));
@@ -108,7 +110,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
                             resize_terminal(&mut app, embedded.as_mut(), width, height);
-                            refresh_projects(search_root, explicit, &home, &mut app);
+                            local.request(&mut app);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -116,7 +118,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                             session.set_mouse_enabled(enabled)?;
                         }
                         if matches!(effect, Effect::Refresh) {
-                            refresh_projects(search_root, explicit, &home, &mut app);
+                            local.request(&mut app);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -129,7 +131,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             }
         }
         if poll_due(Instant::now(), next_poll) {
-            refresh_projects(search_root, explicit, &home, &mut app);
+            local.request(&mut app);
             remote.refresh();
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
@@ -322,35 +324,103 @@ fn project_diagnostics(sources: &[project::SourceSnapshot]) -> Vec<String> {
         .collect()
 }
 
-fn refresh_projects(root: &Path, explicit: &[PathBuf], home: &Path, app: &mut App) {
-    let (mut paths, errors) = project::discover_paths(root, explicit, home);
-    paths.extend(
-        app.snapshot
+/// Keep local discovery and Work reads off the input and drawing thread.
+struct LocalRefresh {
+    root: PathBuf,
+    explicit: Vec<PathBuf>,
+    home: PathBuf,
+    pending: Option<std::thread::JoinHandle<snapshot::DashboardSnapshot>>,
+}
+
+impl LocalRefresh {
+    fn new(root: &Path, explicit: &[PathBuf], home: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            explicit: explicit.to_vec(),
+            home: home.to_path_buf(),
+            pending: None,
+        }
+    }
+
+    fn request(&mut self, app: &mut App) {
+        if self.pending.is_some() {
+            return;
+        }
+        let root = self.root.clone();
+        let explicit = self.explicit.clone();
+        let home = self.home.clone();
+        let previous = app
+            .snapshot
             .sources
             .iter()
             .filter(|source| !source.id.starts_with("ssh:"))
-            .map(|source| source.path.clone()),
-    );
+            .cloned()
+            .collect::<Vec<_>>();
+        self.start(app, move || {
+            refresh_projects(&root, &explicit, &home, &previous)
+        });
+    }
+
+    fn start(
+        &mut self,
+        app: &mut App,
+        read: impl FnOnce() -> snapshot::DashboardSnapshot + Send + 'static,
+    ) {
+        match std::thread::Builder::new()
+            .name("local-snapshot".into())
+            .spawn(read)
+        {
+            Ok(handle) => self.pending = Some(handle),
+            Err(error) => app.refresh_failed(format!("Local snapshot reader: {error}")),
+        }
+    }
+
+    fn poll(&mut self, app: &mut App) -> bool {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+        {
+            return false;
+        }
+        // Only join a finished read; quitting also never waits for a local read.
+        match self.pending.take().unwrap().join() {
+            Ok(mut snapshot) => {
+                let remote = app
+                    .snapshot
+                    .sources
+                    .iter()
+                    .filter(|source| source.id.starts_with("ssh:"))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                snapshot.errors.extend(project_diagnostics(&remote));
+                snapshot.sources.extend(remote);
+                app.refresh(snapshot);
+            }
+            Err(_) => app.refresh_failed("Local snapshot reader stopped".into()),
+        }
+        true
+    }
+}
+
+fn refresh_projects(
+    root: &Path,
+    explicit: &[PathBuf],
+    home: &Path,
+    previous: &[project::SourceSnapshot],
+) -> snapshot::DashboardSnapshot {
+    let (mut paths, errors) = project::discover_paths(root, explicit, home);
+    paths.extend(previous.iter().map(|source| source.path.clone()));
     paths.sort();
     paths.dedup();
-    let mut next = app.snapshot.clone();
-    let remote = next
-        .sources
-        .iter()
-        .filter(|s| s.id.starts_with("ssh:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let local = next
-        .sources
-        .iter()
-        .filter(|s| !s.id.starts_with("ssh:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    next.sources = project::refresh_sources(&local, &paths);
-    next.sources.extend(remote);
-    next.errors = errors;
+    let mut next = snapshot::DashboardSnapshot {
+        rows: Vec::new(),
+        sources: project::refresh_sources(previous, &paths),
+        errors,
+        project_view: true,
+    };
     next.errors.extend(project_diagnostics(&next.sources));
-    app.refresh(next);
+    next
 }
 
 fn poll_due(now: Instant, deadline: Instant) -> bool {

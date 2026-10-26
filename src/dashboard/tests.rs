@@ -351,6 +351,93 @@ fn selection_survives_refresh_reorder_and_filter() {
     assert_eq!(app.selected_id(), Some("selected"));
 }
 #[test]
+fn slow_local_refresh_does_not_block_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = project_app(vec![project_source(
+        "/local",
+        vec![row("first", "executing"), row("selected", "executing")],
+    )]);
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let next = app.snapshot.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    local.start(&mut app, move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        next
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Poll ticks cannot overlap the gated read or wait for it.
+    for _ in 0..3 {
+        local.request(&mut app);
+        assert!(!local.poll(&mut app));
+    }
+    let mut embedded = None;
+    app.take_dirty();
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyCode::Down.into(),
+        |_| unreachable!(),
+    );
+    assert_eq!(
+        app.selected_key,
+        Some(project::RowKey::work("/local", "selected"))
+    );
+    assert!(app.take_dirty());
+    assert!(text(&app, 140, 24).contains("> ▸ selected title"));
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyCode::Tab.into(),
+        |_| unreachable!(),
+    );
+    assert_eq!(app.filter, project::Filter::NeedsYou);
+    assert!(app.take_dirty());
+    assert!(text(&app, 140, 24).contains("No Work Items in this view"));
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyCode::Tab.into(),
+        |_| unreachable!(),
+    );
+    assert_eq!(app.filter, project::Filter::Running);
+    assert!(text(&app, 140, 24).contains("selected title"));
+    // The reader cannot complete until selection, counted views, and draws finish.
+    assert!(!local.poll(&mut app));
+    release_tx.send(()).unwrap();
+    finish_local_refresh(&mut local, &mut app);
+}
+
+#[test]
+fn local_reader_panic_keeps_snapshot_and_allows_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = project_app(vec![project_source("/local", vec![row("work", "planned")])]);
+    let before = app.snapshot.clone();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    local.start(&mut app, || panic!("reader failed"));
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(app.snapshot, before);
+    assert!(
+        app.stale_error
+            .as_ref()
+            .unwrap()
+            .contains("Local snapshot reader stopped")
+    );
+    local.start(&mut app, move || before);
+    finish_local_refresh(&mut local, &mut app);
+    assert!(app.stale_error.is_none());
+}
+
+fn finish_local_refresh(local: &mut LocalRefresh, app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !local.poll(app) {
+        assert!(Instant::now() < deadline, "local refresh did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
 fn removed_selection_uses_nearest_remaining_row() {
     let mut app = app(vec![
         row("first", "planned"),
