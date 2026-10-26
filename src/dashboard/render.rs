@@ -132,6 +132,17 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(controls), areas.footer);
 }
 
+fn updated_time(value: Option<&str>) -> String {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| {
+            time.with_timezone(&chrono::Utc)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "—".into())
+}
+
 fn project_row(
     title: &str,
     status: &str,
@@ -141,7 +152,7 @@ fn project_row(
     selected: bool,
     tone: Color,
 ) -> Line<'static> {
-    let updated_width = if width >= 60 { 9 } else { 0 };
+    let updated_width = if width >= 60 { 12 } else { 0 };
     let title_width = usize::from(width).saturating_sub(4 + 14 + updated_width);
     let title = compact(title, title_width);
     let mut spans = vec![
@@ -152,7 +163,7 @@ fn project_row(
         Span::raw(format!("{status:<14}")),
     ];
     if updated_width > 0 {
-        spans.push(Span::raw(format!("{updated:>9}")));
+        spans.push(Span::raw(format!("{updated:>12}")));
     }
     Line::from(spans).style(if selected {
         Style::default()
@@ -168,7 +179,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
     let columns = project_row(
         "Tasks",
         "Status",
-        "Updated",
+        "Updated UTC",
         " ",
         area.width,
         false,
@@ -223,7 +234,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(project_row(
                 &format!("{triangle} {}", item.status.title),
                 item.category.label(),
-                "—",
+                &updated_time(item.updated_at.as_deref()),
                 if selected { ">" } else { " " },
                 area.width,
                 selected,
@@ -240,7 +251,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
                             if available { "session" } else { "no session" }
                         ),
                         &worker.state,
-                        "—",
+                        &updated_time(worker.updated_at.as_deref()),
                         if selected { ">" } else { " " },
                         area.width,
                         selected,

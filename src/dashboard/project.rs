@@ -77,6 +77,9 @@ pub struct Worker {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub elapsed_ms: Option<u64>,
+    // The existing SSH snapshot has no update-time field.
+    #[serde(skip)]
+    pub updated_at: Option<String>,
     pub terminal: Option<TerminalDescriptor>,
     pub unavailable_reason: String,
 }
@@ -86,6 +89,7 @@ pub struct ProjectWork {
     pub status: work_status::WorkItemStatus,
     pub category: Category,
     pub phase: Option<String>,
+    pub updated_at: Option<String>,
     pub workers: Vec<Worker>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,6 +246,17 @@ impl SourceSnapshot {
                                     model: (!pair.model.is_empty()).then(|| pair.model.clone()),
                                     effort: pair.effort.clone(),
                                     elapsed_ms,
+                                    updated_at: item
+                                        .transitions
+                                        .iter()
+                                        .rev()
+                                        .find(|transition| {
+                                            transition.object_kind == "task"
+                                                && transition.object_id == task.id
+                                        })
+                                        .map(|transition| transition.occurred_at.clone())
+                                        .or_else(|| task.completed_at.clone())
+                                        .or_else(|| task.started_at.clone()),
                                     unavailable_reason: terminal
                                         .as_ref()
                                         .and_then(|d| d.unavailable_reason.clone())
@@ -263,6 +278,10 @@ impl SourceSnapshot {
                     status,
                     category,
                     phase,
+                    updated_at: item
+                        .transitions
+                        .last()
+                        .map(|transition| transition.occurred_at.clone()),
                     workers,
                 }
             })
@@ -486,6 +505,12 @@ impl Filter {
     pub fn next(self) -> Self {
         Self::VIEWS
             [(Self::VIEWS.iter().position(|view| *view == self).unwrap() + 1) % Self::VIEWS.len()]
+    }
+    pub fn previous(self) -> Self {
+        Self::VIEWS[(Self::VIEWS.iter().position(|view| *view == self).unwrap()
+            + Self::VIEWS.len()
+            - 1)
+            % Self::VIEWS.len()]
     }
 }
 

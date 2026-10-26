@@ -41,6 +41,7 @@ impl App {
         };
         if app.project_mode() {
             app.selected_key = project::initial_key(&app.snapshot.sources, app.filter);
+            app.reconcile_project_selection();
         } else {
             app.reconcile_selection(None);
         }
@@ -226,12 +227,16 @@ impl App {
             return Effect::None;
         }
         match key {
-            KeyCode::Tab if self.project_mode() && self.size.0 >= 60 && self.size.0 < 100 => {
-                self.pane = if self.pane == Pane::List {
-                    Pane::Detail
+            KeyCode::Tab | KeyCode::BackTab if self.project_mode() => {
+                self.filter = if key == KeyCode::BackTab || modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    self.filter.previous()
                 } else {
-                    Pane::List
+                    self.filter.next()
                 };
+                self.reconcile_project_selection();
+                self.detail_scroll = 0;
+                self.clamp_scrolls();
                 self.dirty = true;
             }
             KeyCode::Char('f') | KeyCode::Char('F') if self.project_mode() => {

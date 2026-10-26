@@ -31,6 +31,14 @@ To prepare the other macOS release target, pass `x86_64-apple-darwin` or
 Installed Fluent executables contain the static library. Operators need tmux,
 but do not need Zig or a separate Ghostty installation.
 
+The dashboard groups Work by project. Use Tab/Shift+Tab to cycle All, Needs you,
+Running, Ready, Waiting, and History. Ready includes Ready to land; Waiting
+includes Queued and Planned. Each row keeps its exact status. The Updated UTC
+column uses the latest published transition (or recorded task start/completion)
+and shows `—` when no timestamp is available, including the current SSH snapshot.
+The `f`/`F` filter aliases and `a` History/All shortcut remain available when
+navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
+
 In the dashboard, expand a Work Item, select its native agent worker, and press
 `t` to observe its terminal beside the project list. Observe clients use tmux's
 `read-only,ignore-size` flags and preserve the worker's dimensions even when

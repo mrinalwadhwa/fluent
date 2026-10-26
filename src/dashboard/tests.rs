@@ -667,6 +667,7 @@ fn project_source(id: &str, rows: Vec<WorkItemStatus>) -> project::SourceSnapsho
                 category: project::Category::from_published_action(&status.action, false),
                 status,
                 phase: None,
+                updated_at: None,
                 workers: Vec::new(),
             })
             .collect(),
@@ -1071,8 +1072,8 @@ fn work_filters_count_items_from_authoritative_state() {
     assert_eq!(before.work[0].category, C::Ready);
     let mut before_app = project_app(vec![before]);
     before_app.filter = project::Filter::Ready;
-    assert!(before_app.project_keys().is_empty());
-    assert!(text(&before_app, 140, 24).contains("Ready to land 0"));
+    assert_eq!(before_app.project_keys().len(), 1);
+    assert!(text(&before_app, 140, 24).contains("Ready 1"));
     let learning = crate::work_model::AttemptLearning::succeeded(
         1,
         crate::follow_up::ArtifactRef {
@@ -1088,7 +1089,7 @@ fn work_filters_count_items_from_authoritative_state() {
     let mut after_app = project_app(vec![after]);
     after_app.filter = project::Filter::Ready;
     assert_eq!(after_app.project_keys().len(), 1);
-    assert!(text(&after_app, 140, 24).contains("Ready to land 1"));
+    assert!(text(&after_app, 140, 24).contains("Ready 1"));
 }
 
 #[test]
@@ -1131,11 +1132,11 @@ fn expanded_work_shows_parallel_worker_roles() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.project_keys().len(), 3);
     let rendered = text(&app, 140, 24);
-    assert!(rendered.contains("Current 1"));
+    assert!(rendered.contains("All 1"));
     assert!(rendered.contains("architecture"));
     assert!(rendered.contains("tests"));
-    assert!(rendered.contains("architecture") && rendered.contains("term:on"));
-    assert!(rendered.contains("tests") && rendered.contains("term:off"));
+    assert!(rendered.contains("architecture") && rendered.contains("· session"));
+    assert!(rendered.contains("tests") && rendered.contains("no session"));
 }
 
 #[test]
@@ -1156,6 +1157,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
         model: None,
         effort: None,
         elapsed_ms: None,
+        updated_at: None,
         terminal: None,
         unavailable_reason: "headless execution".into(),
     });
@@ -1199,7 +1201,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
         .provider_wait_ms = 4_000;
     app.select_key(selected);
     let rendered = text(&app, 140, 30);
-    assert!(rendered.contains("term:on"));
+    assert!(rendered.contains("· session"));
     assert!(rendered.contains("Provider: Codex"));
     assert!(rendered.contains("Model: test-model"));
     assert!(rendered.contains("Effort: high"));
@@ -1304,6 +1306,7 @@ fn selection_preserves_composite_worker_identity() {
             model: None,
             effort: None,
             elapsed_ms: None,
+            updated_at: None,
             terminal: None,
             unavailable_reason: "unavailable".into(),
         });
@@ -1615,4 +1618,120 @@ fn project_rows_preserve_exact_status_and_selection_cues() {
     assert_eq!(buffer[(status_x, 5)].symbol(), "R");
     assert_eq!(buffer[(status_x, 6)].symbol(), "R");
     assert!(lines[3].contains("Updated"));
+}
+
+#[test]
+fn tab_views_preserve_selection_and_exact_categories() {
+    use project::{Category as C, Filter};
+    let mut source = project_source(
+        "/one",
+        vec![
+            row("attention", "needs-user"),
+            row("run", "executing"),
+            row("ready", "task-ready"),
+            row("land", "merge-ready"),
+            row("queue", "task-ready"),
+            row("plan", "planned"),
+            row("past", "merged"),
+            row("future", "future"),
+        ],
+    );
+    source.work[4].category = C::Queued;
+    let mut app = project_app(vec![source]);
+    let selected = app.selected_key.clone();
+    assert_eq!(app.project_keys().len(), 8);
+    let cases = [
+        (Filter::NeedsYou, vec!["attention"]),
+        (Filter::Running, vec!["run"]),
+        (Filter::Ready, vec!["ready", "land"]),
+        (Filter::Waiting, vec!["queue", "plan"]),
+        (Filter::History, vec!["past"]),
+        (
+            Filter::All,
+            vec![
+                "attention",
+                "run",
+                "ready",
+                "land",
+                "queue",
+                "plan",
+                "past",
+                "future",
+            ],
+        ),
+    ];
+    for (filter, ids) in cases {
+        app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.filter, filter);
+        assert_eq!(
+            app.project_keys()
+                .iter()
+                .map(|key| key.work_item_id.as_str())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        if filter == Filter::NeedsYou {
+            assert_eq!(app.selected_key, selected);
+        }
+        let rendered = text(&app, 120, 28);
+        assert!(
+            rendered
+                .lines()
+                .nth(1)
+                .unwrap()
+                .contains("All 8  Needs you 1  Running 1  Ready 2  Waiting 2  History 1")
+        );
+        if filter == Filter::Ready {
+            assert!(rendered.contains("Ready to land"));
+        }
+        if filter == Filter::Waiting {
+            assert!(rendered.contains("Queued") && rendered.contains("Planned"));
+        }
+    }
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.filter, Filter::History);
+    let selected = app.selected_key.clone();
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.selected_key, selected);
+    app.handle_key(KeyCode::Tab, KeyModifiers::SHIFT);
+    assert_eq!(app.filter, Filter::History);
+    app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE);
+    assert_eq!(app.filter, Filter::All);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(app.filter, Filter::History);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(app.filter, Filter::All);
+}
+
+#[test]
+fn project_rows_show_recorded_update_times() {
+    let root = tempfile::tempdir().unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Recorded update");
+    item.add_initial_attempt("attempt-1").unwrap();
+    item.attempts[0].tasks[0].started_at = Some("2026-10-25T11:22:00Z".into());
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    store
+        .create_work_item_with_transition(
+            &item,
+            &crate::work_model::DurableTransitionMetadata {
+                origin: Default::default(),
+                reason: None,
+                evidence_ref: None,
+            },
+        )
+        .unwrap();
+    let saved = store.read_work_item_snapshot("work").unwrap();
+    let updated =
+        chrono::DateTime::parse_from_rfc3339(&saved.transitions.last().unwrap().occurred_at)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .format("%m-%d %H:%M")
+            .to_string();
+    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    let mut app = project_app(vec![source]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let rendered = text(&app, 120, 28);
+    assert!(rendered.contains("Updated UTC"), "{rendered}");
+    assert!(rendered.contains(&updated), "{rendered}");
+    assert_eq!(rendered.matches(&updated).count(), 2, "{rendered}");
 }

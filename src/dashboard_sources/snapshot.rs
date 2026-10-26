@@ -167,6 +167,7 @@ pub fn decode_snapshot(source: &SshSource, bytes: &[u8]) -> Result<SourceSnapsho
                 snapshot.queued_work_item_ids.contains(&row.id),
             ),
             phase: row.phase,
+            updated_at: None,
             workers: row.workers,
             status: WorkItemStatus {
                 id: row.id,
