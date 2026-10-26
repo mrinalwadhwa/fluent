@@ -8,24 +8,49 @@ pub fn terminal_size(size: (u16, u16), identity: &str) -> (u16, u16) {
     (content.width.clamp(1, 500), content.height.clamp(1, 200))
 }
 
-pub fn terminal_content(size: (u16, u16), identity: &str) -> ratatui::layout::Rect {
-    let area = ratatui::layout::Rect::new(0, 0, size.0, size.1);
-    let body = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(5),
-        ratatui::layout::Constraint::Min(5),
-        ratatui::layout::Constraint::Length(1),
+/// Share project geometry between drawing, scrolling, and terminal input.
+pub struct ProjectAreas {
+    pub header: ratatui::layout::Rect,
+    pub body: ratatui::layout::Rect,
+    pub footer: ratatui::layout::Rect,
+    pub list: ratatui::layout::Rect,
+    pub divider: ratatui::layout::Rect,
+    pub detail: ratatui::layout::Rect,
+}
+
+pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
+    use ratatui::layout::{Constraint, Layout, Rect};
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
     ])
-    .split(area)[1];
-    let pane = if size.0 >= 100 {
-        ratatui::layout::Layout::horizontal([
-            ratatui::layout::Constraint::Percentage(43),
-            ratatui::layout::Constraint::Percentage(57),
+    .split(area);
+    let (list, divider, detail) = if area.width >= 100 {
+        // Give terminal output more room than the static prototype's 73% list.
+        let panes = Layout::horizontal([
+            Constraint::Percentage(65),
+            Constraint::Length(1),
+            Constraint::Min(1),
         ])
-        .split(body)[1]
+        .split(rows[1]);
+        (panes[0], panes[1], panes[2])
     } else {
-        body
+        (rows[1], Rect::default(), rows[1])
     };
-    crate::terminal_view::content_area(pane, identity)
+    ProjectAreas {
+        header: rows[0],
+        body: rows[1],
+        footer: rows[2],
+        list,
+        divider,
+        detail,
+    }
+}
+
+pub fn terminal_content(size: (u16, u16), identity: &str) -> ratatui::layout::Rect {
+    let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
+    crate::terminal_view::content_area(areas.detail, identity)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,7 +70,8 @@ pub fn project_scroll_bounds(
     if size.0 < 60 || size.1 < 15 {
         return ScrollBounds::default();
     }
-    let inner_height = size.1.saturating_sub(8);
+    let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
+    let inner_height = areas.list.height.saturating_sub(1);
     let groups = sources
         .iter()
         .filter(|source| source.work.iter().any(|work| filter.matches(work.category)))
@@ -62,7 +88,7 @@ pub fn project_scroll_bounds(
         .map(|work| work.workers.len())
         .sum::<usize>();
     let lines = groups + work + workers + usize::from(groups == 0);
-    let detail_width = detail_width(size).max(1) as usize;
+    let detail_width = areas.detail.width.max(1) as usize;
     let details = selected_key
         .map(|key| project::detail_values(sources, key))
         .unwrap_or_default();
@@ -80,7 +106,7 @@ pub fn project_scroll_bounds(
             .saturating_sub(inner_height as usize)
             .min(u16::MAX as usize) as u16,
         detail_max_scroll: detail_lines
-            .saturating_sub(inner_height as usize)
+            .saturating_sub(areas.detail.height as usize)
             .min(u16::MAX as usize) as u16,
     }
 }

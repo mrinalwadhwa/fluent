@@ -984,7 +984,7 @@ fn work_filters_count_items_from_authoritative_state() {
         "/one",
         vec![row("one", "planned"), row("two", "needs-user")],
     )]);
-    app.filter = project::Filter::Category(C::NeedsYou);
+    app.filter = project::Filter::NeedsYou;
     assert_eq!(app.project_keys().len(), 1);
     assert_eq!(app.project_keys()[0].work_item_id, "two");
     assert!(text(&app, 100, 24).contains("Needs you 1"));
@@ -1070,7 +1070,7 @@ fn work_filters_count_items_from_authoritative_state() {
     let before = project::SourceSnapshot::load(learning_root.path()).unwrap();
     assert_eq!(before.work[0].category, C::Ready);
     let mut before_app = project_app(vec![before]);
-    before_app.filter = project::Filter::Category(C::ReadyToLand);
+    before_app.filter = project::Filter::Ready;
     assert!(before_app.project_keys().is_empty());
     assert!(text(&before_app, 140, 24).contains("Ready to land 0"));
     let learning = crate::work_model::AttemptLearning::succeeded(
@@ -1086,7 +1086,7 @@ fn work_filters_count_items_from_authoritative_state() {
     let after = project::SourceSnapshot::load(learning_root.path()).unwrap();
     assert_eq!(after.work[0].category, C::ReadyToLand);
     let mut after_app = project_app(vec![after]);
-    after_app.filter = project::Filter::Category(C::ReadyToLand);
+    after_app.filter = project::Filter::Ready;
     assert_eq!(after_app.project_keys().len(), 1);
     assert!(text(&after_app, 140, 24).contains("Ready to land 1"));
 }
@@ -1220,6 +1220,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn loaded_worker_metadata_reaches_rows_and_details() {
     use crate::work_model::{AttemptStatus, TaskStatus};
     let root = tempfile::tempdir().unwrap();
@@ -1541,4 +1542,77 @@ fn dashboard_accepts_repeatable_project_paths() {
         }
         _ => panic!("expected dashboard command"),
     }
+}
+
+#[test]
+fn project_layout_uses_header_rule_and_one_pane_divider() {
+    let mut app = project_app(vec![project_source(
+        "/factory/main",
+        vec![row("work", "executing")],
+    )]);
+    for (width, height) in [(120, 28), (100, 24)] {
+        app.resize(width, height);
+        for terminal_open in [false, true] {
+            app.terminal = terminal_open.then(terminal_display);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered = buffer_text(buffer);
+            let lines = rendered.lines().collect::<Vec<_>>();
+            assert!(lines[0].starts_with("Fluent work"), "{rendered}");
+            assert!(
+                lines[1].contains("All 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0"),
+                "{rendered}"
+            );
+            assert!(lines[2].chars().all(|c| c == '─'), "{rendered}");
+            for line in &lines[3..height as usize - 1] {
+                assert_eq!(line.matches('│').count(), 1, "{rendered}");
+                assert!(!line.contains(['┌', '┐', '└', '┘', '─']), "{rendered}");
+            }
+            let divider = lines[3].chars().position(|c| c == '│').unwrap();
+            assert!(divider >= width as usize * 3 / 5);
+            for y in 3..height - 1 {
+                assert_eq!(buffer[(divider as u16, y)].symbol(), "│");
+            }
+            assert!(lines[3].contains("Tasks") && lines[3].contains("Status"));
+        }
+    }
+}
+
+#[test]
+fn project_rows_preserve_exact_status_and_selection_cues() {
+    let mut source = project_source(
+        "/factory/main",
+        vec![
+            row("long", "executing"),
+            row("land", "merge-ready"),
+            row("plan", "planned"),
+        ],
+    );
+    source.stale = Some("offline".into());
+    source.work[0].status.title =
+        "漢字 e\u{301} a very long title that must not hide the exact state".into();
+    source.work[0].phase = Some("Writing".into());
+    let app = project_app(vec![source]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rendered = buffer_text(buffer);
+    let lines = rendered.lines().collect::<Vec<_>>();
+    assert!(lines[4].contains("STALE"), "{rendered}");
+    assert!(
+        lines[5].contains('漢')
+            && lines[5].contains('字')
+            && lines[5].contains("e\u{301}")
+            && lines[5].contains("Running"),
+        "{rendered}"
+    );
+    assert!(lines[6].contains("Ready to land"), "{rendered}");
+    assert!(lines[7].contains("Planned"), "{rendered}");
+    assert_eq!(buffer[(0, 5)].symbol(), ">");
+    assert_ne!(buffer[(0, 5)].bg, buffer[(0, 6)].bg);
+    let status_x = lines[3].find("Status").unwrap() as u16;
+    assert_eq!(buffer[(status_x, 5)].symbol(), "R");
+    assert_eq!(buffer[(status_x, 6)].symbol(), "R");
+    assert!(lines[3].contains("Updated"));
 }

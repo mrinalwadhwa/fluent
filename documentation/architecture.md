@@ -2091,12 +2091,16 @@ but later status and show commands emit no next action for that row, avoiding an
 inspection self-loop and allowing other actionable Work to surface. The boundary
 returns valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
-`fluent dashboard` projects those rows into a read-only operator console. Its
-snapshot keeps Current Work grouped as Needs you, Running, and Ready, with
-Terminal Work available through the All Work view. The console stores selection
-by Work Item ID, so a successful refresh preserves a visible selection across
-reordering. It uses a wide list-and-detail layout at 100 columns, separate list
-and detail panes from 60 columns, and a resize message below the minimum size.
+`fluent dashboard` projects those rows into a read-only operator console grouped
+by project. Counted All, Needs you, Running, Ready, Waiting, and History views
+filter Work Items; Ready includes Ready to land, and Waiting includes Queued and
+Planned. Rows retain their exact categories. The compact header has one rule,
+and a single divider separates the list from details at 100 columns or wider.
+The list uses 65% of the width to leave room for embedded terminal output.
+From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
+shows a resize message. Selection uses source, Work Item, Task, and invocation
+identity, so refresh preserves a visible selection across reordering. The old
+status-grouped snapshot remains an internal compatibility path.
 The event loop refreshes the read-only snapshot every two seconds or on request,
 retains and labels the last successful snapshot after a read failure, and draws
 only when visible state changes. `dashboard.rs` owns terminal setup and the

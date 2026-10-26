@@ -19,15 +19,6 @@ pub enum Category {
     Unknown,
 }
 impl Category {
-    pub const FILTERS: [Self; 7] = [
-        Self::NeedsYou,
-        Self::Running,
-        Self::Queued,
-        Self::Ready,
-        Self::ReadyToLand,
-        Self::Planned,
-        Self::History,
-    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::NeedsYou => "Needs you",
@@ -456,39 +447,45 @@ pub fn refresh_sources(previous: &[SourceSnapshot], paths: &[PathBuf]) -> Vec<So
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
-    Current,
-    Category(Category),
+    All,
+    NeedsYou,
+    Running,
+    Ready,
+    Waiting,
+    History,
 }
 impl Filter {
+    pub const VIEWS: [Self; 6] = [
+        Self::All,
+        Self::NeedsYou,
+        Self::Running,
+        Self::Ready,
+        Self::Waiting,
+        Self::History,
+    ];
     pub fn matches(self, category: Category) -> bool {
         match self {
-            Self::Current => category != Category::History,
-            Self::Category(selected) => selected == category,
+            Self::All => true,
+            Self::NeedsYou => category == Category::NeedsYou,
+            Self::Running => category == Category::Running,
+            Self::Ready => matches!(category, Category::Ready | Category::ReadyToLand),
+            Self::Waiting => matches!(category, Category::Queued | Category::Planned),
+            Self::History => category == Category::History,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Current => "Current",
-            Self::Category(category) => category.label(),
+            Self::All => "All",
+            Self::NeedsYou => "Needs you",
+            Self::Running => "Running",
+            Self::Ready => "Ready",
+            Self::Waiting => "Waiting",
+            Self::History => "History",
         }
     }
     pub fn next(self) -> Self {
-        const OPTIONS: [Filter; 8] = [
-            Filter::Current,
-            Filter::Category(Category::NeedsYou),
-            Filter::Category(Category::Running),
-            Filter::Category(Category::Queued),
-            Filter::Category(Category::Ready),
-            Filter::Category(Category::ReadyToLand),
-            Filter::Category(Category::Planned),
-            Filter::Category(Category::History),
-        ];
-        OPTIONS[(OPTIONS
-            .iter()
-            .position(|option| *option == self)
-            .unwrap_or(0)
-            + 1)
-            % OPTIONS.len()]
+        Self::VIEWS
+            [(Self::VIEWS.iter().position(|view| *view == self).unwrap() + 1) % Self::VIEWS.len()]
     }
 }
 

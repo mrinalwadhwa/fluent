@@ -159,7 +159,7 @@ pub fn navigate_and_refresh(
 ) -> Result<()> {
     let paths = vec![root.to_owned()];
     let mut app = App::new(load_project_snapshot(&paths, Vec::new()));
-    app.filter = project::Filter::Current;
+    app.filter = project::Filter::All;
     let keys = app.project_keys();
     ensure!(keys.len() >= 2, "fixture must publish two Work items");
     app.select_key(keys[0].clone());

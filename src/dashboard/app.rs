@@ -23,7 +23,7 @@ impl App {
             all_work: false,
             selected: None,
             selected_key: None,
-            filter: Filter::Current,
+            filter: Filter::All,
             expanded: BTreeSet::new(),
             selected_index: 0,
             pane: Pane::List,
@@ -255,10 +255,10 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Char('a') if self.project_mode() => {
-                self.filter = if self.filter == Filter::Category(project::Category::History) {
-                    Filter::Current
+                self.filter = if self.filter == Filter::History {
+                    Filter::All
                 } else {
-                    Filter::Category(project::Category::History)
+                    Filter::History
                 };
                 self.reconcile_project_selection();
                 self.clamp_scrolls();

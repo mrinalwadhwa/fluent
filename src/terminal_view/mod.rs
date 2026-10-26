@@ -64,7 +64,11 @@ pub(crate) fn identity_lines(identity: &str, width: u16) -> Vec<String> {
 
 /// Reserve the same identity rows for drawing, resizing, and mouse routing.
 pub(crate) fn content_area(area: ratatui::layout::Rect, identity: &str) -> ratatui::layout::Rect {
-    let inner = ratatui::widgets::Block::bordered().inner(area);
+    let inner = ratatui::layout::Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
     let rows = identity_lines(identity, inner.width)
         .len()
         .min(usize::from(inner.height)) as u16;
@@ -74,14 +78,22 @@ pub(crate) fn content_area(area: ratatui::layout::Rect, identity: &str) -> ratat
 pub fn draw(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, display: &Display) {
     use ratatui::{
         style::{Color, Modifier, Style},
-        widgets::{Block, Borders, Paragraph},
+        widgets::Paragraph,
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Terminal · {} ", display.state));
-    let inner = block.inner(area);
+    let inner = ratatui::layout::Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
     let content = content_area(area, &display.identity);
-    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(display.state.as_str()).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ratatui::layout::Rect { height: 1, ..area },
+    );
     frame.render_widget(
         Paragraph::new(identity_lines(&display.identity, inner.width).join("\n")),
         ratatui::layout::Rect {

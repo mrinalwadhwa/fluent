@@ -58,81 +58,63 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_projects(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    let total = app
-        .snapshot
-        .sources
-        .iter()
-        .flat_map(|source| &source.work)
-        .count();
-    let counts = super::project::Category::FILTERS
-        .iter()
-        .map(|category| {
-            let count = app
-                .snapshot
-                .sources
-                .iter()
-                .flat_map(|source| &source.work)
-                .filter(|work| work.category == *category)
-                .count();
-            format!("{} {count}", category.label())
-        })
-        .collect::<Vec<_>>();
-    let unknown = app
-        .snapshot
-        .sources
-        .iter()
-        .flat_map(|source| &source.work)
-        .filter(|work| work.category == super::project::Category::Unknown)
-        .count();
-    let first = format!(
-        "{} {}  ·  {total} Work Items{}",
-        app.filter.label(),
-        app.project_keys()
-            .iter()
-            .filter(|key| key.task_id.is_none())
-            .count(),
-        if unknown > 0 {
-            format!(" · Unknown {unknown}")
-        } else {
-            String::new()
+    let areas = layout::project_areas(area);
+    let mut tabs = Vec::new();
+    for view in super::project::Filter::VIEWS {
+        if !tabs.is_empty() {
+            tabs.push(Span::raw("  "));
         }
-    );
+        let count = app
+            .snapshot
+            .sources
+            .iter()
+            .flat_map(|source| &source.work)
+            .filter(|work| view.matches(work.category))
+            .count();
+        let style = if app.filter == view {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        tabs.push(Span::styled(format!("{} {count}", view.label()), style));
+    }
+    let tab_line = Line::from(tabs);
+    let hint = "Tab/⇧Tab view";
+    let mut tab_line = tab_line;
+    if tab_line.width() + hint.width() + 2 <= area.width as usize {
+        tab_line.spans.push(Span::raw("  "));
+        tab_line
+            .spans
+            .push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    }
+    let title = if let Some(error) = &app.stale_error {
+        format!("Fluent work · {error}")
+    } else {
+        "Fluent work".into()
+    };
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(first),
-            Line::from(counts[..4].join("  ")),
-            Line::from(counts[4..].join("  ")),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Fluent · Projects "),
-        ),
-        chunks[0],
+        Paragraph::new(vec![Line::from(title), tab_line])
+            .block(Block::default().borders(Borders::BOTTOM)),
+        areas.header,
     );
     if app.help {
-        help(frame, chunks[1], app);
+        help(frame, areas.body, app);
     } else if app.errors {
-        errors(frame, chunks[1], app);
+        errors(frame, areas.body, app);
     } else if area.width >= 100 {
-        let panes = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(43), Constraint::Percentage(57)])
-            .split(chunks[1]);
-        project_list(frame, panes[0], app);
-        project_detail(frame, panes[1], app);
+        frame.render_widget(
+            Paragraph::new(vec![Line::from("│"); areas.divider.height as usize]),
+            areas.divider,
+        );
+        project_list(frame, areas.list, app);
+        project_detail(frame, areas.detail, app);
     } else if app.pane == Pane::List {
-        project_list(frame, chunks[1], app);
+        project_list(frame, areas.list, app);
     } else {
-        project_detail(frame, chunks[1], app);
+        project_detail(frame, areas.detail, app);
     }
     let controls = if app.help {
         "? or Esc close help"
@@ -147,10 +129,52 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else {
         "j/k select  Enter expand  t terminal  f filter  e errors  r refresh  ? help  q quit"
     };
-    frame.render_widget(Paragraph::new(controls), chunks[2]);
+    frame.render_widget(Paragraph::new(controls), areas.footer);
+}
+
+fn project_row(
+    title: &str,
+    status: &str,
+    updated: &str,
+    marker: &str,
+    width: u16,
+    selected: bool,
+    tone: Color,
+) -> Line<'static> {
+    let updated_width = if width >= 60 { 9 } else { 0 };
+    let title_width = usize::from(width).saturating_sub(4 + 14 + updated_width);
+    let title = compact(title, title_width);
+    let mut spans = vec![
+        Span::raw(format!(
+            "{marker} {title}{}  ",
+            " ".repeat(title_width.saturating_sub(title.width()))
+        )),
+        Span::raw(format!("{status:<14}")),
+    ];
+    if updated_width > 0 {
+        spans.push(Span::raw(format!("{updated:>9}")));
+    }
+    Line::from(spans).style(if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Rgb(74, 165, 239))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(tone)
+    })
 }
 
 fn project_list(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = project_row(
+        "Tasks",
+        "Status",
+        "Updated",
+        " ",
+        area.width,
+        false,
+        Color::DarkGray,
+    );
+    frame.render_widget(Paragraph::new(columns), Rect { height: 1, ..area });
     let mut lines = Vec::new();
     for source in &app.snapshot.sources {
         let work = source
@@ -167,67 +191,75 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy())
             .unwrap_or_default();
+        // Keep staleness at the front so a long source name cannot hide it.
         lines.push(Line::styled(
             format!(
-                "{} · {parent}/{} · {}{}",
-                source.short_id(),
-                source.project,
-                source.host,
+                "{}{} · {parent}/{} · {}",
                 if source.stale.is_some() {
-                    " · STALE"
+                    "STALE · "
                 } else {
                     ""
-                }
+                },
+                source.short_id(),
+                source.project,
+                source.host
             ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::DarkGray),
         ));
         for item in work {
-            let selected = app.selected_key.as_ref() == Some(&item.key);
-            let marker = if selected { ">" } else { " " };
+            use super::project::Category;
+            let tone = match item.category {
+                Category::NeedsYou => Color::LightRed,
+                Category::Running => Color::LightBlue,
+                Category::Ready | Category::ReadyToLand => Color::LightGreen,
+                _ => Color::Gray,
+            };
             let triangle = if app.expanded.contains(&item.key) {
                 "▾"
             } else {
                 "▸"
             };
-            lines.push(Line::from(format!(
-                "{marker} {triangle} {}  {} [{}]",
-                item.status.title,
-                item.phase.as_deref().unwrap_or(item.category.label()),
-                item.status.id
-            )));
+            let selected = app.selected_key.as_ref() == Some(&item.key);
+            lines.push(project_row(
+                &format!("{triangle} {}", item.status.title),
+                item.category.label(),
+                "—",
+                if selected { ">" } else { " " },
+                area.width,
+                selected,
+                tone,
+            ));
             if app.expanded.contains(&item.key) {
                 for worker in &item.workers {
-                    let marker = if app.selected_key.as_ref() == Some(&worker.key) {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    lines.push(Line::from(format!(
-                        "{marker} {} [{}] term:{}",
-                        worker.role,
-                        worker.state,
-                        if worker.terminal.as_ref().is_some_and(|t| t.can_observe) {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    )));
+                    let selected = app.selected_key.as_ref() == Some(&worker.key);
+                    let available = worker.terminal.as_ref().is_some_and(|t| t.can_observe);
+                    lines.push(project_row(
+                        &format!(
+                            "  ↳ {} · {}",
+                            worker.role,
+                            if available { "session" } else { "no session" }
+                        ),
+                        &worker.state,
+                        "—",
+                        if selected { ">" } else { " " },
+                        area.width,
+                        selected,
+                        Color::Gray,
+                    ));
                 }
             }
         }
     }
     if lines.is_empty() {
-        lines.push(Line::from("No Work Items in this filter"));
+        lines.push(Line::from("No Work Items in this view"));
     }
     frame.render_widget(
-        Paragraph::new(lines).scroll((app.list_scroll, 0)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Projects / Work / Workers "),
-        ),
-        area,
+        Paragraph::new(lines).scroll((app.list_scroll, 0)),
+        Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        },
     );
 }
 
@@ -244,12 +276,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(values.into_iter().map(Line::from).collect::<Vec<_>>())
             .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Selected details / terminal "),
-            ),
+            .scroll((app.detail_scroll, 0)),
         area,
     );
 }
