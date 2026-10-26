@@ -84,6 +84,7 @@ fn dashboard_snapshot_is_nonmutating() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 #[serial_test::serial]
 fn dashboard_does_not_replay_pending_root_publication() {
     let root = tempfile::tempdir().unwrap();
@@ -451,12 +452,50 @@ fn help_lists_contextual_controls_and_closes() {
 }
 #[test]
 fn dashboard_controls_leave_work_state_unchanged() {
-    let mut app = app(vec![row("work", "planned")]);
-    let before = app.snapshot.rows[0].status.clone();
-    for key in ['j', 'a', '?', 'r', 'c'] {
-        app.handle_key(KeyCode::Char(key), KeyModifiers::NONE);
+    fn files(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn visit(path: &Path, out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    visit(&entry.unwrap().path(), out);
+                }
+            } else {
+                out.insert(path.to_owned(), std::fs::read(path).unwrap());
+            }
+        }
+        let mut out = Default::default();
+        visit(root, &mut out);
+        out
     }
-    assert_eq!(app.snapshot.rows[0].status, before);
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let mut item = crate::work_model::WorkItem::planned("work", "Read only navigation");
+    item.add_initial_attempt("attempt-1").unwrap();
+    store.create_work_item(&item).unwrap();
+    let before = files(root.path());
+    let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
+    for width in [120, 100, 80, 59] {
+        app.resize(width, 24);
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Left,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('a'),
+            KeyCode::Char('a'),
+            KeyCode::Char('?'),
+            KeyCode::Esc,
+            KeyCode::Char('e'),
+            KeyCode::Esc,
+            KeyCode::Char('r'),
+            KeyCode::Char('c'),
+        ] {
+            app.handle_key(code, KeyModifiers::NONE);
+            let _ = text(&app, width, 24);
+        }
+    }
+    assert_eq!(files(root.path()), before);
 }
 #[test]
 fn overflow_rows_remain_navigable() {
@@ -703,10 +742,10 @@ fn embedded_terminal_keeps_project_context_visible() {
     let buffer = terminal.backend().buffer();
     let rendered = buffer_text(buffer);
     assert!(rendered.contains("same-name"), "{rendered}");
-    assert_eq!(buffer[(68, 7)].symbol(), "界");
-    assert_eq!(buffer[(71, 7)].symbol(), "a");
-    assert_eq!(buffer[(75, 7)].symbol(), "t");
-    assert_eq!(buffer[(60, 7)].symbol(), "│");
+    let content = layout::terminal_content((140, 30), &app.terminal.as_ref().unwrap().identity);
+    assert_eq!(buffer[(content.x + 7, content.y)].symbol(), "界");
+    assert_eq!(buffer[(content.x + 10, content.y)].symbol(), "a");
+    assert_eq!(buffer[(content.x - 1, content.y)].symbol(), "│");
     assert!(rendered.contains("Observe"), "{rendered}");
     assert!(rendered.contains("agent-work"), "{rendered}");
 }
@@ -833,7 +872,7 @@ fn wrapped_terminal_header_preserves_viewport_geometry() {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(area.x, area.y)].symbol(), "n");
         assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "Z");
-        let header: String = (6..area.y)
+        let header: String = (4..area.y)
             .flat_map(|y| (area.x..area.right()).map(move |x| buffer[(x, y)].symbol()))
             .collect();
         let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
@@ -1272,8 +1311,12 @@ fn loaded_worker_metadata_reaches_rows_and_details() {
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let rendered = text(&app, 140, 30);
-    assert!(rendered.contains("architecture [complete] term:on"));
-    assert!(rendered.contains("tests [planned] term:off"));
+    assert!(rendered.lines().any(|line| line.contains("architecture")
+        && line.contains("session")
+        && line.contains("complete")));
+    assert!(rendered.lines().any(|line| line.contains("tests")
+        && line.contains("no session")
+        && line.contains("planned")));
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
     let details = text(&app, 140, 30);
     assert!(details.contains("Provider: fixture"));
@@ -1447,15 +1490,13 @@ fn project_layout_keeps_selected_content_visible() {
             assert!(rendered.contains("? help"));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| render::draw(frame, &app)).unwrap();
-            for y in 6..height - 2 {
-                assert_eq!(terminal.backend().buffer()[(0, y)].symbol(), "│");
-                assert_eq!(terminal.backend().buffer()[(width - 1, y)].symbol(), "│");
-            }
             if width >= 100 {
-                let boundary = width * 43 / 100 - 1;
-                for y in 6..height - 2 {
+                let boundary =
+                    layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height))
+                        .divider
+                        .x;
+                for y in 3..height - 1 {
                     assert_eq!(terminal.backend().buffer()[(boundary, y)].symbol(), "│");
-                    assert_eq!(terminal.backend().buffer()[(boundary + 1, y)].symbol(), "│");
                 }
             }
         }
@@ -1467,17 +1508,17 @@ fn project_layout_keeps_selected_content_visible() {
     compact.snapshot.sources[0].work[0].status.title =
         "漢字 e\u{301} and a very long Work title that wraps safely".into();
     compact.resize(60, 15);
-    compact.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    compact.handle_key(KeyCode::Right, KeyModifiers::NONE);
     let rendered = text(&compact, 60, 15);
-    assert!(rendered.contains("Selected details"));
-    assert!(rendered.contains('漢') && rendered.contains('字'));
+    assert!(rendered.contains("Details"));
+    assert!(rendered.contains("Work Item: 長"));
     compact.resize(100, 18);
     let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
     terminal
         .draw(|frame| render::draw(frame, &compact))
         .unwrap();
-    for y in 6..16 {
-        assert_eq!(terminal.backend().buffer()[(42, y)].symbol(), "│");
+    for y in 3..17 {
+        assert_eq!(terminal.backend().buffer()[(65, y)].symbol(), "│");
     }
 }
 
@@ -1969,4 +2010,166 @@ fn arrow_drill_observes_without_retargeting_on_selection() {
     for session in &mut sessions {
         session.stop().unwrap();
     }
+}
+
+#[test]
+fn narrow_view_keeps_filter_and_return_keys_distinct() {
+    let mut app = project_app(vec![project_source(
+        "/one",
+        vec![row("work", "needs-user")],
+    )]);
+    for width in [60, 80, 99] {
+        app.resize(width, 24);
+        app.pane = app::Pane::List;
+        app.filter = project::Filter::All;
+        assert!(!text(&app, width, 24).contains("Work Item: work"));
+        app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.filter, project::Filter::NeedsYou);
+        assert_eq!(app.pane, app::Pane::List);
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        let rendered = text(&app, width, 24);
+        assert!(rendered.contains("Work Item: work"), "{rendered}");
+        assert!(rendered.contains("←/Esc list"), "{rendered}");
+        app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.filter, project::Filter::All);
+        assert_eq!(app.pane, app::Pane::Detail);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.pane, app::Pane::List);
+        assert!(text(&app, width, 24).contains("work title"));
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.pane, app::Pane::List);
+    }
+}
+
+#[test]
+fn terminal_mode_and_focus_remain_explicit() {
+    for (width, height) in [(120, 28), (100, 24), (80, 24), (60, 15)] {
+        for state in [
+            "Observe · i control",
+            "Control · Ctrl-] navigate",
+            "Control · navigation",
+        ] {
+            let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+            app.resize(width, height);
+            app.pane = app::Pane::Detail;
+            let mut display = terminal_display();
+            display.state = state.into();
+            app.set_terminal(display);
+            let rendered = text(&app, width, height);
+            assert!(rendered.contains(state), "{width}x{height}: {rendered}");
+            assert!(rendered.contains("←/Esc"), "{rendered}");
+            assert!(rendered.contains("f full-screen"), "{rendered}");
+            assert_eq!(
+                app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE),
+                Effect::FullscreenTerminal
+            );
+        }
+    }
+}
+
+#[test]
+fn hidden_terminal_releases_input_focus() {
+    use crossterm::event::{Event, KeyEvent};
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    app.set_terminal(terminal_display());
+    app.pane = app::Pane::Detail;
+    for (width, height) in [(59, 24), (80, 14), (80, 24)] {
+        app.resize(width, height);
+        if width == 80 && height == 24 {
+            app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        }
+        assert!(!app.terminal_visible());
+        assert!(
+            terminal_input_event(
+                &app,
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            )
+            .is_none()
+        );
+        assert!(terminal_input_event(&app, Event::Paste("hidden".into())).is_none());
+    }
+    #[cfg(feature = "test-support")]
+    {
+        use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
+        let root = tempfile::tempdir().unwrap();
+        let mut item = crate::work_model::WorkItem::planned("work", "Hidden control");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = item.attempts[0].tasks[0].id.clone();
+        crate::work_model::WorkModelStore::new(root.path())
+            .create_work_item(&item)
+            .unwrap();
+        let mut session = TerminalSession::start_tmux_fixture(TerminalIdentity::fixture(
+            root.path(),
+            "work",
+            "attempt-1",
+            &task,
+        ))
+        .unwrap();
+        let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        let mut embedded = None;
+        handle_terminal_key(
+            &mut app,
+            &mut embedded,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            |_| Ok(()),
+        );
+        handle_terminal_key(
+            &mut app,
+            &mut embedded,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            |_| Ok(()),
+        );
+        assert!(embedded.as_ref().unwrap().focused());
+        resize_terminal(&mut app, embedded.as_mut(), 59, 24);
+        assert!(!embedded.as_ref().unwrap().focused());
+        assert!(embedded.as_ref().unwrap().has_control());
+        resize_terminal(&mut app, embedded.as_mut(), 80, 24);
+        assert!(!embedded.as_ref().unwrap().focused());
+        assert!(
+            embedded
+                .as_mut()
+                .unwrap()
+                .send(Event::Paste("hidden".into()))
+                .is_err()
+        );
+        drop(embedded);
+        session.stop().unwrap();
+    }
+}
+
+#[test]
+fn project_views_keep_large_counts_and_detail_overflow_visible() {
+    let mut app = project_app(vec![project_source(
+        "/one",
+        (0..120)
+            .map(|i| row(&format!("work-{i}"), "merged"))
+            .collect(),
+    )]);
+    app.resize(60, 15);
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert!(
+        text(&app, 60, 15)
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("History 120")
+    );
+    app.snapshot.sources[0].diagnostics =
+        vec!["a long diagnostic with many words ".repeat(70) + "END-DIAGNOSTIC"];
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+    for _ in 0..300 {
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    }
+    let rendered = text(&app, 60, 15);
+    assert!(
+        rendered
+            .lines()
+            .map(str::trim)
+            .collect::<String>()
+            .contains("END-DIAGNOSTIC"),
+        "{rendered}"
+    );
 }

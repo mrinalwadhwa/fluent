@@ -60,6 +60,7 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let areas = layout::project_areas(area);
     let mut tabs = Vec::new();
+    let mut selected_end = 0;
     for view in super::project::Filter::VIEWS {
         if !tabs.is_empty() {
             tabs.push(Span::raw("  "));
@@ -80,6 +81,9 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             Style::default().fg(Color::Gray)
         };
         tabs.push(Span::styled(format!("{} {count}", view.label()), style));
+        if app.filter == view {
+            selected_end = tabs.iter().map(Span::width).sum::<usize>();
+        }
     }
     let tab_line = Line::from(tabs);
     let hint = "Tab/⇧Tab view";
@@ -90,15 +94,40 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             .spans
             .push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
     }
-    let title = if let Some(error) = &app.stale_error {
-        format!("Fluent work · {error}")
+    let position = if area.width < 100 {
+        if app.pane == Pane::List {
+            " · List"
+        } else {
+            " · Details · ←/Esc list"
+        }
     } else {
-        "Fluent work".into()
+        ""
     };
+    let mut title = format!("Fluent work{position}");
+    if !app.terminal_visible() {
+        if let Some(display) = &app.terminal {
+            title.push_str(&format!(" · {}", display.state));
+        }
+    }
+    if let Some(error) = &app.stale_error {
+        title.push_str(&format!(" · {error}"));
+    }
+    frame.render_widget(Block::default().borders(Borders::BOTTOM), areas.header);
     frame.render_widget(
-        Paragraph::new(vec![Line::from(title), tab_line])
-            .block(Block::default().borders(Borders::BOTTOM)),
-        areas.header,
+        Paragraph::new(title),
+        Rect {
+            height: 1,
+            ..areas.header
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(tab_line)
+            .scroll((0, selected_end.saturating_sub(area.width as usize) as u16)),
+        Rect {
+            y: areas.header.y + 1,
+            height: 1,
+            ..areas.header
+        },
     );
     if app.help {
         help(frame, areas.body, app);
@@ -119,15 +148,15 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     let controls = if app.help {
         "? or Esc close help"
     } else if app.errors {
-        "j/k scroll  PgUp/PgDn page  e or Esc return  ? help  q quit"
-    } else if app.terminal.is_some() {
-        "i Control  Ctrl-] navigate  ] literal  o Observe  f full-screen  t reconnect  F filter  ? help"
+        "↑/↓ scroll  PgUp/PgDn page  e/Esc back  ? help  q quit"
+    } else if app.terminal_visible() {
+        "←/Esc back  i Control  f full-screen  ? help  q quit"
     } else if app.pane == Pane::Detail && area.width < 100 {
-        "Esc/Tab list  j/k scroll  ? help  q quit"
+        "←/Esc list  ↑/↓ scroll  Tab view  ? help  q quit"
     } else if area.width < 100 {
-        "j/k select Enter expand t terminal f filter ? help q quit"
+        "↑/↓ select  Enter workers  → details  ? help  q quit"
     } else {
-        "j/k select  Enter expand  t terminal  f filter  e errors  r refresh  ? help  q quit"
+        "↑/↓ select  Enter workers  → details/session  ← back  ? help  q quit"
     };
     frame.render_widget(Paragraph::new(controls), areas.footer);
 }
@@ -285,9 +314,13 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         .map(|key| layout::project_detail_values(&app.snapshot.sources, key))
         .unwrap_or_else(|| vec!["No Work Item selected".into()]);
     frame.render_widget(
-        Paragraph::new(values.into_iter().map(Line::from).collect::<Vec<_>>())
-            .wrap(Wrap { trim: false })
-            .scroll((app.detail_scroll, 0)),
+        Paragraph::new(
+            layout::project_detail_lines(&values, area.width)
+                .into_iter()
+                .map(Line::from)
+                .collect::<Vec<_>>(),
+        )
+        .scroll((app.detail_scroll, 0)),
         area,
     );
 }
@@ -408,34 +441,65 @@ fn detail_lines(row: &DashboardRow) -> Vec<Line<'static>> {
     lines
 }
 fn errors(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = layout::error_lines(&app.snapshot, area.width)
+    let width = if app.project_mode() {
+        area.width.saturating_add(2)
+    } else {
+        area.width
+    };
+    let lines = layout::error_lines(&app.snapshot, width)
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).scroll((app.error_scroll, 0)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Work Item read errors "),
-        ),
-        area,
-    );
+    if app.project_mode() {
+        frame.render_widget(
+            Paragraph::new("Work Item read errors"),
+            Rect { height: 1, ..area },
+        );
+        frame.render_widget(
+            Paragraph::new(lines).scroll((app.error_scroll, 0)),
+            Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            },
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(lines).scroll((app.error_scroll, 0)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Work Item read errors "),
+            ),
+            area,
+        );
+    }
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let text = if app.project_mode() {
-        "j/k select; Enter expand; Tab details/list; Esc list; t terminal/reconnect; i Control; Ctrl-] navigate; ] literal; o Observe; f full-screen (open view); F filter; a history; e errors; r refresh; c copy; ? close; q quit"
+        "↑/↓ or j/k select; Enter workers; Tab/Shift+Tab view; → details/session; ←/Esc list; t terminal/reconnect; i Control; Ctrl-] navigate; ] literal; o Observe; f full-screen (open view); f/F next view; a History/All; e errors; r refresh; c copy; ? close; q quit"
     } else if app.size.0 >= 100 {
         "j/k or arrows select; PgUp/PgDn list; a Current/All; e errors; r refresh; c copy; ? close; q quit"
     } else {
         "Enter detail; Esc list; j/k select or scroll; PgUp/PgDn list; a Current/All; e errors; r refresh; ? close; q quit"
     };
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" Help ")),
-        area,
-    );
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    if app.project_mode() {
+        frame.render_widget(Paragraph::new("Help"), Rect { height: 1, ..area });
+        frame.render_widget(
+            paragraph,
+            Rect {
+                y: area.y + 1,
+                height: area.height.saturating_sub(1),
+                ..area
+            },
+        );
+    } else {
+        frame.render_widget(
+            paragraph.block(Block::default().borders(Borders::ALL).title(" Help ")),
+            area,
+        );
+    }
 }
 fn bar(frame: &mut Frame, area: Rect, app: &App) {
     let text = if app.help {

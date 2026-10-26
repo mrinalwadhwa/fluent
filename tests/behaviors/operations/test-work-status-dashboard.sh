@@ -55,11 +55,11 @@ assert_not_contains() {
 }
 
 clean_dashboard_output() {
-  perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r/\n/g'
+  perl -CSDA -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/[\s\x{2502}\x{2500}]//g'
 }
 
 clean_dashboard_output_tail() {
-  clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "FluentDashboard"); print $i >= 0 ? substr($_, $i) : $_'
+  clean_dashboard_output | perl -0777 -ne '$i = rindex($_, "Fluentwork"); print $i >= 0 ? substr($_, $i) : $_'
 }
 
 wait_for_dashboard_capture() {
@@ -295,7 +295,7 @@ test_dashboard_lists_work_items() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current1" || RESULT=1
+  assert_contains "$OUTPUT" "All1" || RESULT=1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
@@ -311,8 +311,8 @@ test_dashboard_refreshes_work_items_on_poll() {
   "$FLUENT_BIN" work-item create work-polled --title "Polled Work" > /dev/null
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current2" || RESULT=1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "rk" | clean_dashboard_output)"
+  assert_contains "$OUTPUT" "All2" || RESULT=1
   assert_contains "$OUTPUT" "work-polled" || RESULT=1
   assert_contains "$OUTPUT" "PolledWork" || RESULT=1
   return $RESULT
@@ -325,11 +325,11 @@ test_dashboard_surfaces_actionable_work() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Readytoland1" || RESULT=1
+  assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-action" || RESULT=1
   assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
-  assert_contains "$OUTPUT" "Status:Readytoland" || RESULT=1
-  assert_contains "$OUTPUT" "attempt-action-merge-candidate" || RESULT=1
+  assert_contains "$OUTPUT" "Readytoland" || RESULT=1
+  assert_contains "$OUTPUT" "Nextaction:fluentmerge-candidatelandwork-action" || RESULT=1
   return $RESULT
 }
 
@@ -344,7 +344,7 @@ test_dashboard_surfaces_needs_user_work() {
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "NeedsUserWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-needs-user" || RESULT=1
-  assert_contains "$OUTPUT" "Status:Needsyou" || RESULT=1
+  assert_contains "$OUTPUT" "State:needs-user" || RESULT=1
   return $RESULT
 }
 
@@ -356,9 +356,8 @@ test_dashboard_reports_work_read_errors() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "e" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current1" || RESULT=1
+  assert_contains "$OUTPUT" "All1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
-  assert_contains "$OUTPUT" "Sourcediagnostic:failedtoparse" || RESULT=1
   assert_contains "$OUTPUT" "failedtoparse" || RESULT=1
   return $RESULT
 }
@@ -369,8 +368,8 @@ test_dashboard_shows_empty_work_view() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
-  assert_contains "$OUTPUT" "Current0" || RESULT=1
-  assert_contains "$OUTPUT" "NoWorkItemsinthisfilter" || RESULT=1
+  assert_contains "$OUTPUT" "All0" || RESULT=1
+  assert_contains "$OUTPUT" "NoWorkItemsinthisview" || RESULT=1
   return $RESULT
 }
 

@@ -92,14 +92,7 @@ pub fn project_scroll_bounds(
     let details = selected_key
         .map(|key| project_detail_values(sources, key))
         .unwrap_or_default();
-    let detail_lines = details
-        .iter()
-        .map(|line| {
-            UnicodeWidthStr::width(line.as_str())
-                .max(1)
-                .div_ceil(detail_width)
-        })
-        .sum::<usize>();
+    let detail_lines = project_detail_lines(&details, detail_width as u16).len();
     ScrollBounds {
         list_height: inner_height,
         list_max_scroll: lines
@@ -266,10 +259,33 @@ pub fn error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
 }
 
 pub fn project_error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
-    error_lines(snapshot, size.0)
+    error_lines(snapshot, size.0.saturating_add(2))
         .len()
-        .saturating_sub(size.1.saturating_sub(8) as usize)
+        .saturating_sub(size.1.saturating_sub(5) as usize)
         .min(u16::MAX as usize) as u16
+}
+
+/// Wrap at display cells once so the renderer and scroll bounds agree.
+pub fn project_detail_lines(values: &[String], width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    for value in values {
+        for paragraph in value.split('\n') {
+            let mut line = String::new();
+            let mut used = 0;
+            for character in paragraph.chars() {
+                let columns = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+                if used + columns > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                line.push(character);
+                used += columns;
+            }
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {

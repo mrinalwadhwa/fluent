@@ -16,7 +16,7 @@ fn assert_visible_control(app: &App) -> Result<()> {
     );
     let identity = &app.terminal.as_ref().unwrap().identity;
     let content = layout::terminal_content(app.size, identity);
-    let header: String = (6..content.y)
+    let header: String = (4..content.y)
         .flat_map(|y| (content.x..content.right()).map(move |x| buffer[(x, y)].symbol()))
         .collect();
     let compact = |text: &str| {

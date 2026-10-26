@@ -42,7 +42,9 @@ navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
 Use Up/Down to select a Work Item and Enter to expand or collapse its workers.
 Right inspects Work details or opens the selected available worker in Observe;
 `t` remains the terminal/reconnect alias. Moving selection releases the previous
-attachment and waits for an explicit open command before attaching elsewhere. Observe clients use tmux's
+attachment and waits for an explicit open command before attaching elsewhere.
+At 60–99 columns, Right opens details and Left/Esc returns to the list. Tab and
+Shift+Tab keep switching views in either pane while navigation owns focus. Observe clients use tmux's
 `read-only,ignore-size` flags and preserve the worker's dimensions even when
 no controller is attached. Only Control resizes the worker; releasing Control
 retains its last dimensions. Terminal output is interpreted inside Ghostty

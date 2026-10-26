@@ -114,25 +114,25 @@ def journey(binary, project, mode):
         raise AssertionError(f"Expected {required}, absent {absent}\n{screen.text()}")
 
     try:
-        wait_for("Work Items", "work-visible")
+        wait_for("Tasks", "Visible Work")
         if mode == "help":
             os.write(master, b"?")
-            wait_for("Help", "j/k", "select", "f full-screen", "F filter", "Esc close help", absent=("Projects / Work / Workers",))
+            wait_for("Help", "j/k", "select", "f full-screen", "Tab/Shift+Tab view", "Esc close help", absent=("Visible Work",))
             os.write(master, b"\x1b")
-            wait_for("Work Items", "work-visible", absent=("Esc close help",))
+            wait_for("Tasks", "Visible Work", absent=("Esc close help",))
         else:
             assert "broken-29" not in screen.text()
             os.write(master, b"e")
-            wait_for("Work Item read errors", "Esc return", "broken-00")
+            wait_for("Work Item read errors", "e/Esc back", "broken-00")
             for _ in range(100):
                 os.write(master, b"\x1b[6~")
             wait_for("broken-29")
             os.write(master, b"\x1b")
-            wait_for("Work Items", "work-visible", absent=("Esc return",))
-            os.write(master, b"\t")
-            wait_for("Work Item: work-visible", "Esc/Tab list")
+            wait_for("Tasks", "Visible Work", absent=("e/Esc back",))
+            os.write(master, b"\x1b[C")
+            wait_for("Work Item: work-visible", "←/Esc list")
             os.write(master, b"\x1b")
-            wait_for("Work Items", "work-visible", absent=("Esc list",))
+            wait_for("Tasks", "Visible Work", absent=("←/Esc list",))
         os.write(master, b"q")
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:

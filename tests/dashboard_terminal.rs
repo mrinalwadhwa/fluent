@@ -313,7 +313,9 @@ fn terminal_control_input_pty_child() {
         .key(key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     dashboard.key(read_pty_input("navigation")).unwrap();
-    dashboard.key(key(KeyCode::Right, KeyModifiers::NONE)).unwrap();
+    dashboard
+        .key(key(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
     let selected = dashboard.terminal();
     assert_eq!(selected.descriptor(), second.descriptor());
     assert_eq!(selected.state_label(), "Observe · i control");

@@ -208,7 +208,7 @@ impl App {
             let page = self
                 .size
                 .1
-                .saturating_sub(if self.project_mode() { 8 } else { 6 })
+                .saturating_sub(if self.project_mode() { 5 } else { 6 })
                 .max(1);
             let max = if self.project_mode() {
                 layout::project_error_max_scroll(&self.snapshot, self.size)
@@ -305,6 +305,10 @@ impl App {
             }
             KeyCode::Enter if self.size.0 < 100 && self.size.0 >= 60 => {
                 self.pane = Pane::Detail;
+                self.dirty = true;
+            }
+            KeyCode::Left if self.project_mode() => {
+                self.pane = Pane::List;
                 self.dirty = true;
             }
             KeyCode::Esc if self.pane == Pane::Detail => {
