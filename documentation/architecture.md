@@ -2235,10 +2235,15 @@ From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
 shows a resize message. Selection uses source, Work Item, Task, and invocation
 identity, so refresh preserves a visible selection across reordering. The old
 status-grouped snapshot remains an internal compatibility path.
-The event loop refreshes the read-only snapshot every two seconds or on request,
-retains and labels the last successful snapshot after a read failure, and draws
-only when visible state changes. `dashboard.rs` owns terminal setup and the
-event loop; `dashboard/snapshot.rs`, `dashboard/app.rs`, and
+The event loop requests a read-only snapshot every two seconds or on request
+and draws only when visible state changes. After the initial synchronous load,
+`dashboard.rs` runs local discovery and reads in one background worker, keeping
+input and redraws responsive. Poll ticks reuse an in-flight read; manual requests
+during that read coalesce into one follow-up. Completed local results retain
+the current SSH snapshots and reconcile the current selection. Each failed
+source retains its last snapshot with a stale label and read diagnostics.
+`dashboard.rs` owns terminal setup and the event loop;
+`dashboard/snapshot.rs`, `dashboard/app.rs`, and
 `dashboard/render.rs` respectively own projection, interaction state, and pure
 Ratatui rendering. `dashboard/layout.rs` computes shared wrapping and scroll
 bounds and project detail text without depending on interaction state or rendering.

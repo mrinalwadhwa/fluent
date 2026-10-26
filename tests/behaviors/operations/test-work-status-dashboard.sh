@@ -399,6 +399,15 @@ test_dashboard_help_journey() {
   python3 "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" "$FLUENT_BIN" "$TEST_DIR/project" help
 }
 
+test_dashboard_navigates_during_local_refresh() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_planned_work_item
+  "$FLUENT_BIN" work-item create work-z-second --title "Second Work" > /dev/null
+  "$FLUENT_BIN" attempt create work-z-second attempt-second > /dev/null
+  python3 "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" "$FLUENT_BIN" "$TEST_DIR/project" refresh
+}
+
 test_dashboard_overflow_error_journey() {
   setup_test_project
   trap cleanup_test_project RETURN
@@ -436,5 +445,6 @@ run_test "dashboard shows empty Work view" test_dashboard_shows_empty_work_view
 
 run_test "dashboard help journey" test_dashboard_help_journey
 run_test "dashboard overflow error journey" test_dashboard_overflow_error_journey
+run_test "dashboard navigates during local refresh" test_dashboard_navigates_during_local_refresh
 
 summarize_and_exit

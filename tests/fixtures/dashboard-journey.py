@@ -94,6 +94,8 @@ def journey(binary, project, mode):
         os.execv(binary, [binary, "dashboard", str(project)])
     screen = Screen(width, height)
     exited = False
+    refresh_gate = project / ".fluent/work/items/refresh-gate.json"
+    gate_writer = None
 
     def wait_for(*required, absent=()):
         deadline = time.monotonic() + 8
@@ -120,6 +122,27 @@ def journey(binary, project, mode):
             wait_for("Help", "j/k", "select", "f full-screen", "Tab/Shift+Tab view", "Esc close help", absent=("Visible Work",))
             os.write(master, b"\x1b")
             wait_for("Tasks", "Visible Work", absent=("Esc close help",))
+        elif mode == "refresh":
+            wait_for("> ▸ Visible Work", "Second Work")
+            # Opening the writer proves that a real snapshot read has reached
+            # the FIFO. Retain it without bytes or EOF until navigation ends.
+            os.mkfifo(refresh_gate)
+            os.write(master, b"r")
+            deadline = time.monotonic() + 5
+            while gate_writer is None:
+                try:
+                    gate_writer = os.open(refresh_gate, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        raise
+                    assert time.monotonic() < deadline, "local snapshot read did not start"
+                    time.sleep(0.01)
+            os.write(master, b"j")
+            wait_for("> ▸ Second Work")
+            os.write(master, b"\t")
+            wait_for("No Work Items in this view", absent=("Second Work",))
+            os.write(master, b"\x1b[Z")
+            wait_for("Visible Work", "Second Work", absent=("No Work Items in this view",))
         else:
             assert "broken-29" not in screen.text()
             os.write(master, b"e")
@@ -158,6 +181,10 @@ def journey(binary, project, mode):
                 pass
             os.waitpid(child, 0)
         os.close(master)
+        if gate_writer is not None:
+            os.close(gate_writer)
+        if mode == "refresh":
+            refresh_gate.unlink(missing_ok=True)
     assert snapshot(project / ".fluent/work") == before, "dashboard changed stored Work bytes"
 
 
