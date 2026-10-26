@@ -402,7 +402,19 @@ Each completed change improves the project and shapes how Fluent approaches futu
 
 Run `fluent dashboard` from a checkout to see its Work alongside checkouts already registered with the scheduler. Add an unregistered checkout with `--project /path/to/checkout`; repeat the option for more projects. The dashboard reads the existing registry and Work snapshots without registering or changing any project.
 
-The list groups Work by source. Each group shows project name, host, and path context; the detail pane shows the full checkout path. Press `f` to cycle through Current, Needs you, Running, Queued, Ready, Ready to land, Planned, and History. Counts in the header count Work Items, including only the published lifecycle and queue state; expanded workers do not change them. Press Enter on a Work Item to show its Attempt's worker Tasks. In compact mode, press Tab to switch between list and details; Enter on a worker also opens details. Press Esc to return to the list. Press `e` for read errors, `r` to refresh, and `?` for help.
+The list groups Work by source. Each group shows project name, host, and path
+context; the detail pane shows the full checkout path. While dashboard navigation
+owns input, press Tab/Shift+Tab to cycle forward/backward through All, Needs you,
+Running, Ready, Waiting, and History. Ready includes Ready and Ready to land;
+Waiting includes Queued and Planned. Rows keep their exact categories. Header
+counts reflect published Work Item lifecycle and queue state; expanding workers
+does not change them.
+
+Use Up/Down to select a row and Enter on a Work Item to expand or collapse its
+Attempt's worker Tasks. Press Right to inspect selected details or open the
+selected available worker's session in Observe mode. In compact mode, Left/Esc
+returns to the list; Tab/Shift+Tab still changes views in either pane while
+navigation owns input. Press `e` for read errors, `r` to refresh, and `?` for help.
 
 A source that fails a later refresh keeps its last snapshot with a `STALE` label while other projects continue updating. Worker details use `unavailable` where Fluent has no recorded model, elapsed time, or provider wait. Agent-terminal availability comes from managed terminal descriptors; a headless worker has no interactive terminal.
 
