@@ -1164,7 +1164,8 @@ fn details_distinguish_recorded_values_from_unknowns() {
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
-    let details = project::detail_values(&app.snapshot.sources, app.selected_key.as_ref().unwrap());
+    let details =
+        layout::project_detail_values(&app.snapshot.sources, app.selected_key.as_ref().unwrap());
     assert!(details.contains(&"Provider: Codex".into()));
     assert!(details.contains(&"Model: unavailable".into()));
     assert!(details.contains(&"Elapsed: unavailable".into()));
@@ -1213,7 +1214,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
         vec![row("work", "task-ready")],
     )]);
     assert!(
-        project::detail_values(
+        layout::project_detail_values(
             &ready.snapshot.sources,
             ready.selected_key.as_ref().unwrap()
         )
@@ -1734,4 +1735,72 @@ fn project_rows_show_recorded_update_times() {
     assert!(rendered.contains("Updated UTC"), "{rendered}");
     assert!(rendered.contains(&updated), "{rendered}");
     assert_eq!(rendered.matches(&updated).count(), 2, "{rendered}");
+}
+
+#[test]
+fn project_details_prioritize_action_without_redundant_row_copy() {
+    let mut status = row("WI-42", "needs-user");
+    status.title = "Do not repeat this selected title".into();
+    status.recovery_blocker = Some("Host proof is missing".into());
+    status.next_action = Some("fluent work-item show WI-42".into());
+    let mut source = project_source("/one", vec![status]);
+    source.work[0].workers.push(project::Worker {
+        key: project::RowKey {
+            source_id: "/one".into(),
+            work_item_id: "WI-42".into(),
+            attempt_id: Some("attempt-1".into()),
+            task_id: Some("write-1".into()),
+            execution_generation: Some("generation-1".into()),
+        },
+        role: "writer".into(),
+        state: "executing".into(),
+        provider: Some("Codex".into()),
+        model: None,
+        effort: None,
+        elapsed_ms: None,
+        updated_at: None,
+        terminal: None,
+        unavailable_reason: "headless execution".into(),
+    });
+    let mut app = project_app(vec![source]);
+    for worker in [false, true] {
+        if worker {
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        let values = layout::project_detail_values(
+            &app.snapshot.sources,
+            app.selected_key.as_ref().unwrap(),
+        );
+        let joined = values.join("\n");
+        assert!(
+            !joined.contains("Do not repeat this selected title"),
+            "{joined}"
+        );
+        assert!(!joined.contains("Status: Needs you"), "{joined}");
+        assert!(joined.contains("Work Item: WI-42"));
+        assert!(joined.contains("Next action: fluent work-item show WI-42"));
+        assert!(joined.find("Next action:").unwrap() < joined.find("Source:").unwrap());
+        if worker {
+            for field in [
+                "Task: write-1",
+                "Invocation: generation-1",
+                "State: executing",
+                "headless execution",
+            ] {
+                assert!(joined.contains(field), "{joined}");
+            }
+        } else {
+            assert!(joined.contains("Host proof is missing"));
+        }
+        let rendered = text(&app, 120, 28);
+        let detail = rendered
+            .lines()
+            .skip(3)
+            .take(24)
+            .map(|line| line.split('│').nth(1).unwrap_or(""))
+            .collect::<String>();
+        assert!(detail.contains("Next action:"), "{rendered}");
+        assert!(!detail.contains("Do not repeat"), "{rendered}");
+    }
 }
