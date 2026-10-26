@@ -227,6 +227,28 @@ impl App {
             return Effect::None;
         }
         match key {
+            KeyCode::Right if self.project_mode() => {
+                self.pane = Pane::Detail;
+                self.detail_scroll = 0;
+                self.dirty = true;
+                if let Some(worker) = self
+                    .selected_key
+                    .as_ref()
+                    .and_then(|key| project::find_worker(&self.snapshot.sources, key))
+                {
+                    if worker
+                        .terminal
+                        .as_ref()
+                        .is_some_and(|terminal| terminal.can_observe)
+                    {
+                        return Effect::OpenTerminal;
+                    }
+                    self.stale_error = Some(format!(
+                        "Terminal unavailable: {}",
+                        worker.unavailable_reason
+                    ));
+                }
+            }
             KeyCode::Tab | KeyCode::BackTab if self.project_mode() => {
                 self.filter = if key == KeyCode::BackTab || modifiers.contains(KeyModifiers::SHIFT)
                 {

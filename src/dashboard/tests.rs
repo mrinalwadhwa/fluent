@@ -1804,3 +1804,169 @@ fn project_details_prioritize_action_without_redundant_row_copy() {
         assert!(!detail.contains("Do not repeat"), "{rendered}");
     }
 }
+
+fn worker_row(source: &str, task: &str) -> project::Worker {
+    project::Worker {
+        key: project::RowKey {
+            source_id: source.into(),
+            work_item_id: "work".into(),
+            attempt_id: Some("attempt-1".into()),
+            task_id: Some(task.into()),
+            execution_generation: Some(format!("generation-{task}")),
+        },
+        role: task.into(),
+        state: "executing".into(),
+        provider: None,
+        model: None,
+        effort: None,
+        elapsed_ms: None,
+        updated_at: None,
+        terminal: None,
+        unavailable_reason: "headless execution".into(),
+    }
+}
+
+#[test]
+fn arrow_drill_requires_selected_available_worker() {
+    let mut source = project_source("/one", vec![row("work", "executing")]);
+    let mut available = worker_row("/one", "writer");
+    available.terminal = Some(crate::terminal_sessions::TerminalDescriptor {
+        schema_version: 1,
+        source_id: "/one".into(),
+        project_identity: "/one".into(),
+        work_item_id: "work".into(),
+        attempt_id: "attempt-1".into(),
+        task_id: "writer".into(),
+        execution_generation: "generation-writer".into(),
+        session_id: "selected-session".into(),
+        role: "writer".into(),
+        provider: "fixture".into(),
+        lifecycle: crate::terminal_sessions::TerminalLifecycle::Running,
+        can_observe: true,
+        can_control: true,
+        unavailable_reason: None,
+    });
+    source.work[0].workers = vec![available, worker_row("/one", "reviewer")];
+    let mut app = project_app(vec![source]);
+    assert_eq!(
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+        Effect::None
+    );
+    assert_eq!(app.pane, app::Pane::Detail);
+    assert!(app.terminal.is_none());
+    app.pane = app::Pane::List;
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.project_keys().len(), 3);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    let selected = app.selected_key.clone();
+    assert_eq!(
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+        Effect::OpenTerminal
+    );
+    assert_eq!(app.selected_key, selected);
+    app.pane = app::Pane::List;
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+        Effect::None
+    );
+    assert!(text(&app, 120, 28).contains("headless execution"));
+    assert!(app.terminal.is_none());
+    app.pane = app::Pane::List;
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    app.snapshot.sources[0].work[0].workers[0]
+        .terminal
+        .as_mut()
+        .unwrap()
+        .can_observe = false;
+    assert_eq!(
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+        Effect::None
+    );
+    app.pane = app::Pane::List;
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.project_keys().len(), 1);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+fn arrow_drill_observes_without_retargeting_on_selection() {
+    use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
+    use crossterm::event::KeyEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Two workers");
+    item.add_review_only_attempt("attempt-1", &["architecture", "tests"], "main", "abc", true)
+        .unwrap();
+    let tasks = item.attempts[0]
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    crate::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&item)
+        .unwrap();
+    let mut sessions = tasks
+        .iter()
+        .map(|task| {
+            TerminalSession::start_tmux_fixture(TerminalIdentity::fixture(
+                root.path(),
+                "work",
+                "attempt-1",
+                task,
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    let mut app = project_app(vec![source]);
+    let mut embedded = None;
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        |_| Ok(()),
+    );
+    assert!(
+        embedded.is_some(),
+        "open failed: {:?}; selected: {:?}",
+        app.stale_error,
+        app.selected_key
+    );
+    let terminal = embedded.as_ref().unwrap();
+    assert!(terminal.identity().contains(&tasks[0]));
+    assert!(terminal.state_label().starts_with("Observe"));
+    assert!(!terminal.focused());
+    app.pane = app::Pane::List;
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        |_| Ok(()),
+    );
+    assert!(
+        embedded.is_none(),
+        "moving selection must wait for Right before opening another worker"
+    );
+    assert!(app.terminal.is_none());
+    handle_terminal_key(
+        &mut app,
+        &mut embedded,
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        |_| Ok(()),
+    );
+    assert!(embedded.as_ref().unwrap().identity().contains(&tasks[1]));
+    assert!(
+        embedded
+            .as_ref()
+            .unwrap()
+            .state_label()
+            .starts_with("Observe")
+    );
+    drop(embedded);
+    for session in &mut sessions {
+        session.stop().unwrap();
+    }
+}

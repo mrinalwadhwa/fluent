@@ -156,7 +156,12 @@ fn handle_terminal_key(
         }
         app.set_terminal(terminal.display());
     }
-    if effect == Effect::OpenTerminal || embedded.is_some() && previous != app.selected_key {
+    if embedded.is_some() && previous != app.selected_key {
+        // Navigation releases the old attachment; opening another worker is explicit.
+        embedded.take();
+        app.terminal = None;
+    }
+    if effect == Effect::OpenTerminal {
         let same_view = previous == app.selected_key && embedded.is_some();
         let result = if same_view {
             embedded.as_mut().unwrap().reconnect()

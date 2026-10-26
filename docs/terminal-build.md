@@ -39,8 +39,10 @@ and shows `—` when no timestamp is available, including the current SSH snapsh
 The `f`/`F` filter aliases and `a` History/All shortcut remain available when
 navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
 
-In the dashboard, expand a Work Item, select its native agent worker, and press
-`t` to observe its terminal beside the project list. Observe clients use tmux's
+Use Up/Down to select a Work Item and Enter to expand or collapse its workers.
+Right inspects Work details or opens the selected available worker in Observe;
+`t` remains the terminal/reconnect alias. Moving selection releases the previous
+attachment and waits for an explicit open command before attaching elsewhere. Observe clients use tmux's
 `read-only,ignore-size` flags and preserve the worker's dimensions even when
 no controller is attached. Only Control resizes the worker; releasing Control
 retains its last dimensions. Terminal output is interpreted inside Ghostty
