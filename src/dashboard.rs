@@ -110,7 +110,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
                             resize_terminal(&mut app, embedded.as_mut(), width, height);
-                            local.request(&mut app);
+                            local.request(&mut app, true);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -118,7 +118,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                             session.set_mouse_enabled(enabled)?;
                         }
                         if matches!(effect, Effect::Refresh) {
-                            local.request(&mut app);
+                            local.request(&mut app, true);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -131,7 +131,7 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             }
         }
         if poll_due(Instant::now(), next_poll) {
-            local.request(&mut app);
+            local.request(&mut app, false);
             remote.refresh();
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
@@ -330,6 +330,7 @@ struct LocalRefresh {
     explicit: Vec<PathBuf>,
     home: PathBuf,
     pending: Option<std::thread::JoinHandle<snapshot::DashboardSnapshot>>,
+    manual_pending: bool,
 }
 
 impl LocalRefresh {
@@ -339,11 +340,13 @@ impl LocalRefresh {
             explicit: explicit.to_vec(),
             home: home.to_path_buf(),
             pending: None,
+            manual_pending: false,
         }
     }
 
-    fn request(&mut self, app: &mut App) {
+    fn request(&mut self, app: &mut App, manual: bool) {
         if self.pending.is_some() {
+            self.manual_pending |= manual;
             return;
         }
         let root = self.root.clone();
@@ -398,6 +401,9 @@ impl LocalRefresh {
                 app.refresh(snapshot);
             }
             Err(_) => app.refresh_failed("Local snapshot reader stopped".into()),
+        }
+        if std::mem::take(&mut self.manual_pending) {
+            self.request(app, false);
         }
         true
     }

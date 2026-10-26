@@ -338,17 +338,52 @@ fn selection_moves_across_groups_and_scrolls() {
 }
 #[test]
 fn selection_survives_refresh_reorder_and_filter() {
-    let mut app = app(vec![row("first", "planned"), row("selected", "planned")]);
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
-    app.refresh(snapshot::DashboardSnapshot::from_status(
-        crate::work_status::WorkStatus {
-            rows: vec![row("selected", "executing"), row("first", "planned")],
-            errors: vec![],
-        },
-    ));
-    assert_eq!(app.selected_id(), Some("selected"));
-    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(app.selected_id(), Some("selected"));
+    let root = tempfile::tempdir().unwrap();
+    let mut app = project_app(vec![
+        project_source(
+            "/local",
+            vec![row("first", "executing"), row("selected", "executing")],
+        ),
+        project_source("ssh:remote", vec![row("remote", "executing")]),
+    ]);
+    let mut next = project_app(vec![project_source(
+        "/local",
+        vec![row("selected", "executing"), row("first", "executing")],
+    )])
+    .snapshot;
+    next.sources[0].work[0].status.title = "Updated local".into();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    local.start(&mut app, move || {
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        next
+    });
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.filter, project::Filter::Running);
+    app.select_key(project::RowKey::work("/local", "selected"));
+    let selected = app.selected_key.clone();
+    // An SSH result arrives after the local read starts.
+    let mut remote = project_source("ssh:remote", vec![row("remote-new", "executing")]);
+    remote.diagnostics.push("Current remote diagnostic".into());
+    app.snapshot.sources[1] = remote.clone();
+    release_tx.send(()).unwrap();
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(app.selected_key, selected);
+    assert_eq!(app.filter, project::Filter::Running);
+    assert_eq!(app.snapshot.sources[1], remote);
+    assert_eq!(
+        app.snapshot.sources[0].work[0].status.title,
+        "Updated local"
+    );
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("Current remote diagnostic"))
+    );
+    assert!(text(&app, 140, 24).contains("> ▸ Updated local"));
 }
 #[test]
 fn slow_local_refresh_does_not_block_selection() {
@@ -369,7 +404,7 @@ fn slow_local_refresh_does_not_block_selection() {
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     // Poll ticks cannot overlap the gated read or wait for it.
     for _ in 0..3 {
-        local.request(&mut app);
+        local.request(&mut app, false);
         assert!(!local.poll(&mut app));
     }
     let mut embedded = None;
@@ -407,6 +442,51 @@ fn slow_local_refresh_does_not_block_selection() {
     assert!(!local.poll(&mut app));
     release_tx.send(()).unwrap();
     finish_local_refresh(&mut local, &mut app);
+    assert!(
+        local.pending.is_none(),
+        "poll ticks must not queue extra reads"
+    );
+}
+
+#[test]
+fn manual_local_refresh_coalesces_while_a_read_is_pending() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let mut item = crate::work_model::WorkItem::planned("work", "Before manual refresh");
+    store.create_work_item(&item).unwrap();
+    let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let next = app.snapshot.clone();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    local.start(&mut app, move || {
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        next
+    });
+    item.title = "After manual refresh".into();
+    store.write_work_item(&item).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            app.handle_key(KeyCode::Char('r'), KeyModifiers::NONE),
+            Effect::Refresh
+        );
+        local.request(&mut app, true);
+    }
+    release_tx.send(()).unwrap();
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(
+        app.snapshot.sources[0].work[0].status.title,
+        "Before manual refresh"
+    );
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(
+        app.snapshot.sources[0].work[0].status.title,
+        "After manual refresh"
+    );
+    assert!(
+        local.pending.is_none(),
+        "manual requests must coalesce into one follow-up"
+    );
+    assert!(!local.poll(&mut app));
 }
 
 #[test]
@@ -1454,12 +1534,15 @@ fn selection_preserves_composite_worker_identity() {
     app.select_key(second.work[0].key.clone());
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     app.select_key(second.work[0].workers[0].key.clone());
-    app.refresh(snapshot::DashboardSnapshot {
+    let root = tempfile::tempdir().unwrap();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    local.start(&mut app, move || snapshot::DashboardSnapshot {
         rows: vec![],
         errors: vec![],
         sources: vec![second, first],
         project_view: true,
     });
+    finish_local_refresh(&mut local, &mut app);
     assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
     assert_eq!(
         app.selected_key
@@ -1534,16 +1617,46 @@ fn failed_source_does_not_hide_healthy_projects() {
     let items = one.join(".fluent/work/items");
     std::fs::remove_dir_all(&items).unwrap();
     std::fs::write(&items, "broken").unwrap();
-    let refreshed = project::refresh_sources(&[old], &[one.clone(), two]);
+    let mut app = project_app(vec![old]);
+    let mut local = LocalRefresh::new(&one, &[two], root.path());
+    local.request(&mut app, false);
+    finish_local_refresh(&mut local, &mut app);
+    let refreshed = &app.snapshot.sources;
     assert_eq!(refreshed.len(), 2);
     assert!(refreshed[0].stale.is_some());
     assert_eq!(refreshed[0].work[0].status.title, "Retain me");
     assert!(refreshed[1].stale.is_none());
-    let rendered = text(&project_app(refreshed), 140, 24);
+    let rendered = text(&app, 140, 24);
     assert!(rendered.contains("STALE"));
     assert_eq!(rendered.matches("STALE").count(), 1);
     assert!(rendered.contains("Retain me"));
     assert!(rendered.contains("Healthy now"));
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("STALE"))
+    );
+    // A successful partial read clears staleness and retains item diagnostics.
+    std::fs::remove_file(&items).unwrap();
+    std::fs::create_dir_all(&items).unwrap();
+    store.create_work_item(&retained).unwrap();
+    std::fs::write(items.join("malformed.json"), "broken").unwrap();
+    local.request(&mut app, true);
+    finish_local_refresh(&mut local, &mut app);
+    assert!(
+        app.snapshot
+            .sources
+            .iter()
+            .all(|source| source.stale.is_none())
+    );
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("malformed.json"))
+    );
+    assert!(text(&app, 140, 24).contains("Retain me"));
 }
 
 #[test]
@@ -1653,6 +1766,11 @@ fn project_sources_observe_without_mutating_work_or_registry() {
     assert!(errors.is_empty());
     let source = project::SourceSnapshot::load(&paths[0]).unwrap();
     assert_eq!(source.work.len(), 1);
+    let mut app = project_app(vec![source]);
+    let mut local = LocalRefresh::new(&project, &[], root.path());
+    local.request(&mut app, true);
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(app.snapshot.sources[0].work.len(), 1);
     assert_eq!(files(root.path()), before);
     assert!(
         !root
