@@ -2521,20 +2521,20 @@ mod setup_cleanup_tests {
 
     #[test]
     fn pane_query_retry_requires_confirmed_server_exit() {
-        // Tester puts TMPDIR below its artifact tree, which can exceed the
-        // Unix socket path limit. Match the short namespace used by terminals
-        // so this check observes a missing server, not an invalid address.
-        let root = tempfile::tempdir_in("/private/tmp").unwrap();
+        // The guarded Tester puts TMPDIR under its artifact directory. Keep
+        // this socket path below the Unix limit, like managed terminal sockets.
+        let root = tempfile::Builder::new()
+            .prefix("fluent-pane-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let socket = root.path().join("socket");
-        assert!(check_pane_query_failure_at(&socket, "no server running on fixture", None).is_ok());
-        assert!(
-            check_pane_query_failure_at(
-                &socket,
-                "error connecting to fixture (No such file or directory)",
-                None
-            )
-            .is_ok()
-        );
+        check_pane_query_failure_at(&socket, "no server running on fixture", None).unwrap();
+        check_pane_query_failure_at(
+            &socket,
+            "error connecting to fixture (No such file or directory)",
+            None,
+        )
+        .unwrap();
         assert!(check_pane_query_failure_at(&socket, "permission denied", None).is_err());
         // An address that cannot be queried must never prove server exit.
         let too_long = root.path().join("x".repeat(128));
