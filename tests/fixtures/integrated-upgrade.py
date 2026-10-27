@@ -1165,6 +1165,93 @@ def require_frozen_candidate(source, task, initial, tip):
                 'frozen first regression input changed: ' + path)
 
 
+def affected_review_roles(paths):
+    """Map changed paths to the ordinary review domains they invalidate."""
+    roles = {'architecture', 'behaviors', 'documentation', 'skills', 'tests'}
+    affected = set()
+    for raw in paths:
+        path = Path(raw)
+        if not raw or path.is_absolute() or any(part in ('.', '..') for part in raw.split('/')):
+            return roles
+        if raw.startswith('.fluent/expertise/'):
+            continue
+        if raw in ('documentation/architecture.md', 'expertise/architecture.md'):
+            affected.update(('documentation', 'architecture'))
+        elif raw in ('documentation/behaviors.md', 'expertise/behaviors.md'):
+            affected.update(('documentation', 'behaviors', 'tests'))
+        elif raw.startswith('documentation/') or raw == 'README.md' or raw == 'LICENSE' or raw.startswith('CHANGELOG'):
+            affected.add('documentation')
+        elif raw == 'expertise/tests.md':
+            affected.update(('documentation', 'tests'))
+        elif raw == 'expertise/skills.md':
+            affected.update(('documentation', 'skills'))
+        elif raw in ('expertise/documentation.md', 'expertise/README.md'):
+            affected.add('documentation')
+        elif raw.startswith('expertise/'):
+            return roles
+        elif raw.startswith('skills/'):
+            affected.update(('documentation', 'skills'))
+        elif raw.startswith('skill-migrations/'):
+            affected.update(('documentation', 'skills', 'tests'))
+        elif raw.startswith('prompts/'):
+            affected.update(('documentation', 'behaviors', 'skills', 'tests'))
+        elif raw.startswith('tests/'):
+            affected.add('tests')
+        elif (raw.startswith(('src/', 'scripts/', 'tools/', 'infrastructure/', 'sandboxes/', '.fluent/hooks/'))
+              or raw in ('.fluent/tester.yaml', '.fluent/extract-tester-results', 'Cargo.toml', 'Cargo.lock', 'build.rs')):
+            affected.update(('documentation', 'architecture', 'tests'))
+        else:
+            return roles
+    return affected
+
+
+def changed_review_paths(workspace, before, after):
+    """Read both sides of renames so a moved file cannot retain stale coverage."""
+    result = read_command(['git', '--no-replace-objects', 'diff', '--name-status', '-z', '--find-renames',
+                           '--diff-filter=ACDMRTUXB', before, after], workspace).split('\0')
+    paths = []
+    index = 0
+    while index < len(result) and result[index]:
+        status = result[index]
+        count = 2 if status.startswith(('R', 'C')) else 1
+        require(status[0] in 'ACDMRTUXB' and len(result) > index + count,
+                'ordinary review change list is malformed')
+        paths.extend(result[index + 1:index + count + 1])
+        index += count + 1
+    return paths
+
+
+def independent_ordinary_reviews(source, attempt):
+    """Select authentic passing reviews after each Writer's domain changes."""
+    roles = {'architecture', 'behaviors', 'documentation', 'skills', 'tests'}
+    selected = {}
+    current = None
+    for task in attempt['tasks']:
+        if task.get('status') != 'complete':
+            continue
+        if task.get('kind') == 'write':
+            output = task.get('output') or {}
+            commit = output.get('commit')
+            require(commit, 'independent Writer commit is missing')
+            if current and current != commit:
+                workspace = (source / task['workspace_access']['writes'][0]['path']).resolve(strict=True)
+                changed = changed_review_paths(workspace, current, commit)
+                for role in affected_review_roles(changed):
+                    selected.pop(role, None)
+            current = commit
+        elif task.get('kind') == 'review':
+            role = task.get('role')
+            if role not in roles:
+                selected.clear()
+                continue
+            if task.get('evidence_review_context'):
+                continue
+            selected.pop(role, None)
+            if current and task.get('review_context', {}).get('candidate_commit') == current:
+                selected[role] = task
+    return selected
+
+
 def require_independent_completion(source, item, attempt, manifest, tip):
     require(item.get('learner_mode') == 'no-expertise', 'independent Learning policy changed')
     writers = [t for t in attempt['tasks'] if t.get('kind') == 'write']
@@ -1187,12 +1274,10 @@ def require_independent_completion(source, item, attempt, manifest, tip):
             [t for t in old['tasks'] if t['id'] == failure['task_id']] and
             audit.get('files', {}).get(failure['artifact_path']) == 'sha256:' + failure['artifact_sha256'],
             'public recovery lost the original failure identity')
+    reviews = independent_ordinary_reviews(source, attempt)
     for role in ('architecture', 'behaviors', 'documentation', 'skills', 'tests'):
-        reviews = [t for t in attempt['tasks'] if t.get('kind') == 'review' and t.get('role') == role]
-        require(reviews and reviews[-1].get('status') == 'complete' and
-                reviews[-1].get('review_context', {}).get('candidate_commit') == tip,
-                'independent ordinary review is missing or stale')
-        task = reviews[-1]
+        require(role in reviews, 'independent ordinary review is missing or stale')
+        task = reviews[role]
         path = str(Path(task['artifact_area']['path']) / 'review.md')
         require(dict(producer_id=task['id'], path=path) in attempt['artifacts'] and
                 selected_path(source, path).read_text().splitlines()[:1] == ['Verdict: pass'],

@@ -1195,6 +1195,40 @@ class ReleasedFixture(unittest.TestCase):
                     for name in ('new-input', 'renamed.test.js'):
                         (self.workspace / name).unlink(missing_ok=True)
 
+    def test_independent_accepts_carried_forward_skills_review(self):
+        self.make_independent_manifest()
+        attempt = self.after['attempts'][-1]
+        (self.workspace / 'README.md').write_text('Updated example story\n')
+        subprocess.check_call(['git', 'add', 'README.md'], cwd=self.workspace)
+        subprocess.check_call(['git', 'commit', '-qm', 'Update example documentation'], cwd=self.workspace)
+        tip = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.workspace, text=True).strip()
+        writer = copy.deepcopy(self.writer)
+        writer['id'] = 'write-documentation'
+        writer['output']['commit'] = tip
+        attempt['tasks'].insert(-1, writer)
+        documentation = next(task for task in attempt['tasks']
+                             if task.get('kind') == 'review' and task.get('role') == 'documentation')
+        documentation['review_context']['candidate_commit'] = tip
+        attempt['tasks'].insert(-1, copy.deepcopy(documentation))
+        attempt['tasks'][-2]['id'] = 'review-documentation-final'
+        attempt['tasks'][-2]['artifact_area']['path'] = self.area + '/review-documentation-final'
+        review_path = self.area + '/review-documentation-final/review.md'
+        self.save(self.source / review_path, 'Verdict: pass\n')
+        attempt['artifacts'].append(dict(producer_id='review-documentation-final', path=review_path))
+        upgrade.require_independent_completion(self.source, self.after, attempt, self.dynamic, tip)
+        without_documentation = copy.deepcopy(attempt)
+        without_documentation['tasks'] = [task for task in without_documentation['tasks']
+                                          if task['id'] != 'review-documentation-final']
+        with self.assertRaisesRegex(RuntimeError, 'ordinary review is missing or stale'):
+            upgrade.require_independent_completion(self.source, self.after,
+                                                   without_documentation, self.dynamic, tip)
+        stale_skills = copy.deepcopy(attempt)
+        next(task for task in stale_skills['tasks'] if task.get('role') == 'skills')[
+            'review_context']['candidate_commit'] = self.initial
+        with self.assertRaisesRegex(RuntimeError, 'ordinary review is missing or stale'):
+            upgrade.require_independent_completion(self.source, self.after,
+                                                   stale_skills, self.dynamic, tip)
+
     def test_independent_exercise_uses_its_own_failure_and_public_retry(self):
         self.make_independent_manifest()
         self.continue_fixture()
