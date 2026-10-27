@@ -137,6 +137,18 @@ to project snapshots.
 
 ---
 
+## Let dashboard exit without waiting for local reads
+
+An unfinished local snapshot reader may continue until its read completes or
+the process exits. It owns its inputs and only observes Work, so dashboard
+cleanup must not wait for it. Preserve the
+[local refresh contract](learnings/dashboard-local-refresh-owns-no-ui-state.md)
+and the blocked-read exit check in the
+[dashboard journey](../../tests/fixtures/dashboard-journey.py). The SSH source
+collection retains its separate join-on-drop behavior.
+
+---
+
 ## Keep dashboard update times local to preserve the SSH snapshot
 
 The current SSH snapshot omits update times. Local Work and worker rows derive
