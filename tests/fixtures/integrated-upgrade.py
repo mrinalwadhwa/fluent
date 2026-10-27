@@ -845,6 +845,18 @@ def literal_shell_commands(command):
     return commands if all(argv[0] in external for argv in commands) else None
 
 
+def literal_workspace_reset(command, workspace):
+    """Recognize one literal cd back to the assigned workspace."""
+    if not isinstance(command, str) or any(c in command for c in '$`\n\r;&|<>()'):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return (len(argv) == 2 and argv[0] == 'cd' and
+            Path(argv[1]).is_absolute() and Path(argv[1]).resolve() == workspace)
+
+
 def native_foreground_result(request, block, result, returned, *, commit_result=False):
     """Validate actual Claude foreground status without synthesizing an exit."""
     inputs, native = block.get('input', {}), result.get('tool_use_result')
@@ -932,6 +944,8 @@ def native_package_results(source, task, proof, output):
             Path(init['cwd']).resolve() == (source / writes[0]['path']).resolve(),
             'Writer invocation session or assigned workspace changed')
     requests, results, positions = {}, {}, {}
+    workspace = Path(init['cwd']).resolve()
+    cwd_safe, pending_reset = True, None
     for position, row in enumerate(rows[start + 1:], start + 1):
         require(row.get('session_id') == session, 'foreign native invocation result')
         require(not (row.get('type') == 'system' and row.get('subtype') == 'init'),
@@ -943,18 +957,29 @@ def native_package_results(source, task, proof, output):
                 tool_id = block.get('id')
                 require(tool_id and tool_id not in requests, 'duplicate native tool request')
                 inputs = block.get('input', {})
-                # Native Bash launches each request in a separate process at
-                # the invocation cwd. An unsupported command cannot change the
-                # next process's cwd; it remains unsafe for its own request.
-                cwd_safe = (block.get('name') == 'Bash' and
-                            literal_shell_commands(inputs.get('command')) is not None)
-                requests[tool_id] = (row, block, cwd_safe)
+                pending_reset = None
+                safe = (block.get('name') == 'Bash' and cwd_safe and
+                        literal_shell_commands(inputs.get('command')) is not None)
+                if block.get('name') == 'Bash' and literal_shell_commands(inputs.get('command')) is None:
+                    cwd_safe = False
+                    if literal_workspace_reset(inputs.get('command'), workspace):
+                        pending_reset = tool_id
+                requests[tool_id] = (row, block, safe)
                 positions[('request', tool_id)] = position
             elif block.get('type') == 'tool_result':
                 tool_id = block.get('tool_use_id')
                 require(tool_id in requests and tool_id not in results, 'missing or duplicate native tool result identity')
                 results[tool_id] = (row, block)
                 positions[('result', tool_id)] = position
+                if tool_id == pending_reset:
+                    request, requested, _ = requests[tool_id]
+                    try:
+                        native_foreground_result(request, requested, row, block)
+                    except (RuntimeError, KeyError, TypeError):
+                        pass
+                    else:
+                        cwd_safe = True
+                    pending_reset = None
     prior_result = -1
     for check in checks:
         tool_id = check.get('tool_use_id')

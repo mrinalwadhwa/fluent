@@ -1130,16 +1130,42 @@ class ReleasedFixture(unittest.TestCase):
                 self.select_proofs()
                 with self.assertRaises(RuntimeError): self.exercise()
 
-    def test_unsupported_prior_bash_does_not_change_separate_package_cwd(self):
+    def test_prior_bash_cd_keeps_later_package_cwd_unproven(self):
         self.continue_fixture()
+        subdirectory = (self.source / self.writer['workspace_access']['writes'][0]['path'] / 'subdirectory').resolve()
+        subdirectory.mkdir()
         prior = copy.deepcopy(self.native_events[1:3])
         prior[0]['message']['content'][0].update(
-            id='prior-context', input={'command': 'cd /tmp; pwd'})
+            id='prior-context', input={'command': 'cd ' + str(subdirectory)})
         prior[1]['message']['content'][0]['tool_use_id'] = 'prior-context'
         self.native_events[1:1] = prior
         self.save_native_events()
         self.select_proofs()
+        with self.assertRaisesRegex(RuntimeError, 'assigned workspace'):
+            self.exercise()
+
+    def test_successful_explicit_workspace_cd_restores_package_proof(self):
+        self.continue_fixture()
+        subdirectory = (self.source / self.writer['workspace_access']['writes'][0]['path'] / 'subdirectory').resolve()
+        subdirectory.mkdir()
+        prior = copy.deepcopy(self.native_events[1:3])
+        prior[0]['message']['content'][0].update(
+            id='prior-context', input={'command': 'cd ' + str(subdirectory)})
+        prior[1]['message']['content'][0]['tool_use_id'] = 'prior-context'
+        reset = copy.deepcopy(self.native_events[1:3])
+        reset[0]['message']['content'][0].update(
+            id='workspace-reset', input={'command': 'cd ' + str((self.source / self.writer['workspace_access']['writes'][0]['path']).resolve())})
+        reset[1]['message']['content'][0]['tool_use_id'] = 'workspace-reset'
+        self.native_events[1:1] = prior + reset
+        self.save_native_events()
+        self.select_proofs()
         self.exercise()
+        reset[1]['message']['content'][0]['is_error'] = True
+        self.native_events[4] = reset[1]
+        self.save_native_events()
+        self.select_proofs()
+        with self.assertRaisesRegex(RuntimeError, 'assigned workspace'):
+            self.exercise()
 
     def test_native_success_preserves_only_observed_numeric_exits(self):
         self.continue_fixture()

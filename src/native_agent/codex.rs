@@ -4273,8 +4273,8 @@ mod tests {
             }
         ));
         let _ = tui.close(None);
-        let relay_result = relay_thread.join().unwrap();
         fake_release.send(()).unwrap();
+        let relay_result = relay_thread.join().unwrap();
         drop(tui);
         if let Err(error) = relay_result {
             // Closing one side of the paired fixture sockets can reset the
