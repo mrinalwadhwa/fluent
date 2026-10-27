@@ -11511,6 +11511,9 @@ impl WorkModelStore {
                 source,
             })?;
         self.normalize_work_artifact_paths(&mut work_item)?;
+        if work_item == prior && managed_files.is_empty() {
+            return Ok(output);
+        }
         work_item.synchronize_pause_records(&self.project_root);
         reject_transition_history_change(&prior, &work_item, &path)?;
         reject_canceled_attempt_launches(&prior, &work_item, &path)?;

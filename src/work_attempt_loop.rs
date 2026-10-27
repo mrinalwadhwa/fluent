@@ -16108,6 +16108,9 @@ mod tests {
             project.path(),
             &mut item,
         );
+        // This case isolates failed Tester attribution; its synthetic Writer
+        // does not provide a completion matrix for the unrelated behavior row.
+        item.attempts[0].writer_completion_contract = None;
         for task in item.attempts[0]
             .tasks
             .iter()
@@ -16302,6 +16305,8 @@ mod tests {
             failed_tester_command_artifacts(project_root, &item.attempts[0], &results).unwrap()
         };
         let task_id = item.add_next_write_round("attempt-1", findings).unwrap();
+        crate::recovery_contracts::prepare_writer_correction_assignments(project_root, &mut item)
+            .unwrap();
         store.write_work_item(&item).unwrap();
         complete_planned_no_change_writer(project_root, store, candidate, &task_id);
         task_id
@@ -17998,6 +18003,7 @@ mod tests {
 
                 let mut repair = final_writer.clone();
                 repair.id = "attempt-1-write-repair-history".to_string();
+                repair.writer_correction_assignment = None;
                 repair.role = crate::work_model::TESTER_HARNESS_REPAIR_ROLE.to_string();
                 repair.output.as_mut().unwrap().no_change = None;
                 repair.created_at = Some("2026-08-21T00:00:00Z".to_string());
@@ -18042,6 +18048,7 @@ mod tests {
 
                 let mut superseded_writer = final_writer;
                 superseded_writer.id = "attempt-1-write-superseded-history".to_string();
+                superseded_writer.writer_correction_assignment = None;
                 superseded_writer.status = TaskStatus::Failed;
                 superseded_writer.output = None;
                 superseded_writer.created_at = Some("2026-08-21T00:01:00Z".to_string());
@@ -18350,10 +18357,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(matches!(
-            outcome,
-            WorkAttemptRunOutcome::MergeCandidateReady { .. }
-        ));
+        assert!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            "accepted recheck should leave a ready candidate: {outcome:?}"
+        );
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(
             stored.attempts[0]
@@ -19904,6 +19911,34 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
                 .unwrap()
                 .requirements[0]
                 .verification_refs = vec![reference];
+            // The fixture changes the immutable reference for each case, so
+            // rebuild the synthetic completed Writer's matrix to match it.
+            let writer = &item.attempts[0].tasks[0];
+            let mut matrix = crate::work_model::WriterCompletionMatrix::skeleton(
+                item.attempts[0]
+                    .writer_completion_contract
+                    .as_ref()
+                    .unwrap(),
+                &writer.id,
+                &[],
+                None,
+            )
+            .unwrap();
+            for row in &mut matrix.rows {
+                row.state = crate::work_model::WriterCompletionState::Complete;
+                row.implementation_evidence = vec!["tests/behavior.rs: fixture behavior".into()];
+                row.verification = vec![crate::work_model::WriterVerificationClaim {
+                    command: "cargo test required_behavior".into(),
+                    result: crate::work_model::WriterVerificationResult::Pass,
+                }];
+            }
+            fs::write(
+                root.path()
+                    .join(&writer.artifact_area.as_ref().unwrap().path)
+                    .join("writer-completion.json"),
+                serde_json::to_vec(&matrix).unwrap(),
+            )
+            .unwrap();
             let tester = item.attempts[0]
                 .tasks
                 .iter()
@@ -19986,7 +20021,6 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
                     path,
                 });
             }
-            item.attempts[0].tasks[0].input_artifacts = inputs;
             store.write_work_item(&item).unwrap();
             let view = crate::verification_assessment::assess_current_verification(
                 root.path(),
@@ -20015,9 +20049,15 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             }
             let status = crate::work_status::summarize_work_item(&item, Some(root.path()));
             assert_eq!(status.verification.as_ref(), Some(&view), "{case}");
+            // Inspect a proposed correction without rewriting the completed
+            // source Writer's immutable assignment or completion contract.
+            let mut correction = item.clone();
+            let correction_id = correction
+                .add_next_write_round("attempt-1", inputs)
+                .unwrap();
             let (findings, context) = crate::work_task_executor::verification_views_for_test(
                 root.path(),
-                &item.attempts[0],
+                &correction.attempts[0],
                 workspace.path(),
             );
             assert_eq!(
@@ -20037,8 +20077,12 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             }
             let admission = crate::recovery_contracts::validate_verification_writer_start(
                 root.path(),
-                &item.attempts[0],
-                &item.attempts[0].tasks[0],
+                &correction.attempts[0],
+                correction.attempts[0]
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == correction_id)
+                    .unwrap(),
             );
             assert_eq!(admission.is_ok(), case == "review" || introduced, "{case}");
             let gate = crate::candidate_gate::run_candidate_gate(
@@ -28983,7 +29027,11 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join("review.md"), "Verdict: pass\n").unwrap();
             let mut task = review_task_with_artifact(&id, role, &path);
-            task.review_context.as_mut().unwrap().candidate_commit = base.clone();
+            task.workspace_access.reads[0].path = "../work-6-work-1-attempt-1".to_string();
+            let context = task.review_context.as_mut().unwrap();
+            context.candidate_commit = base.clone();
+            context.candidate_workspace_path = "../work-6-work-1-attempt-1".to_string();
+            context.source_branch = "main".to_string();
             item.attempts[0].tasks.push(task);
         }
         store.write_work_item(&item).unwrap();
