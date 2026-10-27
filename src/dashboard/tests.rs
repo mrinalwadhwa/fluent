@@ -1124,11 +1124,19 @@ fn work_filters_count_items_from_authoritative_state() {
     updated.attempts[0].learning = Some(learning);
     store.write_work_item(&updated).unwrap();
     let after = project::SourceSnapshot::load(learning_root.path()).unwrap();
-    assert_eq!(after.work[0].category, C::ReadyToLand);
+    assert_eq!(after.work[0].category, C::NeedsYou);
+    assert!(
+        after.work[0]
+            .status
+            .next_action
+            .as_deref()
+            .unwrap_or_default()
+            .contains("merge-candidate show")
+    );
     let mut after_app = project_app(vec![after]);
     after_app.filter = project::Filter::Ready;
-    assert_eq!(after_app.project_keys().len(), 1);
-    assert!(text(&after_app, 140, 24).contains("Ready 1"));
+    assert_eq!(after_app.project_keys().len(), 0);
+    assert!(text(&after_app, 140, 24).contains("Ready 0"));
 }
 
 #[test]

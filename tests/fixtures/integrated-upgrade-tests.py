@@ -1144,6 +1144,63 @@ class ReleasedFixture(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'assigned workspace'):
             self.exercise()
 
+    def select_cwd_reset_observation(self):
+        """Model the root observer's retained facts for this selected invocation."""
+        import base64
+        running = json.loads(self.execution_path.read_text())
+        running['state'] = 'running'
+        running.pop('settled_at')
+        raw = json.dumps(running).encode()
+        executable = self.root / 'observed-claude'
+        executable.write_bytes(b'fixture executable')
+        observed = dict(project=str(self.source), work=self.work,
+            attempt=self.attempt_id, task=self.writer['id'],
+            generation='b' * 32, pid=123, executable=str(executable),
+            executable_sha256=upgrade.digest(executable),
+            execution_record_base64=base64.b64encode(raw).decode(),
+            execution_record_sha256=hashlib.sha256(raw).hexdigest(),
+            selected_environment={'CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR': '1'},
+            source='Darwin KERN_PROCARGS2, proc_pidpath, same-UID process group, unchanged execution bytes')
+        path = self.root / 'cwd-reset-observation.json'
+        self.save(path, observed)
+        self.selection['writer']['cwd_reset_policy'] = dict(path=str(path), sha256=upgrade.digest(path))
+        self.save(self.selection_path, self.selection)
+        return path
+
+    def test_bound_cwd_reset_policy_restores_proof_after_prior_cd(self):
+        self.continue_fixture()
+        prior = copy.deepcopy(self.native_events[1:3])
+        prior[0]['message']['content'][0].update(id='prior-context',
+            input={'command': 'cd subdirectory && pwd'})
+        prior[1]['message']['content'][0]['tool_use_id'] = 'prior-context'
+        self.native_events[1:1] = prior
+        self.save_native_events()
+        self.select_proofs()
+        with self.assertRaisesRegex(RuntimeError, 'assigned workspace'):
+            self.exercise()
+        path = self.select_cwd_reset_observation()
+        self.exercise()
+        original = json.loads(path.read_text())
+        for key, bad in (('generation', 'a' * 32), ('pid', 456),
+                         ('task', 'foreign-task'), ('execution_record_sha256', '0' * 64)):
+            with self.subTest(key=key):
+                damaged = copy.deepcopy(original)
+                damaged[key] = bad
+                self.save(path, damaged)
+                self.selection['writer']['cwd_reset_policy']['sha256'] = upgrade.digest(path)
+                self.save(self.selection_path, self.selection)
+                with self.assertRaises(RuntimeError): self.exercise()
+        self.save(path, original)
+        self.selection['writer']['cwd_reset_policy']['sha256'] = upgrade.digest(path)
+        self.save(self.selection_path, self.selection)
+        prior[1]['message']['content'][0]['is_error'] = True
+        self.native_events[2] = prior[1]
+        self.save_native_events()
+        self.select_proofs()
+        self.selection['writer']['cwd_reset_policy'] = dict(path=str(path), sha256=upgrade.digest(path))
+        self.save(self.selection_path, self.selection)
+        with self.assertRaises(RuntimeError): self.exercise()
+
     def test_successful_explicit_workspace_cd_restores_package_proof(self):
         self.continue_fixture()
         subdirectory = (self.source / self.writer['workspace_access']['writes'][0]['path'] / 'subdirectory').resolve()

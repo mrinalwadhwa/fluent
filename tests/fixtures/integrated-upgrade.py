@@ -4,6 +4,8 @@ This driver never attaches evidence, edits Work records directly, or grants acce
 The coordinator must attach its receipt and obtain targeted Tests Review.
 """
 import argparse
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
@@ -857,6 +859,60 @@ def literal_workspace_reset(command, workspace):
             Path(argv[1]).is_absolute() and Path(argv[1]).resolve() == workspace)
 
 
+def bound_cwd_reset_policy(source, task, proof, execution, receipt):
+    """Validate a root observation of Claude's documented cwd reset setting.
+
+    The observation was made while the selected Writer process was running.
+    Its running record and receipt must name the same process as the settled
+    Task; an environment assertion from a different generation has no value.
+    """
+    entry = proof.get('cwd_reset_policy')
+    if entry is None:
+        return False
+    require(isinstance(entry, dict) and set(entry) == {'path', 'sha256'},
+            'cwd reset selection has unsupported fields')
+    path = Path(entry.get('path', ''))
+    require(path.is_absolute() and not path.is_symlink() and path.is_file() and
+            not path.resolve().is_relative_to(source.resolve()),
+            'cwd reset observation must be a retained external file')
+    raw = path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == entry.get('sha256'),
+            'cwd reset observation digest changed')
+    observed = json.loads(raw)
+    try:
+        running_bytes = base64.b64decode(observed['execution_record_base64'], validate=True)
+    except (KeyError, TypeError, ValueError, binascii.Error) as error:
+        raise RuntimeError('cwd reset running execution is malformed') from error
+    require(hashlib.sha256(running_bytes).hexdigest() == observed.get('execution_record_sha256'),
+            'cwd reset running execution digest changed')
+    running = json.loads(running_bytes)
+    area = Path(task['artifact_area']['path'])
+    owner = execution['attempt_owner']
+    require(observed.get('source') ==
+            'Darwin KERN_PROCARGS2, proc_pidpath, same-UID process group, unchanged execution bytes' and
+            observed.get('selected_environment') ==
+            {'CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR': '1'} and
+            observed.get('project') == str(source) and
+            observed.get('work') == task['work_item_id'] and
+            observed.get('attempt') == task['attempt_id'] and
+            observed.get('task') == task['id'] and
+            observed.get('generation') == execution['launch_generation'] and
+            observed.get('pid') == execution['leader_pid'] and
+            running.get('schema_version') == 2 and running.get('state') == 'running' and
+            running.get('attempt_owner') == owner and
+            running.get('launch_generation') == execution['launch_generation'] and
+            running.get('leader_pid') == execution['leader_pid'] and
+            running.get('process_group_id') == execution['process_group_id'] and
+            receipt == f"2 {observed['generation']} {observed['pid']:010d}\n".encode() and
+            area.is_relative_to(Path('.fluent/work/artifacts') / task['work_item_id'] / task['attempt_id']),
+            'cwd reset observation belongs to another Writer invocation')
+    executable = Path(observed.get('executable', ''))
+    require(executable.is_absolute() and executable.is_file() and
+            not executable.is_symlink() and digest(executable) == observed.get('executable_sha256'),
+            'observed Claude executable changed')
+    return True
+
+
 def native_foreground_result(request, block, result, returned, *, commit_result=False):
     """Validate actual Claude foreground status without synthesizing an exit."""
     inputs, native = block.get('input', {}), result.get('tool_use_result')
@@ -907,6 +963,7 @@ def native_package_results(source, task, proof, output):
             Path(owner.get('project_root', '')).resolve() == source.resolve() and
             owner.get('work_item_id') == task['work_item_id'] and owner.get('attempt_id') == task['attempt_id'],
             'Writer invocation generation or ownership changed')
+    cwd_reset_policy = bound_cwd_reset_policy(source, task, proof, execution, bindings['receipt'])
     checks = proof.get('commands', [])
     require([c.get('command') for c in checks] == list(PACKAGE_COMMANDS) and
             all(len(c.get('artifacts', [])) == 1 for c in checks),
@@ -980,6 +1037,14 @@ def native_package_results(source, task, proof, output):
                     else:
                         cwd_safe = True
                     pending_reset = None
+                elif cwd_reset_policy and requests[tool_id][1].get('name') == 'Bash':
+                    request, requested, _ = requests[tool_id]
+                    try:
+                        native_foreground_result(request, requested, row, block)
+                    except (RuntimeError, KeyError, TypeError):
+                        pass
+                    else:
+                        cwd_safe = True
     prior_result = -1
     for check in checks:
         tool_id = check.get('tool_use_id')
@@ -1579,7 +1644,8 @@ def main():
     parser.add_argument('--verify-only', action='store_true',
                         default=os.environ.get('FLUENT_INTEGRATED_VERIFY_ONLY') == '1', help='validate a retained continuation without invoking attempt run')
     parser.add_argument('--continuation-output', type=Path, default=os.environ.get('FLUENT_INTEGRATED_CONTINUATION_OUTPUT'))
-    parser.add_argument('--package-proofs', type=Path, default=os.environ.get('FLUENT_INTEGRATED_PACKAGE_PROOFS'))
+    parser.add_argument('--package-proofs', type=Path, default=os.environ.get('FLUENT_INTEGRATED_PACKAGE_PROOFS'),
+                        help='select exact package evidence; writer.cwd_reset_policy may bind a root-observed reset file')
     parser.add_argument('--historical-evidence', type=Path, default=os.environ.get('FLUENT_INTEGRATED_HISTORICAL_EVIDENCE'),
                         help='the approved failed envelope for historical exercise A; never resumed')
     parser.add_argument('--work', default=os.environ.get('FLUENT_INTEGRATED_WORK'),

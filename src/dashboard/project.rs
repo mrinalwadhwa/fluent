@@ -35,7 +35,7 @@ impl Category {
         match action {
             "complete" | "merged" | "abandoned" => Self::History,
             "needs-user" | "failed" | "evidence-needed" | "learner-blocked" | "merge-failed"
-            | "landing-pending" => Self::NeedsYou,
+            | "landing-blocked" | "landing-pending" => Self::NeedsYou,
             "executing" | "reviewing" | "merging" => Self::Running,
             "merge-ready" => Self::ReadyToLand,
             _ if queued => Self::Queued,

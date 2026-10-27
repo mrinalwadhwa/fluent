@@ -66603,7 +66603,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"saved-thread"}' '{"type":"t
     let source_home = fixture._tmp.path().join("quota-codex-home");
     fs::create_dir_all(&source_home).unwrap();
     fs::write(source_home.join("auth.json"), "fixture authentication").unwrap();
-    write_mock_claude(&bin, &review_only_mock_script("uncertain"));
+    write_mock_claude(&bin, &review_only_mock_script("pass"));
     write_mock_sandbox_exec(&bin);
     // Cross admission, reservation, execution, and the remaining gates.
 
@@ -70376,7 +70376,21 @@ fn usage_limit_fixture_with_history(tmp: TempDir, completion_recovery: bool) -> 
         item.attempts[0].writer_completion_contract =
             Some(fluent::work_model::WriterCompletionContract {
                 version: WRITER_COMPLETION_CONTRACT_VERSION,
-                requirements: vec![],
+                requirements: vec![WriterCompletionRequirement {
+                    responsibility: Some(CompletionResponsibility::Host),
+                    id: "plan:host-check".into(),
+                    kind: WriterCompletionRequirementKind::Plan,
+                    source: "plan.md#host-check".into(),
+                    requirement: "Check the corrected candidate on the host".into(),
+                    verification_refs: vec!["`true`".into()],
+                    command: Some(fluent::work_model::PlanCommand {
+                        applicability: Default::default(),
+                        command: "true".into(),
+                        working_directory: ".".into(),
+                        environment: Default::default(),
+                        source_row: "plan:host-check".into(),
+                    }),
+                }],
             });
         item.attempts[0].coder_mapping.write.coder = fluent::coder::CoderKind::Codex;
         item.attempts[0].coder_mapping.write.model = "saved-model".into();
@@ -70890,14 +70904,12 @@ fn usage_limit_writer_completion_recovery_rejects_invalid_approval() {
                 "changed-instructions" => {
                     let store = WorkModelStore::new(&fixture.project);
                     let mut item = store.read_work_item_snapshot(&fixture.work).unwrap();
-                    item.attempts[0]
+                    let task = item.attempts[0]
                         .tasks
-                        .last_mut()
-                        .unwrap()
-                        .instructions
-                        .as_mut()
-                        .unwrap()
-                        .push_str("\nUnaudited retry instruction");
+                        .iter_mut()
+                        .find(|task| task.id == fixture.task)
+                        .unwrap();
+                    task.instructions = Some("Unaudited retry instruction".into());
                     store.write_work_item(&item).unwrap();
                 }
                 "changed-approval" => {
