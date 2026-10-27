@@ -2376,6 +2376,7 @@ mod setup_cleanup_tests {
             .unwrap();
         let owner_handle = socket_dir.path().join("owner");
         std::fs::write(&owner_handle, b"").unwrap();
+        let child_ready = socket_dir.path().join("child-ready");
         let registry = source
             .path()
             .join(".fluent/work/terminal-sessions/work-1/attempt-1/task-1");
@@ -2420,12 +2421,20 @@ mod setup_cleanup_tests {
         let mut child = Command::new("/bin/sh")
             .arg("-c")
             .arg(format!(
-                "exec 9< '{}'; exec /bin/sleep 30",
-                owner_handle.display()
+                "exec 9< '{}'; : > '{}'; exec /bin/sleep 30",
+                owner_handle.display(),
+                child_ready.display()
             ))
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
+        while !child_ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            child_ready.exists(),
+            "owner handle child did not open its descriptor"
+        );
         while !owner_members(&owner_handle).unwrap().contains(&child.id())
             && Instant::now() < deadline
         {
@@ -2463,9 +2472,11 @@ mod setup_cleanup_tests {
         let dir = tempfile::tempdir_in("/private/tmp").unwrap();
         let handle = dir.path().join("owner");
         std::fs::File::create(&handle).unwrap();
+        let child_ready = dir.path().join("child-ready");
         let command = format!(
-            "exec 9<'{}'; exec /usr/bin/env -i /bin/sleep 30",
-            handle.display()
+            "exec 9<'{}'; exec /usr/bin/env -i /bin/sh -c ': > \"{}\"; exec /bin/sleep 30'",
+            handle.display(),
+            child_ready.display()
         );
         let mut owned = Command::new("/bin/sh")
             .arg("-c")
@@ -2478,6 +2489,13 @@ mod setup_cleanup_tests {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        while !child_ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            child_ready.exists(),
+            "cleared environment lost the owner handle"
+        );
         loop {
             let members = owner_members(&handle).unwrap();
             if members.contains(&owned.id()) {

@@ -5046,10 +5046,9 @@ pub fn historical_reader_tester_sandbox_for_test(
     fs::create_dir_all(artifact)?;
     let plan = crate::tester::plan(candidate)?;
     let settlement = crate::tester::prepare_settlement_directories(artifact, &plan)?;
-    let sandbox = crate::tester::render_sandbox_profile_with_cache(
+    let sandbox = crate::tester::render_sandbox_profile_for_host_probe(
         candidate,
         artifact,
-        false,
         &ContentResolver::new(Some(project)),
         settlement,
         Some(&cache),

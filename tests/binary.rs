@@ -16005,19 +16005,9 @@ fn confined_pinned_historical_reader_build_preserves_identity() {
         );
     }
     let artifact = project.join(".fluent/work/artifacts/reader-build/attempt-1/tester");
-    let old = std::env::var_os("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
-    unsafe {
-        std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
-    }
     let prepared = fluent::work_task_executor::historical_reader_tester_sandbox_for_test(
         &project, &candidate, &artifact, None,
     );
-    unsafe {
-        match old {
-            Some(value) => std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", value),
-            None => std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT"),
-        }
-    }
     let (_, profile) = prepared.unwrap();
     let source_manifest = project.join("Cargo.toml");
     assert!(

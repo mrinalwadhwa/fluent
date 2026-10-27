@@ -589,6 +589,47 @@ pub(crate) fn render_sandbox_profile_with_cache(
     settlement: TesterSettlement,
     dependency_cache: Option<&crate::writer_cache::WriterDependencyCache>,
 ) -> Result<TesterSandbox> {
+    render_sandbox_profile_with_cache_inner(
+        candidate_workspace,
+        artifact_dir,
+        no_sandbox,
+        resolver,
+        settlement,
+        dependency_cache,
+        false,
+    )
+}
+
+/// Render the production Tester profile for a fixture that probes Seatbelt
+/// itself, even when the surrounding test runner uses a synthetic preflight.
+#[cfg(feature = "test-support")]
+pub(crate) fn render_sandbox_profile_for_host_probe(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    resolver: &ContentResolver,
+    settlement: TesterSettlement,
+    dependency_cache: Option<&crate::writer_cache::WriterDependencyCache>,
+) -> Result<TesterSandbox> {
+    render_sandbox_profile_with_cache_inner(
+        candidate_workspace,
+        artifact_dir,
+        false,
+        resolver,
+        settlement,
+        dependency_cache,
+        true,
+    )
+}
+
+fn render_sandbox_profile_with_cache_inner(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+    resolver: &ContentResolver,
+    settlement: TesterSettlement,
+    dependency_cache: Option<&crate::writer_cache::WriterDependencyCache>,
+    probe_real_profile: bool,
+) -> Result<TesterSandbox> {
     let node_tools = crate::installed_tools::node_access(
         candidate_workspace,
         std::env::var_os("PATH").as_deref(),
@@ -612,10 +653,11 @@ pub(crate) fn render_sandbox_profile_with_cache(
     // remain unable to apply a nested Seatbelt profile. Production never takes
     // this branch and always returns the profile it preflighted.
     #[cfg(feature = "test-support")]
-    if std::env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT")
-        .ok()
-        .as_deref()
-        == Some("pass")
+    if !probe_real_profile
+        && std::env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT")
+            .ok()
+            .as_deref()
+            == Some("pass")
     {
         return Ok(TesterSandbox {
             profile: None,
@@ -705,7 +747,9 @@ pub(crate) fn render_sandbox_profile_with_cache(
                 fs::write(&profile.path, content)?;
             }
             os::admit_installed_tools(&profile, &node_tools, &candidate_abs)?;
-            os::preflight_profile(&profile)?;
+            if !probe_real_profile {
+                os::preflight_profile(&profile)?;
+            }
             Ok(TesterSandbox {
                 profile: Some(profile),
                 settlement_directories,
