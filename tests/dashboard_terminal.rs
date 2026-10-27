@@ -125,6 +125,35 @@ fn confined_terminal_enforces_control_and_generation() {
 }
 
 #[test]
+fn confined_resize_requires_live_control() {
+    if !confined_child("confined_resize_requires_live_control", false) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "resize-control", "attempt-1", "writer");
+    let mut worker = TerminalSession::start_fixture(identity, "exec sleep 30").unwrap();
+    let mut attachment = worker.observe(worker.descriptor()).unwrap();
+
+    assert!(
+        attachment
+            .resize(73, 13)
+            .unwrap_err()
+            .to_string()
+            .contains("Control is required")
+    );
+    assert_eq!(
+        attachment.acquire_control().unwrap(),
+        fluent::terminal_sessions::ControlOutcome::Acquired
+    );
+    attachment.resize(73, 13).unwrap();
+    attachment.release_control();
+    assert!(attachment.resize(73, 13).is_err());
+
+    worker.stop().unwrap();
+    assert!(attachment.resize(73, 13).is_err());
+}
+
+#[test]
 fn confined_terminal_flood_preserves_dashboard_navigation() {
     if !confined_child(
         "confined_terminal_flood_preserves_dashboard_navigation",
