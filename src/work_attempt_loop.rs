@@ -17382,6 +17382,11 @@ mod tests {
                 let fillers = (3..=10).map(|round| {
                     let mut filler = template.clone();
                     filler.id = format!("attempt-1-write-{round}");
+                    filler
+                        .writer_correction_assignment
+                        .as_mut()
+                        .unwrap()
+                        .writer_task_id = filler.id.clone();
                     filler.output.as_mut().unwrap().no_change = None;
                     filler.artifact_area.as_mut().unwrap().path =
                         work_artifact_path("work-1", "attempt-1", &filler.id);
