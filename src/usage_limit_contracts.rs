@@ -504,8 +504,31 @@ pub(crate) fn inspect_with_lease(
                         && started.input_digest == record.input_digest
                 })
         });
+    let bound_completion_retry_area =
+        if let Some(retry) = crate::recovery_contracts::context_retry::current(root, attempt)? {
+            if retry.task_id == failed.id {
+                let mut expected = crate::recovery_contracts::context_retry::prepared_task(&retry)?;
+                expected.status = failed.status.clone();
+                expected.started_at = failed.started_at.clone();
+                expected.completed_at = failed.completed_at.clone();
+                expected.output = failed.output.clone();
+                let start = crate::recovery_contracts::context_retry::request(
+                    &retry,
+                    crate::recovery_contracts::context_retry::kind_for(&retry, "start"),
+                )?;
+                expected == *failed
+                    && attempt
+                        .recovery_operations
+                        .iter()
+                        .any(|operation| operation.matches_request(&start))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
     ensure!(
-        area == &original_area || bound_retry_area,
+        area == &original_area || bound_retry_area || bound_completion_retry_area,
         "failed artifact area is not bound to this Task execution"
     );
     let mut files = BTreeMap::new();

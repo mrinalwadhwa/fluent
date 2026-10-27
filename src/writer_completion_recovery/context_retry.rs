@@ -174,6 +174,11 @@ pub(crate) fn record_start(
         .context("Attempt missing")?;
     if let Some(retry) = contracts::current(root, attempt)? {
         if task_id == retry.task_id {
+            if crate::usage_limit_contracts::current_approval(root, attempt)?
+                .is_some_and(|approval| approval.binding.failed_task.id == retry.task_id)
+            {
+                return Ok(());
+            }
             let operation = contracts::request(&retry, contracts::START)?;
             anyhow::ensure!(
                 attempt

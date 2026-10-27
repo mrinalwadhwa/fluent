@@ -70372,6 +70372,26 @@ fn usage_limit_fixture_with_history(tmp: TempDir, completion_recovery: bool) -> 
     let task = item
         .add_next_write_round("attempt-1", vec![input.clone()])
         .unwrap();
+    if completion_recovery {
+        item.attempts[0].writer_completion_contract =
+            Some(fluent::work_model::WriterCompletionContract {
+                version: WRITER_COMPLETION_CONTRACT_VERSION,
+                requirements: vec![],
+            });
+        item.attempts[0].coder_mapping.write.coder = fluent::coder::CoderKind::Codex;
+        item.attempts[0].coder_mapping.write.model = "saved-model".into();
+        item.attempts[0].coder_mapping.write.effort = Some("high".into());
+        fs::write(
+            source_area.join("writer-completion.json"),
+            serde_json::to_vec_pretty(&WriterCompletionMatrix {
+                schema_version: WRITER_COMPLETION_CONTRACT_VERSION,
+                task_id: "attempt-1-write-1".into(),
+                rows: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
     let writer = item.attempts[0].tasks.last_mut().unwrap();
     writer.writer_correction_assignment = Some(WriterCorrectionAssignment {
         schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
@@ -70398,6 +70418,9 @@ fn usage_limit_fixture_with_history(tmp: TempDir, completion_recovery: bool) -> 
     });
     let failed_area = project.join(&writer.artifact_area.as_ref().unwrap().path);
     fs::create_dir_all(&failed_area).unwrap();
+    if completion_recovery {
+        fs::write(failed_area.join("write-baseline-commit"), &source).unwrap();
+    }
     let store = WorkModelStore::new(&project);
     if completion_recovery {
         writer.status = TaskStatus::NeedsUser;
@@ -70414,6 +70437,11 @@ fn usage_limit_fixture_with_history(tmp: TempDir, completion_recovery: bool) -> 
         item.attempts[0].status = AttemptStatus::NeedsUser;
         item.attempts[0].pause_kind = Some(PauseKind::WriterCompletion);
         store.create_work_item(&item).unwrap();
+        let host_baseline = store
+            .work_task_path(&work, "attempt-1", &task)
+            .unwrap()
+            .with_extension("write-baseline");
+        fs::write(host_baseline, &source).unwrap();
         fluent_cmd()
             .current_dir(&project)
             .args([
@@ -70427,6 +70455,55 @@ fn usage_limit_fixture_with_history(tmp: TempDir, completion_recovery: bool) -> 
             .assert()
             .success();
         item = store.read_work_item_snapshot(&work).unwrap();
+        for task in &item.attempts[0].tasks {
+            for input in &task.input_artifacts {
+                if input.path.ends_with("/progress.md") {
+                    let path = project.join(&input.path);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(path, "- [ ] Finish the remaining correction\n").unwrap();
+                }
+            }
+        }
+        let retry = item.attempts[0].tasks.last().unwrap();
+        let retry_area = project.join(&retry.artifact_area.as_ref().unwrap().path);
+        let mut fixture = UsageLimitFixture {
+            _tmp: tmp,
+            project,
+            workspace,
+            work,
+            task,
+            source: source.clone(),
+            partial: source,
+            failed_area: retry_area,
+        };
+        let mut command = usage_limit_retry_command(&fixture);
+        write_mock_codex(
+            &fixture._tmp.path().join("quota-provider"),
+            r#"#!/bin/bash
+set -euo pipefail
+if [[ "${1:-} ${2:-}" == "login status" ]]; then exit 0; fi
+if [[ "$1" == "--version" ]]; then echo 'codex-cli 0.100.0'; exit 0; fi
+printf 'first correction\n' > correction.txt
+git add correction.txt
+git commit -m 'Apply partial correction' >/dev/null
+printf 'unfinished tracked correction\n' > correction.txt
+printf 'unfinished untracked correction\n' > new-source.txt
+cat <<'QUOTA'
+{"type":"thread.started","thread_id":"saved-thread"}
+{"type":"turn.started"}
+{"type":"error","message":"You've hit your usage limit. Try again later."}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again later."}}
+QUOTA
+exit 1
+"#,
+        );
+        command.assert().failure();
+        fixture.assert_settled();
+        assert!(fixture.workspace.join("correction.txt").exists());
+        assert!(fixture.workspace.join("new-source.txt").exists());
+        fixture.partial = git_head(&fixture.workspace);
+        assert_ne!(fixture.partial, fixture.source);
+        return fixture;
     }
     // Import the subsequent settled native failure, retaining public authority.
     let writer = item.attempts[0].tasks.last_mut().unwrap();
@@ -70679,7 +70756,12 @@ fn assert_usage_limit_completion_recovery_resume_with(
     let completion = failed
         .input_artifacts
         .iter()
-        .find(|a| a.producer_id == "writer-completion-recovery")
+        .find(|a| {
+            matches!(
+                a.producer_id.as_str(),
+                "writer-completion-recovery" | "writer-completion-no-change-retry"
+            )
+        })
         .unwrap();
     let completion_bytes = fs::read(fixture.project.join(&completion.path)).unwrap();
     let failure_bytes = snapshot_tree(&fixture.failed_area);

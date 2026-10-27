@@ -1103,6 +1103,25 @@ fn derive_attempt_recovery_guidance(
         return AttemptRecoveryGuidance::default();
     };
     if let Some(root) = project_root {
+        match crate::usage_limit_contracts::status_action(root, attempt) {
+            Ok(Some(next_action)) => {
+                return AttemptRecoveryGuidance {
+                    blocker: next_action
+                        .is_none()
+                        .then(|| "No eligible usage-limit recovery action".to_string()),
+                    next_action,
+                };
+            }
+            Err(error) => {
+                return AttemptRecoveryGuidance {
+                    next_action: None,
+                    blocker: Some(format!("Usage-limit recovery is blocked: {error:#}")),
+                };
+            }
+            Ok(None) => {}
+        }
+    }
+    if let Some(root) = project_root {
         match crate::recovery_contracts::context_retry::status_action(root, attempt) {
             Ok(Some(next_action)) => {
                 return AttemptRecoveryGuidance {

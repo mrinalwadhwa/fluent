@@ -62,7 +62,7 @@ pub(crate) fn approve_kind(retry: &Retry) -> &'static str {
     }
 }
 
-fn kind_for(retry: &Retry, kind: &str) -> &'static str {
+pub(crate) fn kind_for(retry: &Retry, kind: &str) -> &'static str {
     match (retry.source, kind) {
         (RetrySource::RepairedContext, "resume") => RESUME,
         (RetrySource::RepairedContext, "start") => START,
@@ -640,6 +640,18 @@ pub(crate) fn current(root: &Path, attempt: &Attempt) -> Result<Option<Retry>> {
     Ok(Some(retry))
 }
 
+fn superseded_by_usage_limit(root: &Path, item: &WorkItem, retry: &Retry) -> Result<bool> {
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == retry.before.id)
+        .context("completion retry Attempt missing")?;
+    let Some(approval) = crate::usage_limit_contracts::current_approval(root, attempt)? else {
+        return Ok(false);
+    };
+    Ok(approval.binding.failed_task.id == retry.task_id)
+}
+
 pub(crate) fn validate_pending(
     root: &Path,
     item: &WorkItem,
@@ -972,6 +984,9 @@ pub(crate) fn resume_ready(root: &Path, item: &WorkItem, attempt_id: &str) -> Re
     }
     let retry =
         current(root, attempt)?.context("authorize repair-writer-completion before resume")?;
+    if superseded_by_usage_limit(root, item, &retry)? {
+        return Ok(false);
+    }
     let task = attempt
         .tasks
         .iter()
@@ -1118,6 +1133,9 @@ pub(crate) fn validate_start(
     }
     let retry =
         current(root, attempt)?.context("same-Task context retry has not been authorized")?;
+    if superseded_by_usage_limit(root, item, &retry)? {
+        return Ok(());
+    }
     if task_id != retry.task_id {
         ensure!(
             attempt.tasks.iter().any(|t| t.id == retry.task_id
