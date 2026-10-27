@@ -17,7 +17,8 @@ use crate::native_agent::pi::{
 };
 use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
 
-mod session;
+#[path = "pi_runner/session.rs"]
+mod pi_session;
 
 /// A native Pi invocation may have produced side effects before its owner
 /// loses the receiver, liveness signal, or durable evidence. The Task must
@@ -369,7 +370,7 @@ fn run_inner(task: PiNativeTask<'_>) -> Result<()> {
         };
         settle_pi_result(result, stop)?;
         evidence.sync_all()?;
-        session::save_snapshot(
+        pi_session::save_snapshot(
             &session_file,
             gate.session_id().unwrap_or_default(),
             &generation,

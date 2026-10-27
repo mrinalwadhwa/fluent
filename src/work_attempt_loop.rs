@@ -10361,10 +10361,53 @@ fn writer_run_kind(attempt: &Attempt, task: &Task) -> WriterRunKind {
 
 pub(crate) fn writer_session_id(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .find_map(|line| crate::transcript::conversation_id_from_line(&line))
+    let mut ordinary = None;
+    let mut pi_seen = false;
+    let mut pi_generations: std::collections::HashMap<String, (String, bool, bool, bool)> =
+        std::collections::HashMap::new();
+    let mut settled = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.ok()?;
+        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
+        if value["format"] != "fluent-native-agent-event" || value["provider"] != "pi" {
+            if pi_seen {
+                return None;
+            }
+            ordinary = ordinary.or_else(|| crate::transcript::conversation_id_from_line(&line));
+            continue;
+        }
+        if ordinary.is_some() || value["schema_version"] != 1 {
+            return None;
+        }
+        pi_seen = true;
+        let generation = value["execution_generation"].as_str()?.trim();
+        let conversation = value["assigned_conversation_id"].as_str()?.trim();
+        if generation.is_empty()
+            || conversation.is_empty()
+            || value["conversation_id"].as_str() != Some(conversation)
+        {
+            return None;
+        }
+        let entry = pi_generations
+            .entry(generation.to_string())
+            .or_insert_with(|| (conversation.to_string(), false, false, false));
+        if entry.0 != conversation {
+            return None;
+        }
+        match value["event"]["type"].as_str() {
+            Some("session_start") if !entry.1 && !entry.3 => entry.1 = true,
+            Some("agent_before_settle") if entry.1 && !entry.3 => {
+                entry.2 = value["event"]["outcome"] == "completed";
+            }
+            Some("agent_settled") if entry.1 && entry.2 && !entry.3 => {
+                entry.3 = true;
+                settled = Some(conversation.to_string());
+            }
+            Some("session_start" | "agent_before_settle" | "agent_settled") => return None,
+            _ => {}
+        }
+    }
+    if pi_seen { settled } else { ordinary }
 }
 
 fn write_writer_completion_handoff(
@@ -15249,7 +15292,7 @@ mod tests {
 
     fn final_tester_evidence_fixture(
         project_root: &Path,
-    ) -> (WorkModelStore, tempfile::TempDir, String) {
+    ) -> (WorkModelStore, CandidateGateWorkspace, String) {
         let (store, workspace) =
             make_candidate_gate_fixture(project_root, "pub fn value() {}\n", None);
         fs::create_dir_all(workspace.path().join("tests")).unwrap();
@@ -16735,7 +16778,7 @@ mod tests {
 
     fn failed_recheck_no_change_fixture(
         project: &tempfile::TempDir,
-    ) -> (WorkModelStore, tempfile::TempDir, String) {
+    ) -> (WorkModelStore, CandidateGateWorkspace, String) {
         let (store, _workspace, candidate) = final_tester_evidence_fixture(project.path());
         add_failed_final_tester_command(project.path(), &store);
         complete_failed_tester_no_change_writer(project.path(), &store, &candidate);
@@ -18874,7 +18917,7 @@ mod tests {
         project_root: &Path,
     ) -> (
         WorkModelStore,
-        tempfile::TempDir,
+        CandidateGateWorkspace,
         String,
         crate::queue::DispatchToken,
     ) {
@@ -19132,12 +19175,14 @@ mod tests {
         fs::create_dir_all(&artifact_dir).unwrap();
         fs::write(artifact_dir.join("review.md"), content).unwrap();
 
-        let evidence_path = ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json";
         let evidence_bytes =
-            br#"{"schema_version":1,"check":"host check","result":"pass","working_directory":"."}"#;
-        fs::create_dir_all(project_root.join(evidence_path).parent().unwrap()).unwrap();
-        fs::write(project_root.join(evidence_path), evidence_bytes).unwrap();
+            br#"{"schema_version":1,"producer":"fixture","check":"host check","result":"pass","working_directory":".","run_at":"2026-08-03T00:00:00Z","output":"host check passed"}"#;
         let evidence_digest = format!("sha256:{:x}", Sha256::digest(evidence_bytes));
+        let evidence_path =
+            crate::recovery_contracts::snapshot_path("work-1", "attempt-1", &evidence_digest)
+                .unwrap();
+        fs::create_dir_all(project_root.join(&evidence_path).parent().unwrap()).unwrap();
+        fs::write(project_root.join(&evidence_path), evidence_bytes).unwrap();
 
         store
             .mutate_work_item("work-1", |item| {
@@ -19171,9 +19216,7 @@ mod tests {
                         id: "host-evidence-abc".to_string(),
                         candidate_commit: candidate.clone(),
                         attachment: crate::work_model::EvidenceAttachment {
-                            snapshot_path:
-                                ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
-                                    .to_string(),
+                            snapshot_path: evidence_path.clone(),
                             digest: evidence_digest.clone(),
                         },
                         targets: vec![crate::work_model::EvidenceReviewTarget {
@@ -19193,9 +19236,7 @@ mod tests {
                     recovery_id: "host-evidence-abc".to_string(),
                     candidate_commit: candidate.clone(),
                     attachment: crate::work_model::EvidenceAttachment {
-                        snapshot_path:
-                            ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
-                                .to_string(),
+                        snapshot_path: evidence_path.clone(),
                         digest: evidence_digest.clone(),
                     },
                     prior_review_artifact,
@@ -21126,7 +21167,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         fs::create_dir_all(&project_root).unwrap();
         let store = WorkModelStore::new(&project_root);
 
-        let workspace = tmp.join("work-1-candidate");
+        let workspace = tmp.join("work-6-work-1-attempt-1");
         fs::create_dir_all(&workspace).unwrap();
         init_learner_repo(&workspace);
         fs::write(workspace.join("src.rs"), "fn main() {}").unwrap();
@@ -21154,7 +21195,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         item.add_initial_attempt("attempt-1").unwrap();
         let output = TaskOutput {
             workspace_id: "candidate".to_string(),
-            workspace_path: "../work-1-candidate".to_string(),
+            workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
             base_commit: None,
             commit: base.clone(),
@@ -21234,10 +21275,15 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         // contexts, so they must reflect the real reviewed Writer SHA rather than a
         // placeholder.
         for task in &mut item.attempts[0].tasks {
+            for workspace_ref in &mut task.workspace_access.reads {
+                if workspace_ref.id == "candidate" {
+                    workspace_ref.path = "../work-6-work-1-attempt-1".to_string();
+                }
+            }
             if task.kind == TaskKind::Tester && task.review_context.is_none() {
                 task.review_context = Some(crate::work_model::ReviewContext {
                     candidate_workspace_id: "candidate".to_string(),
-                    candidate_workspace_path: "../work-1-candidate".to_string(),
+                    candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
                     source_branch: "main".to_string(),
                     candidate_commit: base.clone(),
                     base_commit: None,
@@ -21245,6 +21291,8 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             }
             if let Some(context) = task.review_context.as_mut() {
                 context.candidate_commit = base.clone();
+                context.candidate_workspace_path = "../work-6-work-1-attempt-1".to_string();
+                context.source_branch = "main".to_string();
             }
         }
 
@@ -21305,12 +21353,14 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         let (store, project_root, _workspace, candidate) =
             make_learner_passing_fixture(tmp.path(), 1);
 
-        let evidence_path = ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json";
         let evidence_bytes =
-            br#"{"schema_version":1,"check":"host check","result":"pass","working_directory":"."}"#;
-        fs::create_dir_all(project_root.join(evidence_path).parent().unwrap()).unwrap();
-        fs::write(project_root.join(evidence_path), evidence_bytes).unwrap();
+            br#"{"schema_version":1,"producer":"fixture","check":"host check","result":"pass","working_directory":".","run_at":"2026-08-03T00:00:00Z","output":"host check passed"}"#;
         let evidence_digest = format!("sha256:{:x}", Sha256::digest(evidence_bytes));
+        let evidence_path =
+            crate::recovery_contracts::snapshot_path("work-1", "attempt-1", &evidence_digest)
+                .unwrap();
+        fs::create_dir_all(project_root.join(&evidence_path).parent().unwrap()).unwrap();
+        fs::write(project_root.join(&evidence_path), evidence_bytes).unwrap();
 
         let targeted_id = "attempt-1-evidence-abc-tests";
         let targeted_path = work_artifact_path("work-1", "attempt-1", targeted_id);
@@ -21332,8 +21382,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
                 let prior_review_artifact =
                     format!("{}/review.md", prior.artifact_area.as_ref().unwrap().path);
                 let attachment = crate::work_model::EvidenceAttachment {
-                    snapshot_path: ".fluent/work/artifacts/work-1/attempt-1/host-evidence/abc.json"
-                        .to_string(),
+                    snapshot_path: evidence_path.clone(),
                     digest: evidence_digest.clone(),
                 };
                 attempt
@@ -23842,16 +23891,37 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         );
     }
 
+    struct CandidateGateWorkspace(PathBuf, fs::File);
+
+    impl CandidateGateWorkspace {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for CandidateGateWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn make_candidate_gate_fixture(
         project_root: &Path,
         candidate_source: &str,
         hook: Option<&str>,
-    ) -> (WorkModelStore, tempfile::TempDir) {
+    ) -> (WorkModelStore, CandidateGateWorkspace) {
         let parent = project_root.parent().unwrap();
-        let workspace = tempfile::Builder::new()
-            .prefix("work-candidate-gate-")
-            .tempdir_in(parent)
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(parent.join(".work-6-work-1-attempt-1.lock"))
             .unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        let workspace = CandidateGateWorkspace(parent.join("work-6-work-1-attempt-1"), lock);
+        if workspace.path().exists() {
+            fs::remove_dir_all(workspace.path()).unwrap();
+        }
+        fs::create_dir(&workspace.0).unwrap();
         crate::git::run(workspace.path(), &["init", "-q"], "initialize candidate").unwrap();
         crate::git::run(
             workspace.path(),
@@ -24005,7 +24075,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
     fn rejected_gate_matrix_fixture(
         project_root: &Path,
         malformed: bool,
-    ) -> (WorkModelStore, tempfile::TempDir) {
+    ) -> (WorkModelStore, CandidateGateWorkspace) {
         let (store, workspace) =
             make_candidate_gate_fixture(project_root, "pub fn value() {}\n", None);
         let mut item = store.read_work_item("work-1").unwrap();
@@ -25828,7 +25898,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
 
     fn make_uncertain_review_pause_fixture(
         project_root: &Path,
-    ) -> (WorkModelStore, tempfile::TempDir) {
+    ) -> (WorkModelStore, CandidateGateWorkspace) {
         let (store, workspace) =
             make_candidate_gate_fixture(project_root, "pub fn value() {}\n", None);
         store
@@ -27305,6 +27375,57 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             writer_session_id(&native).as_deref(),
             Some("codex-thread-1")
         );
+    }
+
+    #[test]
+    fn writer_session_identity_uses_final_settled_pi_generation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let transcript = tmp.path().join("pi.jsonl");
+        let event = |generation: &str, conversation: &str, kind: &str| {
+            let detail = if kind == "agent_before_settle" {
+                serde_json::json!({"type": kind, "outcome": "completed"})
+            } else {
+                serde_json::json!({"type": kind})
+            };
+            serde_json::json!({
+                "format": "fluent-native-agent-event", "schema_version": 1,
+                "provider": "pi", "execution_generation": generation,
+                "assigned_conversation_id": conversation,
+                "conversation_id": conversation, "event": detail
+            })
+            .to_string()
+        };
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                event("first", "stale", "session_start"),
+                event("first", "stale", "agent_before_settle"),
+                event("first", "stale", "agent_settled"),
+                event("last", "current", "session_start"),
+                event("last", "current", "agent_before_settle"),
+                event("last", "current", "agent_settled"),
+                event("unsettled", "foreign", "session_start"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(writer_session_id(&transcript).as_deref(), Some("current"));
+        for rows in [
+            vec![event("only", "missing", "session_start")],
+            vec![
+                event("one", "first", "session_start"),
+                event("one", "foreign", "agent_settled"),
+            ],
+            vec![
+                event("one", "same", "session_start"),
+                event("one", "same", "agent_before_settle"),
+                event("one", "same", "agent_settled"),
+                event("one", "same", "agent_settled"),
+            ],
+        ] {
+            fs::write(&transcript, rows.join("\n") + "\n").unwrap();
+            assert_eq!(writer_session_id(&transcript), None);
+        }
     }
 
     #[test]
@@ -32045,7 +32166,7 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             .expect("base fixture final Tester");
         tester.review_context = Some(ReviewContext {
             candidate_workspace_id: "candidate".to_string(),
-            candidate_workspace_path: "../work-1-candidate".to_string(),
+            candidate_workspace_path: "../work-6-work-1-attempt-1".to_string(),
             source_branch: "main".to_string(),
             candidate_commit: base.to_string(),
             base_commit: None,

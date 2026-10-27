@@ -6476,6 +6476,7 @@ fn native_acceptance_requires_completed_journeys() {
 
 #[test]
 fn native_acceptance_launch_preserves_installed_resources() {
+    native_acceptance_regression("NativeAcceptance.test_staged_node_keeps_relative_libnode");
     native_acceptance_regression("NativeAcceptance.test_provider_launch_survives_isolated_home");
     native_acceptance_regression(
         "NativeAcceptance.test_provider_launch_rejects_external_package_resource",

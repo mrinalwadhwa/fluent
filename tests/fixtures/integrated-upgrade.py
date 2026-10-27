@@ -814,7 +814,7 @@ def literal_shell_commands(command):
 
     This deliberately small protocol excludes substitutions, assignments,
     functions, aliases, sourced scripts, redirects and nested shells. Unknown
-    syntax makes the inherited cwd unproven for the remainder of the invocation.
+    syntax makes that Bash request's cwd effect unproven.
     """
     if not isinstance(command, str) or any(c in command for c in '$`\n\r'):
         return None
@@ -932,7 +932,6 @@ def native_package_results(source, task, proof, output):
             Path(init['cwd']).resolve() == (source / writes[0]['path']).resolve(),
             'Writer invocation session or assigned workspace changed')
     requests, results, positions = {}, {}, {}
-    cwd_safe = True
     for position, row in enumerate(rows[start + 1:], start + 1):
         require(row.get('session_id') == session, 'foreign native invocation result')
         require(not (row.get('type') == 'system' and row.get('subtype') == 'init'),
@@ -944,9 +943,11 @@ def native_package_results(source, task, proof, output):
                 tool_id = block.get('id')
                 require(tool_id and tool_id not in requests, 'duplicate native tool request')
                 inputs = block.get('input', {})
-                if block.get('name') == 'Bash':
-                    if literal_shell_commands(inputs.get('command')) is None:
-                        cwd_safe = False
+                # Native Bash launches each request in a separate process at
+                # the invocation cwd. An unsupported command cannot change the
+                # next process's cwd; it remains unsafe for its own request.
+                cwd_safe = (block.get('name') == 'Bash' and
+                            literal_shell_commands(inputs.get('command')) is not None)
                 requests[tool_id] = (row, block, cwd_safe)
                 positions[('request', tool_id)] = position
             elif block.get('type') == 'tool_result':

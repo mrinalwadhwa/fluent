@@ -5780,6 +5780,16 @@ fn run_task_coder_with_coder_with_feedback(
                 },
             )?;
         } else {
+            let prior_pi_run = item
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == attempt_id)
+                .and_then(|attempt| resumable_writer_run(attempt, CoderKind::Pi));
+            anyhow::ensure!(
+                prior_pi_run
+                    .is_none_or(|run| run.session_id.as_deref().is_some_and(|id| !id.is_empty())),
+                "native Pi prior Writer has no settled conversation identity"
+            );
             let previous_session = item
                 .attempts
                 .iter()
@@ -17790,7 +17800,7 @@ mod tests {
             input_artifacts: vec![crate::work_model::WorkItemInputArtifact {
                 source_path: ".fluent/work/artifacts/source/input.txt".to_string(),
                 snapshot_path: ".fluent/work/artifacts/work-1/inputs/0000-input.txt".to_string(),
-                digest: "sha256:approved".to_string(),
+                digest: format!("sha256:{:x}", Sha256::digest(b"authoritative\n")),
             }],
             ..Default::default()
         };

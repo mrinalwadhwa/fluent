@@ -1084,12 +1084,12 @@ fn work_filters_count_items_from_authoritative_state() {
             }],
             writes: vec![WorkspaceRef {
                 id: "candidate".into(),
-                path: "../candidate".into(),
+                path: "../work-9-candidate-attempt-1".into(),
             }],
         };
         task.output = Some(TaskOutput {
             workspace_id: "candidate".into(),
-            workspace_path: "../candidate".into(),
+            workspace_path: "../work-9-candidate-attempt-1".into(),
             source_branch: "main".into(),
             base_commit: None,
             commit: "abc123".into(),

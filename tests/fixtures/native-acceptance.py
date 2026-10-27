@@ -14,6 +14,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
@@ -157,6 +158,22 @@ def copy_runtime_file(source, target):
     return target
 
 
+def copy_node_runtime(source, target):
+    """Copy one installed executable and its directly linked libnode runtime."""
+    copy_runtime_file(source, target)
+    links = subprocess.check_output(['otool', '-L', str(source)], text=True)
+    libraries = []
+    for name in re.findall(r'^\s+@rpath/(libnode[^\s/]+\.dylib)\s', links, re.MULTILINE):
+        original = source.parent.parent / 'lib' / name
+        if not original.is_file():
+            raise RuntimeError(f'Installed Node runtime is missing {original}')
+        private = target.parent.parent / 'lib' / name
+        private.parent.mkdir(parents=True, exist_ok=True)
+        copy_runtime_file(original, private)
+        libraries.append(private)
+    return libraries
+
+
 def copy_installed_package(source, destination, packages):
     source = source.resolve(strict=True)
     if source in packages:
@@ -209,6 +226,7 @@ def prepare_provider_launches(home, selected, environment):
     package_dir = home / '.npm-packages'
     package_dir.mkdir()
     packages = {}
+    node_libraries = []
     # Pi probes its managed terminal with Node's spawn("tmux", ...). A bare
     # subprocess lookup must succeed before reaching operator PATH entries
     # outside the isolated HOME. Fluent's own canonical tmux lookup does not
@@ -228,7 +246,10 @@ def prepare_provider_launches(home, selected, environment):
         entry, package = installed_entry(metadata['executable'], provider)
         target = bin_dir / provider
         if package is None:
-            copy_runtime_file(entry, target)
+            if sys.platform == 'darwin':
+                node_libraries.extend(copy_node_runtime(entry, target))
+            else:
+                copy_runtime_file(entry, target)
         else:
             copied = copy_installed_package(package, package_dir, packages)
             target.symlink_to(os.path.relpath(copied / entry.relative_to(package), bin_dir))
@@ -236,11 +257,17 @@ def prepare_provider_launches(home, selected, environment):
                 node = shutil.which('node', path=environment.get('PATH'))
                 if not node:
                     raise RuntimeError('Installed Node runtime is required for native provider packages')
-                copy_runtime_file(Path(node).resolve(strict=True), bin_dir / 'node')
+                node_source = Path(node).resolve(strict=True)
+                if sys.platform == 'darwin':
+                    node_libraries.extend(copy_node_runtime(node_source, bin_dir / 'node'))
+                else:
+                    copy_runtime_file(node_source, bin_dir / 'node')
         metadata['launch_executable'] = str(target)
         metadata['entry_sha256'] = hashlib.sha256(target.read_bytes()).hexdigest()
     launch = dashboard_environment(environment, home)
     launch['PATH'] = str(bin_dir) + os.pathsep + environment.get('PATH', os.defpath)
+    if node_libraries:
+        launch['DYLD_LIBRARY_PATH'] = str(bin_dir.parent / 'lib')
     launch['CLAUDE_CONFIG_DIR'] = str(home / '.claude')
     launch['PI_CODING_AGENT_DIR'] = str(home / '.pi/agent')
     for key in ('NODE_PATH', 'NODE_OPTIONS'):

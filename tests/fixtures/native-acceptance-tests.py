@@ -241,6 +241,23 @@ class NativeAcceptance(unittest.TestCase):
                           (logs / 'command-0003.log').read_text())
             self.assertEqual((logs / 'command-0003.status').read_text(), '19\n')
 
+    def test_staged_node_keeps_relative_libnode(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / 'install/bin/node'
+            library = root / 'install/lib/libnode.141.dylib'
+            source.parent.mkdir(parents=True)
+            library.parent.mkdir()
+            source.write_bytes(b'node executable')
+            library.write_bytes(b'node runtime')
+            target = root / 'private/.local/bin/node'
+            target.parent.mkdir(parents=True)
+            with patch('subprocess.check_output', return_value=(
+                str(source) + ':\n\t@rpath/libnode.141.dylib (compatibility version 1.0.0)\n')):
+                libraries = native.copy_node_runtime(source, target)
+            self.assertEqual(libraries, [target.parent.parent / 'lib/libnode.141.dylib'])
+            self.assertEqual(libraries[0].read_bytes(), library.read_bytes())
+
     def test_provider_launch_rejects_external_package_resource(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root).resolve()

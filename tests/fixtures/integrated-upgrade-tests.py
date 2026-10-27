@@ -1125,12 +1125,21 @@ class ReleasedFixture(unittest.TestCase):
                         'git status\nD=cd; $D /tmp'):
             with self.subTest(command=command):
                 self.native_events = copy.deepcopy(events)
-                extra = copy.deepcopy(events[1])
-                extra['message']['content'][0].update(id='prior-context', input={'command': command})
-                self.native_events.insert(1, extra)
+                self.native_events[1]['message']['content'][0]['input']['command'] = command
                 self.save_native_events()
                 self.select_proofs()
                 with self.assertRaises(RuntimeError): self.exercise()
+
+    def test_unsupported_prior_bash_does_not_change_separate_package_cwd(self):
+        self.continue_fixture()
+        prior = copy.deepcopy(self.native_events[1:3])
+        prior[0]['message']['content'][0].update(
+            id='prior-context', input={'command': 'cd /tmp; pwd'})
+        prior[1]['message']['content'][0]['tool_use_id'] = 'prior-context'
+        self.native_events[1:1] = prior
+        self.save_native_events()
+        self.select_proofs()
+        self.exercise()
 
     def test_native_success_preserves_only_observed_numeric_exits(self):
         self.continue_fixture()

@@ -39262,6 +39262,11 @@ if [ "$1 $2 $3" = "auth status --json" ]; then
     exit 0
 fi
 
+if [ "$1 $2 $3" = "--safe-mode -p ok" ]; then
+    printf 'ok\n'
+    exit 0
+fi
+
 if [ "$1" = "--version" ]; then
     printf '2.1.211 (Claude Code)\n'
     exit 0
@@ -39290,6 +39295,18 @@ fn write_mock_claude(bin_dir: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&sandbox_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+#[test]
+fn mock_claude_answers_safe_mode_credential_probe() {
+    let temp = TempDir::new().unwrap();
+    write_mock_claude(temp.path(), "exit 88\n");
+    let output = std::process::Command::new(temp.path().join("claude"))
+        .args(["--safe-mode", "-p", "ok"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"ok\n");
 }
 
 fn write_executable_hook(project_root: &Path, name: &str, script: &str) {
@@ -41288,6 +41305,30 @@ fn learner_terminal_history_fixture_with_mode(
             Ok(())
         })
         .unwrap();
+    let updated = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let verification_refs = updated.attempts[0]
+        .writer_completion_contract
+        .as_ref()
+        .unwrap()
+        .requirements[0]
+        .verification_refs
+        .clone();
+    for task in updated.attempts[0]
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write)
+    {
+        let path = fixture
+            .project
+            .join(&task.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json");
+        if path.is_file() {
+            let mut matrix: WriterCompletionMatrix =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            matrix.rows[0].verification_refs = verification_refs.clone();
+            fs::write(path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+        }
+    }
     fluent_cmd()
         .current_dir(&fixture.project)
         .args([
@@ -41326,6 +41367,30 @@ fn learner_terminal_history_fixture_with_mode(
             Ok(())
         })
         .unwrap();
+    let reviewed = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let contract = reviewed.attempts[0]
+        .writer_completion_contract
+        .as_ref()
+        .unwrap();
+    let writer = &reviewed.attempts[0].tasks[1];
+    let matrix_path = fixture
+        .project
+        .join(&writer.artifact_area.as_ref().unwrap().path)
+        .join("writer-completion.json");
+    let mut matrix: WriterCompletionMatrix =
+        serde_json::from_slice(&fs::read(&matrix_path).unwrap()).unwrap();
+    for row in &mut matrix.rows {
+        row.state = WriterCompletionState::Complete;
+        row.implementation_evidence = vec!["fixture: retained completed Writer candidate".into()];
+        row.verification = vec![WriterVerificationClaim {
+            command: "cargo test learner_terminal_history".into(),
+            result: WriterVerificationResult::Pass,
+        }];
+        if row.kind == WriterCompletionRequirementKind::Finding {
+            row.applicable_constraints = vec![contract.requirements[0].id.clone()];
+        }
+    }
+    fs::write(matrix_path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
     let ready = store.read_work_item(&fixture.work).unwrap();
     for task in ready.attempts[0]
         .tasks
