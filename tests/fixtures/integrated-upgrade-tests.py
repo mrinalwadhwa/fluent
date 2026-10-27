@@ -1201,6 +1201,24 @@ class ReleasedFixture(unittest.TestCase):
         self.save(self.selection_path, self.selection)
         with self.assertRaises(RuntimeError): self.exercise()
 
+    def test_bound_cwd_reset_policy_rejects_writer_writable_observation(self):
+        self.continue_fixture()
+        prior = copy.deepcopy(self.native_events[1:3])
+        prior[0]['message']['content'][0].update(id='prior-context',
+            input={'command': 'cd subdirectory && pwd'})
+        prior[1]['message']['content'][0]['tool_use_id'] = 'prior-context'
+        self.native_events[1:1] = prior
+        self.save_native_events()
+        self.select_proofs()
+        retained = self.select_cwd_reset_observation()
+        writable = self.workspace / 'cwd-reset-observation.json'
+        writable.write_bytes(retained.read_bytes())
+        self.selection['writer']['cwd_reset_policy'] = dict(
+            path=str(writable), sha256=upgrade.digest(writable))
+        self.save(self.selection_path, self.selection)
+        with self.assertRaisesRegex(RuntimeError, 'Writer writable root'):
+            self.exercise()
+
     def test_successful_explicit_workspace_cd_restores_package_proof(self):
         self.continue_fixture()
         subdirectory = (self.source / self.writer['workspace_access']['writes'][0]['path'] / 'subdirectory').resolve()

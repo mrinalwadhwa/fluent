@@ -875,6 +875,12 @@ def bound_cwd_reset_policy(source, task, proof, execution, receipt):
     require(path.is_absolute() and not path.is_symlink() and path.is_file() and
             not path.resolve().is_relative_to(source.resolve()),
             'cwd reset observation must be a retained external file')
+    writes = task.get('workspace_access', {}).get('writes', [])
+    require(writes and all(isinstance(root, dict) and root.get('path') for root in writes),
+            'Writer writable roots are missing')
+    require(all(not path.resolve().is_relative_to((source / root['path']).resolve())
+                for root in writes),
+            'cwd reset observation must be outside every Writer writable root')
     raw = path.read_bytes()
     require(hashlib.sha256(raw).hexdigest() == entry.get('sha256'),
             'cwd reset observation digest changed')

@@ -33584,7 +33584,7 @@ fn work_task_run_auth_rejection_pauses_attempt_after_one_retry() {
 
     let bin_dir = tmp.path().join("bin-auth-401");
     let counter_file = tmp.path().join("auth-invocation-count");
-    write_mock_claude(
+    write_mock_claude_without_readiness_prelude(
         &bin_dir,
         &format!(
             r##"#!/bin/bash
@@ -33719,7 +33719,7 @@ fn refresh_timeout_preserves_provider_paused_attempt() {
         .success();
 
     let bin_dir = tmp.path().join("bin-refresh-timeout");
-    write_mock_claude(
+    write_mock_claude_without_readiness_prelude(
         &bin_dir,
         r##"#!/bin/bash
 if [ "$1" = "--version" ]; then exit 0; fi
@@ -34453,7 +34453,7 @@ fn work_task_run_write_auth_rejection_pauses_attempt_after_one_retry() {
 
     let bin_dir = tmp.path().join("bin-write-auth-401");
     let counter_file = tmp.path().join("write-auth-invocation-count");
-    write_mock_claude(
+    write_mock_claude_without_readiness_prelude(
         &bin_dir,
         &format!(
             r##"#!/bin/bash
@@ -39264,11 +39264,30 @@ fi
 
 "##;
 
+const AUTH_FIXTURE_MOCK_PRELUDE: &str = r##"#!/bin/bash
+if [ "$1 $2 $3" = "auth status --json" ]; then
+    printf '{"loggedIn":true}\n'
+    exit 0
+fi
+if [ "$1" = "--version" ]; then
+    printf '2.1.211 (Claude Code)\n'
+    exit 0
+fi
+"##;
+
 fn write_mock_claude(bin_dir: &Path, script: &str) {
+    write_mock_claude_with_prelude(bin_dir, script, PROVIDER_READINESS_MOCK_PRELUDE);
+}
+
+fn write_mock_claude_without_readiness_prelude(bin_dir: &Path, script: &str) {
+    write_mock_claude_with_prelude(bin_dir, script, AUTH_FIXTURE_MOCK_PRELUDE);
+}
+
+fn write_mock_claude_with_prelude(bin_dir: &Path, script: &str, prelude: &str) {
     fs::create_dir_all(bin_dir).unwrap();
 
     let script_body = script.strip_prefix("#!/bin/bash\n").unwrap_or(script);
-    let combined = format!("{}{}", PROVIDER_READINESS_MOCK_PRELUDE, script_body);
+    let combined = format!("{}{}", prelude, script_body);
 
     let claude_path = bin_dir.join("claude");
     fs::write(&claude_path, &combined).unwrap();
