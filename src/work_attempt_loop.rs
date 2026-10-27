@@ -16187,6 +16187,23 @@ mod tests {
             })
             .unwrap();
 
+        let item = store.read_work_item("work-1").unwrap();
+        let writer = &item.attempts[0].tasks[0];
+        let matrix_path = project
+            .path()
+            .join(&writer.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json");
+        let mut matrix: crate::work_model::WriterCompletionMatrix =
+            serde_json::from_slice(&fs::read(&matrix_path).unwrap()).unwrap();
+        matrix.rows[0].verification_refs = item.attempts[0]
+            .writer_completion_contract
+            .as_ref()
+            .unwrap()
+            .requirements[0]
+            .verification_refs
+            .clone();
+        fs::write(matrix_path, serde_json::to_vec(&matrix).unwrap()).unwrap();
+
         let outcome = interpret_reviews(
             project.path(),
             &store,
