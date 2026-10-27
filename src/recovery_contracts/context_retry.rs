@@ -1,4 +1,5 @@
 //! Validate one completion retry after audited, output-free context recovery.
+use super::claude_session as claude;
 use super::*;
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ pub(crate) enum RetrySource {
     #[default]
     RepairedContext,
     InvalidCompletion,
+    MissingClaudeConversation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,7 @@ pub(crate) fn approve_kind(retry: &Retry) -> &'static str {
     match retry.source {
         RetrySource::RepairedContext => APPROVE,
         RetrySource::InvalidCompletion => COMPLETION_APPROVE,
+        RetrySource::MissingClaudeConversation => claude::APPROVE,
     }
 }
 
@@ -65,29 +68,32 @@ fn kind_for(retry: &Retry, kind: &str) -> &'static str {
         (RetrySource::RepairedContext, "start") => START,
         (RetrySource::InvalidCompletion, "resume") => COMPLETION_RESUME,
         (RetrySource::InvalidCompletion, "start") => COMPLETION_START,
+        (RetrySource::MissingClaudeConversation, "resume") => claude::RESUME,
+        (RetrySource::MissingClaudeConversation, "start") => claude::START,
         _ => approve_kind(retry),
     }
 }
 
 fn has_retry_history(attempt: &Attempt) -> bool {
-    attempt
-        .recovery_operations
-        .iter()
-        .any(|r| matches!(r.operation_kind.as_str(), APPROVE | COMPLETION_APPROVE))
-        || attempt.tasks.iter().any(|t| {
-            t.kind == TaskKind::Write
-                && t.status == TaskStatus::Failed
-                && t.output.is_none()
-                && t.input_artifacts.iter().any(|a| {
-                    a.producer_id == "writer-completion-recovery"
-                        && a.path
-                            == work_model::work_artifact_path(
-                                &attempt.work_item_id,
-                                &attempt.id,
-                                &format!("writer-completion-recoveries/{}/recovery.json", t.id),
-                            )
-                })
-        })
+    attempt.recovery_operations.iter().any(|r| {
+        matches!(
+            r.operation_kind.as_str(),
+            APPROVE | COMPLETION_APPROVE | claude::APPROVE
+        )
+    }) || attempt.tasks.iter().any(|t| {
+        t.kind == TaskKind::Write
+            && t.status == TaskStatus::Failed
+            && t.output.is_none()
+            && t.input_artifacts.iter().any(|a| {
+                a.producer_id == "writer-completion-recovery"
+                    && a.path
+                        == work_model::work_artifact_path(
+                            &attempt.work_item_id,
+                            &attempt.id,
+                            &format!("writer-completion-recoveries/{}/recovery.json", t.id),
+                        )
+            })
+    })
 }
 
 fn completion_failure_shape(attempt: &Attempt) -> bool {
@@ -103,6 +109,9 @@ fn completion_failure_shape(attempt: &Attempt) -> bool {
 }
 
 pub(crate) fn recognized(root: &Path, item: &WorkItem, attempt: &Attempt) -> Result<bool> {
+    if claude::recognized(root, attempt)? {
+        return Ok(true);
+    }
     if !has_retry_history(attempt) && !completion_failure_shape(attempt) {
         return Ok(false);
     }
@@ -137,8 +146,7 @@ pub(crate) fn recognized(root: &Path, item: &WorkItem, attempt: &Attempt) -> Res
         {
             return Ok(false);
         }
-        let invalid_matrix =
-            serde_json::from_slice::<work_model::WriterCompletionMatrix>(&matrix).is_err();
+        let invalid_matrix = invalid_completion_matrix(root, item, attempt, task, &matrix)?;
         let invalid_no_change = fs::read(root.join(&area.path).join("no-change.json"))
             .ok()
             .is_some_and(|bytes| {
@@ -148,11 +156,12 @@ pub(crate) fn recognized(root: &Path, item: &WorkItem, attempt: &Attempt) -> Res
             return Ok(false);
         }
     }
-    if attempt
-        .recovery_operations
-        .iter()
-        .any(|r| matches!(r.operation_kind.as_str(), APPROVE | COMPLETION_APPROVE))
-    {
+    if attempt.recovery_operations.iter().any(|r| {
+        matches!(
+            r.operation_kind.as_str(),
+            APPROVE | COMPLETION_APPROVE | claude::APPROVE
+        )
+    }) {
         // Recorded context authority must still reject stale or consumed retries.
         return Ok(true);
     }
@@ -177,6 +186,9 @@ pub(crate) fn inspect(
         .iter()
         .find(|a| a.id == attempt_id)
         .context("Attempt missing")?;
+    if claude::recognized(root, attempt)? {
+        return claude::inspect(root, item, attempt, resolution);
+    }
     if completion_failure_shape(attempt) {
         let task = attempt
             .tasks
@@ -273,6 +285,30 @@ pub(crate) fn inspect(
     })
 }
 
+/// An incomplete, valid matrix is ordinary work, not exceptional retry authority.
+fn invalid_completion_matrix(
+    root: &Path,
+    item: &WorkItem,
+    attempt: &Attempt,
+    task: &Task,
+    bytes: &[u8],
+) -> Result<bool> {
+    let contract = attempt
+        .writer_completion_contract
+        .as_ref()
+        .context("completion retry requires its immutable completion contract")?;
+    contract.validate().map_err(anyhow::Error::msg)?;
+    let findings = writer_completion_findings_from_item(root, task, Some(item))?;
+    Ok(
+        match serde_json::from_slice::<work_model::WriterCompletionMatrix>(bytes) {
+            Err(_) => true,
+            Ok(matrix) => matrix
+                .status_against(contract, &task.id, &findings)
+                .is_err(),
+        },
+    )
+}
+
 fn inspect_invalid_completion(
     root: &Path,
     item: &WorkItem,
@@ -293,20 +329,25 @@ fn inspect_invalid_completion(
                 .any(|operation| operation.operation_kind == COMPLETION_APPROVE),
         "completion retry requires a settled, newly authorized pause"
     );
-    ensure!(
-        attempt
-            .tasks
-            .iter()
-            .rev()
-            .find(|candidate| candidate.kind == TaskKind::Write)
-            .is_some_and(|candidate| candidate.id == task.id),
-        "completion retry requires the latest Writer Task"
-    );
     let index = attempt
         .tasks
         .iter()
         .position(|candidate| candidate.id == task.id)
         .unwrap();
+    if task.status == TaskStatus::Failed {
+        validate_unstarted_writer_reservation(root, &attempt.tasks[index + 1..])?;
+    } else {
+        ensure!(
+            index + 1 == attempt.tasks.len(),
+            "completion retry requires the latest Writer Task"
+        );
+    }
+    ensure!(
+        attempt.tasks[..index]
+            .iter()
+            .all(|prior| matches!(prior.status, TaskStatus::Complete | TaskStatus::Superseded)),
+        "completion retry has unresolved prior Tasks"
+    );
     let previous = attempt.tasks[..index]
         .iter()
         .rev()
@@ -349,7 +390,7 @@ fn inspect_invalid_completion(
             .join(crate::recovery_contracts::WRITER_COMPLETION_MATRIX_FILE),
     )
     .context("completion retry has no retained matrix")?;
-    let bad_matrix = serde_json::from_slice::<work_model::WriterCompletionMatrix>(&matrix).is_err();
+    let bad_matrix = invalid_completion_matrix(root, item, attempt, task, &matrix)?;
     let bad_no_change = fs::read(root.join(&area.path).join("no-change.json"))
         .ok()
         .is_some_and(|bytes| serde_json::from_slice::<work_model::NoChangeOutput>(&bytes).is_err());
@@ -373,12 +414,15 @@ fn inspect_invalid_completion(
                 && record.state == crate::execution::ExecutionState::Launching
                 && record.leader_pid == 0
                 && record.process_group_id == 0
+                && record.settled_at.is_none()
+                && record.heartbeat_at == record.started_at
                 && crate::execution::receipt_absent_or_prior_generation(
                     &execution_path,
                     record.launch_generation.as_deref().unwrap(),
                 )?,
             "failed completion retry has no proof that this generation stopped before provider launch"
         );
+        validate_failed_preparation_owner(root, item, attempt, task, &record)?;
     } else {
         ensure!(
             attempt.pause_kind == Some(PauseKind::WriterCompletion),
@@ -446,25 +490,27 @@ pub(crate) fn request(retry: &Retry, kind: &str) -> Result<RecoveryOperationRequ
             .context("retry assignment missing")?
             .source_candidate_commit
             .clone(),
-        RetrySource::InvalidCompletion => retry.before.tasks[..retry
-            .before
-            .tasks
-            .iter()
-            .position(|candidate| candidate.id == task.id)
-            .context("completion retry Task missing")?]
-            .iter()
-            .rev()
-            .find_map(|candidate| {
-                candidate
-                    .output
-                    .as_ref()
-                    .map(|output| output.commit.clone())
-            })
-            .context("completion retry candidate missing")?,
+        RetrySource::InvalidCompletion | RetrySource::MissingClaudeConversation => {
+            retry.before.tasks[..retry
+                .before
+                .tasks
+                .iter()
+                .position(|candidate| candidate.id == task.id)
+                .context("completion retry Task missing")?]
+                .iter()
+                .rev()
+                .find_map(|candidate| {
+                    candidate
+                        .output
+                        .as_ref()
+                        .map(|output| output.commit.clone())
+                })
+                .context("completion retry candidate missing")?
+        }
     };
-    let kind = if matches!(kind, RESUME | COMPLETION_RESUME) {
+    let kind = if matches!(kind, RESUME | COMPLETION_RESUME | claude::RESUME) {
         kind_for(retry, "resume")
-    } else if matches!(kind, START | COMPLETION_START) {
+    } else if matches!(kind, START | COMPLETION_START | claude::START) {
         kind_for(retry, "start")
     } else {
         approve_kind(retry)
@@ -497,6 +543,7 @@ pub(crate) fn failed_task(retry: &Retry) -> Result<&Task> {
 pub(crate) fn audit_ref(retry: &Retry) -> Result<ArtifactRef> {
     let (producer, directory) = match retry.source {
         RetrySource::RepairedContext => (APPROVE, "writer-completion-context-retries"),
+        RetrySource::MissingClaudeConversation => (claude::APPROVE, "claude-session-retries"),
         RetrySource::InvalidCompletion => {
             (COMPLETION_APPROVE, "writer-completion-no-change-retries")
         }
@@ -531,23 +578,29 @@ pub(crate) fn prepared_task(retry: &Retry) -> Result<Task> {
 }
 
 pub(crate) fn current(root: &Path, attempt: &Attempt) -> Result<Option<Retry>> {
-    let Some(operation) = attempt
-        .recovery_operations
-        .iter()
-        .find(|r| matches!(r.operation_kind.as_str(), APPROVE | COMPLETION_APPROVE))
-    else {
+    let Some(operation) = attempt.recovery_operations.iter().find(|r| {
+        matches!(
+            r.operation_kind.as_str(),
+            APPROVE | COMPLETION_APPROVE | claude::APPROVE
+        )
+    }) else {
         return Ok(None);
     };
     ensure!(
         attempt
             .recovery_operations
             .iter()
-            .filter(|r| matches!(r.operation_kind.as_str(), APPROVE | COMPLETION_APPROVE))
+            .filter(|r| matches!(
+                r.operation_kind.as_str(),
+                APPROVE | COMPLETION_APPROVE | claude::APPROVE
+            ))
             .count()
             == 1,
         "ambiguous completion retry authority"
     );
-    let directory = if operation.operation_kind == COMPLETION_APPROVE {
+    let directory = if operation.operation_kind == claude::APPROVE {
+        "claude-session-retries"
+    } else if operation.operation_kind == COMPLETION_APPROVE {
         "writer-completion-no-change-retries"
     } else {
         "writer-completion-context-retries"
@@ -574,7 +627,9 @@ pub(crate) fn current(root: &Path, attempt: &Attempt) -> Result<Option<Retry>> {
     let retry: Retry = serde_json::from_slice(&bytes)?;
     ensure!(
         ((retry.schema_version == 1 && retry.source == RetrySource::RepairedContext)
-            || (retry.schema_version == 2 && retry.source == RetrySource::InvalidCompletion))
+            || (retry.schema_version == 2 && retry.source == RetrySource::InvalidCompletion)
+            || (retry.schema_version == 3
+                && retry.source == RetrySource::MissingClaudeConversation))
             && retry.before.id == attempt.id
             && retry.before.work_item_id == attempt.work_item_id
             && operation.matches_request(&request(&retry, approve_kind(&retry))?)
@@ -607,6 +662,28 @@ pub(crate) fn validate_pending(
             .iter()
             .any(|c| c.attempt_id == attempt.id),
         "retry candidate is already finalized"
+    );
+    ensure!(
+        attempt.writer_completion_contract == retry.before.writer_completion_contract,
+        "completion retry immutable contract changed"
+    );
+    ensure!(
+        attempt
+            .recovery_operations
+            .starts_with(&retry.before.recovery_operations)
+            && attempt.recovery_operations[retry.before.recovery_operations.len()..]
+                .iter()
+                .all(|operation| {
+                    [
+                        approve_kind(retry),
+                        kind_for(retry, "resume"),
+                        kind_for(retry, "start"),
+                    ]
+                    .contains(&operation.operation_kind.as_str())
+                        && request(retry, &operation.operation_kind)
+                            .is_ok_and(|request| operation.matches_request(&request))
+                }),
+        "completion retry recovery history changed"
     );
     validate_retained_files(root, retry)?;
     let mut expected = prepared_task(retry)?;
@@ -690,6 +767,34 @@ pub(crate) fn validate_pending(
         false,
     )?;
     let original = failed_task(retry)?;
+    if retry.source == RetrySource::MissingClaudeConversation {
+        ensure!(
+            task.instructions == item.write_task_instructions()
+                && attempt.writer_runs == retry.before.writer_runs
+                && attempt.terminal_mode == retry.before.terminal_mode,
+            "missing-session retry assignment or session identity changed"
+        );
+    }
+    if retry.source == RetrySource::InvalidCompletion {
+        let area = original
+            .artifact_area
+            .as_ref()
+            .context("original artifact area missing")?;
+        crate::usage_limit_contracts::unlocked(
+            &root.join(&area.path).join("execution-owner.lock"),
+            false,
+        )?;
+        if original.status == TaskStatus::Failed {
+            validate_unstarted_writer_reservation(root, &retry.before.tasks[index + 1..])?;
+            let record = serde_json::from_slice(&assignment_input_bytes(
+                root,
+                &format!("{}/execution.json", area.path),
+            )?)?;
+            validate_failed_preparation_owner(root, item, attempt, original, &record)?;
+            writer_completion::validated_writer_context(root, item, task)?
+                .context("completion retry lost its original approval")?;
+        }
+    }
     match retry.source {
         RetrySource::RepairedContext => {
             let assignment = original.writer_correction_assignment.as_ref().unwrap();
@@ -716,7 +821,7 @@ pub(crate) fn validate_pending(
             writer_completion::validated_writer_context(root, item, task)?
                 .context("retry completion authority missing")?;
         }
-        RetrySource::InvalidCompletion => {
+        RetrySource::InvalidCompletion | RetrySource::MissingClaudeConversation => {
             let index = retry
                 .before
                 .tasks
@@ -784,6 +889,29 @@ pub(crate) fn validate_pending(
 }
 
 pub(crate) fn validate_retained_files(root: &Path, retry: &Retry) -> Result<()> {
+    if retry.source == RetrySource::MissingClaudeConversation {
+        // Additions can change the proof of settlement just as replacements can.
+        // Rebuild only the original areas; the prepared retry owns a new area.
+        let mut current = BTreeMap::new();
+        for task in &retry.before.tasks {
+            if let Some(area) = &task.artifact_area {
+                crate::usage_limit_contracts::bind_directory(root, &area.path, &mut current)?;
+            }
+        }
+        let task = retry
+            .before
+            .tasks
+            .iter()
+            .find(|task| task.id == retry.task_id)
+            .context("missing-session source Task disappeared")?;
+        for input in &task.input_artifacts {
+            crate::usage_limit_contracts::bind_file(root, &input.path, &mut current)?;
+        }
+        ensure!(
+            current == retry.files,
+            "retained missing-session evidence changed"
+        );
+    }
     for (path, digest) in &retry.files {
         ensure!(
             assignment_input_digest(root, path)? == *digest,
@@ -791,6 +919,28 @@ pub(crate) fn validate_retained_files(root: &Path, retry: &Retry) -> Result<()> 
         );
     }
     if retry.source == RetrySource::InvalidCompletion {
+        let area = failed_task(retry)?
+            .artifact_area
+            .as_ref()
+            .context("original artifact area missing")?;
+        let mut files = BTreeMap::new();
+        crate::usage_limit_contracts::bind_directory(root, &area.path, &mut files)?;
+        let prefix = format!("{}/", area.path);
+        let expected = retry
+            .files
+            .iter()
+            .filter(|(path, _)| path.starts_with(&prefix))
+            .map(|(path, digest)| (path.clone(), digest.clone()))
+            .collect::<BTreeMap<_, _>>();
+        ensure!(
+            files == expected,
+            "retained completion retry artifact inventory changed"
+        );
+    }
+    if matches!(
+        retry.source,
+        RetrySource::InvalidCompletion | RetrySource::MissingClaudeConversation
+    ) {
         let baseline = host_write_baseline_path(
             &work_model::WorkModelStore::new(root),
             &retry.before.work_item_id,
@@ -815,6 +965,10 @@ pub(crate) fn resume_ready(root: &Path, item: &WorkItem, attempt_id: &str) -> Re
         .context("Attempt missing")?;
     if !recognized(root, item, attempt)? {
         return Ok(false);
+    }
+    if current(root, attempt)?.is_none() && claude::recognized(root, attempt)? {
+        claude::inspect(root, item, attempt, claude::RESOLUTION)?;
+        return Ok(true);
     }
     let retry =
         current(root, attempt)?.context("authorize repair-writer-completion before resume")?;
@@ -847,6 +1001,13 @@ pub(crate) fn status_action(root: &Path, attempt: &Attempt) -> Result<Option<Opt
     if !recognized(root, &item, attempt)? {
         return Ok(None);
     }
+    if claude::recognized(root, attempt)? {
+        claude::inspect(root, &item, attempt, claude::RESOLUTION)?;
+        return Ok(Some(Some(format!(
+            "fluent attempt run {} {}",
+            attempt.work_item_id, attempt.id
+        ))));
+    }
     if current(root, attempt)?.is_some() {
         return if resume_ready(root, &item, &attempt.id)? {
             Ok(Some(Some(format!(
@@ -858,11 +1019,33 @@ pub(crate) fn status_action(root: &Path, attempt: &Attempt) -> Result<Option<Opt
         };
     }
     if completion_failure_shape(attempt) {
-        let task = attempt
-            .tasks
-            .iter()
-            .rev()
-            .find(|task| task.kind == TaskKind::Write && task.output.is_none());
+        let task = attempt.tasks.iter().rev().find(|task| {
+            task.kind == TaskKind::Write
+                && task.output.is_none()
+                && matches!(task.status, TaskStatus::NeedsUser | TaskStatus::Failed)
+        });
+        if let Some(task) = task
+            && task.status == TaskStatus::Failed
+            && let Some(assignment) = &task.writer_correction_assignment
+            && let Some(action) = stale_assignment_context_action(
+                root,
+                attempt,
+                task,
+                &assignment.source_candidate_commit,
+            )?
+        {
+            // Exact-byte context recovery has its own output-free proof. Do
+            // not apply its absent-receipt rule to a current assignment whose
+            // completion recovery retains an earlier generation's receipt.
+            assignment_context_recovery_target(
+                root,
+                &item,
+                &attempt.id,
+                &task.id,
+                &assignment.source_candidate_commit,
+            )?;
+            return Ok(Some(Some(action)));
+        }
         if task.is_some_and(|task| {
             task.status == TaskStatus::NeedsUser
                 || (task
@@ -956,6 +1139,79 @@ pub(crate) fn validate_start(
     validate_pending(root, item, &retry, own_lease, false)
 }
 
+/// Retain exact reservation provenance after the approved retry completes.
+/// This proves terminal history only; it grants no review or Learning credit.
+pub(crate) fn terminal_superseded_reservations(
+    root: &Path,
+    attempt: &Attempt,
+) -> Result<Vec<String>> {
+    let Some(retry) = current(root, attempt)? else {
+        return Ok(Vec::new());
+    };
+    if retry.source != RetrySource::InvalidCompletion {
+        return Ok(Vec::new());
+    }
+    let index = retry
+        .before
+        .tasks
+        .iter()
+        .position(|task| task.id == retry.task_id)
+        .context("retry lost original Task")?;
+    let later = &retry.before.tasks[index + 1..];
+    if later.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_unstarted_writer_reservation(root, later)?;
+    validate_retained_files(root, &retry)?;
+    let task = attempt
+        .tasks
+        .iter()
+        .find(|task| task.id == retry.task_id)
+        .context("completed retry Task missing")?;
+    ensure!(
+        task.status == TaskStatus::Complete
+            && task.output.is_some()
+            && task.started_at.is_some()
+            && task.completed_at.is_some(),
+        "reservation supersession requires its completed retry"
+    );
+    let mut expected = prepared_task(&retry)?;
+    expected.status = task.status.clone();
+    expected.started_at = task.started_at.clone();
+    expected.completed_at = task.completed_at.clone();
+    expected.output = task.output.clone();
+    ensure!(*task == expected, "completed retry identity changed");
+    for kind in [kind_for(&retry, "resume"), kind_for(&retry, "start")] {
+        let request = request(&retry, kind)?;
+        ensure!(
+            attempt
+                .recovery_operations
+                .iter()
+                .any(|operation| operation.matches_request(&request)),
+            "completed retry lost its resume or start authority"
+        );
+    }
+    let approved = attempt
+        .recovery_operations
+        .iter()
+        .find(|operation| operation.operation_kind == approve_kind(&retry))
+        .context("completed retry approval missing")?;
+    let mut ids = Vec::new();
+    for reservation in later {
+        let actual = attempt
+            .tasks
+            .iter()
+            .find(|task| task.id == reservation.id)
+            .context("superseded retry reservation missing")?;
+        let mut expected = reservation.clone();
+        expected.status = TaskStatus::Superseded;
+        expected.completed_at = Some(approved.completed_at.clone());
+        ensure!(*actual == expected, "superseded retry reservation changed");
+        ids.push(actual.id.clone());
+    }
+    Ok(ids)
+}
+
 pub(crate) fn pending_publications(item: &WorkItem, prior: Option<&WorkItem>) -> Vec<String> {
     item.attempts
         .iter()
@@ -969,6 +1225,9 @@ pub(crate) fn pending_publications(item: &WorkItem, prior: Option<&WorkItem>) ->
                     | COMPLETION_APPROVE
                     | COMPLETION_RESUME
                     | COMPLETION_START
+                    | claude::APPROVE
+                    | claude::RESUME
+                    | claude::START
             ) && prior.is_none_or(|p| {
                 !p.attempts
                     .iter()
@@ -992,7 +1251,10 @@ pub(crate) fn validate_publication(
             .context("pending retry operation missing")?;
         let record = attempt.recovery_operation(operation).unwrap();
         let retry = current(root, attempt)?.context("pending retry audit missing")?;
-        let starting = matches!(record.operation_kind.as_str(), START | COMPLETION_START);
+        let starting = matches!(
+            record.operation_kind.as_str(),
+            START | COMPLETION_START | claude::START
+        );
         ensure!(
             record.matches_request(&request(&retry, &record.operation_kind)?),
             "pending retry operation changed"

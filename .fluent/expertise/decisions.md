@@ -69,6 +69,27 @@ avoid a Control reacquisition gap. See the
 
 ---
 
+## Version SSH display credit independently of Control
+
+SSH terminal protocol version 2 requires compatible clients and helpers on both
+ends; reject older helpers instead of falling back to uncredited output.
+Snapshot protocol version 1 remains separate. Limit unconsumed display bytes to
+128 KiB across the connection: the helper spends credit before reading tmux
+output, and the client returns consumed bytes in batches after partial display
+writes or explicit discard on leaving a view. Reject credit beyond bytes sent.
+While credit is exhausted, keep servicing heartbeats, input and worker liveness.
+
+Display credit applies to Observe and Control equally. Returning it never grants
+input or worker-resize authority; those actions still require the validated
+Control lease for the exact invocation. Preserve this separation when changing
+flow control. See [SSH sources](../../docs/ssh-agent-sources.md), the
+[protocol](../../src/dashboard_sources/protocol.rs), and
+`ssh_fullscreen_rejects_uncredited_output_and_old_helpers` and
+`ssh_fullscreen_stalled_display_remains_bounded` in
+[SSH regressions](../../tests/ssh_agent_sources.rs).
+
+---
+
 ## Preserve manual sizing for managed terminals
 
 Managed tmux windows use manual sizing from creation because `ignore-size`
@@ -931,6 +952,79 @@ combined predecessor at `43022b29fa437ade211fef3fff66798c5d940ef9` must reject
 record-10/envelope-9/transaction-10 state before mutation. Keep all earlier pinned
 reader preparations in the canonical Tester. The real confinement command is a
 separate host gate; routine profile assertions cannot supply its evidence.
+
+## Recover only proven missing Claude conversations
+
+Explicit resume may recover the released zero-turn missing-conversation failure
+through a distinct schema-3 retry audit in the existing completion-retry
+machinery. The neutral [Claude recovery contract](../../src/recovery_contracts/claude_session.rs)
+binds the candidate, assignment, retained evidence, and settled ownership. The
+[publisher](../../src/writer_completion_recovery/context_retry.rs) owns the audit,
+resume/start operations, and durable launch claims. This authority grants no
+quota, authentication, round-extension, review, or landing approval.
+
+Claude recovery authority selects record and journal schema 16 and writer
+envelope 14. Older mutating writers must refuse both published records and
+interrupted journals. Keep the actual released-0.6.0 upgrade fixture and the
+separately pinned pre-change reader at
+`6d8c9bc6de9b93f57d7aab1c9c6640a86b4bf036` in the
+[upgrade tests](../../tests/claude_writer_upgrade.rs). The latter understands the
+base formats and tests the inner record and attempt fences independently of
+the outer writer envelope.
+
+Writers bind HOME and CLAUDE_CONFIG_DIR to their Attempt's private Claude home.
+A surviving legacy session remains in `claude-home/.claude`; select that
+existing location without migrating or rewriting provider history. Unfamiliar
+local files still select resume and require an exact provider rejection before
+a fresh conversation can start.
+
+The [session policy](../../src/claude_session.rs) permits at most one fresh
+fallback per logical Task. Proven local absence before any invocation spends
+that budget directly. Otherwise, only a settled exact rejection with no model,
+tool, or hook progress may spend it. Generic retries preserve earlier launch
+evidence and lose fallback eligibility. The
+[native adapter](../../src/native_agent/claude.rs) returns a typed rejection only
+after an exact diagnostic, a known failing exit before SessionStart, and
+verified terminal settlement. Both adapters retain rejected-launch evidence.
+
+The execution boundary holds the model lock through cancellation checks and
+spawn. A Claude recovery may consume one resume launch and one separately
+claimed fresh fallback, or just one fresh launch when absence is proven before
+launch. A scoped proven-rejection marker permits only that second launch;
+other retry sources keep their existing budgets. A failed fresh launch cannot
+enter generic retry or handoff-correction budgets. Native adapter tests cover
+progress, conflicting diagnostics, and uncertain settlement; real-provider
+acceptance remains a separate host obligation.
+
+## Recover invalid completion without replacing its history
+
+The neutral completion-retry contract also recognizes semantic matrix defects
+against the immutable contract and saved finding assignment. A valid incomplete
+matrix does not grant exceptional retry authority. Approval retains the original
+Task in its immutable audit and prepares that same Task in a fresh artifact area;
+it never edits the original matrix or nonempty transcript.
+
+A failed preparation and an earlier provider run are separate native generations.
+Retain the prior-generation receipt as historical evidence and reject matching
+or malformed receipts. Only one later planned Writer reservation may be
+superseded, with no start, completion, output, or materialized artifact area.
+Share that reservation validator and the failed-preparation owner binding with
+assignment-context recovery, but keep its stricter absent-receipt rule separate
+from completion retry's historical receipt rule. Require the preparation time to
+match the failed Task, an unchanged heartbeat, no settlement, and a dead native
+owner; an unlocked file alone does not prove the preparation stopped. Neither
+path weakens ordinary failed-Task or round-cap guards.
+
+The existing schema-2 InvalidCompletion audit already binds the full Attempt,
+source files, baseline and retry identity. Semantic recognition uses that same
+authority and operation meaning, retaining its record-15, envelope-13 and
+transaction-15 compatibility fences. Approval supplies no completion credit;
+explicit resume and one provider launch remain separate effects. Pending launch
+rechecks the contract, recovery history, exact source-file inventory, source
+execution ownership, and the unmaterialized reservation. Host guidance skips
+superseded reservations, and
+Learner admission validates their exact audit-bound identity after the retry
+completes. Neither treats that provenance as host or review acceptance.
 
 ## Hold reference identity through interrupted restoration
 

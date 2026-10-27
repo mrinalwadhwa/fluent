@@ -679,6 +679,10 @@ pub enum AttemptCommands {
     },
 
     /// Advance an Attempt through the next safe transitions
+    ///
+    /// Recovers a released 0.6.0 Writer stranded by an exact zero-turn
+    /// missing Claude conversation after checking its candidate and retained evidence.
+    /// Status reports this command when that guarded recovery is available.
     Run {
         /// Work Item ID
         work_item_id: String,

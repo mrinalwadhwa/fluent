@@ -9,9 +9,19 @@ import struct
 import sys
 import termios
 import time
+import tempfile
+import json
+from pathlib import Path
 
+scenario = sys.argv[4] if len(sys.argv) > 4 else "drain"
+unread = len(sys.argv) > 5 and sys.argv[5] == "unread"
+signals = tempfile.TemporaryDirectory(prefix="ssh-display-")
+os.environ["FLUENT_SSH_FULLSCREEN_SIGNALS"] = signals.name
+os.environ["FLUENT_SSH_FULLSCREEN_SCENARIO"] = scenario
 pid, master = pty.fork()
 if pid == 0:
+    if unread:
+        os.environ["FLUENT_SSH_FULLSCREEN_UNREAD"] = "1"
     os.environ["FLUENT_SSH_FULLSCREEN_CHILD"] = sys.argv[2]
     os.environ["TERM"] = "xterm-256color"
     fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
@@ -22,7 +32,9 @@ sent = False
 opened = False
 detach_at = None
 eof = False
-deadline = time.monotonic() + 25
+deadline = time.monotonic() + 35
+started = time.monotonic()
+phases = [{"phase": "spawned", "elapsed": 0}]
 try:
     while time.monotonic() < deadline and (status is None or not eof):
         if not eof and select.select([master], [], [], 0.01)[0]:
@@ -37,11 +49,41 @@ try:
             if not opened and b"SSH_DASHBOARD_READY" in output:
                 os.write(master, b"f")
                 opened = True
+                phases.append({"phase": "dashboard-ready", "elapsed": time.monotonic() - started})
             if detach_at is None and b"SSH_FULLSCREEN_PAINT" in output:
+                phases.append({"phase": "fullscreen-paint", "elapsed": time.monotonic() - started})
                 # Pause display consumption long enough to fill the output PTY.
                 # Idle input must not make stdout nonblocking and abort repaint.
-                time.sleep(0.4)
+                stall = float(sys.argv[3]) if len(sys.argv) > 3 else 0.4
+                if scenario != "drain":
+                    if scenario == "detach" and sys.argv[2] == "control":
+                        os.write(master, b"x")
+                    time.sleep(0.3)
+                    if scenario == "detach":
+                        os.write(master, b"\x02d")
+                    else:
+                        Path(signals.name, "trigger").touch()
+                    sent = True
+                    # Keep withholding output after the lifecycle event.
+                    if unread:
+                        settle_deadline = time.monotonic() + 15
+                        while (not Path(signals.name, "local-settled").exists()
+                               and time.monotonic() < settle_deadline):
+                            time.sleep(0.02)
+                        assert Path(signals.name, "local-settled").exists(), "local cleanup waited for unread PTY"
+                        modes = termios.tcgetattr(master)
+                        assert modes[3] & termios.ICANON and modes[3] & termios.ECHO, "raw terminal modes survived cleanup"
+                        phases.append({"phase": "settled-before-drain", "elapsed": time.monotonic() - started})
+                    else:
+                        time.sleep(stall - 0.3)
+                    if scenario == "detach" and sys.argv[2] == "control":
+                        assert Path(signals.name, "client-detached").exists(), "client detach stalled behind echo"
+                    elif scenario != "detach":
+                        assert Path(signals.name, "settled").exists(), "lifecycle stalled behind display"
+                else:
+                    time.sleep(stall)
                 detach_at = time.monotonic() + 0.5
+                phases.append({"phase": "reader-resumed", "elapsed": time.monotonic() - started})
             if not sent:
                 assert b"SSH_FULLSCREEN_RETURNED" not in output, output.decode(errors="replace")
             assert len(output) < 1024 * 1024, "display flood"
@@ -55,8 +97,45 @@ try:
                 status = result
     assert status is not None and eof, output.decode(errors="replace")
     assert sent and os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
+    if not unread:
+        assert b"SSH_FULLSCREEN_RETURNED" in output
+    assert b"\x1b[?1049h" in output and output.rfind(b"\x1b[?1049l") > output.rfind(b"\x1b[?1049h")
+    assert b"\x1b[?2004h" in output and output.rfind(b"\x1b[?2004l") > output.rfind(b"\x1b[?2004h")
+    pressure = "unread until local settlement" if unread else f"reader stall {sys.argv[3] if len(sys.argv)>3 else '0.4'}s"
+    print(f"ok controlled PTY: {sys.argv[2]} {scenario}, {pressure}")
 finally:
     if status is None:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        # Ask the Rust owner to settle its separate worker session before killing
+        # the PTY process group. Drain output so its terminal guard can finish.
+        Path(signals.name, "cleanup").touch()
+        cleanup_deadline = time.monotonic() + 8
+        while status is None and time.monotonic() < cleanup_deadline:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+            done, result = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = result
+        if status is None:
+            os.killpg(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
     os.close(master)
+    evidence = os.environ.get("FLUENT_SSH_PTY_EVIDENCE_DIR")
+    if evidence:
+        name = f"{sys.argv[2]}-{scenario}-{sys.argv[3] if len(sys.argv)>3 else '0.4'}"
+        if unread:
+            name += "-unread"
+        Path(evidence, name + ".pty").write_bytes(output)
+        Path(evidence, name + ".json").write_text(json.dumps({
+            "mode": sys.argv[2], "scenario": scenario,
+            "stall_seconds": float(sys.argv[3]) if len(sys.argv)>3 else 0.4,
+            "unread_until_settlement": unread,
+            "wait_status": status, "display_bytes": len(output),
+            "phases": phases, "elapsed": time.monotonic() - started,
+            "initial_size": [100, 30], "test_binary": sys.argv[1],
+            "transport": "hermetic OpenSSH/tmux clients; production helper and full-screen loop"
+        }, indent=2) + "\n")
+    signals.cleanup()

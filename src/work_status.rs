@@ -193,7 +193,11 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
         .zip(merge_candidate)
         .filter(|(_, candidate)| candidate.merge_state.status == MergeCandidateMergeStatus::Merged)
         .map(|(attempt, candidate)| landed_evidence_history(project_root, attempt, candidate));
-    let recovery = if evidence_history.is_some() {
+    let landing_recovery = landing_binding_guidance(item, merge_candidate, project_root);
+    let landing_blocked = landing_recovery.is_some();
+    let recovery = if let Some(recovery) = landing_recovery {
+        recovery
+    } else if evidence_history.is_some() {
         AttemptRecoveryGuidance::default()
     } else {
         attempt_recovery_guidance(attempt, project_root)
@@ -240,8 +244,12 @@ pub fn summarize_work_item(item: &WorkItem, project_root: Option<&Path>) -> Work
         merge: merge_candidate
             .map(format_merge_state)
             .unwrap_or_else(|| "-".to_string()),
-        action: action_label_with_liveness(item, attempt, merge_candidate, project_root)
-            .to_string(),
+        action: if landing_blocked {
+            "landing-blocked"
+        } else {
+            action_label_with_liveness(item, attempt, merge_candidate, project_root)
+        }
+        .to_string(),
         next_action: if merge_candidate.is_some_and(|candidate| {
             candidate.merge_state.status == MergeCandidateMergeStatus::Merged
         }) {
@@ -474,10 +482,17 @@ pub fn work_item_show_value(
                 && candidate.merge_state.status == MergeCandidateMergeStatus::Merged
         })
     });
+    let pending_candidate = attempt.and_then(|attempt| {
+        item.merge_candidates
+            .iter()
+            .rev()
+            .find(|candidate| candidate.attempt_id == attempt.id)
+    });
     let recovery = if candidate.is_some() {
         AttemptRecoveryGuidance::default()
     } else {
-        attempt_recovery_guidance(attempt, Some(project_root))
+        landing_binding_guidance(item, pending_candidate, Some(project_root))
+            .unwrap_or_else(|| attempt_recovery_guidance(attempt, Some(project_root)))
     };
     if let (Some(attempt), Some(candidate)) = (attempt, candidate) {
         output["evidence-history"] = serde_json::to_value(landed_evidence_history(
@@ -1133,6 +1148,30 @@ fn derive_attempt_recovery_guidance(
         next_action: derive_other_attempt_recovery_next_action(attempt, project_root),
         blocker,
     }
+}
+
+fn landing_binding_guidance(
+    item: &WorkItem,
+    candidate: Option<&MergeCandidate>,
+    project_root: Option<&Path>,
+) -> Option<AttemptRecoveryGuidance> {
+    let candidate = candidate?;
+    let root = project_root?;
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+        || item
+            .attempt_learning_advancement(&candidate.attempt_id)
+            .is_err()
+    {
+        return None;
+    }
+    let error = crate::work_merge_executor::ensure_landing_bindings(root, item, candidate).err()?;
+    Some(AttemptRecoveryGuidance {
+        blocker: Some(error.to_string()),
+        next_action: Some(format!(
+            "fluent merge-candidate show {} {}",
+            item.id, candidate.id
+        )),
+    })
 }
 
 fn derive_other_attempt_recovery_next_action(

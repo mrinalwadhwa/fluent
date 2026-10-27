@@ -316,7 +316,15 @@ fn active_writer_project_root(
         let Some(path) = line.strip_prefix("worktree ") else {
             continue;
         };
-        let root = fs::canonicalize(path)?;
+        let root = match fs::canonicalize(path) {
+            Ok(root) => root,
+            Err(_) => {
+                // Other registered worktrees need not be visible to this
+                // Writer. An inaccessible binding never supplies authority.
+                inaccessible = true;
+                continue;
+            }
+        };
         let store = WorkModelStore::new(&root);
         let item_path = store.work_item_path(work_item_id)?;
         let item = match store.read_work_item_snapshot(work_item_id) {
@@ -483,7 +491,20 @@ pub fn check_writer_handoff(
         "Writer handoff must run from the assigned candidate workspace {}",
         workspace.display()
     );
-    crate::worktree::ensure_candidate_worktree(project_root, &workspace)?;
+    if let Err(error) = crate::worktree::ensure_candidate_worktree(project_root, &workspace) {
+        let candidate = git::run_stdout(
+            &caller_workspace,
+            &["rev-parse", "HEAD"],
+            "read candidate for unverifiable Writer handoff",
+        )?;
+        return Ok(unverified_writer_handoff(
+            candidate,
+            format!(
+                "Cannot verify the host-owned candidate binding at {}: {error:#}",
+                project_root.display()
+            ),
+        ));
+    }
 
     assess_writer_handoff_candidate(
         project_root,
@@ -1235,6 +1256,19 @@ pub(crate) fn run_attempt_with_dispatch(
 fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunResult> {
     let initial_item = read_work_item_or_not_found(config.store, config.work_item_id)?;
     initial_item.ensure_mutation_compatible()?;
+    if let Some(task) = initial_item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .and_then(|attempt| attempt.tasks.last())
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Planned)
+    {
+        crate::recovery_contracts::writer_completion::validated_committed_repair_start(
+            config.project_root,
+            &initial_item,
+            task,
+        )?;
+    }
     crate::recovery_contracts::context_retry::resume_ready(
         config.project_root,
         &initial_item,
@@ -1634,6 +1668,21 @@ fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunR
             && attempt.review_state == Some(AttemptReviewState::Passed)
         {
             let mut item = item;
+            let already_merged = item.merge_candidates.iter().any(|candidate| {
+                candidate.attempt_id == config.attempt_id
+                    && candidate.merge_state.status == MergeCandidateMergeStatus::Merged
+            });
+            if !already_merged
+                && let Some(outcome) = gate_pending_writer_before_advancement(
+                    config.project_root,
+                    config.store,
+                    &mut item,
+                    config.attempt_id,
+                )?
+            {
+                outcomes.push(outcome);
+                return Ok(WorkAttemptRunResult { outcomes });
+            }
             let candidate_id = item.create_or_get_merge_candidate(config.attempt_id)?;
             let attempt_index = item
                 .attempts
@@ -1727,6 +1776,17 @@ fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunR
                 let handoff_only = mode.is_post_land();
 
                 if learner_still_pending {
+                    if !handoff_only
+                        && let Some(outcome) = gate_pending_writer_before_advancement(
+                            config.project_root,
+                            config.store,
+                            &mut item,
+                            config.attempt_id,
+                        )?
+                    {
+                        outcomes.push(outcome);
+                        return Ok(WorkAttemptRunResult { outcomes });
+                    }
                     let run_coder = |request: &LearnerCoderRequest<'_>| {
                         default_learner_run_coder(&config, request)
                     };
@@ -1827,6 +1887,24 @@ fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunR
             }
             let candidate_id =
                 mutate_attempt_work_item(config.store, config.work_item_id, |fresh| {
+                    let candidate = fresh
+                        .merge_candidates
+                        .iter()
+                        .find(|candidate| candidate.attempt_id == config.attempt_id)
+                        .ok_or_else(|| WorkModelError::MergeCandidateNotFound {
+                            candidate_id: candidate_id.clone(),
+                        })?;
+                    crate::work_merge_executor::ensure_landing_bindings(
+                        config.project_root,
+                        fresh,
+                        candidate,
+                    )
+                    .map_err(|error| {
+                        WorkModelError::InvalidRecoveryOperation {
+                            attempt_id: config.attempt_id.to_string(),
+                            reason: error.to_string(),
+                        }
+                    })?;
                     fresh.mark_merge_candidate_ready(config.attempt_id)
                 })?;
             outcomes.push(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
@@ -1843,13 +1921,18 @@ fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunR
                 || ordinary_review_tasks(config.project_root, attempt)
                     .iter()
                     .any(|(_, verdict)| *verdict != Verdict::Pass));
-        if let Some(task) = attempt.tasks.iter().find(|task| {
-            task.status == TaskStatus::Planned
-                && is_task_ready(task, &attempt.tasks)
-                && !(final_tester_needs_reviews
-                    && task.kind == TaskKind::Tester
-                    && !task.is_failed_command_recheck())
-        }) {
+        if let Some(task) = attempt
+            .tasks
+            .iter()
+            .find(|task| {
+                task.status == TaskStatus::Planned
+                    && is_task_ready(task, &attempt.tasks)
+                    && !(final_tester_needs_reviews
+                        && task.kind == TaskKind::Tester
+                        && !task.is_failed_command_recheck())
+            })
+            .cloned()
+        {
             if task.kind == TaskKind::Review && supports_parallel_review_phase(attempt) {
                 let planned_review_ids: Vec<String> = attempt
                     .tasks
@@ -1863,6 +1946,21 @@ fn run_attempt_inner(config: WorkAttemptRunConfig<'_>) -> Result<WorkAttemptRunR
                     .collect();
                 run_parallel_reviews(&config, &planned_review_ids, &mut outcomes)?;
                 continue;
+            }
+
+            // A reserved Tester can survive recovery. Recheck its Writer's
+            // obligations even when no new review interpretation is needed.
+            if task.kind == TaskKind::Tester && !task.is_failed_command_recheck() {
+                let mut current = item.clone();
+                if let Some(outcome) = gate_pending_writer_before_advancement(
+                    config.project_root,
+                    config.store,
+                    &mut current,
+                    config.attempt_id,
+                )? {
+                    outcomes.push(outcome);
+                    return Ok(WorkAttemptRunResult { outcomes });
+                }
             }
 
             let task_no_sandbox = task_uses_no_sandbox(
@@ -4247,7 +4345,7 @@ fn run_learner_step(
     // Probe the resolved Learner boundary before changing durable Learning state.
     // Capture may genuinely run unsandboxed; the protected modes and Codex retain
     // their confinement even when the caller requested `--no-sandbox`.
-    let prepared_run = match prepare_learner_run(
+    let mut prepared_run = match prepare_learner_run(
         project_root,
         item,
         attempt_index,
@@ -4290,63 +4388,6 @@ fn run_learner_step(
         return Ok(());
     };
 
-    // A fresh, lock-held reservation with landing validation. It re-reads the durable
-    // state under the model lock and decides whether THIS runner launches, so a
-    // record a peer already succeeded, took non-relaunchable (its coder already ran
-    // but host evidence is pending), or made ineligible is never relaunched — the
-    // reservation, not this stale snapshot, is authoritative. A crash after it
-    // reserves the in-progress state leaves a retryable record rather than an orphan
-    // handoff with no durable learning state.
-    mutate_attempt_work_item(store, &work_item_id, |item| {
-        let attempt = item
-            .attempts
-            .iter_mut()
-            .find(|attempt| attempt.id == attempt_id)
-            .unwrap();
-        attempt.ensure_not_canceled()?;
-        for directory in std::iter::once(&prepared_run.run_dir)
-            .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir))
-        {
-            let record =
-                crate::execution::record_path_for_transcript(&directory.join("transcript.jsonl"));
-            crate::execution::prepare_launch(
-                &record,
-                Some(crate::execution::AttemptExecutionOwner {
-                    project_root: project_root.to_path_buf(),
-                    work_item_id: work_item_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                }),
-            )
-            .map_err(|error| WorkModelError::AttemptResumeIneligible {
-                attempt_id: attempt_id.clone(),
-                reason: format!("publish Learner execution identity: {error:#}"),
-            })?;
-            let relative = record.strip_prefix(project_root).map_err(|error| {
-                WorkModelError::AttemptResumeIneligible {
-                    attempt_id: attempt_id.clone(),
-                    reason: format!("bind Learner execution: {error}"),
-                }
-            })?;
-            let reference = crate::work_model::ArtifactRef {
-                producer_id: "local-execution".into(),
-                path: relative.display().to_string(),
-            };
-            if !attempt.artifacts.contains(&reference) {
-                attempt.artifacts.push(reference);
-            }
-        }
-        Ok(())
-    })?;
-    let runs = match reserve_learner_run(store, &work_item_id, &attempt_id, learner_coder)? {
-        LearnerReservation::Skip => {
-            *item = store.read_work_item(&work_item_id)?;
-            return Ok(());
-        }
-        LearnerReservation::Launch { runs } => runs,
-    };
-    // The reservation wrote the in-progress state; refresh the in-memory snapshot so
-    // `try_learn`/`finalize_learning` operate on the reserved durable record.
-    *item = store.read_work_item(&work_item_id)?;
     let config = LearnerConfig {
         run_coder: config.run_coder,
         codex_worker: provider_readiness.codex_worker(),
@@ -4354,66 +4395,159 @@ fn run_learner_step(
         provider_readiness: Some(&provider_readiness),
         no_sandbox: config.no_sandbox,
     };
-
-    // A pre-land no-expertise run must leave every candidate pointer at the reviewed
-    // Writer SHA, so — unlike capture, which moves canonical pointers through the
-    // host-owned Git transaction and `finalize_learning`'s whole-aggregate write — it
-    // settles every terminal Learning transition through its own fresh, lock-held,
-    // field-level mutations. Those re-read the current aggregate, accept only this
-    // runner's exact Learning frontier, and change only the Learning record, so a
-    // concurrent Work-model change during the coder run neither strands Learning
-    // `InProgress` on a stale write nor is clobbered by a pre-run snapshot.
-    if mode.is_pre_land_no_expertise() {
-        return settle_no_expertise_learner(
-            store,
-            project_root,
-            item,
-            attempt_index,
-            candidate_id,
-            mode,
-            &config,
-            runs,
-            &prepared_run,
-        );
-    }
-
-    // Capture and post-land: run the Learner coder, confinement, and draft stamping,
-    // producing the handoff to write. The handoff is written LAST, by
-    // `finalize_learning`, after the terminal learning outcome is persisted or
-    // composed from a write failure.
-    let before_learn = item.clone();
-    let learned = try_learn(
+    run_prepared_learner_step(
+        store,
         project_root,
         item,
         attempt_index,
         candidate_id,
         mode,
         &config,
-        &prepared_run,
-    );
-    let settled = settle_native_learner_invocations(
-        store,
-        item,
-        attempt_index,
-        std::iter::once(&prepared_run.run_dir)
-            .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
-        learned.is_ok(),
-        Some(&before_learn),
-    );
-    let learned = match settled {
-        Ok(()) => learned,
-        Err(error) => Err(error),
-    };
-    store
-        .read_work_item(&work_item_id)?
-        .attempts
-        .iter()
-        .find(|attempt| attempt.id == attempt_id)
-        .unwrap()
-        .ensure_not_canceled()?;
-    finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
-        crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
-    })
+        &mut prepared_run,
+    )
+}
+
+/// Finish every unused reservation on success, skip, or failure, including a
+/// partially published set. Keep the Learner and provider leases in the caller.
+#[allow(clippy::too_many_arguments)]
+fn run_prepared_learner_step(
+    store: &WorkModelStore,
+    project_root: &Path,
+    item: &mut WorkItem,
+    attempt_index: usize,
+    candidate_id: &str,
+    mode: work_task_executor::LearnerExecutionMode,
+    config: &LearnerConfig<'_>,
+    prepared_run: &mut PreparedLearnerRun,
+) -> Result<()> {
+    let work_item_id = item.id.clone();
+    let attempt_id = item.attempts[attempt_index].id.clone();
+    let learner_coder = item.attempts[attempt_index]
+        .coder_mapping
+        .for_task_kind(TaskKind::Write)
+        .coder;
+    let result = (|| {
+        // A fresh, lock-held reservation with landing validation. It re-reads the durable
+        // state under the model lock and decides whether THIS runner launches, so a
+        // record a peer already succeeded, took non-relaunchable (its coder already ran
+        // but host evidence is pending), or made ineligible is never relaunched — the
+        // reservation, not this stale snapshot, is authoritative. A crash after it
+        // reserves the in-progress state leaves a retryable record rather than an orphan
+        // handoff with no durable learning state.
+        mutate_attempt_work_item(store, &work_item_id, |item| {
+            let attempt = item
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.id == attempt_id)
+                .unwrap();
+            attempt.ensure_not_canceled()?;
+            for directory in std::iter::once(&prepared_run.run_dir)
+                .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir))
+            {
+                let record = crate::execution::record_path_for_transcript(
+                    &directory.join("transcript.jsonl"),
+                );
+                let reservation = crate::execution::prepare_launch(
+                    &record,
+                    Some(crate::execution::AttemptExecutionOwner {
+                        project_root: project_root.to_path_buf(),
+                        work_item_id: work_item_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    }),
+                )
+                .map_err(|error| WorkModelError::AttemptResumeIneligible {
+                    attempt_id: attempt_id.clone(),
+                    reason: format!("publish Learner execution identity: {error:#}"),
+                })?;
+                prepared_run.launch_reservations.push(reservation);
+                let relative = record.strip_prefix(project_root).map_err(|error| {
+                    WorkModelError::AttemptResumeIneligible {
+                        attempt_id: attempt_id.clone(),
+                        reason: format!("bind Learner execution: {error}"),
+                    }
+                })?;
+                let reference = crate::work_model::ArtifactRef {
+                    producer_id: "local-execution".into(),
+                    path: relative.display().to_string(),
+                };
+                if !attempt.artifacts.contains(&reference) {
+                    attempt.artifacts.push(reference);
+                }
+            }
+            Ok(())
+        })?;
+        let runs = match reserve_learner_run(store, &work_item_id, &attempt_id, learner_coder)? {
+            LearnerReservation::Skip => {
+                *item = store.read_work_item(&work_item_id)?;
+                return Ok(());
+            }
+            LearnerReservation::Launch { runs } => runs,
+        };
+        // The reservation wrote the in-progress state; refresh the in-memory snapshot so
+        // `try_learn`/`finalize_learning` operate on the reserved durable record.
+        *item = store.read_work_item(&work_item_id)?;
+
+        // A pre-land no-expertise run must leave every candidate pointer at the reviewed
+        // Writer SHA, so — unlike capture, which moves canonical pointers through the
+        // host-owned Git transaction and `finalize_learning`'s whole-aggregate write — it
+        // settles every terminal Learning transition through its own fresh, lock-held,
+        // field-level mutations. Those re-read the current aggregate, accept only this
+        // runner's exact Learning frontier, and change only the Learning record, so a
+        // concurrent Work-model change during the coder run neither strands Learning
+        // `InProgress` on a stale write nor is clobbered by a pre-run snapshot.
+        if mode.is_pre_land_no_expertise() {
+            return settle_no_expertise_learner(
+                store,
+                project_root,
+                item,
+                attempt_index,
+                candidate_id,
+                mode,
+                config,
+                runs,
+                prepared_run,
+            );
+        }
+
+        // Capture and post-land: run the Learner coder, confinement, and draft stamping,
+        // producing the handoff to write. The handoff is written LAST, by
+        // `finalize_learning`, after the terminal learning outcome is persisted or
+        // composed from a write failure.
+        let before_learn = item.clone();
+        let learned = prepared_run.settle_unused(try_learn(
+            project_root,
+            item,
+            attempt_index,
+            candidate_id,
+            mode,
+            config,
+            prepared_run,
+        ));
+        let settled = settle_native_learner_invocations(
+            store,
+            item,
+            attempt_index,
+            std::iter::once(&prepared_run.run_dir)
+                .chain(prepared_run.repairs.iter().map(|repair| &repair.run_dir)),
+            learned.is_ok(),
+            Some(&before_learn),
+        );
+        let learned = match settled {
+            Ok(()) => learned,
+            Err(error) => Err(error),
+        };
+        store
+            .read_work_item(&work_item_id)?
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .unwrap()
+            .ensure_not_canceled()?;
+        finalize_learning(store, item, attempt_index, runs, learned, |handoff| {
+            crate::learner::write_handoff(project_root, &work_item_id, &attempt_id, handoff)
+        })
+    })();
+    prepared_run.settle_unused(result)
 }
 
 fn acquire_learner_provider_capacity(
@@ -4485,7 +4619,24 @@ struct PreparedLearnerRun {
     denied_write_roots: Vec<PathBuf>,
     run_dir: PathBuf,
     repairs: Vec<PreparedLearnerRepairRun>,
+    launch_reservations: Vec<crate::execution::LaunchReservation>,
     isolated_workspace: Option<HandoffOnlyWorkspace>,
+}
+
+impl PreparedLearnerRun {
+    fn settle_unused<T>(&self, mut outcome: Result<T>) -> Result<T> {
+        for reservation in &self.launch_reservations {
+            if let Err(error) = reservation.settle_unused() {
+                outcome = match outcome {
+                    Ok(_) => Err(error),
+                    Err(primary) => Err(primary.context(format!(
+                        "settle unused Learner execution reservation: {error:#}"
+                    ))),
+                };
+            }
+        }
+        outcome
+    }
 }
 
 /// One bounded schema-repair launch prepared alongside the initial Learner run.
@@ -4683,6 +4834,7 @@ fn prepare_learner_run(
         denied_write_roots,
         run_dir,
         repairs,
+        launch_reservations: Vec::new(),
         isolated_workspace,
     })
 }
@@ -4750,7 +4902,7 @@ fn settle_no_expertise_learner(
     // its already-run coder is never rerun, a transcript-pump transport fault stays
     // relaunchable, and a rejected candidate Git mutation or unsupported host stays
     // relaunchable `Generic`. (B3, B4h, B4i, B5, B5b, B10, B10a)
-    let handoff = match try_learn(
+    let handoff = match prepared_run.settle_unused(try_learn(
         project_root,
         item,
         attempt_index,
@@ -4758,7 +4910,7 @@ fn settle_no_expertise_learner(
         mode,
         config,
         prepared_run,
-    ) {
+    )) {
         Ok(handoff) => handoff,
         Err(run) => {
             settle_native_learner_invocations(
@@ -6138,6 +6290,61 @@ fn resume_canceled_attempt(
     Ok(())
 }
 
+fn cancellation_execution_paths(
+    project: &Path,
+    work: &str,
+    attempt: &Attempt,
+) -> Result<Vec<PathBuf>> {
+    let root = project
+        .join(".fluent/work/artifacts")
+        .join(work)
+        .join(&attempt.id);
+    let mut paths = attempt
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.artifact_area
+                .as_ref()
+                .map(|area| crate::execution::record_path_for_artifact(project, &area.path))
+        })
+        .collect::<Vec<_>>();
+    paths.extend(
+        attempt
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.producer_id == "local-execution")
+            .map(|artifact| project.join(&artifact.path)),
+    );
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    for path in &paths {
+        anyhow::ensure!(
+            path.starts_with(&root)
+                && path
+                    .strip_prefix(&root)?
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                && path
+                    .file_name()
+                    .is_some_and(|name| name == "execution.json"),
+            "cancellation execution path is outside its owning Attempt: {}",
+            path.display()
+        );
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.file_type().is_file()
+                    && path.canonicalize()?
+                        == project.canonicalize()?.join(path.strip_prefix(project)?),
+                "cancellation execution path is not a canonical owned file: {}",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(paths)
+}
+
 /// Stop every owned local worker for one Attempt, then pause unfinished work
 /// for an explicit same-Attempt resume. Persist the stop boundary before
 /// signaling and verify every registered execution before recording settlement.
@@ -6149,7 +6356,7 @@ pub fn cancel_local_attempt(
 ) -> Result<usize> {
     let _effect_lock = crate::land_lock::acquire(&crate::land_lock::effect_lock_path(project_root))
         .map_err(|error| anyhow::anyhow!("failed to acquire landing effect lock: {error}"))?;
-    let attempt = mutate_attempt_work_item(store, work_item_id, |item| {
+    let (attempt, repeated) = mutate_attempt_work_item(store, work_item_id, |item| {
         item.ensure_not_abandoned()?;
         let has_pending_candidate = item.merge_candidates.iter().any(|candidate| {
             candidate.attempt_id == attempt_id
@@ -6162,7 +6369,8 @@ pub fn cancel_local_attempt(
             .ok_or_else(|| WorkModelError::AttemptNotFound {
                 id: attempt_id.into(),
             })?;
-        if !attempt.cancellation_requested() {
+        let repeated = attempt.cancellation_requested();
+        if !repeated {
             attempt.cancellation = Some(crate::work_model::AttemptCancellation {
                 requested_at: crate::work_model::now_iso8601(),
                 settled_at: None,
@@ -6182,68 +6390,99 @@ pub fn cancel_local_attempt(
             }
             attempt.pause_recovery = None;
         }
-        Ok(attempt.clone())
+        Ok((attempt.clone(), repeated))
     })?;
     drop(_effect_lock);
-    if attempt.cancellation.as_ref().unwrap().settled_at.is_some() {
-        return Ok(0);
-    }
+    let original_stop = attempt.cancellation.as_ref().unwrap().clone();
     let executing = attempt
         .tasks
         .iter()
         .filter(|task| task.status == TaskStatus::Executing)
         .map(|task| task.id.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut records = attempt
-        .tasks
-        .iter()
-        .filter_map(|task| {
-            task.artifact_area
-                .as_ref()
-                .map(|area| crate::execution::record_path_for_artifact(project_root, &area.path))
-        })
-        .collect::<Vec<_>>();
-    records.extend(
-        attempt
-            .artifacts
-            .iter()
-            .filter(|artifact| artifact.producer_id == "local-execution")
-            .map(|artifact| project_root.join(&artifact.path)),
-    );
-    for execution in records {
-        match fs::symlink_metadata(&execution) {
-            Ok(_) => {
-                crate::execution::cancel(&execution)
-                    .with_context(|| format!("cancel local execution {}", execution.display()))?;
+    if !repeated {
+        for execution in cancellation_execution_paths(project_root, work_item_id, &attempt)? {
+            match fs::symlink_metadata(&execution) {
+                Ok(_) => {
+                    crate::execution::cancel(&execution).with_context(|| {
+                        format!("cancel local execution {}", execution.display())
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
         }
     }
     // Setup owns the Task lease before it has a child. Let that owner observe the
     // durable gate and unwind before recording settled cancellation.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let tasks_live = executing.iter().any(|id| {
-            crate::lease::is_leased(&crate::lease::task_lock_path(
+    let setup_task_ids = attempt
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<HashSet<_>>();
+    let setup_leases = loop {
+        let paths = attempt
+            .tasks
+            .iter()
+            .map(|task| crate::lease::task_lock_path(project_root, work_item_id, &task.id))
+            .chain(std::iter::once(crate::lease::learner_lock_path(
                 project_root,
                 work_item_id,
-                id,
-            ))
-        });
-        let learner_live = crate::lease::is_leased(&crate::lease::learner_lock_path(
-            project_root,
-            work_item_id,
-            attempt_id,
-        ));
-        if !tasks_live && !learner_live {
-            break;
+                attempt_id,
+            )));
+        let mut leases = Vec::new();
+        let mut contended = false;
+        for path in paths {
+            match crate::lease::try_acquire(&path)? {
+                crate::lease::LeaseAttempt::Acquired(lease) => leases.push(lease),
+                crate::lease::LeaseAttempt::Contended => {
+                    contended = true;
+                    break;
+                }
+            }
         }
+        if !contended {
+            break leases;
+        }
+        drop(leases);
         anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "cancellation is durable; local setup has not settled yet"
+            !repeated && std::time::Instant::now() < deadline,
+            "cancellation is durable; local setup still owns a lease; refusing unused settlement"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // Setup may have published a reservation or a Learner artifact after the
+    // first scan. Freeze a fresh inventory only after those owners unwind.
+    let fresh = store.read_work_item(work_item_id)?;
+    let fresh_attempt = fresh
+        .attempts
+        .iter()
+        .find(|a| a.id == attempt_id)
+        .context("cancellation's owning Attempt is missing")?;
+    let mut records = Vec::new();
+    for path in cancellation_execution_paths(project_root, work_item_id, fresh_attempt)? {
+        match fs::read(&path) {
+            Ok(bytes) => records.push((
+                path,
+                serde_json::from_slice::<crate::execution::ExecutionRecord>(&bytes)?,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = std::env::var_os("FLUENT_TEST_CANCEL_RECONCILE_BARRIER") {
+        let barrier = PathBuf::from(barrier);
+        fs::write(barrier.with_extension("ready"), b"snapshot")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !barrier.exists() {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "cancel reconciliation test barrier timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     let canceled = mutate_attempt_work_item(store, work_item_id, |item| {
         let has_pending_candidate = item.merge_candidates.iter().any(|candidate| {
@@ -6255,8 +6494,70 @@ pub fn cancel_local_attempt(
             .iter_mut()
             .find(|attempt| attempt.id == attempt_id)
             .unwrap();
-        let stop = attempt.cancellation.as_ref().unwrap();
-        if stop.settled_at.is_some() {
+        let reconcile = || -> Result<()> {
+            let stop = attempt
+                .cancellation
+                .as_ref()
+                .context("cancellation stop disappeared")?;
+            anyhow::ensure!(
+                stop.requested_at == original_stop.requested_at
+                    && stop.resumed_at.is_none()
+                    && (!repeated || stop == &original_stop),
+                "cancellation authority changed or resumed before settlement"
+            );
+            anyhow::ensure!(
+                attempt.tasks == fresh_attempt.tasks
+                    && attempt.artifacts == fresh_attempt.artifacts,
+                "cancellation's owned setup or artifact inventory changed"
+            );
+            let owner = crate::execution::AttemptExecutionOwner {
+                project_root: project_root.to_path_buf(),
+                work_item_id: work_item_id.into(),
+                attempt_id: attempt_id.into(),
+            };
+            let current_paths = cancellation_execution_paths(project_root, work_item_id, attempt)?;
+            anyhow::ensure!(
+                attempt
+                    .tasks
+                    .iter()
+                    .all(|task| setup_task_ids.contains(&task.id)),
+                "cancellation setup-owner inventory changed"
+            );
+            for (path, record) in &records {
+                anyhow::ensure!(
+                    current_paths.contains(path),
+                    "cancellation execution inventory changed"
+                );
+                if record.state == crate::execution::ExecutionState::Launching {
+                    anyhow::ensure!(
+                        attempt.status == AttemptStatus::NeedsUser
+                            && attempt.pause_kind == Some(PauseKind::Interrupted)
+                            && attempt.tasks.iter().any(|task| task.output.is_none()
+                                && matches!(
+                                    task.status,
+                                    TaskStatus::Executing
+                                        | TaskStatus::NeedsUser
+                                        | TaskStatus::Failed
+                                )
+                                && task.artifact_area.as_ref().is_some_and(|area| {
+                                    crate::execution::record_path_for_artifact(
+                                        project_root,
+                                        &area.path,
+                                    ) == *path
+                                })),
+                        "unused reservation has no unfinished Task owned by this stopped Attempt: {}",
+                        path.display()
+                    );
+                }
+                crate::execution::reconcile_unused_after_stop(path, record, &owner, stop)?;
+            }
+            Ok(())
+        };
+        reconcile().map_err(|error| WorkModelError::AttemptResumeIneligible {
+            attempt_id: attempt_id.into(),
+            reason: format!("cancellation settlement remains unproven: {error:#}"),
+        })?;
+        if attempt.cancellation.as_ref().unwrap().settled_at.is_some() {
             return Ok(0);
         }
         for task in &mut attempt.tasks {
@@ -6279,6 +6580,7 @@ pub fn cancel_local_attempt(
         attempt.cancellation.as_mut().unwrap().settled_at = Some(crate::work_model::now_iso8601());
         Ok(executing.len())
     })?;
+    drop(setup_leases);
     work_task_executor::reclaim_managed_build_output(project_root, store);
     Ok(canceled)
 }
@@ -9246,12 +9548,63 @@ fn write_candidate_gate_handoff(
     Ok(relative_path)
 }
 
-/// Reconcile a completed Writer's structured completion matrix before any Tester
-/// or reviewer is planned. For matrix-backed Attempts, the host then projects
-/// required Plan completion into `progress.md`; Writers never serialize that
-/// immutable section. Ordinary incomplete claims create one Writer continuation.
-/// Structural corruption pauses with a durable diagnosis. Older Attempts without
-/// a matrix retain their required-progress gate.
+/// Recheck Writer-owned obligations without changing claims or host row policy.
+fn gate_pending_writer_before_advancement(
+    project_root: &Path,
+    store: &WorkModelStore,
+    item: &mut WorkItem,
+    attempt_id: &str,
+) -> Result<Option<WorkAttemptRunOutcome>> {
+    let index = item
+        .attempts
+        .iter()
+        .position(|a| a.id == attempt_id)
+        .context("Writer advancement Attempt is missing")?;
+    let attempt = &item.attempts[index];
+    if attempt.kind.is_review_only_like() || attempt.writer_completion_contract.is_none() {
+        return Ok(None);
+    }
+    let writer = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+        .context("Writer advancement has no completed Writer")?;
+    let reason = match crate::recovery_contracts::pending_writer_completion_rows(
+        project_root,
+        attempt,
+        writer,
+    ) {
+        Ok(rows) if rows.is_empty() => return Ok(None),
+        Ok(rows) => format!(
+            "Writer completion remains pending: {}",
+            rows.iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(error) => format!("cannot validate Writer completion before advancement: {error:#}"),
+    };
+    let artifact =
+        crate::recovery_contracts::writer_completion_matrix_ref(project_root, attempt, writer)
+            .unwrap_or_else(|| required_progress_artifact(attempt));
+    pause_writer_completion_before_reviews(
+        project_root,
+        store,
+        item,
+        index,
+        attempt_id,
+        &artifact,
+        &reason,
+        0,
+        0,
+    )
+    .map(Some)
+}
+
+/// Reconcile a completed Writer's matrix before planning ordinary reviews.
+/// Project required Plan completion into progress without rewriting claims.
+/// Older Attempts retain their required-progress gate.
 fn gate_writer_completion_before_reviews(
     project_root: &Path,
     store: &WorkModelStore,
@@ -10786,6 +11139,13 @@ fn interpret_reviews(
     // An unmarked (legacy) Attempt has no contract, so this never scans its prose.
     let reviews_would_pass = failed.is_empty() && uncertain.is_empty();
     if reviews_would_pass {
+        // Targeted acceptance can re-enter here without running the post-Writer
+        // gate. It completes only its bound obligation, never another finding.
+        if let Some(outcome) =
+            gate_pending_writer_before_advancement(project_root, store, &mut item, attempt_id)?
+        {
+            return Ok(outcome);
+        }
         let host_check = crate::host_evidence::required_host_verification_pending(
             project_root,
             &item.attempts[attempt_index],
@@ -11138,6 +11498,18 @@ fn interpret_reviews(
             });
         }
         let candidate_id = mutate_attempt_work_item(store, &item.id, |fresh| {
+            let candidate = fresh
+                .merge_candidates
+                .iter()
+                .find(|candidate| candidate.attempt_id == attempt_id)
+                .ok_or_else(|| WorkModelError::MergeCandidateNotFound {
+                    candidate_id: candidate_id.clone(),
+                })?;
+            crate::work_merge_executor::ensure_landing_bindings(project_root, fresh, candidate)
+                .map_err(|error| WorkModelError::InvalidRecoveryOperation {
+                    attempt_id: attempt_id.to_string(),
+                    reason: error.to_string(),
+                })?;
             fresh.mark_merge_candidate_ready(attempt_id)
         })?;
         return Ok(WorkAttemptRunOutcome::MergeCandidateReady { candidate_id });
@@ -12217,6 +12589,7 @@ mod tests {
                 denied_write_roots: Vec::new(),
                 run_dir: run_dir.clone(),
                 repairs: Vec::new(),
+                launch_reservations: Vec::new(),
                 isolated_workspace: None,
             };
             let before_learn = item.clone();
@@ -12312,6 +12685,7 @@ mod tests {
             denied_write_roots: Vec::new(),
             run_dir: run_dir.clone(),
             repairs: Vec::new(),
+            launch_reservations: Vec::new(),
             isolated_workspace: None,
         };
         let before_learn = item.clone();
@@ -14930,6 +15304,34 @@ mod tests {
         item.attempts[0].tasks[0].output.as_mut().unwrap().commit = candidate.clone();
         item.attempts[0].writer_completion_contract =
             crate::work_model::WriterCompletionContract::from_planning_context(&context);
+        // This fixture starts after successful Writer completion. Keep its
+        // claims present so the advancement guard can validate that premise.
+        let writer = &item.attempts[0].tasks[0];
+        let mut matrix = crate::work_model::WriterCompletionMatrix::skeleton(
+            item.attempts[0]
+                .writer_completion_contract
+                .as_ref()
+                .unwrap(),
+            &writer.id,
+            &[],
+            None,
+        )
+        .unwrap();
+        for row in &mut matrix.rows {
+            row.state = crate::work_model::WriterCompletionState::Complete;
+            row.implementation_evidence = vec!["src/lib.rs: candidate".into()];
+            row.verification = vec![crate::work_model::WriterVerificationClaim {
+                command: "cargo test required_behavior".into(),
+                result: crate::work_model::WriterVerificationResult::Pass,
+            }];
+        }
+        let area = project_root.join(&writer.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(&area).unwrap();
+        fs::write(
+            area.join("writer-completion.json"),
+            serde_json::to_vec(&matrix).unwrap(),
+        )
+        .unwrap();
         item.add_review_tasks("attempt-1", review::REVIEWERS)
             .unwrap();
         for review in item.attempts[0]
@@ -18199,6 +18601,20 @@ mod tests {
                     task.id = format!("attempt-1-write-{round}");
                     if let Some(area) = task.artifact_area.as_mut() {
                         area.path = work_artifact_path("work-1", "attempt-1", &task.id);
+                        let source = project
+                            .path()
+                            .join(&template.artifact_area.as_ref().unwrap().path)
+                            .join("writer-completion.json");
+                        let mut matrix: crate::work_model::WriterCompletionMatrix =
+                            serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+                        matrix.task_id = task.id.clone();
+                        let area = project.path().join(&area.path);
+                        fs::create_dir_all(&area).unwrap();
+                        fs::write(
+                            area.join("writer-completion.json"),
+                            serde_json::to_vec(&matrix).unwrap(),
+                        )
+                        .unwrap();
                     }
                     task
                 });
@@ -27606,6 +28022,361 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
         let mut item = store.read_work_item("work-1").unwrap();
         item.learner_mode = crate::work_model::LearnerMode::NoExpertise;
         store.write_work_item(&item).unwrap();
+    }
+
+    // Exercise the real reservation, execution, draft validation and publication
+    // paths. Only the provider is replaced with a short, supervised child.
+    fn check_learner_reservation_lifecycle(no_expertise: bool, repairs: usize, fail: bool) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        if no_expertise {
+            mark_no_expertise(&store);
+        }
+        fs::write(
+            project_root.join(".fluent/config.yaml"),
+            "learner:\n  schema-repair-budget: 2\n",
+        )
+        .unwrap();
+        let evidence = std::cell::RefCell::new(Vec::new());
+        let coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+            let mut child = std::process::Command::new("/usr/bin/true");
+            assert!(
+                crate::execution::output(&mut child, request.transcript_path)?
+                    .status
+                    .success()
+            );
+            let path = crate::execution::record_path_for_transcript(request.transcript_path);
+            evidence.borrow_mut().push((path.clone(), fs::read(&path)?));
+            if fail && evidence.borrow().len() > repairs {
+                bail!("provider failed after supervised child");
+            }
+            let draft = if evidence.borrow().len() <= repairs {
+                r#"{"learning_summary":"rejected","follow_ups":[{"id":"","summary":"needs id"}]}"#
+            } else {
+                r#"{"learning_summary":"accepted","follow_ups":[]}"#
+            };
+            fs::create_dir_all(request.handoff_dir)?;
+            fs::write(
+                request.handoff_dir.join(crate::learner::DRAFT_FILE_NAME),
+                draft,
+            )?;
+            Ok(())
+        };
+        let outcome = run_pre_land_learner_outcome(&project_root, &store, &coder);
+        let succeeded = !fail && repairs < 3;
+        assert_eq!(
+            matches!(outcome, WorkAttemptRunOutcome::MergeCandidateReady { .. }),
+            succeeded
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        let learning = stored.attempts[0].learning.as_ref().unwrap();
+        assert_eq!(learning.is_succeeded(), succeeded);
+        assert_eq!(learning.runs, 1, "repairs remain one logical Learning run");
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        assert!(learner_workspace_is_clean_at(&workspace, &base));
+        assert_eq!(evidence.borrow().len(), (repairs + 1).min(3));
+        assert_registered_learner_executions_settled(&project_root, &stored, 3);
+        for (path, bytes) in evidence.borrow().iter() {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                *bytes,
+                "retain actual child evidence"
+            );
+        }
+        let runs = project_root
+            .join(crate::learner::handoff_dir_rel("work-1", "attempt-1"))
+            .join("runs");
+        for n in 1..=repairs.min(3) {
+            assert!(runs.join(format!("run-{n}/submitted-draft.json")).is_file());
+            assert!(runs.join(format!("run-{n}/error.txt")).is_file());
+        }
+        if succeeded {
+            assert!(
+                runs.join(format!("run-{}/submitted-draft.json", repairs + 1))
+                    .is_file()
+            );
+            // An already successful reservation must launch nothing and still
+            // finish any newly published execution reservations.
+            let mut current = stored.clone();
+            let mode = if no_expertise {
+                work_task_executor::LearnerExecutionMode::PreLandNoExpertise
+            } else {
+                work_task_executor::LearnerExecutionMode::Capture
+            };
+            // Model a peer's success after provider admission: the final fresh
+            // Learning reservation, not the caller's admission, decides to skip.
+            let mut prepared = prepare_learner_run(
+                &project_root,
+                &current,
+                0,
+                &stored.merge_candidates[0].id,
+                mode,
+                false,
+                None,
+            )
+            .unwrap();
+            run_prepared_learner_step(
+                &store,
+                &project_root,
+                &mut current,
+                0,
+                &stored.merge_candidates[0].id,
+                mode,
+                &LearnerConfig {
+                    run_coder: &|_| panic!("succeeded Learning relaunched"),
+                    codex_worker: None,
+                    no_sandbox: false,
+                },
+                &mut prepared,
+            )
+            .unwrap();
+            let skipped = store.read_work_item("work-1").unwrap();
+            assert_eq!(skipped.attempts[0].learning, stored.attempts[0].learning);
+            assert_eq!(skipped.merge_candidates, stored.merge_candidates);
+            assert_registered_learner_executions_settled(&project_root, &skipped, 6);
+            for (path, bytes) in evidence.borrow().iter() {
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+            }
+        }
+    }
+
+    fn assert_registered_learner_executions_settled(root: &Path, item: &WorkItem, count: usize) {
+        let paths: Vec<_> = item.attempts[0]
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.producer_id == "local-execution")
+            .map(|artifact| root.join(&artifact.path))
+            .collect();
+        assert_eq!(paths.len(), count);
+        for path in paths {
+            let record: crate::execution::ExecutionRecord =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                record.state,
+                crate::execution::ExecutionState::Settled,
+                "{}",
+                path.display()
+            );
+            assert!(record.settled_at.is_some());
+            assert!(!crate::execution::execution_is_live(&path).unwrap());
+            assert_eq!(
+                record.attempt_owner.as_ref().unwrap().attempt_id,
+                "attempt-1"
+            );
+        }
+    }
+
+    #[test]
+    fn learner_reservations_settle_after_partial_publication_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        crate::work_model::set_attempt_terminal(&mut item.attempts[0], AttemptStatus::Complete);
+        let candidate = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.write_work_item(&item).unwrap();
+        let before = store.read_work_item("work-1").unwrap();
+        let mut prepared = prepare_learner_run(
+            &project_root,
+            &item,
+            0,
+            &candidate,
+            work_task_executor::LearnerExecutionMode::Capture,
+            false,
+            None,
+        )
+        .unwrap();
+        // The first reservation is published before this filesystem error
+        // prevents registering the complete set and reserving Learning.
+        fs::create_dir(prepared.repairs[0].run_dir.join("execution.json")).unwrap();
+        let error = run_prepared_learner_step(
+            &store,
+            &project_root,
+            &mut item,
+            0,
+            &candidate,
+            work_task_executor::LearnerExecutionMode::Capture,
+            &LearnerConfig {
+                run_coder: &|_| panic!("failed reservation launched coder"),
+                codex_worker: None,
+                no_sandbox: false,
+            },
+            &mut prepared,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("publish Learner execution identity"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].learning, before.attempts[0].learning);
+        assert_eq!(stored.attempts[0].artifacts, before.attempts[0].artifacts);
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        let path = prepared.run_dir.join("execution.json");
+        let record: crate::execution::ExecutionRecord =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record.state, crate::execution::ExecutionState::Settled);
+        assert!(record.settled_at.is_some());
+        assert_eq!(record.leader_pid, 0);
+        assert!(!crate::execution::execution_is_live(&path).unwrap());
+    }
+
+    #[test]
+    fn learner_reservations_settle_after_registration_storage_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store, project_root, _workspace, base) = make_learner_passing_fixture(tmp.path(), 1);
+        let mut item = store.read_work_item("work-1").unwrap();
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        crate::work_model::set_attempt_terminal(&mut item.attempts[0], AttemptStatus::Complete);
+        let candidate = item.create_or_get_merge_candidate("attempt-1").unwrap();
+        store.write_work_item(&item).unwrap();
+        let mut prepared = prepare_learner_run(
+            &project_root,
+            &item,
+            0,
+            &candidate,
+            work_task_executor::LearnerExecutionMode::Capture,
+            false,
+            None,
+        )
+        .unwrap();
+        // Fail the production split-record commit after every execution record
+        // exists. Reading the store recovers that journal, retaining its refs.
+        let _fault = crate::work_model::persist_fault::arm_split_write("work-1");
+        let error = run_prepared_learner_step(
+            &store,
+            &project_root,
+            &mut item,
+            0,
+            &candidate,
+            work_task_executor::LearnerExecutionMode::Capture,
+            &LearnerConfig {
+                run_coder: &|_| panic!("failed registration launched coder"),
+                codex_worker: None,
+                no_sandbox: false,
+            },
+            &mut prepared,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected split-record storage fault"));
+        let stored = store.read_work_item("work-1").unwrap();
+        assert!(stored.attempts[0].learning.is_none());
+        assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+        assert_registered_learner_executions_settled(&project_root, &stored, 3);
+    }
+
+    #[test]
+    fn learner_reservations_block_readiness_when_unused_identity_is_unproven() {
+        for no_expertise in [true, false] {
+            for provider_error in [false, true] {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let (store, project_root, _workspace, base) =
+                    make_learner_passing_fixture(tmp.path(), 1);
+                if no_expertise {
+                    mark_no_expertise(&store);
+                }
+                let blocked = std::cell::RefCell::new(None);
+                let coder = |request: &LearnerCoderRequest<'_>| -> Result<()> {
+                    assert!(
+                        crate::execution::output(
+                            &mut std::process::Command::new("true"),
+                            request.transcript_path
+                        )?
+                        .status
+                        .success()
+                    );
+                    let unused = request
+                        .transcript_path
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("run-2/execution.json");
+                    // A receipt that cannot prove an absent child must prevent
+                    // cleanup and success, even when draft validation succeeds.
+                    let bytes = fs::read(&unused)?;
+                    fs::write(unused.with_file_name("execution-receipt"), "unknown child")?;
+                    *blocked.borrow_mut() = Some((unused, bytes));
+                    if provider_error {
+                        return Err(learner_sidecar_error());
+                    }
+                    write_valid_learner_draft(request);
+                    Ok(())
+                };
+                let error = interpret_reviews(
+                    &project_root,
+                    &store,
+                    store.read_work_item("work-1").unwrap(),
+                    "attempt-1",
+                    true,
+                    Some(LearnerConfig {
+                        run_coder: &coder,
+                        codex_worker: None,
+                        no_sandbox: false,
+                    }),
+                )
+                .unwrap_err();
+                assert!(format!("{error:#}").contains("refusing unused settlement"));
+                let stored = store.read_work_item("work-1").unwrap();
+                let learning = stored.attempts[0].learning.as_ref().unwrap();
+                assert!(learning.is_failed());
+                assert_eq!(learning.runs, 1);
+                assert!(
+                    learning
+                        .last_failure
+                        .as_deref()
+                        .unwrap()
+                        .contains("refusing unused settlement")
+                );
+                if provider_error {
+                    assert_eq!(
+                        learning.failure_kind,
+                        Some(LearningFailureKind::EvidencePending)
+                    );
+                    assert!(
+                        !learning.is_relaunchable(),
+                        "retain the primary failure's classification"
+                    );
+                }
+                assert_eq!(stored.merge_candidates[0].candidate_commit, base);
+                let blocked = blocked.borrow();
+                let (path, bytes) = blocked.as_ref().unwrap();
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+                let last = path
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("run-3/execution.json");
+                let record: crate::execution::ExecutionRecord =
+                    serde_json::from_slice(&fs::read(last).unwrap()).unwrap();
+                assert_eq!(
+                    record.state,
+                    crate::execution::ExecutionState::Settled,
+                    "one cleanup error must not strand later reservations"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn learner_reservations_settle_after_first_draft_and_skipped_retry() {
+        for no_expertise in [true, false] {
+            check_learner_reservation_lifecycle(no_expertise, 0, false);
+        }
+    }
+
+    #[test]
+    fn learner_reservations_settle_after_repair_with_unused_remainder() {
+        for no_expertise in [true, false] {
+            check_learner_reservation_lifecycle(no_expertise, 1, false);
+        }
+    }
+
+    #[test]
+    fn learner_reservations_settle_after_exhaustion_or_provider_failure() {
+        for no_expertise in [true, false] {
+            check_learner_reservation_lifecycle(no_expertise, 3, false);
+            check_learner_reservation_lifecycle(no_expertise, 0, true);
+            check_learner_reservation_lifecycle(no_expertise, 1, true);
+        }
     }
 
     #[test]

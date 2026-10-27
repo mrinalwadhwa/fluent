@@ -1,0 +1,45 @@
+{
+  "schema_version": 12,
+  "id": "saved-node-work",
+  "title": "Retain existing Node Work",
+  "model_writer_version": {
+    "format": "fluent-work-item-writer",
+    "schema_version": 10,
+    "version": "0.6.0"
+  },
+  "storage_revision": 1,
+  "instructions": "Run the saved Node project commands.",
+  "authorization": {
+    "state": "execution-ready",
+    "authority": "human"
+  },
+  "transitions": [
+    {
+      "sequence": 1,
+      "object_kind": "work-item",
+      "object_id": "saved-node-work",
+      "old_state": null,
+      "new_state": "authorized",
+      "occurred_at": "2026-10-24T19:30:28.064697+00:00",
+      "origin": "unknown"
+    },
+    {
+      "sequence": 2,
+      "object_kind": "attempt",
+      "object_id": "attempt-1",
+      "old_state": null,
+      "new_state": "planned",
+      "occurred_at": "2026-10-24T19:30:28.064739+00:00",
+      "origin": "fluent"
+    },
+    {
+      "sequence": 3,
+      "object_kind": "task",
+      "object_id": "attempt-1-write-1",
+      "old_state": null,
+      "new_state": "planned",
+      "occurred_at": "2026-10-24T19:30:28.064739+00:00",
+      "origin": "fluent"
+    }
+  ]
+}

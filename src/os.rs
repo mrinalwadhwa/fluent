@@ -206,9 +206,11 @@ pub(crate) fn deny_writer_source_entries(
         "Writer cache grant must name the exact current Attempt"
     );
     if let Some(home) = claude_home {
-        let expected_home = task_artifact
-            .parent()
-            .context("Writer Task artifact has no Attempt directory")?
+        // Recovery artifacts can nest below the Attempt. Keep the home bound
+        // to the same validated Work Item and Attempt as the dependency cache.
+        let expected_home = artifact_root
+            .join(work_item.as_os_str())
+            .join(attempt.as_os_str())
             .join("claude-home");
         anyhow::ensure!(
             home == expected_home,
@@ -219,6 +221,15 @@ pub(crate) fn deny_writer_source_entries(
         return Ok(());
     }
     let mut content = std::fs::read_to_string(&profile.path)?;
+    // Git must be able to enter the source checkout to verify the candidate's
+    // common directory and registration. A literal directory read permits that
+    // operation without granting any source descendants or directory writes.
+    for root in [source, physical_source.as_path()] {
+        content.push_str(&format!(
+            "\n(allow file-read* (literal {}))",
+            sbpl_string(root)
+        ));
+    }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
@@ -239,15 +250,18 @@ pub(crate) fn deny_writer_source_entries(
                         &child.path(),
                         "deny",
                     );
-                    for allowed in ["progress"] {
-                        append_writer_source_rule(
-                            &mut content,
-                            source,
-                            &physical_source,
-                            &child.path().join(allowed),
-                            "allow",
-                        );
-                    }
+                    let progress = child
+                        .path()
+                        .join("progress")
+                        .join(work_item.as_os_str())
+                        .join(attempt.as_os_str());
+                    append_writer_source_rule(
+                        &mut content,
+                        source,
+                        &physical_source,
+                        &progress,
+                        "allow",
+                    );
                     append_writer_source_rule(
                         &mut content,
                         source,
@@ -438,26 +452,40 @@ pub fn preflight_profile(profile: &SandboxProfile) -> Result<()> {
 }
 
 /// Verify that an already-rendered profile can read every existing root in a
-/// Reviewer launch plan.
+/// worker launch plan.
 ///
 /// Run this before reserving the model call. A profile that launches correctly
 /// but cannot open its declared candidate or evidence inputs is not a usable
-/// reviewer boundary.
+/// worker boundary.
 pub fn preflight_readable_paths(profile: &SandboxProfile, paths: &[PathBuf]) -> Result<()> {
     #[cfg(feature = "test-support")]
     if let Some(result) = test_reviewer_read_preflight_result() {
         return result;
     }
     #[cfg(feature = "test-support")]
-    if let Some(result) = test_preflight_result() {
+    if env::var_os("FLUENT_TEST_WORKER_READ_PROBE").is_none()
+        && let Some(result) = test_preflight_result()
+    {
         return result;
     }
     #[cfg(target_os = "macos")]
     {
-        let existing = paths
-            .iter()
-            .filter(|path| path.exists())
-            .collect::<Vec<_>>();
+        let mut existing = Vec::new();
+        for path in paths {
+            match std::fs::metadata(path) {
+                Ok(_) => existing.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(HostSandboxPreflightError {
+                        message: format!(
+                            "worker cannot inspect declared path {}: {error}",
+                            path.display()
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
         if existing.is_empty() {
             return Ok(());
         }
@@ -473,7 +501,14 @@ pub fn preflight_readable_paths(profile: &SandboxProfile, paths: &[PathBuf]) -> 
             .filter(|path| path.is_dir())
             .collect::<Vec<_>>();
         let run_probe = |program: &str, args: &[&str], probe_paths: &[&PathBuf]| {
-            let mut command = Command::new(sandbox_exec_program());
+            // Replace only probe execution in deterministic route tests. The
+            // ordinary build always applies the trusted system launcher.
+            #[cfg(feature = "test-support")]
+            let launcher = env::var_os("FLUENT_TEST_WORKER_READ_PROBE")
+                .unwrap_or_else(|| sandbox_exec_program().into());
+            #[cfg(not(feature = "test-support"))]
+            let launcher = sandbox_exec_program();
+            let mut command = Command::new(launcher);
             command
                 .arg("-f")
                 .arg(&profile.path)
@@ -492,7 +527,7 @@ pub fn preflight_readable_paths(profile: &SandboxProfile, paths: &[PathBuf]) -> 
             }
             let output =
                 run_probe(program, &args, &group).map_err(|error| HostSandboxPreflightError {
-                    message: format!("could not probe reviewer {kind} read paths: {error}"),
+                    message: format!("could not probe worker {kind} read paths: {error}"),
                 })?;
             if output.status.success() {
                 continue;
@@ -502,7 +537,7 @@ pub fn preflight_readable_paths(profile: &SandboxProfile, paths: &[PathBuf]) -> 
                 let output = run_probe(program, &args, &[path]).map_err(|error| {
                     HostSandboxPreflightError {
                         message: format!(
-                            "could not probe reviewer read path {}: {error}",
+                            "could not probe worker read path {}: {error}",
                             path.display()
                         ),
                     }
@@ -518,16 +553,14 @@ pub fn preflight_readable_paths(profile: &SandboxProfile, paths: &[PathBuf]) -> 
                 };
                 return Err(HostSandboxPreflightError {
                     message: format!(
-                        "reviewer cannot read declared path {}: {detail}",
+                        "worker cannot read declared path {}: {detail}",
                         path.display()
                     ),
                 }
                 .into());
             }
             return Err(HostSandboxPreflightError {
-                message: format!(
-                    "reviewer {kind} read-path probe failed without identifying a path"
-                ),
+                message: format!("worker {kind} read-path probe failed without identifying a path"),
             }
             .into());
         }
@@ -851,6 +884,40 @@ pub(crate) fn render_profile_for_scoped_codex_provider_with_tools(
     }
     std::fs::write(&profile.path, content)?;
     Ok(profile)
+}
+
+/// Admit installed tools read-only and map native dependencies built in the
+/// assigned workspace. Tool parents receive only metadata traversal.
+pub(crate) fn admit_installed_tools(
+    profile: &SandboxProfile,
+    tools: &crate::installed_tools::NodeToolAccess,
+    workspace: &Path,
+) -> Result<()> {
+    let roots = &tools.roots;
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let mut content = std::fs::read_to_string(&profile.path)?;
+    content.push('\n');
+    content.push_str(&render_root_rules(&[], roots));
+    for directory in &tools.search_directories {
+        content.push_str(&format!(
+            "\n(allow file-read-metadata (literal {}))",
+            sbpl_string(directory)
+        ));
+    }
+    content.push_str(&format!(
+        "\n(allow file-map-executable (subpath {}))",
+        sbpl_string(workspace)
+    ));
+    for root in roots {
+        content.push_str(&format!(
+            "\n(allow file-map-executable (subpath {0}))\n(deny file-write* (subpath {0}))",
+            sbpl_string(root)
+        ));
+    }
+    std::fs::write(&profile.path, content)?;
+    Ok(())
 }
 
 /// Render an autonomous Claude profile whose mutable provider state lives under
@@ -1555,7 +1622,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer cannot read declared path"),
+                .contains("worker cannot read declared path"),
             "{error:#}"
         );
     }

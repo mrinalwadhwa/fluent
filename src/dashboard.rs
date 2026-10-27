@@ -99,6 +99,12 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                                         Ok(())
                                     })
                             });
+                        if !session.is_active() {
+                            // Full-screen restoration exhausted its display
+                            // budget. Exit without another draw or diagnostic
+                            // write to the unread PTY; workers remain owned.
+                            break;
+                        }
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
                             resize_terminal(&mut app, embedded.as_mut(), width, height);

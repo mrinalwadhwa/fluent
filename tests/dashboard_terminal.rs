@@ -9,6 +9,156 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
 
+#[test]
+fn canonical_dashboard_host_gate_keeps_real_tmux_required() {
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../.fluent/tester.yaml")).unwrap();
+    let commands = config["commands"].as_sequence().unwrap();
+    let command = commands
+        .iter()
+        .find(|command| {
+            command["command"].as_str() == Some("bash tests/host/check-dashboard-terminal.sh")
+        })
+        .expect("real tmux coverage must remain a required canonical command");
+    assert_eq!(command["test_harness"].as_str(), Some("cargo-nextest"));
+    assert_eq!(command["reject_process_leaks"].as_bool(), Some(true));
+    let output = std::process::Command::new("bash")
+        .arg("tests/host/check-dashboard-terminal.sh")
+        .env_remove("FLUENT_TEST_REAL_TERMINAL_HOST")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("host terminal authorization is required")
+    );
+}
+
+fn confined_child(test: &str, flood: bool) -> bool {
+    if std::env::var("FLUENT_TEST_DASHBOARD_CHILD").as_deref() == Ok(test) {
+        return true;
+    }
+    let logs = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("FLUENT_TEST_DASHBOARD_CHILD", test)
+        .env("FLUENT_TEST_DASHBOARD_FLOOD", if flood { "1" } else { "0" })
+        .env(
+            "FLUENT_TEST_TERMINAL_CLIENT",
+            std::env::current_dir()
+                .unwrap()
+                .join("tests/fixtures/dashboard-terminal-client.py"),
+        )
+        .env("FLUENT_TEST_TERMINAL_CLIENT_LOG", logs.path().join("input"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child {}: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    false
+}
+
+#[test]
+fn confined_terminal_enforces_control_and_generation() {
+    if !confined_child("confined_terminal_enforces_control_and_generation", false) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let identity = TerminalIdentity::fixture(root.path(), "confined", "attempt-1", "writer");
+    let mut worker = TerminalSession::start_fixture(identity.clone(), "exec sleep 30").unwrap();
+    let mut view =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("CLIENT_READY observe")
+    });
+    assert!(view.send(Event::Paste("forbidden".into())).is_err());
+    view.resize(45, 12).unwrap();
+    wait_for(|| {
+        view.refresh();
+        (view.frame().columns, view.frame().rows) == (45, 12)
+    });
+    view.acquire_control().unwrap();
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("CLIENT_READY control")
+    });
+    let mut peer = worker.observe(worker.descriptor()).unwrap();
+    assert_eq!(
+        peer.acquire_control().unwrap(),
+        fluent::terminal_sessions::ControlOutcome::Occupied
+    );
+    view.send(Event::Paste("selected-界".into())).unwrap();
+    let input = std::env::var_os("FLUENT_TEST_TERMINAL_CLIENT_LOG").unwrap();
+    wait_for(|| std::fs::read(&input).is_ok_and(|bytes| bytes == "selected-界".as_bytes()));
+    view.observe_only().unwrap();
+    assert_eq!(
+        peer.acquire_control().unwrap(),
+        fluent::terminal_sessions::ControlOutcome::Acquired
+    );
+    peer.release_control();
+    view.acquire_control().unwrap();
+    let descriptor = view.descriptor().clone();
+    std::thread::scope(|scope| {
+        let stopped = scope.spawn(|| worker.stop());
+        wait_for(|| {
+            view.refresh();
+            view.ended()
+        });
+        stopped.join().unwrap().unwrap();
+    });
+    let frame = view.frame().text();
+    let mut replacement = TerminalSession::start_fixture(identity, "exec sleep 30").unwrap();
+    assert_ne!(replacement.descriptor(), &descriptor);
+    assert_eq!(view.descriptor(), &descriptor);
+    assert!(view.send(Event::Paste("forbidden".into())).is_err());
+    assert!(view.acquire_control().is_err());
+    view.refresh();
+    assert_eq!(view.frame().text(), frame);
+    drop(view);
+    replacement.stop().unwrap();
+}
+
+#[test]
+fn confined_terminal_flood_preserves_dashboard_navigation() {
+    if !confined_child(
+        "confined_terminal_flood_preserves_dashboard_navigation",
+        true,
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = fluent::work_model::WorkModelStore::new(root.path());
+    for id in ["first", "second"] {
+        store
+            .create_work_item(&fluent::work_model::WorkItem::planned(id, id))
+            .unwrap();
+    }
+    let mut worker = TerminalSession::start_fixture(
+        TerminalIdentity::fixture(root.path(), "confined-flood", "attempt-1", "writer"),
+        "exec sleep 30",
+    )
+    .unwrap();
+    let mut view =
+        EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    fluent::dashboard::test_support::navigate_and_refresh(root.path(), &mut view).unwrap();
+    let descriptor = view.descriptor().clone();
+    view.reconnect().unwrap();
+    assert_eq!(view.descriptor(), &descriptor);
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("flood 界")
+    });
+    assert!(view.frame().cells.len() <= 60 * 10);
+    drop(view);
+    worker.stop().unwrap();
+}
+
 fn run_input_pty(mode: &str) {
     let output = std::process::Command::new("python3")
         .arg("tests/fixtures/dashboard-terminal-handoff.py")
@@ -21,6 +171,32 @@ fn run_input_pty(mode: &str) {
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn pty_handoff_timeout_retains_diagnostics() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let child = root.path().join("stalled-terminal.py");
+    std::fs::write(
+        &child,
+        "#!/usr/bin/env python3\nimport os, signal\nos.write(2, b'original attachment failure\\n')\nsignal.pause()\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = std::process::Command::new("python3")
+        .arg("tests/fixtures/dashboard-terminal-handoff.py")
+        .arg(child)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "a stalled child must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("terminal handoff child did not settle"));
+    assert!(
+        stderr.contains("original attachment failure"),
+        "timeout discarded the original terminal diagnostic: {stderr}"
     );
 }
 
@@ -640,6 +816,7 @@ fn fullscreen_attachment_pty_child() {
         result.unwrap();
     });
     let result = attachment.run();
+    eprintln!("full-screen attachment returned: {result:?}");
     let driven = driver.join();
     worker.stop().unwrap();
     driven.expect("the server must confirm resize and native detach");

@@ -1,0 +1,9 @@
+(binary(=dashboard_terminal) & (
+    test(=focused_input_reaches_only_selected_invocation)
+    | test(=observer_cannot_type_or_resize_worker)
+    | test(=resize_preserves_terminal_screen_semantics)
+    | test(=ended_view_does_not_follow_new_invocation_input)
+    | test(=fullscreen_resize_requires_control)
+    | test(=worker_escape_sequences_stay_inside_terminal_view)
+    | test(=display_flood_keeps_dashboard_responsive)
+)) | test(=terminal_sessions::setup_cleanup_tests::nested_fullscreen_cancellation_and_retry)

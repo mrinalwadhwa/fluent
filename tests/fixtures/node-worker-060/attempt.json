@@ -1,0 +1,21 @@
+{
+  "schema_version": 12,
+  "id": "attempt-1",
+  "work_item_id": "saved-node-work",
+  "order": 0,
+  "status": "planned",
+  "coder_mapping": {
+    "write": {
+      "coder": "claude",
+      "model": "claude-sonnet-4-6",
+      "effort": "high"
+    },
+    "review": {
+      "coder": "codex",
+      "model": "gpt-5.4",
+      "effort": "high"
+    }
+  },
+  "artifacts": [],
+  "created_at": "2026-10-24T19:30:28.064505+00:00"
+}

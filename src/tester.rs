@@ -214,7 +214,7 @@ pub struct TesterSettlement {
 }
 
 impl TesterSandbox {
-    fn profile(&self) -> Option<&os::SandboxProfile> {
+    pub(crate) fn profile(&self) -> Option<&os::SandboxProfile> {
         self.profile.as_ref()
     }
 
@@ -589,6 +589,10 @@ pub(crate) fn render_sandbox_profile_with_cache(
     settlement: TesterSettlement,
     dependency_cache: Option<&crate::writer_cache::WriterDependencyCache>,
 ) -> Result<TesterSandbox> {
+    let node_tools = crate::installed_tools::node_access(
+        candidate_workspace,
+        std::env::var_os("PATH").as_deref(),
+    )?;
     let TesterSettlement {
         settlement_directories,
         commands,
@@ -660,11 +664,34 @@ pub(crate) fn render_sandbox_profile_with_cache(
     } else {
         None
     };
+    let mut readable_roots = vec![common_git_dir.clone()];
+    if let Some(cache) = &historical_cache {
+        // Cargo discovers enclosing workspaces from the manifest's ancestors,
+        // even when --manifest-path and a separate working directory are used.
+        // Admit exact existing manifests, never their source directories.
+        for ancestor in cache.ancestors() {
+            let manifest = ancestor.join("Cargo.toml");
+            match fs::symlink_metadata(&manifest) {
+                Ok(metadata) => {
+                    anyhow::ensure!(
+                        metadata.is_file() && !metadata.file_type().is_symlink(),
+                        "historical reader ancestor manifest must be a regular file: {}",
+                        manifest.display()
+                    );
+                    readable_roots.push(manifest);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).context("inspect historical reader ancestor manifest");
+                }
+            }
+        }
+    }
     match os::render_profile_common_only_with_denied_access(
         resolver,
         &home,
         &writable_roots,
-        std::slice::from_ref(&common_git_dir),
+        &readable_roots,
         &[],
         std::slice::from_ref(&common_git_dir),
     ) {
@@ -677,6 +704,7 @@ pub(crate) fn render_sandbox_profile_with_cache(
                 ));
                 fs::write(&profile.path, content)?;
             }
+            os::admit_installed_tools(&profile, &node_tools, &candidate_abs)?;
             os::preflight_profile(&profile)?;
             Ok(TesterSandbox {
                 profile: Some(profile),

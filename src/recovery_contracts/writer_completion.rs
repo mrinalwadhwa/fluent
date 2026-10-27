@@ -155,6 +155,12 @@ pub(crate) fn validate_terminal_superseded_history(
             );
         }
     }
+    for id in super::context_retry::terminal_superseded_reservations(project_root, attempt)? {
+        anyhow::ensure!(
+            authorized.insert(id),
+            "reservation was superseded by conflicting authorities"
+        );
+    }
     anyhow::ensure!(
         actual == authorized,
         "Superseded Task history has no matching completed recovery authority"
@@ -170,6 +176,9 @@ pub(crate) struct WriterRecoveryContext {
     pub artifacts: Vec<ArtifactRef>,
     pub source_task_id: String,
     pub candidate_commit: String,
+    // Only the exact replacement named by a matrix-bound audit can use that
+    // repair obligation to start without current verification evidence.
+    repairs_committed_matrix: bool,
 }
 
 pub(crate) fn validated_writer_context(
@@ -209,6 +218,7 @@ pub(crate) fn validated_writer_context(
     let original_instructions = original_instructions.as_deref().unwrap_or_default();
     let mut artifacts = Vec::new();
     let mut instruction_binding = None;
+    let mut repairs_committed_matrix = false;
     for reference in references {
         anyhow::ensure!(
             reference.producer_id == PRODUCER && attempt.artifacts.contains(reference),
@@ -354,6 +364,24 @@ pub(crate) fn validated_writer_context(
                 instruction_binding.is_none(),
                 "Writer-completion recovery instructions have ambiguous authority"
             );
+            repairs_committed_matrix =
+                authority.source_matrix_sha256.is_some() && authority.task_id == task.id;
+            if authority.source_matrix_sha256.is_some() {
+                // Deliver only the matrix whose bytes this authority validated.
+                // The executor grants these exact recovery inputs read access.
+                let area = source
+                    .artifact_area
+                    .as_ref()
+                    .context("recovery source has no artifact area")?;
+                artifacts.push(ArtifactRef {
+                    producer_id: source.id.clone(),
+                    path: format!(
+                        "{}/{}",
+                        area.path,
+                        crate::recovery_contracts::WRITER_COMPLETION_MATRIX_FILE
+                    ),
+                });
+            }
             instruction_binding =
                 Some((authority.source_writer_task_id, authority.candidate_commit));
         }
@@ -367,7 +395,51 @@ pub(crate) fn validated_writer_context(
         artifacts,
         source_task_id,
         candidate_commit,
+        repairs_committed_matrix,
     }))
+}
+
+/// Recognize the exact audited repair at the caller's checked model frontier.
+/// This grants admission only; completion and verification keep their own gates.
+pub(crate) fn validated_committed_repair_start(
+    project_root: &Path,
+    item: &crate::work_model::WorkItem,
+    task: &crate::work_model::Task,
+) -> Result<bool> {
+    let Some(context) = validated_writer_context(project_root, item, task)? else {
+        return Ok(false);
+    };
+    if !context.repairs_committed_matrix {
+        return Ok(false);
+    }
+    let attempt = item
+        .attempts
+        .last()
+        .filter(|attempt| Some(attempt.id.as_str()) == task.attempt_id.as_deref())
+        .context("Writer-completion repair is not on the current Attempt")?;
+    attempt.ensure_not_canceled()?;
+    anyhow::ensure!(
+        attempt.tasks.last() == Some(task)
+            && task.status == TaskStatus::Planned
+            && task.output.is_none()
+            && attempt
+                .tasks
+                .iter()
+                .rev()
+                .find(|source| {
+                    source.kind == TaskKind::Write && source.status == TaskStatus::Complete
+                })
+                .is_some_and(|source| source.id == context.source_task_id)
+            && !item
+                .merge_candidates
+                .iter()
+                .any(|candidate| candidate.attempt_id == attempt.id),
+        "Writer-completion repair is not the current authorized Task"
+    );
+    // The executor already holds the starting Task's leases; every other owner
+    // must be settled. Queue admission also checks the starting Task's leases.
+    ensure_settled_ownership(project_root, attempt, Some(&task.id))?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,4 +634,129 @@ pub(crate) fn corrective_writer_instructions(resolution: &str, audit_artifact: &
     format!(
         "{INSTRUCTIONS_MARKER}. The completed source Writer has completion evidence that needs correction. Read the source matrix and immutable requirement contract, preserve the source Task and candidate history, and write a complete fresh matrix for this corrective Writer. If no source change is needed, use the verified no-change result. Operator authorization: {resolution}. Authority: {audit_artifact}"
     )
+}
+
+pub(crate) fn ensure_settled_ownership(
+    project_root: &Path,
+    attempt: &Attempt,
+    starting_task: Option<&str>,
+) -> Result<()> {
+    if attempt
+        .tasks
+        .iter()
+        .any(|task| task.status == crate::work_model::TaskStatus::Executing)
+    {
+        bail!("Attempt has a running Task");
+    }
+    for task in &attempt.tasks {
+        if Some(task.id.as_str()) == starting_task {
+            continue;
+        }
+        crate::usage_limit_contracts::unlocked(
+            &crate::lease::task_lock_path(project_root, &attempt.work_item_id, &task.id),
+            false,
+        )?;
+        if let Some(area) = &task.artifact_area {
+            let path = project_root.join(&area.path);
+            crate::usage_limit_contracts::unlocked(&path.join("execution-owner.lock"), false)?;
+            if crate::execution::execution_is_live(&path.join("execution.json"))? {
+                bail!("Writer-completion recovery requires settled execution ownership");
+            }
+        }
+    }
+    crate::usage_limit_contracts::unlocked(
+        &crate::lease::learner_lock_path(project_root, &attempt.work_item_id, &attempt.id),
+        false,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod retry_history_tests {
+    use super::*;
+    use crate::{recovery_contracts::context_retry, work_model::*};
+
+    #[test]
+    fn completed_retry_proves_only_its_superseded_reservation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut item = WorkItem::planned("history", "Preserve retry history");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let source = &mut item.attempts[0].tasks[0];
+        source.status = TaskStatus::Complete;
+        source.output = Some(TaskOutput {
+            workspace_id: "candidate".into(),
+            workspace_path: source.workspace_access.writes[0].path.clone(),
+            source_branch: "main".into(),
+            base_commit: None,
+            commit: "a".repeat(40),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let id = item.add_next_write_round("attempt-1", vec![]).unwrap();
+        item.attempts[0].tasks[1].status = TaskStatus::Failed;
+        item.add_next_write_round("attempt-1", vec![]).unwrap();
+        let area = &item.attempts[0].tasks[1]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path;
+        fs::create_dir_all(root.join(area)).unwrap();
+        let baseline = WorkModelStore::new(root)
+            .work_task_path("history", "attempt-1", &id)
+            .unwrap()
+            .with_extension("write-baseline");
+        fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+        fs::write(&baseline, b"baseline").unwrap();
+        let retry = context_retry::Retry {
+            schema_version: 2,
+            source: context_retry::RetrySource::InvalidCompletion,
+            before: item.attempts[0].clone(),
+            task_id: id,
+            context: None,
+            baseline_sha256: Some(content_digest(b"baseline")),
+            files: Default::default(),
+            resolution: "Retry this failed preparation".into(),
+        };
+        let reference = context_retry::audit_ref(&retry).unwrap();
+        fs::create_dir_all(root.join(&reference.path).parent().unwrap()).unwrap();
+        fs::write(
+            root.join(&reference.path),
+            serde_json::to_vec_pretty(&retry).unwrap(),
+        )
+        .unwrap();
+        let attempt = &mut item.attempts[0];
+        attempt.artifacts.push(reference);
+        let approved = attempt
+            .record_recovery_operation(
+                &context_retry::request(&retry, context_retry::COMPLETION_APPROVE).unwrap(),
+                None,
+            )
+            .unwrap()
+            .completed_at
+            .clone();
+        for kind in [context_retry::RESUME, context_retry::START] {
+            attempt
+                .record_recovery_operation(&context_retry::request(&retry, kind).unwrap(), None)
+                .unwrap();
+        }
+        attempt.tasks[1] = context_retry::prepared_task(&retry).unwrap();
+        attempt.tasks[1].status = TaskStatus::Complete;
+        attempt.tasks[1].output = attempt.tasks[0].output.clone();
+        attempt.tasks[1].started_at = Some(approved.clone());
+        attempt.tasks[1].completed_at = Some(approved.clone());
+        attempt.tasks[2].status = TaskStatus::Superseded;
+        attempt.tasks[2].completed_at = Some(approved);
+        validate_terminal_superseded_history(root, attempt, "history").unwrap();
+        let valid = attempt.clone();
+        attempt.tasks[2].instructions = Some("changed reservation".into());
+        assert!(validate_terminal_superseded_history(root, attempt, "history").is_err());
+        *attempt = valid.clone();
+        attempt.tasks[1].status = TaskStatus::Failed;
+        assert!(validate_terminal_superseded_history(root, attempt, "history").is_err());
+        *attempt = valid;
+        fs::create_dir_all(root.join(&attempt.tasks[2].artifact_area.as_ref().unwrap().path))
+            .unwrap();
+        assert!(validate_terminal_superseded_history(root, attempt, "history").is_err());
+    }
 }

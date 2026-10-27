@@ -1,4 +1,4 @@
-//! Attempt-scoped Cargo caches for Writer tasks, final Testers, and landing.
+//! Attempt-scoped dependency caches for Writers, final Testers, and landing.
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
@@ -21,6 +21,7 @@ pub(crate) struct WriterDependencyCache {
     project_root: PathBuf,
     root: PathBuf,
     cargo_home: PathBuf,
+    npm_cache: PathBuf,
 }
 
 impl WriterDependencyCache {
@@ -34,10 +35,23 @@ impl WriterDependencyCache {
     }
 
     pub(crate) fn launch_env(&self) -> Vec<(String, String)> {
-        vec![(
+        let mut env = vec![(
             "CARGO_HOME".to_string(),
             self.cargo_home.to_string_lossy().into_owned(),
-        )]
+        )];
+        // npm accepts either case; override both so an inherited lowercase
+        // setting cannot redirect mutable data or load operator credentials.
+        for (name, path) in [
+            ("cache", self.npm_cache.clone()),
+            ("userconfig", self.npm_cache.join("user.npmrc")),
+            ("globalconfig", self.npm_cache.join("global.npmrc")),
+        ] {
+            let key = format!("npm_config_{name}");
+            let value = path.to_string_lossy().into_owned();
+            env.push((key.to_uppercase(), value.clone()));
+            env.push((key, value));
+        }
+        env
     }
 }
 
@@ -57,6 +71,7 @@ pub(crate) fn preflight_writer_dependency_cache(
     Ok(WriterDependencyCache {
         project_root: project_root.to_path_buf(),
         cargo_home: root.join("cargo-home"),
+        npm_cache: root.join("npm-cache"),
         root,
     })
 }
@@ -69,8 +84,33 @@ pub(crate) fn prepare_writer_dependency_cache(
     canonical_cargo_home: Option<&Path>,
 ) -> Result<()> {
     reject_symlinked_existing_components(&cache.project_root, &cache.cargo_home)?;
+    reject_symlinked_existing_components(&cache.project_root, &cache.npm_cache)?;
     prepare_private_cargo_dependency_cache(&cache.cargo_home, canonical_cargo_home)?;
+    // Start npm empty: operator caches can contain logs, tokens, or config.
+    // The existing Attempt root owns accounting and terminal reclamation.
+    fs::create_dir_all(&cache.npm_cache).context("create private npm cache")?;
+    validate_private_cache_symlinks(&cache.npm_cache, &cache.npm_cache)?;
+    for name in ["user.npmrc", "global.npmrc"] {
+        let path = cache.npm_cache.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path)?;
+                anyhow::ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "private npm config must be a regular file: {}",
+                    path.display()
+                );
+            }
+            Err(error) => return Err(error).context("create private npm config"),
+        }
+    }
     reject_symlinked_existing_components(&cache.project_root, &cache.cargo_home)?;
+    reject_symlinked_existing_components(&cache.project_root, &cache.npm_cache)?;
     Ok(())
 }
 
@@ -410,6 +450,23 @@ mod tests {
     }
 
     #[test]
+    fn npm_cache_rejects_symlinked_state_without_touching_target() {
+        let tmp = TempDir::new().unwrap();
+        let cache = preflight_writer_dependency_cache(tmp.path(), "work-1", "attempt-1").unwrap();
+        let outside = tmp.path().join("operator-npm");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret"), "preserved").unwrap();
+        fs::create_dir_all(cache.root()).unwrap();
+        std::os::unix::fs::symlink(&outside, cache.root().join("npm-cache")).unwrap();
+        assert!(prepare_writer_dependency_cache(&cache, None).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.join("secret")).unwrap(),
+            "preserved"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[test]
     fn unsafe_work_and_attempt_ids_cannot_select_cache_paths() {
         let tmp = TempDir::new().unwrap();
 
@@ -576,6 +633,7 @@ mod tests {
         reclaim_terminal_writer_caches(tmp.path(), &store).unwrap();
 
         assert!(active_cache.root().is_dir());
+        assert!(active_cache.root().join("npm-cache").is_dir());
     }
 
     #[test]
@@ -587,6 +645,7 @@ mod tests {
         let terminal_cache =
             preflight_writer_dependency_cache(tmp.path(), "terminal", "attempt-1").unwrap();
         prepare_writer_dependency_cache(&terminal_cache, None).unwrap();
+        fs::write(terminal_cache.root().join("npm-cache/retired"), "cache").unwrap();
 
         reclaim_terminal_writer_caches(tmp.path(), &store).unwrap();
 

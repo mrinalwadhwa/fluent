@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import runpy
 from pathlib import Path
 import shlex
 import subprocess
@@ -28,38 +29,44 @@ def clean():
     assert not run(['git', 'ls-files', '--others', '--exclude-standard']).strip(), 'candidate must be clean'
 
 
+native = runpy.run_path(str(Path(__file__).with_name('native-acceptance.py')))
 root = Path.cwd().resolve()
 clean()
 candidate = run(['git', 'rev-parse', 'HEAD']).strip()
 output = Path(os.environ['FLUENT_SSH_HOST_OUTPUT']).resolve()
 assert output != root and root not in output.parents, 'evidence must be outside the candidate'
-output.mkdir(parents=True, exist_ok=False)
+output.mkdir(mode=0o700, parents=True, exist_ok=False)
 (output / 'candidate.txt').write_text(candidate + '\n')
 (output / 'command.txt').write_text('bash tests/host/check-ssh-agent-terminal.sh\n')
-binary = Path(os.environ['FLUENT_SSH_LOCAL_BIN']).resolve(strict=True)
-local_project = Path(os.environ['FLUENT_SSH_LOCAL_PROJECT']).resolve(strict=True)
-local_version = run([str(binary), '--version'])
-assert candidate[:8] in local_version, 'local production binary must identify the candidate'
-(output / 'local-version.txt').write_text(local_version)
-(output / 'local-binary.sha256').write_text(hashlib.sha256(binary.read_bytes()).hexdigest() + '\n')
-(output / 'local-host.txt').write_text(run(['sw_vers']) + run(['tmux', '-V']))
-config_path = Path.home() / '.config/fluent/dashboard-sources.json'
-config = json.loads(config_path.read_text())
-assert config['schema_version'] == 1
-configured = {s['name']: s for s in config['ssh']}
-assert len(configured) == len(config['ssh']), 'duplicate source names'
-scenarios = {
-    'sources': 'Show local and remote projects together with distinct source/host identities. Navigate local Work while another configured source fails authentication or host verification; record the source-specific remedy.',
-    'embedded-observe': 'Select the recorded remote Task/generation and observe its native interface. Attempt typing and resizing from Observe; verify no worker input or size change.',
-    'embedded-control': 'Acquire Control, enter Unicode and multiline text, resize, use Esc and Ctrl-C, then Ctrl-] to navigate. Prove only the chosen invocation receives input and a competing attachment cannot obtain Control. Preserve its actual responses and peer observation.',
-    'fullscreen': 'Use f in both Observe and Control. Show the same Task/generation and retained exclusive Control, resize while controlling, use native tmux detach, and verify dashboard input, selection and terminal modes on return. Repeat within an outer tmux.',
-    'disconnect': 'Queue recognizable input while interrupting this SSH connection. Confirm Disconnected and that the remote worker continues. Reconnect with t: prove the same generation, Observe mode, no replay, and explicit i to regain Control. Retain before/after owner identities.',
-    'completion': 'Let the assigned native invocation finish while attached. Prove the workflow advances, ordinary Task evidence remains authoritative, and the ended terminal rejects later input. Start a later disposable invocation through normal Fluent controls; reconnecting the old view must report unavailable and must not restart or retarget it.',
-    'cancellation': 'Attach to a separately prepared disposable native invocation, cancel its Attempt through the normal remote Fluent command, and verify child settlement, attachment invalidation and authoritative cancellation evidence. Keep the local companion project usable.',
-    'failure-return': 'Exercise attachment failure and worker completion during full-screen access. Verify dashboard restoration after each. Keep provider output and concrete action/result observations.',
-}
-(output / 'scenarios.json').write_text(json.dumps(scenarios, indent=2) + '\n')
 try:
+    binary = Path(os.environ['FLUENT_SSH_LOCAL_BIN']).resolve(strict=True)
+    local_project = Path(os.environ['FLUENT_SSH_LOCAL_PROJECT']).resolve(strict=True)
+    local_version = run([str(binary), '--version'])
+    assert candidate[:8] in local_version, 'local production binary must identify the candidate'
+    (output / 'local-version.txt').write_text(local_version)
+    (output / 'local-binary.sha256').write_text(hashlib.sha256(binary.read_bytes()).hexdigest() + '\n')
+    (output / 'local-host.txt').write_text(run(['sw_vers']) + run(['tmux', '-V']))
+    config_path = Path.home() / '.config/fluent/dashboard-sources.json'
+    config = json.loads(config_path.read_text())
+    assert config['schema_version'] == 1
+    configured = {s['name']: s for s in config['ssh']}
+    assert len(configured) == len(config['ssh']), 'duplicate source names'
+    # Isolate the dashboard registry without changing OpenSSH's host-owned keys or config.
+    dashboard_home = native['prepare_dashboard_home'](output / 'dashboard-home', config['ssh'])
+    dashboard_env = native['dashboard_environment'](os.environ, dashboard_home)
+    observations = {}
+    scenarios = {
+        'sources': 'Show local and remote projects together with distinct source/host identities. Navigate local Work while another configured source fails authentication or host verification; record the source-specific remedy.',
+        'embedded-observe': 'Select the recorded remote Task/generation and observe its native interface. Attempt typing and resizing from Observe; verify no worker input or size change.',
+        'embedded-control': 'Acquire Control, enter Unicode and multiline text, resize, use Esc and Ctrl-C, then Ctrl-] to navigate. Prove only the chosen invocation receives input and a competing attachment cannot obtain Control. Preserve its actual responses and peer observation.',
+        'fullscreen': 'Use f in both Observe and Control. Show the same Task/generation and retained exclusive Control, resize while controlling, use native tmux detach, and verify dashboard input, selection and terminal modes on return. Repeat within an outer tmux.',
+        'disconnect': 'Queue recognizable input while interrupting this SSH connection. Confirm Disconnected and that the remote worker continues. Reconnect with t: prove the same generation, Observe mode, no replay, and explicit i to regain Control. Retain before/after owner identities.',
+        'completion': 'Let the assigned native invocation finish while attached. Prove the workflow advances, ordinary Task evidence remains authoritative, and the ended terminal rejects later input. Start a later disposable invocation through normal Fluent controls; reconnecting the old view must report unavailable and must not restart or retarget it.',
+        'cancellation': 'Attach to a separately prepared disposable native invocation, cancel its Attempt through the normal remote Fluent command, and verify child settlement, attachment invalidation and authoritative cancellation evidence. Keep the local companion project usable.',
+        'failure-return': 'Exercise attachment failure and worker completion during full-screen access. Verify dashboard restoration after each. Keep provider output and concrete action/result observations.',
+    }
+    (output / 'scenarios.json').write_text(json.dumps(scenarios, indent=2) + '\n')
+    assert tuple(scenarios) == native['SSH_SCENARIOS']
     for provider in ['codex', 'claude', 'pi']:
         name = os.environ['FLUENT_SSH_' + provider.upper() + '_SOURCE']
         source = configured[name]
@@ -96,15 +103,18 @@ try:
             print(scenario + ': ' + description, flush=True)
         print('Complete these journeys in the dashboard, then q to record observations. Use an authorized second terminal to interrupt SSH or cancel fixture Work.', flush=True)
         capture = output / (provider + '.typescript')
-        subprocess.run(['/usr/bin/script', '-q', str(capture), str(binary), 'dashboard', str(local_project)], check=True)
+        subprocess.run(['/usr/bin/script', '-q', str(capture), str(binary), 'dashboard', str(local_project)], env=dashboard_env, check=True)
+        observations[provider] = {}
         for scenario in scenarios:
             result = input(provider + ' / ' + scenario + ': enter pass followed by concrete action/result observations and evidence references, or fail: ')
             (output / (provider + '-' + scenario + '.txt')).write_text(result + '\n')
+            observations[provider][scenario] = result
             assert result.startswith('pass ') and len(result) > 10, 'host acceptance remains incomplete'
         after = remote(host, ['fluent', 'agent-source', 'snapshot', '--project-root', project])
         (output / (provider + '-after.json')).write_text(after)
         (output / (provider + '-remote-status.txt')).write_text(remote(host, ['fluent', 'status', project]))
         assert remote(host, ['git', '-C', project, 'rev-parse', 'HEAD']).strip() == candidate
+    native['require_ssh_journeys'](observations)
     clean()
     assert run(['git', 'rev-parse', 'HEAD']).strip() == candidate
     (output / 'result.txt').write_text('Recorded all provider journeys. Targeted Tests Review must inspect captures and action/result evidence before accepting this required check.\n')

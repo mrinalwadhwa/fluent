@@ -567,6 +567,281 @@ test_work_merge_candidate_inspection_read_only() {
   return $RESULT
 }
 
+legacy_fixture_cli() {
+  env -u FLUENT_TASK_KIND \
+    HOME="${TEST_DIR}/home" XDG_CONFIG_HOME="${TEST_DIR}/config" \
+    XDG_DATA_HOME="${TEST_DIR}/data" CLAUDE_CONFIG_DIR="${TEST_DIR}/claude" \
+    FLUENT_NO_UPDATE_CHECK=1 "$@"
+}
+
+# Build the history with the published executable. No Work records are synthesized
+# for the positive cases: the old Writer and reviewers own every saved identity.
+create_legacy_branch_switch_candidate() {
+  local delta="$1"
+  mkdir -p "${TEST_DIR}/home"
+  OLD_FLUENT_BIN="$(bash "${PROJECT_DIR}/tests/fixtures/prepare-released-060.sh")" || return 1
+  cat > "${TEST_DIR}/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+set -eu
+trap 'status=$?; fluent-test-review-inspection claude "$status" "$@" || exit $?; exit "$status"' EXIT
+if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
+  printf '{"loggedIn":true}\n'
+  exit 0
+fi
+if [ "${1:-}" = "--version" ]; then printf '2.1.211\n'; exit 0; fi
+PROMPT=""
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-p" ]; then PROMPT="$arg"; break; fi
+  previous="$arg"
+done
+# Writer launches can point at a saved assignment instead of inlining its text.
+case "$PWD:$PROMPT" in
+  */work-6-work-1-attempt-1:*'You are the Learner'*) ;;
+  */work-6-work-1-attempt-1:*'Rebase the candidate branch onto'*) ;;
+  */work-6-work-1-attempt-1:*) PROMPT='You are a Fluent Writer' ;;
+esac
+case "$PROMPT" in
+  *'Rebase the candidate branch onto'*)
+    target=$(printf '%s' "$PROMPT" | sed -n 's/.*onto `\([^`]*\)`.*/\1/p' | head -1)
+    git rebase "$target"
+    ;;
+  *'You are the Learner'*)
+    mkdir -p .fluent/expertise
+    printf 'Preserve the original review identity.\n' > .fluent/expertise/landing.md
+    draft=$(printf '%s\n' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+    printf '{"learning_summary":"Preserve review identity","follow_ups":[]}\n' > "$draft"
+    ;;
+  *'You are a Fluent Writer'*)
+    if [ ! -f candidate.txt ]; then
+      printf 'first candidate\n' > candidate.txt
+      git add candidate.txt
+      git commit -m 'Add candidate' -m '- Create the initial candidate'
+    else
+      if [ "$LANDING_FIXTURE_DELTA" = carried ]; then
+        printf 'Document the candidate.\n' >> README.md
+        git add README.md
+      else
+        printf 'corrected candidate\n' >> candidate.txt
+        git add candidate.txt
+      fi
+      git commit -m 'Update candidate' -m '- Apply the requested correction'
+    fi
+    ;;
+  *)
+    case "$PWD" in
+      *attempt-1-review-documentation*) printf 'Verdict: fail\n\nCorrect the candidate.\n' > review.md ;;
+      *) printf 'Verdict: pass\n\nCandidate inspected.\n' > review.md ;;
+    esac
+    ;;
+esac
+printf '{"type":"result","subtype":"success","result":"done","session_id":"mock"}\n'
+MOCK
+  chmod +x "${TEST_DIR}/bin/claude"
+  export LANDING_FIXTURE_DELTA="$delta"
+  legacy_fixture_cli "$OLD_FLUENT_BIN" work-item create work-1 --title 'Preserve review identity' > /dev/null || return 1
+  legacy_fixture_cli "$OLD_FLUENT_BIN" attempt create work-1 attempt-1 --write-coder claude --review-coder claude > /dev/null || return 1
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$OLD_FLUENT_BIN" task run work-1 attempt-1 attempt-1-write-1 --no-sandbox || return 1
+  git checkout -b integration > /dev/null 2>&1 || return 1
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$OLD_FLUENT_BIN" attempt run work-1 attempt-1 --no-sandbox || return 1
+  legacy_fixture_cli "$OLD_FLUENT_BIN" work-item show work-1 > "$TEST_DIR/legacy.json" || return 1
+  jq -e '
+    .attempts[0] as $a |
+    [$a.tasks[] | select(.kind == "write") | .output.source_branch] == ["main", "integration"] and
+    $a.review_state == "passed" and $a.learning.status == "succeeded" and
+    .merge_candidates[0].target_branch == "integration"
+  ' "$TEST_DIR/legacy.json" > /dev/null || return 1
+}
+
+snapshot_ordinary_reviews() {
+  local destination="$1"
+  mkdir -p "$destination"
+  for record in .fluent/work/tasks/work-1/attempt-1/*review*.json; do
+    cp "$record" "$destination/$(basename "$record")" || return 1
+    local area
+    area=$(jq -r '.artifact_area.path' "$record")
+    cp "$area/review.md" "$destination/$(basename "$record").md" || return 1
+  done
+}
+
+test_work_merge_legacy_branch_switch() {
+  local delta="$1"
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_legacy_branch_switch_candidate "$delta" || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-before" || return 1
+  local main_before
+  main_before=$(git rev-parse main)
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate || return 1
+  [ "$(git rev-parse main)" = "$main_before" ] || return 1
+  [ "$(merge_candidate_record_value '.target_branch')" = integration ] || return 1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = merged ] || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-after" || return 1
+  diff -ru "$TEST_DIR/reviews-before" "$TEST_DIR/reviews-after"
+}
+
+test_work_merge_rejects_changed_effective_coverage() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_legacy_branch_switch_candidate carried || return 1
+  cp -R .fluent/work "$TEST_DIR/original-work" || return 1
+  local target_before corruption
+  target_before=$(git rev-parse integration)
+  for corruption in branch commit workspace access missing changed-domain; do
+    # Deliberate negative controls start from the same real completed history.
+    rm -rf .fluent/work
+    cp -R "$TEST_DIR/original-work" .fluent/work || return 1
+    python3 - "$corruption" <<'PYCONTROL' || return 1
+import json, sys
+from pathlib import Path
+kind = sys.argv[1]
+root = Path('.fluent/work')
+name = 'attempt-1-review-architecture'
+if kind == 'changed-domain':
+    name = 'attempt-1-review-2-documentation'
+path = root / 'tasks/work-1/attempt-1' / (name + '.json')
+if kind in ('missing', 'changed-domain'):
+    path.unlink()
+else:
+    value = json.loads(path.read_text())
+    if kind == 'branch': value['review_context']['source_branch'] = 'integration'
+    if kind == 'commit': value['review_context']['candidate_commit'] = '0' * 40
+    if kind == 'workspace':
+        value['review_context']['candidate_workspace_path'] = '../foreign'
+        value['workspace_access']['reads'] = [{'id': 'candidate', 'path': '../foreign'}]
+    if kind == 'access': value['workspace_access']['reads'] = []
+    path.write_text(json.dumps(value))
+PYCONTROL
+    if PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate > "$TEST_DIR/refusal" 2>&1; then
+      printf 'Unexpected landing success for %s\n' "$corruption"
+      return 1
+    fi
+    cat "$TEST_DIR/refusal"
+    if [ "$corruption" = access ]; then
+      assert_contains "$(cat "$TEST_DIR/refusal")" 'readable workspace' || return 1
+    else
+      assert_contains "$(cat "$TEST_DIR/refusal")" 'review binding changed before landing' || return 1
+    fi
+    [ "$(git rev-parse integration)" = "$target_before" ] || return 1
+    [ "$(merge_candidate_record_value '.merge_state.landing_intent // empty')" = "" ] || return 1
+    if [ "$corruption" = branch ]; then
+      if PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" attempt run work-1 attempt-1 --no-sandbox > "$TEST_DIR/readiness" 2>&1; then
+        cat "$TEST_DIR/readiness"
+        return 1
+      fi
+      assert_contains "$(cat "$TEST_DIR/readiness")" 'review binding changed before landing' || return 1
+      assert_contains "$(cat "$TEST_DIR/readiness")" 'fluent merge-candidate show work-1' || return 1
+    fi
+  done
+}
+
+test_work_merge_recovers_released_landing_pending() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_legacy_branch_switch_candidate carried || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-before" || return 1
+  local target_before
+  target_before=$(git rev-parse integration)
+  if PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$OLD_FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate > "$TEST_DIR/old-land" 2>&1; then
+    printf 'Published 0.6 unexpectedly landed the branch-switch candidate\n'
+    return 1
+  fi
+  cat "$TEST_DIR/old-land"
+  assert_contains "$(cat "$TEST_DIR/old-land")" 'ordinary documentation review binding changed before landing' || return 1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = landing-pending ] || return 1
+  [ "$(git rev-parse integration)" = "$target_before" ] || return 1
+  merge_candidate_record_value '.merge_state.landing_intent' > "$TEST_DIR/original-intent.json"
+  cp -R .fluent/work "$TEST_DIR/pending-work" || return 1
+
+  local corruption expected target_after
+  for corruption in evidence model authorization cancellation target repository; do
+    rm -rf .fluent/work
+    cp -R "$TEST_DIR/pending-work" .fluent/work || return 1
+    expected='landing intent no longer matches'
+    case "$corruption" in
+      evidence)
+        local evidence_path
+        evidence_path=$(jq -r '.check_artifacts[0].path' "$TEST_DIR/original-intent.json")
+        printf '\nchanged evidence\n' >> "$evidence_path"
+        ;;
+      model)
+        local record='.fluent/work/tasks/work-1/attempt-1/attempt-1-review-architecture.json'
+        jq '.review_context.source_branch = "altered"' "$record" > "$TEST_DIR/changed.json" || return 1
+        cp "$TEST_DIR/changed.json" "$record"
+        ;;
+      authorization)
+        local record='.fluent/work/items/work-1.json'
+        jq '.authorization = {state:"execution-ready", authority:"automatic"}' "$record" > "$TEST_DIR/changed.json" || return 1
+        cp "$TEST_DIR/changed.json" "$record"
+        expected='landing authorization changed'
+        ;;
+      cancellation)
+        legacy_fixture_cli "$FLUENT_BIN" attempt cancel work-1 attempt-1 || return 1
+        expected='cancel'
+        ;;
+      target)
+        git commit --allow-empty -m 'Move fixture target' > /dev/null || return 1
+        expected='target moved'
+        ;;
+      repository)
+        local record
+        record=$(merge_candidate_record_path)
+        jq '.merge_state.landing_intent.repository = "/different/repository"' "$record" > "$TEST_DIR/changed.json" || return 1
+        cp "$TEST_DIR/changed.json" "$record"
+        ;;
+    esac
+    target_after=$(git rev-parse integration)
+    if PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate > "$TEST_DIR/refusal" 2>&1; then
+      printf 'Unexpected recovery success after changing %s\n' "$corruption"
+      return 1
+    fi
+    cat "$TEST_DIR/refusal"
+    assert_contains "$(cat "$TEST_DIR/refusal")" "$expected" || return 1
+    [ "$(git rev-parse integration)" = "$target_after" ] || return 1
+    if [ "$corruption" = target ]; then
+      git reset --hard "$target_before" > /dev/null || return 1
+    fi
+  done
+
+  rm -rf .fluent/work
+  cp -R "$TEST_DIR/pending-work" .fluent/work || return 1
+  # Retry without rewriting any historical record or starting another Writer.
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" attempt run work-1 attempt-1 --no-sandbox || return 1
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate || return 1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = merged ] || return 1
+  [ "$(git rev-parse integration)" = "$(jq -r '.verified_commit' "$TEST_DIR/original-intent.json")" ] || return 1
+  merge_candidate_record_value '.merge_state.landing_intent' > "$TEST_DIR/after-intent.json"
+  diff -u "$TEST_DIR/original-intent.json" "$TEST_DIR/after-intent.json" || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-after" || return 1
+  diff -ru "$TEST_DIR/reviews-before" "$TEST_DIR/reviews-after" || return 1
+  local reflog_before
+  reflog_before=$(git reflog show --format='%H %gs' integration)
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate || return 1
+  [ "$(git reflog show --format='%H %gs' integration)" = "$reflog_before" ] || return 1
+}
+
+test_work_merge_reconciles_applied_intent() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_legacy_branch_switch_candidate fresh || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-before" || return 1
+  if FLUENT_TEST_INTERRUPT_AFTER_LANDING_GIT=1 PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate > "$TEST_DIR/interrupted" 2>&1; then
+    printf 'Landing did not stop at the injected publication boundary\n'
+    return 1
+  fi
+  cat "$TEST_DIR/interrupted"
+  assert_contains "$(cat "$TEST_DIR/interrupted")" 'injected interruption after landing Git effect' || return 1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = landing-pending ] || return 1
+  [ "$(git rev-parse integration)" = "$(merge_candidate_record_value '.merge_state.landing_intent.verified_commit')" ] || return 1
+  local reflog_before
+  reflog_before=$(git reflog show --format='%H %gs' integration)
+  PATH="${TEST_DIR}/bin:$PATH" legacy_fixture_cli "$FLUENT_BIN" merge-candidate land --no-sandbox work-1 attempt-1-merge-candidate || return 1
+  [ "$(merge_candidate_record_value '.merge_state.status')" = merged ] || return 1
+  [ "$(git reflog show --format='%H %gs' integration)" = "$reflog_before" ] || return 1
+  snapshot_ordinary_reviews "$TEST_DIR/reviews-after" || return 1
+  diff -ru "$TEST_DIR/reviews-before" "$TEST_DIR/reviews-after"
+}
+
 printf 'test-work-merge-candidate\n\n'
 
 run_test "work merge lands after update and checks" \
@@ -595,5 +870,18 @@ run_test "work merge rebase failure leaves target unchanged" \
   test_work_merge_rebase_failure_leaves_target_unchanged
 run_test "work merge-candidate inspection is read-only" \
   test_work_merge_candidate_inspection_read_only
+
+run_test "legacy branch switch lands with fresh ordinary reviews" \
+  'test_work_merge_legacy_branch_switch fresh'
+run_test "legacy branch switch lands with carried ordinary reviews" \
+  'test_work_merge_legacy_branch_switch carried'
+
+run_test "landing rejects changed or missing effective coverage" \
+  test_work_merge_rejects_changed_effective_coverage
+
+run_test "public land recovers released 0.6 landing-pending history" \
+  test_work_merge_recovers_released_landing_pending
+run_test "public land reconciles an already-applied intent" \
+  test_work_merge_reconciles_applied_intent
 
 summarize_and_exit

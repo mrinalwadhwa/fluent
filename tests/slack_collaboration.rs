@@ -4860,10 +4860,21 @@ fn async_checkout_loss_pauses_until_explicit_reconfirmation() {
 
 #[test]
 fn async_provider_login_recovery_rechecks_scope_before_resuming() {
+    check_async_provider_login_recovery(Duration::ZERO);
+}
+
+#[test]
+fn async_provider_login_recovery_rechecks_scope_after_slow_resume() {
+    // Exercise a provider that completes after the former 500 ms polling window.
+    check_async_provider_login_recovery(Duration::from_millis(750));
+}
+
+fn check_async_provider_login_recovery(resume_delay: Duration) {
     #[derive(Clone)]
     struct LoginProvider {
         preparations: Arc<AtomicUsize>,
         turns: Arc<AtomicUsize>,
+        resume_delay: Duration,
     }
     impl ConversationProvider for LoginProvider {
         fn prepare_session(&mut self, scope: &ProviderScope) -> ProviderResult<Option<String>> {
@@ -4894,6 +4905,7 @@ fn async_provider_login_recovery_rechecks_scope_before_resuming() {
             _: &str,
         ) -> ProviderResult<String> {
             assert_eq!(session, "authenticated-session");
+            std::thread::sleep(self.resume_delay);
             self.turns.fetch_add(1, Ordering::SeqCst);
             Ok("resumed after login".into())
         }
@@ -4909,6 +4921,7 @@ fn async_provider_login_recovery_rechecks_scope_before_resuming() {
         LoginProvider {
             preparations: preparations.clone(),
             turns: turns.clone(),
+            resume_delay,
         },
         InMemorySlack::default(),
         1,
@@ -4925,6 +4938,7 @@ fn async_provider_login_recovery_rechecks_scope_before_resuming() {
         LoginProvider {
             preparations: preparations.clone(),
             turns: turns.clone(),
+            resume_delay,
         },
         InMemorySlack::default(),
         1,
@@ -4984,15 +4998,34 @@ fn async_provider_login_recovery_rechecks_scope_before_resuming() {
     runner
         .drive_once(std::time::Duration::from_millis(1))
         .unwrap();
-    for _ in 0..100 {
-        if turns.load(Ordering::SeqCst) == 1 {
+    // Observe the completed reply, including durable state and delivery, before
+    // dropping the fixture. Provider startup can exceed a short polling window.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        runner.poll_completions().unwrap();
+        if runner
+            .slack()
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.text.contains("resumed after login"))
+        {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "login recovery did not deliver its reply: preparations={}, turns={}",
+            preparations.load(Ordering::SeqCst),
+            turns.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
-    runner.poll_completions().unwrap();
     assert_eq!(preparations.load(Ordering::SeqCst), 2);
     assert_eq!(turns.load(Ordering::SeqCst), 1);
+    let recovered = FileCollaborationStore::new(home.path())
+        .load_thread(&config, "1.0")
+        .unwrap()
+        .unwrap();
+    assert!(recovered.pending_turn.is_none());
 }
 
 #[test]

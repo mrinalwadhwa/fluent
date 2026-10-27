@@ -5,8 +5,23 @@ use anyhow::{Context, Result, ensure};
 use crossterm::event::Event;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// Permit a slow display to resume, but never let it own local teardown.
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+pub(crate) struct DisplayRestoreFailed;
+
+impl std::fmt::Display for DisplayRestoreFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("terminal display unavailable; dashboard closed without repaint")
+    }
+}
+
+impl std::error::Error for DisplayRestoreFailed {}
 
 pub struct SshTerminal {
     ssh: OpenSsh,
@@ -221,53 +236,123 @@ impl SshTerminal {
         connection.resize(columns, rows)?;
         connection.take_output();
         connection.repaint()?;
-        let mut raw = RawInput::new()?;
-        let mut stdout = std::io::stdout();
+        let mut raw = RawTerminal::new()?;
         let mut size = (columns, rows);
         let mut prefix = false;
-        loop {
-            connection.poll()?;
-            stdout.write_all(&connection.take_output())?;
-            stdout.flush()?;
-            if connection.ended() || connection.detached() {
-                break;
-            }
-            let current = crossterm::terminal::size()?;
-            if current != size {
-                connection.resize(current.0, current.1)?;
-                size = current;
-            }
-            let mut input = [0; 8192];
-            match raw.input.read(&mut input) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if connection.has_control() {
-                        connection.input(&input[..n])?;
-                    } else {
-                        // Observe never sends user input. Honor native detach
-                        // locally while its remote tmux client remains read-only.
-                        for &byte in &input[..n] {
-                            if prefix && byte == b'd' {
-                                return Ok(0);
+        let result = (|| {
+            loop {
+                connection.poll()?;
+                connection.write_output(&mut raw.output)?;
+                if connection.ended() || connection.detached() {
+                    break;
+                }
+                let current = crossterm::terminal::size()?;
+                if current != size {
+                    connection.resize(current.0, current.1)?;
+                    size = current;
+                }
+                let mut input = [0; 8192];
+                match raw.input.read(&mut input) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if connection.has_control() {
+                            connection.input(&input[..n])?;
+                        } else {
+                            // Observe never sends user input. Honor native detach
+                            // locally while its remote tmux client remains read-only.
+                            for &byte in &input[..n] {
+                                if prefix && byte == b'd' {
+                                    return Ok(0);
+                                }
+                                prefix = byte == 2;
                             }
-                            prefix = byte == 2;
                         }
                     }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e.into()),
+                std::thread::sleep(Duration::from_millis(5));
             }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(0)
+            Ok(0)
+        })();
+        // Preserve a display failure even if transport already failed: the
+        // dashboard must not repaint an unavailable terminal during cleanup.
+        raw.restore_display(connection)?;
+        result
     }
 }
 
-struct RawInput {
+struct RawTerminal {
     input: File,
+    output: File,
     raw: bool,
 }
-impl RawInput {
+impl RawTerminal {
+    fn restore_display(&mut self, connection: &mut RemoteConnection) -> Result<()> {
+        // Discard only after leaving full-screen. Cancel any partial terminal
+        // sequence and reset display modes before the dashboard paints again.
+        let mut reset: &[u8] = b"\x18\x1b[!p\x1b[0m\x1b[?25h";
+        let mut transport_error = None;
+        let deadline = Instant::now() + RESTORE_TIMEOUT;
+        let restored = (|| -> Result<()> {
+            while !reset.is_empty() {
+                ensure!(
+                    Instant::now() < deadline,
+                    "full-screen display restoration timed out"
+                );
+                if transport_error.is_none() {
+                    transport_error = connection.poll().err();
+                }
+                connection.take_output();
+                let mut ready = libc::pollfd {
+                    fd: self.output.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let polled = unsafe { libc::poll(&mut ready, 1, 0) };
+                if polled < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error.into());
+                    }
+                } else if polled > 0 {
+                    match self.output.write(reset) {
+                        Ok(0) => anyhow::bail!("full-screen terminal output closed"),
+                        Ok(n) => reset = &reset[n..],
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                if !reset.is_empty() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = restored {
+            // Full-screen has ended. Discard its queued paint and attempt one
+            // nonblocking reset; neither emulator progress nor a successful
+            // write is required to release raw mode or settle the attachment.
+            unsafe { libc::tcflush(self.output.as_raw_fd(), libc::TCOFLUSH) };
+            let _ = self.output.write(
+                b"\x18\x1b[!p\x1b[0m\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1015l\x1b[?1006l\x1b[?2004l\x1b[?1049l",
+            );
+            return Err(error.context(DisplayRestoreFailed));
+        }
+        match transport_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn new() -> Result<Self> {
         // PTY stdin and stdout can share an open file description. Changing
         // stdin's flags would also make repaint writes fail under backpressure.
@@ -277,13 +362,24 @@ impl RawInput {
             .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
             .open("/dev/tty")
             .context("opening full-screen terminal input")?;
-        let mut guard = Self { input, raw: false };
+        // stdout may share stdin's file description. A separate open keeps
+        // both inherited flags intact, including on setup and write failures.
+        let output = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open("/dev/tty")
+            .context("opening full-screen terminal output")?;
+        let mut guard = Self {
+            input,
+            output,
+            raw: false,
+        };
         crossterm::terminal::enable_raw_mode()?;
         guard.raw = true;
         Ok(guard)
     }
 }
-impl Drop for RawInput {
+impl Drop for RawTerminal {
     fn drop(&mut self) {
         if self.raw {
             let _ = crossterm::terminal::disable_raw_mode();

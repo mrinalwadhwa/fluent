@@ -374,6 +374,7 @@ impl CoderKind {
 pub struct TranscriptCapture<'a> {
     pub(crate) path: &'a Path,
     pub(crate) config: crate::transcript_pump::TranscriptPumpConfig,
+    allow_claude_retries: bool,
 }
 
 impl<'a> TranscriptCapture<'a> {
@@ -387,6 +388,7 @@ impl<'a> TranscriptCapture<'a> {
         Self {
             path: transcript_path,
             config: crate::transcript_pump::resolve_config(project_root),
+            allow_claude_retries: true,
         }
     }
 
@@ -403,7 +405,19 @@ impl<'a> TranscriptCapture<'a> {
         path: &'a Path,
         config: crate::transcript_pump::TranscriptPumpConfig,
     ) -> Self {
-        Self { path, config }
+        Self {
+            path,
+            config,
+            allow_claude_retries: true,
+        }
+    }
+
+    pub(crate) fn single_claude_launch(&self) -> Self {
+        Self {
+            path: self.path,
+            config: self.config.clone(),
+            allow_claude_retries: false,
+        }
     }
 }
 
@@ -518,6 +532,38 @@ pub enum CoderSession<'a> {
     Resume(&'a str),
 }
 
+/// A missing-conversation fallback gets one supervised process launch. It
+/// cannot restart a fresh conversation through the auth or rate-limit loops.
+fn run_claude_with_retry_policy(
+    build: impl Fn() -> Command,
+    capture: Option<&TranscriptCapture<'_>>,
+) -> CoderRunCompletion {
+    let transcript = capture.map(|capture| capture.path);
+    let config = capture
+        .map(|capture| capture.config.clone())
+        .unwrap_or_default();
+    if capture.is_some_and(|capture| !capture.allow_claude_retries) {
+        run_with_transcript_reported(
+            build(),
+            transcript,
+            &config,
+            Some(SupervisionDeadline::ClaudeNoProgress(
+                config.claude_no_progress_timeout,
+            )),
+        )
+    } else {
+        run_with_transcript_retrying_reported(
+            build,
+            transcript,
+            &config,
+            &crate::notify::notify,
+            &real_credential_refresh,
+            true,
+            None,
+        )
+    }
+}
+
 /// Claude Code invoked via sandbox-exec.
 pub struct SandboxedClaudeCode {
     pub sandbox_profile: Option<String>,
@@ -602,10 +648,8 @@ impl Coder for SandboxedClaudeCode {
             return CoderRunCompletion::terminal_only(Err(err.into()));
         }
         let want_transcript = capture.is_some();
-        let transcript_file = capture.map(|c| c.path);
-        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         classify_claude_provider_argument_failure(
-            run_with_transcript_retrying_reported(
+            run_claude_with_retry_policy(
                 || {
                     let mut cmd = self.build_writer_command(working_dir, session);
                     apply_coder_env(&mut cmd, extra_env);
@@ -623,12 +667,7 @@ impl Coder for SandboxedClaudeCode {
                     cmd.args(extra_args);
                     cmd
                 },
-                transcript_file,
-                &config,
-                &crate::notify::notify,
-                &real_credential_refresh,
-                true,
-                None,
+                capture,
             ),
             capture,
             extra_args,
@@ -903,12 +942,10 @@ impl Coder for BareClaudeCode {
             return CoderRunCompletion::terminal_only(Err(err.into()));
         }
         let want_transcript = capture.is_some();
-        let transcript_file = capture.map(|c| c.path);
-        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
         let model = self.effective_model();
         let effort = self.effort.clone();
         classify_claude_provider_argument_failure(
-            run_with_transcript_retrying_reported(
+            run_claude_with_retry_policy(
                 || {
                     let mut cmd = self.build_writer_command(working_dir, session);
                     apply_coder_env(&mut cmd, extra_env);
@@ -929,12 +966,7 @@ impl Coder for BareClaudeCode {
                     cmd.args(extra_args);
                     cmd
                 },
-                transcript_file,
-                &config,
-                &crate::notify::notify,
-                &real_credential_refresh,
-                true,
-                None,
+                capture,
             ),
             capture,
             extra_args,
@@ -1865,17 +1897,20 @@ impl std::error::Error for SupervisionSidecarError {
     }
 }
 
-/// Persist a non-clean supervision report as `coder-supervision.json` in the role
-/// artifact directory, written atomically via a unique temp file and rename. A clean
-/// report has nothing to persist. A write obstruction returns a typed non-retryable
-/// error.
+/// Choose whether to retain clean reports as evidence alongside diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SupervisionReportRetention {
+    NonClean,
+    All,
+}
+
+/// Persist a supervision report as `coder-supervision.json` in the role artifact
+/// directory, written atomically via a unique temp file and rename. Return a typed
+/// non-retryable error when storage obstructs the write.
 fn persist_coder_supervision(
     report: &CoderSupervisionReport,
     artifact_dir: &Path,
 ) -> Result<(), SupervisionSidecarError> {
-    if report.is_clean() {
-        return Ok(());
-    }
     let write = || -> Result<()> {
         std::fs::create_dir_all(artifact_dir)
             .with_context(|| format!("create artifact dir {}", artifact_dir.display()))?;
@@ -1893,16 +1928,35 @@ fn persist_coder_supervision(
     write().map_err(SupervisionSidecarError)
 }
 
-/// Persist the coder's supervision report at the role artifact boundary, then return
-/// its terminal outcome. A sidecar obstruction is composed as a typed non-retryable
-/// secondary — onto the run error if the run also failed, or returned as the error if
-/// the run succeeded — so the group-sweep diagnostic is never silently dropped and the
-/// already-run coder is never relaunched.
+/// Persist the coder's non-clean supervision report at the role artifact boundary,
+/// then return its terminal outcome.
 pub(crate) fn finish_supervised_coder_run(
     completion: CoderRunCompletion,
     artifact_dir: &Path,
 ) -> Result<i32> {
-    let sidecar = persist_coder_supervision(&completion.report, artifact_dir);
+    finish_supervised_coder_run_with_retention(
+        completion,
+        artifact_dir,
+        SupervisionReportRetention::NonClean,
+    )
+}
+
+/// Persist the requested supervision evidence, then return the terminal outcome.
+/// Claude Writers retain clean reports to prove settlement during session recovery.
+/// A sidecar obstruction is composed as a typed non-retryable
+/// secondary — onto the run error if the run also failed, or returned as the error if
+/// the run succeeded — so the group-sweep diagnostic is never silently dropped and the
+/// already-run coder is never relaunched.
+pub(crate) fn finish_supervised_coder_run_with_retention(
+    completion: CoderRunCompletion,
+    artifact_dir: &Path,
+    retention: SupervisionReportRetention,
+) -> Result<i32> {
+    let sidecar = if retention == SupervisionReportRetention::All || !completion.report.is_clean() {
+        persist_coder_supervision(&completion.report, artifact_dir)
+    } else {
+        Ok(())
+    };
     match (completion.terminal, sidecar) {
         (Ok(code), Ok(())) => Ok(code),
         (Ok(_), Err(sidecar_err)) => Err(anyhow::Error::new(sidecar_err)),
@@ -3673,6 +3727,112 @@ fn preserve_transcript_phase(
     Ok(())
 }
 
+/// Freeze every launch diagnostic before a missing-session fallback replaces
+/// the canonical files. Existing phases remain immutable across Task retries.
+pub(crate) fn preserve_missing_claude_launch(
+    transcript: &Path,
+    report: &CoderSupervisionReport,
+) -> Result<()> {
+    let mut phase = next_transcript_phase(Some(transcript));
+    let number = phase;
+    prepare_transcript_retry_phase(Some(transcript), &mut phase)?;
+    for source in [
+        provider_stderr_path(transcript),
+        crate::transcript_pump::status_path_for(transcript),
+    ] {
+        let bytes = std::fs::read(&source)?;
+        let target = phase_transcript_path(&source, number);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    let path = transcript
+        .parent()
+        .context("Claude transcript has no artifact directory")?
+        .join(format!("coder-supervision.{number}.json"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(&serde_json::to_vec_pretty(report)?)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Preserve the last invocation before an outer Task retry replaces its files.
+/// Failed setup may leave only some files; retain each one that exists.
+pub(crate) fn preserve_claude_invocation(transcript: &Path) -> Result<()> {
+    let status = crate::transcript_pump::status_path_for(transcript);
+    let sources = [
+        status.clone(),
+        transcript.to_path_buf(),
+        provider_stderr_path(transcript),
+        transcript.with_file_name("coder-supervision.json"),
+        transcript.with_file_name("native-claude-stderr.log"),
+        transcript.with_file_name("native-claude-exit.json"),
+        transcript.with_file_name("native-claude-settlement.json"),
+        transcript.with_file_name("native-claude-startup-diagnostic.json"),
+        transcript.with_file_name("native-claude-runtime-diagnostic.json"),
+        transcript.with_file_name("execution.json"),
+        transcript.with_file_name("execution-receipt"),
+    ];
+    // A failed preservation may have saved only some files. Continue past
+    // every occupied phase on repair so partial evidence remains immutable.
+    let phase = sources
+        .iter()
+        .map(|source| next_transcript_phase(Some(source)))
+        .max()
+        .unwrap_or(0);
+    let mut status_preserved = false;
+    let result: Result<()> = (|| {
+        for source in sources {
+            let bytes = match std::fs::read(&source) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("read Claude invocation evidence at {}", source.display())
+                    });
+                }
+            };
+            if let Some(bytes) = bytes {
+                let target = phase_transcript_path(&source, phase);
+                (|| -> std::io::Result<()> {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&target)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()
+                })()
+                .with_context(|| {
+                    format!(
+                        "preserve Claude invocation evidence at {}",
+                        target.display()
+                    )
+                })?;
+            }
+            if source == status {
+                status_preserved = true;
+            }
+        }
+        Ok(())
+    })();
+    result.map_err(|error| {
+        let error = crate::transcript_pump::TranscriptPumpError::new(format!("{error:#}"));
+        // Never replace a prior diagnostic until its bytes have been retained.
+        // If that fails, the typed error still reaches the Task's durable pause.
+        if status_preserved {
+            crate::transcript_pump::record_prelaunch_failure(transcript, error).into()
+        } else {
+            error.into()
+        }
+    })
+}
+
 /// The immutable per-phase transcript path derived from a live transcript path:
 /// `run.jsonl` becomes `run.<phase>.jsonl`.
 /// The next safe per-phase transcript number for a Task, derived from existing
@@ -4548,12 +4708,10 @@ mod pump_supervision_tests {
         );
 
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.iter().filter(|c| **c == "signal_group").count(), 1);
-        assert_eq!(calls.iter().filter(|c| **c == "reap").count(), 1);
         assert_eq!(
-            calls.iter().filter(|c| **c == "kill_leader").count(),
-            0,
-            "a settled group signal never falls back to a direct kill"
+            calls.as_slice(),
+            ["poll_exit", "signal_group", "reap"],
+            "sweep before reaping the exited leader, without repeating cleanup or falling back to a direct kill"
         );
     }
 
@@ -4968,7 +5126,8 @@ mod pump_supervision_tests {
     fn natural_exit_sweeps_group_before_reaping() {
         // B5: the leader exits naturally and the pump reaches EOF, but a same-group
         // descendant (with stdout redirected away, so it does not hold the pipe) is
-        // still swept before the boundary returns.
+        // still swept. The fake-leader test pins signal-before-reap ordering;
+        // this real-process test also waits for the OS to reap the descendant.
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         let pid_path = dir.path().join("descendant.pid");
@@ -4997,16 +5156,25 @@ mod pump_supervision_tests {
         );
 
         let pid = std::fs::read_to_string(&pid_path).unwrap();
-        let alive = Command::new("/bin/kill")
-            .args(["-0", pid.trim()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // SIGKILL delivery can precede reaping by the descendant's new parent.
+        // Bound observation below its natural sleep so a missed sweep still fails.
+        let deadline = started + Duration::from_secs(4);
+        let alive = loop {
+            let alive = Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("probe the descendant after the group sweep")
+                .success();
+            if !alive || Instant::now() >= deadline {
+                break alive;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert!(
             !alive,
-            "the same-group descendant must be swept before the leader is reaped"
+            "the same-group descendant must exit before its natural sleep completes"
         );
     }
 

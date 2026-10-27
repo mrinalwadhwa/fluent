@@ -641,7 +641,106 @@ enum SocketRead {
     Text(String),
 }
 
-fn read_socket(socket: &Mutex<WebSocket<UnixStream>>) -> Result<SocketRead> {
+/// Track actual TUI write progress, including partial writes inside tungstenite.
+/// Wrap the stream before the handshake so buffered input stays in its original
+/// WebSocket throughout the invocation.
+#[derive(Debug)]
+pub struct CodexDisplayStream {
+    stream: UnixStream,
+    last_write: Instant,
+    pending: Vec<u8>,
+    written: usize,
+    relaying: bool,
+    yielded: bool,
+}
+
+impl CodexDisplayStream {
+    pub fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            last_write: Instant::now(),
+            pending: Vec::new(),
+            written: 0,
+            relaying: false,
+            yielded: false,
+        }
+    }
+}
+
+impl std::ops::Deref for CodexDisplayStream {
+    type Target = UnixStream;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl Read for CodexDisplayStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if !self.relaying {
+            return self.stream.read(bytes);
+        }
+        let read = unsafe {
+            libc::recv(
+                std::os::fd::AsRawFd::as_raw_fd(&self.stream),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if read < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(read as usize)
+        }
+    }
+}
+
+impl Write for CodexDisplayStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.flush()?;
+        let written = self.stream.write(&bytes[..bytes.len().min(64 * 1024)])?;
+        if written == 0 {
+            return Ok(0);
+        }
+        self.last_write = Instant::now();
+        // Accept only this write's suffix. tungstenite 0.24 drains a Vec from
+        // the front after each short write; keeping a cursor here avoids
+        // repeatedly shifting a large frame on a small socket.
+        // The sole display sender still owns at most one bounded frame.
+        self.pending.extend_from_slice(&bytes[written..]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut progressed = 0;
+        let started = Instant::now();
+        self.yielded = false;
+        while self.written < self.pending.len() {
+            if self.relaying
+                && (progressed >= 256 * 1024 || started.elapsed() >= Duration::from_millis(20))
+            {
+                // Yield even when a peer drains continuously; input shares
+                // the WebSocket and must get a turn between large writes.
+                self.yielded = true;
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let end = self.pending.len().min(self.written + 64 * 1024);
+            let n = self.stream.write(&self.pending[self.written..end])?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            self.written += n;
+            progressed += n;
+            self.last_write = Instant::now();
+        }
+        self.pending.clear();
+        self.written = 0;
+        self.stream.flush()
+    }
+}
+
+fn read_socket<S: Read + Write>(socket: &Mutex<WebSocket<S>>) -> Result<SocketRead> {
     let mut socket = socket
         .lock()
         .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?;
@@ -652,7 +751,9 @@ fn read_socket(socket: &Mutex<WebSocket<UnixStream>>) -> Result<SocketRead> {
         Err(tungstenite::Error::Io(error))
             if matches!(
                 error.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::Interrupted
             ) =>
         {
             Ok(SocketRead::Pending)
@@ -662,33 +763,74 @@ fn read_socket(socket: &Mutex<WebSocket<UnixStream>>) -> Result<SocketRead> {
     }
 }
 
-fn send_required_tui_frame(client: &mut WebSocket<UnixStream>, text: String) -> Result<()> {
-    const DRAIN_LIMIT: Duration = Duration::from_secs(3);
-    let mut result = client.send(Message::Text(text));
-    let deadline = Instant::now() + DRAIN_LIMIT;
+fn send_required_tui_frame(
+    client: &Mutex<WebSocket<CodexDisplayStream>>,
+    text: String,
+    on_pending: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    const IDLE_LIMIT: Duration = Duration::from_secs(3);
+    let started = Instant::now();
+    let mut message = Some(Message::Text(text));
+    let mut on_pending = Some(on_pending);
     loop {
+        let (result, last_write, fd, yielded) = {
+            let mut client = client
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
+            // The stream's write quantum and syscall timeout bound each lock
+            // hold. Release it between flushes so operator input keeps moving.
+            let result = match message.take() {
+                Some(message) => client.send(message),
+                None => client.flush(),
+            };
+            (
+                result,
+                client.get_ref().last_write.max(started),
+                std::os::fd::AsRawFd::as_raw_fd(&client.get_ref().stream),
+                client.get_ref().yielded,
+            )
+        };
         match result {
             Ok(()) => return Ok(()),
             Err(tungstenite::Error::Io(error))
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
                 ) =>
             {
-                if Instant::now() >= deadline {
-                    return Err(tungstenite::Error::Io(error)).with_context(|| format!(
-                        "Codex TUI WebSocket protocol send failed: required frame did not drain within {DRAIN_LIMIT:?}"
-                    ));
+                if last_write.elapsed() >= IDLE_LIMIT {
+                    return Err(tungstenite::Error::Io(error)).context(
+                        "Codex TUI WebSocket protocol send made no progress for three seconds",
+                    );
                 }
-                // tungstenite retains the frame after a stream write failure.
-                // Flush its buffered bytes; sending the message again would
-                // duplicate a partly delivered protocol response.
-                std::thread::sleep(Duration::from_millis(10));
-                result = client.flush();
+                if !yielded && let Some(on_pending) = on_pending.take() {
+                    on_pending()?;
+                }
+                // tungstenite retains the unsent suffix. Resending the frame
+                // would duplicate it. Input reads can also flush control frames
+                // and update the shared progress timestamp.
+                if yielded {
+                    std::thread::yield_now();
+                    continue;
+                }
+                let mut ready = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // Wait outside the WebSocket lock. Wake as soon as the reader
+                // drains bytes instead of rate-limiting a healthy local socket.
+                if unsafe { libc::poll(&mut ready, 1, 10) } < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error).context("wait for Codex display write readiness");
+                    }
+                }
+                std::thread::yield_now();
             }
-            Err(error) => {
-                return Err(error).context("Codex TUI WebSocket protocol send failed");
-            }
+            Err(error) => return Err(error).context("Codex TUI WebSocket protocol send failed"),
         }
     }
 }
@@ -830,7 +972,7 @@ impl DisplaySpool {
 /// HTTP Upgrade, while the older stream fixture intentionally covers JSONL
 /// framing only. This path is the one used by managed Task launch.
 pub fn relay_codex_websockets<W, F>(
-    client: WebSocket<UnixStream>,
+    client: WebSocket<CodexDisplayStream>,
     server: WebSocket<UnixStream>,
     generation: &str,
     thread_id: &str,
@@ -982,7 +1124,9 @@ fn trace_relay_with_details<T: Write>(
     let mut trace = trace
         .lock()
         .map_err(|_| anyhow::anyhow!("Codex relay trace lock poisoned"))?;
-    if trace.1 >= 272 || (trace.1 >= 256 && matches!(outcome, "received" | "forwarded")) {
+    if trace.1 >= 272
+        || (trace.1 >= 256 && matches!(outcome, "received" | "forwarded" | "send-pending"))
+    {
         return Ok(());
     }
     let safe_method = method.filter(|method| {
@@ -1013,7 +1157,7 @@ fn trace_relay_with_details<T: Write>(
 
 /// Retain bounded, payload-free diagnostics for the production relay.
 pub fn relay_codex_websockets_with_trace<W, F, T>(
-    client: WebSocket<UnixStream>,
+    client: WebSocket<CodexDisplayStream>,
     server: WebSocket<UnixStream>,
     generation: &str,
     thread_id: &str,
@@ -1102,7 +1246,7 @@ fn fresh_thread_display_page(start: &Value, request: &Value, assigned: &str) -> 
 /// TUI's handshake from the provider's original responses, then forward its
 /// first prompt and later requests over the subscribed bootstrap connection.
 fn relay_codex_websockets_with_handoff<W, F, T>(
-    client: WebSocket<UnixStream>,
+    mut client: WebSocket<CodexDisplayStream>,
     server: WebSocket<UnixStream>,
     generation: &str,
     thread_id: &str,
@@ -1124,12 +1268,13 @@ where
     let downstream_abort_server = server.get_ref().try_clone()?;
     let display_abort_client = client.get_ref().try_clone()?;
     let overflow_abort_client = client.get_ref().try_clone()?;
+    // Read input without waiting and bound each display write syscall. Small
+    // blocking writes let the kernel coalesce a draining local reader, while
+    // the stream's byte quantum bounds the shared WebSocket lock hold.
+    client.get_mut().relaying = true;
     client
         .get_ref()
-        .set_read_timeout(Some(Duration::from_millis(50)))?;
-    client
-        .get_ref()
-        .set_write_timeout(Some(Duration::from_millis(250)))?;
+        .set_write_timeout(Some(Duration::from_millis(10)))?;
     server
         .get_ref()
         .set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -1155,10 +1300,21 @@ where
         let display = scope.spawn(move || -> Result<()> {
             let result = (|| {
                 while let Some(text) = display_queue.pop() {
-                    let mut client = display_client
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("Codex TUI WebSocket lock poisoned"))?;
-                    if let Err(error) = send_required_tui_frame(&mut client, text) {
+                    if let Err(error) = send_required_tui_frame(&display_client, text, || {
+                        let sequence = display_gate
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
+                            .input_sequence;
+                        trace_relay(
+                            &display_trace,
+                            generation,
+                            thread_id,
+                            "app-to-tui",
+                            "send-pending",
+                            None,
+                            sequence,
+                        )
+                    }) {
                         let sequence = display_gate
                             .lock()
                             .map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?
@@ -1204,11 +1360,18 @@ where
                             }
                             let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
                             trace_relay_transport_error(&request_trace, generation, thread_id, "tui-to-app", "read-error", None, sequence, &error)?;
-                            return Err(error).context("reading native Codex TUI requests");
+                            // A lost display cannot terminate the independent
+                            // provider evidence stream. Revoke this input path;
+                            // the owner still decides settlement or cancellation.
+                            request_display_detached.store(true, Ordering::Release);
+                            bootstrap_display.detach();
+                            return Ok(());
                         }
                         Ok(SocketRead::Closed) => {
                             let sequence = request_gate.lock().map_err(|_| anyhow::anyhow!("native Codex relay gate poisoned"))?.input_sequence;
                             trace_relay(&request_trace, generation, thread_id, "tui-to-app", "closed", None, sequence)?;
+                            request_display_detached.store(true, Ordering::Release);
+                            bootstrap_display.detach();
                             return Ok(());
                         }
                         Ok(SocketRead::Pending) => {
@@ -1240,9 +1403,18 @@ where
                         trace_relay(&request_trace, generation, thread_id, "tui-to-app", "rejected", Some(method), next_sequence)?;
                         if let Some(id) = request.get("id") {
                             let response = json!({"id": id, "error": {"code": -32000, "message": error.to_string()}});
-                            upstream_client.lock()
-                                .map_err(|_| anyhow::anyhow!("Codex WebSocket lock poisoned"))?
-                                .send(Message::Text(response.to_string()))?;
+                            // Refusals use the same FIFO and budgets as every
+                            // other display message. They must not append a new
+                            // frame to a partially flushed required response.
+                            if let Err(rejection) = bootstrap_display.push(response.to_string()) {
+                                request_display_detached.store(true, Ordering::Release);
+                                let _ = trace_relay_with_details(
+                                    &request_trace, generation, thread_id, "app-to-tui", "display-detached",
+                                    Some(method), next_sequence,
+                                    RelayTraceDetails { display_rejection: Some(&rejection), ..Default::default() },
+                                );
+                                let _ = client_abort.shutdown(Shutdown::Both);
+                            }
                             continue;
                         }
                         return Err(error);
@@ -1815,11 +1987,13 @@ pub fn run(task: CodexNativeTask<'_>) -> Result<()> {
                     0,
                 )?;
                 client.set_read_timeout(Some(Duration::from_secs(12)))?;
-                let client =
-                    tungstenite::accept_with_config(client, Some(native_websocket_config()))
-                        .map_err(|error| {
-                            anyhow::anyhow!("Codex native TUI WebSocket handshake failed: {error}")
-                        })?;
+                let client = tungstenite::accept_with_config(
+                    CodexDisplayStream::new(client),
+                    Some(native_websocket_config()),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("Codex native TUI WebSocket handshake failed: {error}")
+                })?;
                 trace_relay(
                     &boundary,
                     &generation_for_relay,
@@ -2005,6 +2179,18 @@ mod tests {
             // Error details must survive context wrappers and the normal-event
             // budget without revealing their arbitrary strings or messages.
             let trace = Mutex::new((Vec::new(), 256));
+            for _ in 0..32 {
+                trace_relay(
+                    &trace,
+                    "generation-1",
+                    "assigned-thread",
+                    "app-to-tui",
+                    "send-pending",
+                    None,
+                    1,
+                )
+                .unwrap();
+            }
             trace_relay_transport_error(
                 &trace,
                 "generation-1",
@@ -3163,9 +3349,9 @@ mod tests {
     fn required_tui_websocket_send_reports_transport_failure() {
         let (tui_stream, relay_stream) = UnixStream::pair().unwrap();
         let relay = std::thread::spawn(move || {
-            let mut socket = tungstenite::accept(relay_stream).unwrap();
+            let socket = tungstenite::accept(CodexDisplayStream::new(relay_stream)).unwrap();
             socket.get_ref().shutdown(Shutdown::Write).unwrap();
-            send_required_tui_frame(&mut socket, "required-response".into())
+            send_required_tui_frame(&Mutex::new(socket), "required-response".into(), || Ok(()))
                 .unwrap_err()
                 .to_string()
         });
@@ -3189,7 +3375,7 @@ mod tests {
         let evidence = File::create(&evidence_path).unwrap();
         let trace = File::create(&trace_path).unwrap();
         let relay = std::thread::spawn(move || {
-            let client = tungstenite::accept(relay_client).unwrap();
+            let client = tungstenite::accept(CodexDisplayStream::new(relay_client)).unwrap();
             let server = tungstenite::client("ws://localhost/", relay_server)
                 .unwrap()
                 .0;
@@ -3732,7 +3918,7 @@ mod tests {
                         Err(error) => return Err(error).context("accept installed Codex TUI"),
                     }
                 };
-                let client = tungstenite::accept(client)
+                let client = tungstenite::accept(CodexDisplayStream::new(client))
                     .map_err(|error| anyhow::anyhow!("installed Codex TUI WebSocket: {error}"))?;
                 relay_codex_websockets_with_handoff(
                     client,
@@ -4006,7 +4192,7 @@ mod tests {
         let evidence = File::create(&evidence_path).unwrap();
         let trace = File::create(&trace_path).unwrap();
         let relay_thread = std::thread::spawn(move || {
-            let relay = tungstenite::accept(relay).unwrap();
+            let relay = tungstenite::accept(CodexDisplayStream::new(relay)).unwrap();
             relay_codex_websockets_with_handoff(
                 relay,
                 owner,

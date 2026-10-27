@@ -612,6 +612,71 @@ fn copy_session_tail(source: &Path, output: &Path, start: u64) -> Result<()> {
     Ok(())
 }
 
+/// Native Claude emits its missing-resume diagnostic on stderr before hooks
+/// start. Ignore only terminal color codes; other output remains disqualifying.
+fn settled_missing_rejection(
+    id: &str,
+    exit_code: Option<i32>,
+    hooks: &[u8],
+    stderr: &[u8],
+    settle: impl FnOnce() -> Result<()>,
+) -> Result<Option<crate::claude_session::MissingConversation>> {
+    if !crate::claude_session::valid_id(id)
+        || exit_code != Some(1)
+        || !hooks.is_empty()
+        || stderr.len() > 4096
+    {
+        return Ok(None);
+    }
+    let mut plain = Vec::new();
+    let mut bytes = stderr.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == 0x1b {
+            if bytes.next() != Some(b'[') {
+                return Ok(None);
+            }
+            while bytes
+                .peek()
+                .is_some_and(|byte| byte.is_ascii_digit() || *byte == b';')
+            {
+                bytes.next();
+            }
+            if bytes.next() != Some(b'm') {
+                return Ok(None);
+            }
+        } else {
+            plain.push(byte);
+        }
+    }
+    let Ok(text) = std::str::from_utf8(&plain) else {
+        return Ok(None);
+    };
+    if text.trim() != format!("No conversation found with session ID: {id}") {
+        return Ok(None);
+    }
+    settle()?;
+    Ok(Some(crate::claude_session::MissingConversation(
+        id.to_owned(),
+    )))
+}
+
+fn native_pane_script(
+    command: &Command,
+    generation_file: &Path,
+    stderr: &Path,
+    exit_status: &Path,
+) -> Result<String> {
+    Ok(format!(
+        "#!/bin/sh\nset -u\nfor n in $(seq 1 1200); do\n  [ -f {} ] && break\n  sleep 0.05\ndone\n[ -f {} ] || exit 1\n{} 2>{}\nstatus=$?\ncat {} >&2\nprintf '%s\\n' \"$status\" > {}\nexit \"$status\"\n",
+        quote(&generation_file.display().to_string()),
+        quote(&generation_file.display().to_string()),
+        command_line(command)?,
+        quote(&stderr.display().to_string()),
+        quote(&stderr.display().to_string()),
+        quote(&exit_status.display().to_string()),
+    ))
+}
+
 pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
     ensure!(
         task.private_home.is_dir(),
@@ -651,14 +716,14 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
         task.prompt,
     )?;
     let pane = artifact.join("native-claude-pane.sh");
+    let stderr = artifact.join("native-claude-stderr.log");
+    File::create(&stderr)?.sync_all()?;
+    // This receipt belongs to this launch's private socket directory, so an
+    // earlier invocation cannot supply its exit status.
+    let exit_status = sockets.path().join("exit-status");
     fs::write(
         &pane,
-        format!(
-            "#!/bin/sh\nset -eu\nfor n in $(seq 1 1200); do\n  [ -f {} ] && break\n  sleep 0.05\ndone\n[ -f {} ] || exit 1\nexec {}\n",
-            quote(&generation_file.display().to_string()),
-            quote(&generation_file.display().to_string()),
-            command_line(&command)?
-        ),
+        native_pane_script(&command, &generation_file, &stderr, &exit_status)?,
     )?;
     let shell_command = format!("/bin/sh {}", quote(&pane.display().to_string()));
     let mut terminal = TerminalSession::start_managed_with_sockets(
@@ -727,6 +792,41 @@ pub fn run(task: ClaudeNativeTask<'_>) -> Result<()> {
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Ok(status) = fs::read_to_string(&exit_status)
+                        && let Ok(code) = status.trim().parse::<i32>()
+                    {
+                        crate::atomic_write::atomic_write(
+                            &artifact.join("native-claude-exit.json"),
+                            &serde_json::to_vec(
+                                &serde_json::json!({"execution_generation":generation,"exit_code":code}),
+                            )?,
+                        )?;
+                        evidence.sync_all()?;
+                        if let CoderSession::Resume(id) = task.session
+                            && let Some(rejection) = settled_missing_rejection(
+                                id,
+                                Some(code),
+                                if evidence.metadata()?.len() == 0 {
+                                    b""
+                                } else {
+                                    b"hook evidence"
+                                },
+                                &fs::read(&stderr)?,
+                                || terminal.finish(),
+                            )?
+                        {
+                            crate::atomic_write::atomic_write(
+                                &artifact.join("native-claude-settlement.json"),
+                                &serde_json::to_vec(
+                                    &serde_json::json!({"execution_generation":generation,"settled":true,"missing_session_id":id}),
+                                )?,
+                            )?;
+                            return Err(rejection.into());
+                        }
+                        break Err(anyhow::anyhow!(
+                            "native Claude exited with code {code} without completion"
+                        ));
+                    }
                     if !terminal.is_live()? {
                         let (diagnostic, signals) = if gate.session_id().is_none() {
                             record_startup_diagnostic(
@@ -817,6 +917,174 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
+
+    #[test]
+    fn native_rejection_records_provider_exit_and_exact_diagnostic() {
+        use std::{fs, process::Command};
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let root = tempfile::tempdir().unwrap();
+        let generation = root.path().join("generation");
+        let stderr = root.path().join("stderr");
+        let status = root.path().join("exit-status");
+        let pane = root.path().join("pane.sh");
+        fs::write(&generation, "owned-generation").unwrap();
+        let diagnostic = format!("No conversation found with session ID: {ID}");
+        let mut provider = Command::new("/bin/sh");
+        provider.args([
+            "-c",
+            "printf '%s\\n' \"$1\" >&2; exit 1",
+            "provider",
+            &diagnostic,
+        ]);
+        fs::write(
+            &pane,
+            super::native_pane_script(&provider, &generation, &stderr, &status).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new("/bin/sh").arg(pane).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(fs::read_to_string(&status).unwrap(), "1\n");
+        assert_eq!(fs::read(&stderr).unwrap(), output.stderr);
+        let mut settled = false;
+        let rejection =
+            super::settled_missing_rejection(ID, Some(1), b"", &fs::read(stderr).unwrap(), || {
+                settled = true;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(settled);
+        assert_eq!(rejection.0, ID);
+    }
+
+    #[test]
+    fn native_missing_rejection_requires_settlement_and_no_progress() {
+        use crate::claude_session::{
+            StoredSession, begin_invocation, run_native_with_fallback, stored_session,
+        };
+        use crate::coder::CoderSession;
+        use std::fs;
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        for mode in [
+            "missing",
+            "color",
+            "progress",
+            "uncertain",
+            "wrong",
+            "conflict",
+            "unknown-exit",
+            "success",
+            "earlier-invocation",
+            "fresh-failure",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            fs::create_dir_all(home.join("projects/retained")).unwrap();
+            fs::write(
+                home.join(format!("projects/retained/{ID}.jsonl")),
+                "unfamiliar history",
+            )
+            .unwrap();
+            assert_eq!(stored_session(&home, ID).unwrap(), StoredSession::Uncertain);
+            let transcript = root.path().join("transcript.jsonl");
+            let first = begin_invocation(&transcript).unwrap();
+            let eligible = if mode == "earlier-invocation" {
+                begin_invocation(&transcript).unwrap()
+            } else {
+                first
+            };
+            let mut launches = Vec::new();
+            let mut settled = false;
+            let result = run_native_with_fallback(
+                CoderSession::Resume(ID),
+                eligible,
+                false,
+                &transcript,
+                |session| {
+                    launches.push(session);
+                    if session == CoderSession::FreshPersistent {
+                        return if mode == "fresh-failure" {
+                            anyhow::bail!("fresh launch failed")
+                        } else {
+                            Ok(())
+                        };
+                    }
+                    let hooks: &[u8] = if mode == "progress" {
+                        b"SessionStart followed by tool progress"
+                    } else {
+                        b""
+                    };
+                    fs::write(&transcript, hooks).unwrap();
+                    let target = if mode == "wrong" {
+                        "22222222-2222-4222-8222-222222222222"
+                    } else {
+                        ID
+                    };
+                    let mut stderr = format!("No conversation found with session ID: {target}\n");
+                    if mode == "conflict" {
+                        stderr.push_str("authentication failed\n");
+                    }
+                    if mode == "color" {
+                        stderr = format!("\u{1b}[31m{stderr}\u{1b}[39m");
+                    }
+                    fs::write(
+                        transcript.with_file_name("native-claude-stderr.log"),
+                        &stderr,
+                    )
+                    .unwrap();
+                    let exit = match mode {
+                        "unknown-exit" => None,
+                        "success" => Some(0),
+                        _ => Some(1),
+                    };
+                    if let Some(rejection) = super::settled_missing_rejection(
+                        ID,
+                        exit,
+                        hooks,
+                        stderr.as_bytes(),
+                        || {
+                            if mode == "uncertain" {
+                                anyhow::bail!("process ownership is uncertain");
+                            }
+                            settled = true;
+                            Ok(())
+                        },
+                    )? {
+                        return Err(rejection.into());
+                    }
+                    anyhow::bail!("unclassified native exit")
+                },
+            );
+            let fallback = matches!(mode, "missing" | "color" | "fresh-failure");
+            assert_eq!(launches.len(), if fallback { 2 } else { 1 }, "{mode}");
+            assert_eq!(
+                result.is_ok(),
+                matches!(mode, "missing" | "color"),
+                "{mode}: {result:?}"
+            );
+            if fallback {
+                assert!(settled);
+                assert_eq!(launches[1], CoderSession::FreshPersistent);
+                assert!(
+                    fs::read_to_string(transcript.with_file_name("native-claude-stderr.0.log"))
+                        .unwrap()
+                        .contains(ID)
+                );
+                assert!(
+                    transcript
+                        .with_file_name("claude-session-fallback.json")
+                        .is_file()
+                );
+            }
+            if mode == "fresh-failure" {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .is::<crate::claude_session::FallbackStopped>()
+                );
+            }
+        }
+    }
 
     #[test]
     fn claude_hook_waits_for_payload_on_nonblocking_accepted_socket() {

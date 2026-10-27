@@ -71,9 +71,18 @@ the ID to process all stored Work Items). Fluent records the source and target
 format in an audit file, rewrites the records transactionally, and treats a
 repeat as a no-op. Unknown future formats are rejected rather than guessed.
 
+Existing 0.6.0 projects do not need to be deleted or initialized again. Work
+created with `--instructions` keeps its saved assignment and does not require
+Brief, Behaviors, Approach, or Plan files. Correction Writers receive the saved
+assignment alongside current findings. Fluent preserves existing configuration,
+history, and Tester files. When an initial Writer has no `.fluent/tester.yaml`
+or result extractor, its assignment explicitly asks it to create and commit
+the missing files.
+
 See the [v0.6.0 release notes](documentation/releases/v0.6.0.md) for behavior
 changes, assurance limits, and recovery commands.
-For a transition from v0.5.0 with a shared scheduler, follow the
+For Claude session recovery from v0.6.0, or a transition from v0.5.0 with a
+shared scheduler, follow the
 [next-release transition procedure](documentation/releases/next.md).
 
 For a local conversation in an owner-approved private Discord server, see
@@ -158,6 +167,20 @@ Fluent gives each Attempt an isolated Git worktree, keeping its changes separate
 
 Within the Attempt, the Writer receives the approved Brief, Behavior Specifications, Technical Approach, and its assigned part of the Implementation Plan, along with the relevant code, project Expertise, and instructions. It implements the change, writes or updates its tests, runs focused harness-native checks, and commits a candidate for review. Its final message reports the exact checks and what they covered.
 
+Before starting a Writer or Reviewer, Fluent opens its declared inputs under
+the worker's sandbox profile. If an input cannot be read, the Task pauses with
+the exact path. Open supplied files directly: listing their parent `.fluent`
+directory can be denied even when the files are readable. A worker that loses
+access should report that path and the failed operation instead of continuing
+from the Work Item title alone.
+
+An active Writer can run `fluent task check-handoff <work-item-id> <attempt-id>
+<task-id>` from its assigned candidate. Read the JSON report's `overall` status
+and individual diagnostics; successful command exit only means a report was
+produced. An inaccessible host binding yields `not-verifiable`, never a pass.
+This preflight does not change Work state or replace the trusted host handoff,
+ordinary reviews, final Tester, or Learning.
+
 Reviewers treat the Writer’s focused report as advisory evidence, inspect the implementation and tests themselves, and do not rerun the full suite. If one concrete result is missing, the Tests Reviewer may run one named harness-native check. If its read-only environment cannot run that check, it records the exact command and candidate-relative working directory instead of requesting a source change. Fluent pauses for explicit `fluent attempt evidence run` authorization, which schedules a verification Task bound to the candidate. Run the printed Task command, then `fluent attempt run` to validate its receipt and rerun only the Tests Reviewer. The worker uses private writable scratch against read-only candidate source and retains detailed logs in its Task artifacts. A source finding still returns directly to the Writer, avoiding a complete-suite run for a candidate that is already known to need correction.
 
 After every Reviewer passes, the Tester runs once as the authoritative final gate. It is a deterministic runner, not a coding agent. It reads one or more test commands from the project’s `.fluent/tester.yaml`, runs them sequentially in the candidate workspace, and captures each command’s output, exit code, and duration. The project’s `.fluent/extract-tester-results` executable normalizes those outputs into a single `tester-results.json` artifact, which Fluent binds to the exact reviewed commit. An introduced regression or infrastructure error returns to the Writer; a clean result advances the candidate to Learning.
@@ -165,10 +188,23 @@ After every Reviewer passes, the Tester runs once as the authoritative final gat
 Some test tools update tracked lockfiles or generated metadata as a side effect. A Work Task Tester starts only from a clean tracked candidate and restores tracked side effects after each run while retaining the original command evidence. It leaves untracked and ignored build outputs alone; a preexisting tracked edit or changed candidate commit fails closed instead of being overwritten.
 
 Writer and final Tester Tasks in one Attempt share the Fluent-owned
-Attempt-scoped Cargo dependency cache, while another Attempt never receives that
-cache. Each sandbox grants only that private cache's dependency stores; the
-operator's Cargo home, credentials, configuration, and binaries remain outside
-the boundary.
+Attempt-scoped Cargo and npm dependency caches, while another Attempt never
+receives those caches. Cargo admits only dependency stores; npm starts empty
+and uses private user/global configuration. Installed tools receive read/execute
+access separately, and operator credentials and mutable caches stay outside the
+new grants.
+
+Existing Node projects created with Fluent 0.6.0 can use the upgraded binary
+without reinitializing `.fluent`, changing coder settings, or replacing Work
+history. Fluent resolves the selected `node`, `npm`, and `npx` on `PATH`, including
+standard macOS installer links from `/usr/local/bin` into
+`/usr/local/lib/node_modules/npm`. Homebrew and direct version-manager
+installations use the same resolved-package boundary. Clean worktrees install
+their own dependencies: declare the project's install and test commands, such as
+`npm ci && npm test`, in the Tester configuration. Fluent runs saved commands
+unchanged; it does not copy the source checkout's ignored `node_modules`.
+See [Node worker preparation](documentation/architecture.md#prepare-node-workers)
+for supported launchers and prerequisite diagnostics.
 
 Fluent reclaims idle `target` output in its managed worktrees after Tasks settle
 or Attempts stop. It keeps active output and favors output from unfinished Work.

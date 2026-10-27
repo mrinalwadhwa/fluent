@@ -6,6 +6,10 @@ commands:
       unset FLUENT_MAX_TOTAL_WRITE_ROUNDS
       FLUENT_RELEASED_050_BIN="$(bash tests/fixtures/prepare-released-predecessor.sh)"
       export FLUENT_RELEASED_050_BIN
+      FLUENT_RELEASED_060_BIN="$(bash tests/fixtures/prepare-released-060.sh)"
+      export FLUENT_RELEASED_060_BIN
+      FLUENT_CLAUDE_SESSION_OLD_BIN="$(bash tests/fixtures/build-claude-session-old-reader.sh)"
+      export FLUENT_CLAUDE_SESSION_OLD_BIN
       FLUENT_OWNERSHIP_OLD_BIN="$(bash tests/fixtures/build-ownership-old-reader.sh)"
       export FLUENT_OWNERSHIP_OLD_BIN
       FLUENT_LAUNCH_HANDOFF_OLD_BIN="$(bash tests/fixtures/build-launch-handoff-old-reader.sh)"
@@ -49,7 +53,8 @@ commands:
       export FLUENT_BIN_OVERRIDE="$(pwd)/target/test-support/debug/fluent"
       export FLUENT_TEST_HERMETIC_PROVIDERS=1
       export PATH="$(pwd)/tests/fixtures/provider-doubles:$PATH"
-      FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --test-threads 4 --message-format libtest-json 2>&1
+      FLUENT_TEST_HOST_SANDBOX_PREFLIGHT=pass NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --features test-support --no-fail-fast --test-threads 4 --message-format libtest-json \
+        -E "not ($(cat tests/fixtures/dashboard-terminal-host.filter))" 2>&1
     test_harness: cargo-nextest
     reject_process_leaks: true
   - command: |
@@ -78,6 +83,22 @@ commands:
   - command: bash tests/host/check-native-codex-first-turn.sh
     test_harness: shell-harness
     reject_process_leaks: true
+  - command: bash tests/host/check-native-codex-display-backpressure.sh
+    test_harness: shell-harness
+    reject_process_leaks: true
   - command: bash tests/host/check-ssh-agent-terminal.sh
+    test_harness: shell-harness
+    reject_process_leaks: true
+  - command: bash tests/host/check-node-worker-upgrade.sh
+    test_harness: shell-harness
+    reject_process_leaks: true
+  - command: bash tests/host/check-completion-repair-admission.sh
+    test_harness: shell-harness
+    reject_process_leaks: true
+  - command: bash tests/host/check-dashboard-terminal.sh
+    test_harness: cargo-nextest
+    reject_process_leaks: true
+
+  - command: bash tests/host/check-ssh-fullscreen-backpressure.sh
     test_harness: shell-harness
     reject_process_leaks: true

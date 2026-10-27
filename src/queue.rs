@@ -1343,6 +1343,17 @@ fn ensure_resume_eligible(
         .iter()
         .find(|attempt| attempt.id == attempt_id)
         .ok_or_else(|| anyhow::anyhow!("Work Item {id:?} has no Attempt to resume"))?;
+    if let Some(task) = attempt
+        .tasks
+        .last()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Planned)
+    {
+        crate::recovery_contracts::writer_completion::validated_committed_repair_start(
+            project_root,
+            item,
+            task,
+        )?;
+    }
     if crate::recovery_contracts::context_retry::resume_ready(project_root, item, attempt_id)? {
         return Ok(());
     }

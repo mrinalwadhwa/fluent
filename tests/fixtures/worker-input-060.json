@@ -1,0 +1,101 @@
+{
+  "release": {
+    "commit": "be19732c42ac645cb9fac5701c8e93171b1aa480",
+    "sha256": "23b722148602782b4f9092b61df80337b8356da1483b3b810517333499e7ab23",
+    "version": "fluent 0.6.0 be19732c",
+    "asset": "https://github.com/mrinalwadhwa/fluent/releases/download/v0.6.0/fluent-aarch64-apple-darwin",
+    "capture_commands": [
+      "fluent version",
+      "fluent work-item create input-upgrade --title \"A title without the assignment\" --instructions \"Create result.txt containing the saved instruction marker.\"",
+      "fluent attempt create input-upgrade attempt-1"
+    ]
+  },
+  "records": {
+    ".fluent/work/attempts/input-upgrade/attempt-1.json": {
+      "schema_version": 12,
+      "id": "attempt-1",
+      "work_item_id": "input-upgrade",
+      "order": 0,
+      "status": "planned",
+      "coder_mapping": {
+        "write": {
+          "coder": "claude",
+          "model": ""
+        },
+        "review": {
+          "coder": "claude",
+          "model": ""
+        }
+      },
+      "artifacts": [],
+      "created_at": "2026-10-24T19:24:19.942388+00:00"
+    },
+    ".fluent/work/items/input-upgrade.json": {
+      "schema_version": 12,
+      "id": "input-upgrade",
+      "title": "A title without the assignment",
+      "model_writer_version": {
+        "format": "fluent-work-item-writer",
+        "schema_version": 10,
+        "version": "0.6.0"
+      },
+      "storage_revision": 1,
+      "instructions": "Create result.txt containing the saved instruction marker.",
+      "authorization": {
+        "state": "execution-ready",
+        "authority": "human"
+      },
+      "transitions": [
+        {
+          "sequence": 1,
+          "object_kind": "work-item",
+          "object_id": "input-upgrade",
+          "old_state": null,
+          "new_state": "authorized",
+          "occurred_at": "2026-10-24T19:24:19.942651+00:00",
+          "origin": "unknown"
+        },
+        {
+          "sequence": 2,
+          "object_kind": "attempt",
+          "object_id": "attempt-1",
+          "old_state": null,
+          "new_state": "planned",
+          "occurred_at": "2026-10-24T19:24:19.942712+00:00",
+          "origin": "fluent"
+        },
+        {
+          "sequence": 3,
+          "object_kind": "task",
+          "object_id": "attempt-1-write-1",
+          "old_state": null,
+          "new_state": "planned",
+          "occurred_at": "2026-10-24T19:24:19.942712+00:00",
+          "origin": "fluent"
+        }
+      ]
+    },
+    ".fluent/work/tasks/input-upgrade/attempt-1/attempt-1-write-1.json": {
+      "order": 0,
+      "id": "attempt-1-write-1",
+      "kind": "write",
+      "role": "author",
+      "instructions": "Create result.txt containing the saved instruction marker.",
+      "work_item_id": "input-upgrade",
+      "attempt_id": "attempt-1",
+      "workspace_access": {
+        "reads": [],
+        "writes": [
+          {
+            "id": "candidate",
+            "path": "../work-13-input-upgrade-attempt-1"
+          }
+        ]
+      },
+      "artifact_area": {
+        "path": ".fluent/work/artifacts/input-upgrade/attempt-1/attempt-1-write-1"
+      },
+      "created_at": "2026-10-24T19:24:19.942370+00:00"
+    }
+  }
+}

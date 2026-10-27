@@ -16,7 +16,14 @@ directories may remain intentionally unreadable.
 
 ## Phase 1 — Understand the Work Item
 
+{{#if assignment_path}}
+Read the saved Task assignment at {{assignment_path}}.
+Assess these instructions alongside the current findings and any planning files below.
+{{/if}}
+
+{{#if brief_path}}
 1. Read Brief at {{brief_path}} — what to review and why.
+{{/if}}
 2. Read the generated current context at {{execution_context_path}}. It contains
    exact candidate/base commits, changed files, unresolved steps, deduplicated
    current findings, passing evidence, executed commands, and historical artifact
@@ -39,7 +46,7 @@ Read each preserved Work Item input. These immutable files are authoritative rev
 
 ## Phase 2 — Inspect the codebase
 
-1. Use the Brief to decide what to look at.
+1. Use the saved assignment and any supplied Brief to decide what to look at.
 {{#if review_diff_command}}
 2. Run the review diff command (`{{review_diff_command}}`) to see the change that triggered this review.
 {{else}}

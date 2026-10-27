@@ -7,6 +7,7 @@ use std::io;
 pub struct DashboardTerminal {
     pub(super) terminal: Terminal<CrosstermBackend<io::Stdout>>,
     cleanup: Cleanup,
+    active: bool,
 }
 
 #[derive(Default)]
@@ -62,6 +63,7 @@ impl DashboardTerminal {
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(stdout))?,
             cleanup,
+            active: true,
         })
     }
     pub fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()> {
@@ -81,13 +83,27 @@ impl DashboardTerminal {
     pub fn size(&self) -> Result<(u16, u16)> {
         Ok(terminal::size()?)
     }
+    /// Report whether the dashboard can resume drawing after a handoff.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
     /// Run synchronously while the dashboard neither reads nor draws. Restore
-    /// modes and invalidate Ratatui's buffer even when the attachment fails.
+    /// modes and invalidate Ratatui's buffer after ordinary attachment failures;
+    /// stop drawing when the attachment cannot restore the local display.
     pub fn handoff<T>(&mut self, attach: impl FnOnce() -> Result<T>) -> Result<T> {
         let mouse = self.mouse_enabled();
         self.terminal.show_cursor()?;
         self.cleanup.restore();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(attach));
+        if let Ok(Err(error)) = &result {
+            if error.is::<crate::terminal_view::DisplayRestoreFailed>() {
+                // The attachment restored raw mode and attempted a bounded
+                // display reset. Reopening or dropping an active dashboard
+                // here would block on the same unread terminal again.
+                self.active = false;
+                return result.unwrap();
+            }
+        }
         let restored = Self::open().and_then(|mut terminal| {
             terminal.set_mouse_enabled(mouse)?;
             terminal.terminal.clear()?;
@@ -105,6 +121,8 @@ impl DashboardTerminal {
 }
 impl Drop for DashboardTerminal {
     fn drop(&mut self) {
-        let _ = self.terminal.show_cursor();
+        if self.active {
+            let _ = self.terminal.show_cursor();
+        }
     }
 }

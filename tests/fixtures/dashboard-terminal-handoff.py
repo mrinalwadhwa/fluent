@@ -12,6 +12,8 @@ import sys
 import tempfile
 import termios
 import time
+import json
+from pathlib import Path
 
 mode = sys.argv[2] if len(sys.argv) > 2 else None
 input_mode = mode in ("input", "control-input")
@@ -61,6 +63,8 @@ eof = False
 resized = False
 detached = False
 sent = set()
+phases = [{"phase": "spawned", "elapsed": 0}]
+started = time.monotonic()
 try:
     # PTY EOF and waitpid become observable independently. Drain through EOF
     # and reap through exit, instead of treating the first EOF as a timeout.
@@ -75,6 +79,8 @@ try:
             if not chunk:
                 eof = True
             output.extend(chunk)
+            if len(phases) == 1 and chunk:
+                phases.append({"phase": "first-output", "elapsed": time.monotonic() - started})
             if input_mode:
                 for step, data in input_bytes.items():
                     if step not in sent and f"INPUT_READY_{step}".encode() in output:
@@ -83,9 +89,11 @@ try:
             if attachment_mode and not resized and b"RESIZE_ATTACH_READY" in output:
                 fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 13, 73, 0, 0))
                 resized = True
+                phases.append({"phase": "resize", "elapsed": time.monotonic() - started})
             if attachment_mode and not detached and b"DETACH_ATTACH_READY" in output:
                 assert os.write(master, b"\x02d") == 2
                 detached = True
+                phases.append({"phase": "detach", "elapsed": time.monotonic() - started})
             if len(output) > 1024 * 1024:
                 raise AssertionError("unexpected terminal output flood")
         if status is None:
@@ -97,8 +105,10 @@ try:
     if status is None:
         os.kill(pid, signal.SIGKILL)
         status = os.waitpid(pid, 0)[1]
-        raise AssertionError("terminal handoff child did not settle")
-    assert eof, "terminal handoff child left its PTY open"
+        raise AssertionError(
+            "terminal handoff child did not settle\n" + output.decode(errors="replace")
+        )
+    assert eof, "terminal handoff child left its PTY open\n" + output.decode(errors="replace")
     assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
     if nested:
         assert os.path.isfile(nested.name + "/passed"), output.decode(errors="replace")
@@ -125,6 +135,14 @@ finally:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
     os.close(master)
+    if evidence := os.environ.get("FLUENT_DASHBOARD_PTY_EVIDENCE_DIR"):
+        prefix = Path(evidence) / f"{mode or 'handoff'}-{pid}"
+        prefix.with_suffix('.pty').write_bytes(output)
+        prefix.with_suffix('.json').write_text(json.dumps({
+            "mode": mode, "wait_status": status, "eof": eof, "phases": phases,
+            "elapsed": time.monotonic() - started, "initial_size": [100, 30],
+            "resized": resized, "detached": detached, "test_binary": sys.argv[1]
+        }, indent=2) + '\n')
     if nested:
         try:
             with open(nested.name + "/inner") as inner:

@@ -101,6 +101,11 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
         lock_digest = digest(lockfile.read())
         work_model_bytes = work_model.read()
         work_model_digest = digest(work_model_bytes)
+        # Some predecessors carry the pins for host tooling but do not link the
+        # terminal adapter. Preserve their existing build identity and inputs.
+        terminal_pin = (source.extractfile("tools/terminal-deps.env").read()
+                        if b"target/terminal-deps/install" in source.extractfile("build.rs").read()
+                        else None)
         root_files = {name: source.extractfile(name).read()
                       for name in ("Cargo.toml", "Cargo.lock", "src/main.rs")} if evidence == "root" else {}
     rustc = run("rustc", "-vV").decode()
@@ -114,6 +119,15 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                                           or configured_target in {".", ".."}):
         raise ValueError(f"invalid CARGO_BUILD_TARGET triple: {configured_target!r}")
     build_target = configured_target if configured_target is not None else host
+    terminal_root = repository / "target/terminal-deps/install" / build_target
+    terminal_inputs = {}
+    if terminal_pin is not None:
+        if (repository / "tools/terminal-deps.env").read_bytes() != terminal_pin:
+            raise ValueError("historical terminal pins differ; prepare those exact inputs separately")
+        terminal_inputs = {str(path.relative_to(terminal_root)): digest(path.read_bytes())
+                           for path in sorted(terminal_root.rglob("*")) if path.is_file()}
+        if not terminal_inputs:
+            raise ValueError("prepare pinned terminal inputs before building this historical reader")
     cargo = run("cargo", "--version").decode()
     options = {key: value for key, value in os.environ.items()
                if key.startswith(("RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC",
@@ -139,6 +153,8 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 "cargo_config": cargo_config,
                 "cargo_cwd_config": cargo_cwd_config(build_cwd),
                 "build_command": build_command}
+    if terminal_pin is not None:
+        identity["terminal_inputs"] = terminal_inputs
     key = digest(json.dumps(identity, sort_keys=True).encode())
     try:
         cache.mkdir(parents=True, exist_ok=True)
@@ -159,6 +175,13 @@ def main(repository, commit, reader_root, mode="offline", evidence="none"):
                 source_dir.mkdir()
                 with tarfile.open(fileobj=io.BytesIO(archive)) as source:
                     source.extractall(source_dir)
+                for name, expected in terminal_inputs.items():
+                    content = (terminal_root / name).read_bytes()
+                    if digest(content) != expected:
+                        raise ValueError(f"terminal input changed during preparation: {name}")
+                    destination = source_dir / "target/terminal-deps/install" / build_target / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(content)
                 target = temporary / "target"
                 env = os.environ.copy()
                 env["CARGO_HOME"] = str(cargo_home_path)

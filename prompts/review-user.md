@@ -47,10 +47,23 @@ remediation is named, emit exactly one `Disposition: code-change` line.
 
 ## Phase 1 — Understand the Work Item
 
+{{#if assignment_path}}
+Read the saved Task assignment at {{assignment_path}}.
+Assess these instructions alongside the current findings and any planning files below.
+{{/if}}
+
+{{#if brief_path}}
 1. Read Brief at {{brief_path}} — what should have changed and why.
+{{/if}}
+{{#if behaviors_path}}
 2. Read Behaviors at {{behaviors_path}} — EARS statements describing observable changes in behavior.
+{{/if}}
+{{#if approach_path}}
 3. Read Approach at {{approach_path}} — technical direction the implementation should have followed.
+{{/if}}
+{{#if plan_path}}
 4. Read Plan at {{plan_path}} — incremental steps the implementation should have followed.
+{{/if}}
 5. Read the generated current context at {{execution_context_path}}. It contains
    exact candidate/base commits, changed files, unresolved steps, deduplicated
    current findings, passing evidence, executed commands, and historical artifact

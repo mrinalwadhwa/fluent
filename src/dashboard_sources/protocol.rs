@@ -4,6 +4,10 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+// Version 2 bounds unconsumed display bytes independently of control traffic.
+pub const TERMINAL_VERSION: u32 = 2;
+pub const DISPLAY_WINDOW: usize = 128 * 1024;
+
 pub const MAX_MESSAGE: usize = 384 * 1024;
 const MAX_BUFFER: usize = 1024 * 1024;
 
@@ -20,9 +24,24 @@ pub enum Action {
     Observe,
     Repaint,
     Ping,
+    OutputConsumed { bytes: usize },
     Input { bytes: Vec<u8> },
     Reply { bytes: Vec<u8> },
     Resize { columns: u16, rows: u16 },
+}
+impl Action {
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Observe => "observe",
+            Self::Repaint => "repaint",
+            Self::Ping => "ping",
+            Self::OutputConsumed { .. } => "output-consumed",
+            Self::Input { .. } => "input",
+            Self::Reply { .. } => "reply",
+            Self::Resize { .. } => "resize",
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
@@ -50,6 +69,10 @@ pub struct Wire {
     offset: usize,
 }
 impl Wire {
+    pub fn has_pending_output(&self) -> bool {
+        self.offset < self.output.len()
+    }
+
     pub fn queue(&mut self, message: &impl Serialize) -> Result<()> {
         let mut bytes = serde_json::to_vec(message)?;
         ensure!(bytes.len() <= MAX_MESSAGE, "SSH message exceeds bound");
@@ -70,7 +93,11 @@ impl Wire {
             match writer.write(&self.output[self.offset..]) {
                 Ok(0) => bail!("SSH disconnected"),
                 Ok(n) => self.offset += n,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
                 Err(e) => return Err(e.into()),
             }
         }

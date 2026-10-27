@@ -32,6 +32,7 @@ use crate::work_model::{
 };
 
 mod carried_finding;
+pub(crate) mod claude_session;
 mod plan_evidence;
 pub(crate) use plan_evidence::apply_completed_plan_host_evidence;
 pub(crate) mod context_retry;
@@ -2497,12 +2498,22 @@ pub(crate) fn prepare_writer_correction_assignments(
                 task.role != work_model::TESTER_HARNESS_REPAIR_ROLE,
                 Some(&assessment),
             )?;
-            let evidence = assignment_evidence_for_findings(
+            let mut evidence = assignment_evidence_for_findings(
                 project_root,
                 &task.input_artifacts,
                 &findings,
                 Some(&assessment),
             )?;
+            for input in corrective_host_evidence_inputs(
+                project_root,
+                &item.attempts[attempt_index],
+                &task,
+                &source,
+            )? {
+                if !evidence.contains(&input) {
+                    evidence.push(input);
+                }
+            }
             let source_task_inputs = task_assignment_inputs(project_root, &source.input_artifacts)?;
             WriterCorrectionAssignment {
                 schema_version: work_model::WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
@@ -2555,6 +2566,85 @@ pub(crate) fn prepare_writer_correction_assignments(
             Some(assignment);
     }
     Ok(())
+}
+
+/// Freeze the exact evidence behind a targeted correction alongside its review.
+/// The assignment's existing digest checks then guard every later launch.
+fn corrective_host_evidence_inputs(
+    root: &Path,
+    attempt: &work_model::Attempt,
+    task: &Task,
+    source: &Task,
+) -> Result<Vec<WriterCorrectionAssignmentInput>> {
+    let mut inputs = Vec::new();
+    for input in &task.input_artifacts {
+        let Some(reviewer) = attempt.tasks.iter().find(|reviewer| {
+            reviewer.kind == TaskKind::Review
+                && reviewer.id == input.producer_id
+                && reviewer
+                    .artifact_area
+                    .as_ref()
+                    .is_some_and(|area| input.path == format!("{}/review.md", area.path))
+        }) else {
+            continue;
+        };
+        let Some(context) = reviewer.evidence_review_context.as_ref() else {
+            continue;
+        };
+        let recovery = attempt
+            .evidence_recoveries
+            .iter()
+            .find(|recovery| recovery.id == context.recovery_id)
+            .context("corrective review lost its host evidence recovery")?;
+        anyhow::ensure!(
+            reviewer.status == TaskStatus::Complete
+                && recovery.state == EvidenceRecoveryState::CodeChange
+                && context.attachment == recovery.attachment
+                && context.candidate_commit == recovery.candidate_commit
+                && source
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| output.commit == context.candidate_commit)
+                && recovery.targets.iter().any(|target| {
+                    target.review_task_id.as_deref() == Some(reviewer.id.as_str())
+                        && target.role == reviewer.role
+                        && target.prior_review_artifact == context.prior_review_artifact
+                }),
+            "corrective host evidence no longer matches its review or source candidate"
+        );
+        if let Some(check) = &recovery.required_check {
+            validate_required_check_binding(root, attempt, check)?;
+        }
+        validate_plan_evidence_recovery_at(
+            root,
+            attempt,
+            recovery,
+            crate::check_applicability::evaluation_time(),
+            false,
+        )?;
+        let (evidence, bytes) = bound_recovery_artifact(root, &context.attachment.snapshot_path)?;
+        anyhow::ensure!(
+            evidence.digest == context.attachment.digest
+                && evidence.path
+                    == snapshot_path(&attempt.work_item_id, &attempt.id, &evidence.digest)?,
+            "corrective host evidence digest changed"
+        );
+        parse_evidence_document(&bytes)?;
+        let (binding, _) = bound_recovery_artifact(root, &context.prior_review_artifact)?;
+        for artifact in [evidence, binding] {
+            let input = WriterCorrectionAssignmentInput {
+                digest: artifact.digest,
+                artifact: ArtifactRef {
+                    producer_id: "corrective-host-evidence".into(),
+                    path: artifact.path,
+                },
+            };
+            if !inputs.contains(&input) {
+                inputs.push(input);
+            }
+        }
+    }
+    Ok(inputs)
 }
 
 fn assignment_evidence_for_findings(
@@ -2993,27 +3083,7 @@ pub(crate) fn output_free_assignment_source<'a>(
             .all(|t| matches!(t.status, TaskStatus::Complete | TaskStatus::Superseded)),
         "Attempt has unresolved Tasks"
     );
-    let later = &attempt.tasks[index + 1..];
-    anyhow::ensure!(
-        later.len() <= 1
-            && later.iter().all(|t| t.kind == TaskKind::Write
-                && t.status == TaskStatus::Planned
-                && t.started_at.is_none()
-                && t.completed_at.is_none()
-                && t.output.is_none()),
-        "unsupported later work after output-free Writer"
-    );
-    for later in later {
-        if let Some(area) = &later.artifact_area {
-            match fs::symlink_metadata(root.join(&area.path)) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-                Ok(_) => bail!("later Writer reservation has materialized artifacts"),
-            }
-        } else {
-            bail!("later Writer reservation has no artifact identity");
-        }
-    }
+    validate_unstarted_writer_reservation(root, &attempt.tasks[index + 1..])?;
     let area = task
         .artifact_area
         .as_ref()
@@ -3042,6 +3112,18 @@ pub(crate) fn output_free_assignment_source<'a>(
                     )?)),
         "setup cannot be proven unlaunched"
     );
+    validate_failed_preparation_owner(root, item, attempt, task, &record)?;
+    Ok(source)
+}
+
+/// Bind the reserved native generation to this failed preparation and dead owner.
+fn validate_failed_preparation_owner(
+    root: &Path,
+    item: &work_model::WorkItem,
+    attempt: &work_model::Attempt,
+    task: &Task,
+    record: &crate::execution::ExecutionRecord,
+) -> Result<()> {
     let start = DateTime::parse_from_rfc3339(
         task.started_at
             .as_deref()
@@ -3061,6 +3143,7 @@ pub(crate) fn output_free_assignment_source<'a>(
     );
     let owner = record
         .attempt_owner
+        .as_ref()
         .context("failed setup has no Attempt owner")?;
     anyhow::ensure!(
         owner.project_root == root.canonicalize()?
@@ -3077,7 +3160,32 @@ pub(crate) fn output_free_assignment_source<'a>(
         result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
         "setup owner is live or unverifiable"
     );
-    Ok(source)
+    Ok(())
+}
+
+/// Share only reservation shape, not the distinct native receipt contracts.
+pub(crate) fn validate_unstarted_writer_reservation(root: &Path, later: &[Task]) -> Result<()> {
+    anyhow::ensure!(
+        later.len() <= 1
+            && later.iter().all(|t| t.kind == TaskKind::Write
+                && t.status == TaskStatus::Planned
+                && t.started_at.is_none()
+                && t.completed_at.is_none()
+                && t.output.is_none()),
+        "unsupported later work after output-free Writer"
+    );
+    for later in later {
+        if let Some(area) = &later.artifact_area {
+            match fs::symlink_metadata(root.join(&area.path)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+                Ok(_) => bail!("later Writer reservation has materialized artifacts"),
+            }
+        } else {
+            bail!("later Writer reservation has no artifact identity");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn output_free_context_binding(
@@ -3686,6 +3794,11 @@ pub(crate) fn validate_code_change_writer_start(
                 attempt_id,
                 "another classified Writer owns the planned continuation",
             ));
+        }
+        if writer_completion::validated_committed_repair_start(project_root, item, writer)
+            .map_err(|error| code_change_writer_rejection(attempt_id, format!("{error:#}")))?
+        {
+            return Ok(());
         }
         validate_verification_writer_start(project_root, attempt, &attempt.tasks[writer_index])
             .map_err(|error| code_change_writer_rejection(attempt_id, format!("{error:#}")))?;

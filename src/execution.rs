@@ -456,7 +456,7 @@ pub fn configure_identity_lock(_command: &mut Command, _transcript: &Path) -> Re
 pub(crate) fn prepare_launch(
     transcript: &Path,
     attempt_owner: Option<AttemptExecutionOwner>,
-) -> Result<()> {
+) -> Result<LaunchReservation> {
     let path = record_path_for_transcript(transcript);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -484,6 +484,141 @@ pub(crate) fn prepare_launch(
         launch_generation: Some(new_generation()?),
     };
     crate::atomic_write::atomic_write(&path, &serde_json::to_vec_pretty(&record)?)?;
+    Ok(LaunchReservation { path, record })
+}
+
+/// Retain the exact unlaunched identity published by this caller. Spawning a
+/// child replaces its generation; that child's supervisor owns its settlement.
+pub(crate) struct LaunchReservation {
+    path: PathBuf,
+    record: ExecutionRecord,
+}
+
+impl LaunchReservation {
+    pub(crate) fn settle_unused(&self) -> Result<()> {
+        let _lock = crate::lease::acquire_blocking(&lock_path(&self.path))?;
+        let mut current: ExecutionRecord = serde_json::from_slice(&std::fs::read(&self.path)?)?;
+        check_protocol(&current)?;
+        // Never rewrite another owner/generation, a launched child's evidence,
+        // or a concurrent cancellation. Even a terminal no-op retains its bytes.
+        if current != self.record {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !identity_is_held(&self.path)?
+                && receipt_absent_or_prior_generation(
+                    &self.path,
+                    current.launch_generation.as_deref().unwrap_or_default(),
+                )?,
+            "reserved execution acquired a child identity; refusing unused settlement: {}",
+            self.path.display()
+        );
+        current.state = ExecutionState::Settled;
+        current.settled_at = Some(crate::work_model::now_iso8601());
+        crate::atomic_write::atomic_write(&self.path, &serde_json::to_vec_pretty(&current)?)?;
+        Ok(())
+    }
+}
+
+/// Reconcile only a snapshot proven to be an unused post-stop reservation.
+/// The caller holds the Work model and every setup-owner lease, and has
+/// revalidated the same unresumed stop. This never signals or rewrites a child.
+pub(crate) fn reconcile_unused_after_stop(
+    path: &Path,
+    expected: &ExecutionRecord,
+    owner: &AttemptExecutionOwner,
+    stop: &crate::work_model::AttemptCancellation,
+) -> Result<()> {
+    let _lock = crate::lease::acquire_blocking(&lock_path(path))?;
+    let mut current: ExecutionRecord = serde_json::from_slice(&std::fs::read(path)?)?;
+    check_protocol(&current)?;
+    anyhow::ensure!(
+        current == *expected,
+        "execution generation or evidence changed during cancellation: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        stop.resumed_at.is_none(),
+        "cancellation was resumed before settlement"
+    );
+    anyhow::ensure!(
+        !identity_is_held(path)?,
+        "execution identity is still held; refusing unused settlement: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        current
+            .attempt_owner
+            .as_ref()
+            .is_none_or(|actual| actual == owner),
+        "execution belongs to another Attempt; refusing settlement: {}",
+        path.display()
+    );
+    // A retained terminal resource can name pane descendants outside the server
+    // group. Leave it for verified terminal cleanup, even with zero recorded PIDs.
+    let task = path
+        .parent()
+        .and_then(Path::file_name)
+        .context("execution has no Task directory")?;
+    let resource = owner
+        .project_root
+        .join(".fluent/work/terminal-sessions")
+        .join(&owner.work_item_id)
+        .join(&owner.attempt_id)
+        .join(task)
+        .join("resource.json");
+    match std::fs::symlink_metadata(&resource) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => bail!(
+            "unused reservation retains terminal resources; verify cleanup separately: {}",
+            resource.display()
+        ),
+    }
+    if matches!(
+        current.state,
+        ExecutionState::Canceled | ExecutionState::Settled
+    ) && current.settled_at.is_some()
+    {
+        return Ok(()); // Preserve terminal evidence, including legacy records.
+    }
+    anyhow::ensure!(
+        current.schema_version == LAUNCH_PROTOCOL_VERSION
+            && current.state == ExecutionState::Launching
+            && current.attempt_owner.as_ref() == Some(owner)
+            && current.owner_pid > 0
+            && current.leader_pid == 0
+            && current.process_group_id == 0
+            && current.settled_at.is_none()
+            && current.heartbeat_at == current.started_at,
+        "execution is not a proven owned unused reservation: {}",
+        path.display()
+    );
+    let started = chrono::DateTime::parse_from_rfc3339(&current.started_at)?;
+    let requested = chrono::DateTime::parse_from_rfc3339(&stop.requested_at)?;
+    let settled = stop
+        .settled_at
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()?;
+    anyhow::ensure!(
+        started >= requested
+            && started <= chrono::Utc::now()
+            && settled.is_none_or(|settled| started <= settled),
+        "unused reservation is outside the original cancellation interval: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        receipt_absent_or_prior_generation(
+            path,
+            current.launch_generation.as_deref().unwrap_or_default()
+        )?,
+        "unused reservation has current or ambiguous child handoff evidence: {}",
+        path.display()
+    );
+    current.state = ExecutionState::Canceled;
+    current.settled_at = Some(crate::work_model::now_iso8601());
+    crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&current)?)?;
     Ok(())
 }
 
@@ -575,7 +710,7 @@ pub fn spawn(command: &mut Command, transcript: &Path) -> Result<std::process::C
     };
     let _lock = crate::lease::acquire_blocking(&lock_path(&path))?;
     let generation = new_generation()?;
-    match std::fs::read(&path) {
+    let reserved_record = match std::fs::read(&path) {
         Ok(bytes) => {
             let mut record: ExecutionRecord = serde_json::from_slice(&bytes)?;
             check_protocol(&record)?;
@@ -598,6 +733,7 @@ pub fn spawn(command: &mut Command, transcript: &Path) -> Result<std::process::C
             record.launch_generation = Some(generation.clone());
             record.settled_at = None;
             crate::atomic_write::atomic_write(&path, &serde_json::to_vec_pretty(&record)?)?;
+            record
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             anyhow::ensure!(
@@ -618,11 +754,32 @@ pub fn spawn(command: &mut Command, transcript: &Path) -> Result<std::process::C
                 launch_generation: Some(generation.clone()),
             };
             crate::atomic_write::atomic_write(&path, &serde_json::to_vec_pretty(&record)?)?;
+            record
         }
         Err(error) => return Err(error.into()),
-    }
-    configure_launch_identity(command, transcript, Some(&generation))?;
-    let child = command.spawn()?;
+    };
+    let reservation = LaunchReservation {
+        path: path.clone(),
+        record: reserved_record,
+    };
+    let launch = configure_launch_identity(command, transcript, Some(&generation))
+        .and_then(|()| command.spawn().map_err(Into::into));
+    let child = match launch {
+        Ok(child) => child,
+        Err(error) => {
+            // Spawn has replaced the caller's reservation generation. Retain
+            // this exact token too, and release both locks before settlement.
+            // A child-owned receipt makes unused settlement fail closed.
+            drop(_lock);
+            drop(model_lock);
+            return match reservation.settle_unused() {
+                Ok(()) => Err(error),
+                Err(settlement) => Err(error.context(format!(
+                    "failed launch has unproven settlement: {settlement:#}"
+                ))),
+            };
+        }
+    };
     #[cfg(feature = "test-support")]
     if let Ok(barrier) = std::env::var("FLUENT_TEST_LAUNCH_PARENT_BARRIER") {
         std::fs::write(&barrier, b"spawned")?;
@@ -894,6 +1051,195 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn rejected_spawn_settles_its_unmaterialized_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        output(&mut Command::new("true"), &transcript).unwrap();
+        let path = record_path_for_transcript(&transcript);
+        let prior_receipt = std::fs::read(receipt_path(&path)).unwrap();
+        prepare_launch(&transcript, None).unwrap();
+        let mut invalid = Command::new("true");
+        invalid.arg("invalid\0argument");
+        assert!(spawn(&mut invalid, &transcript).is_err());
+        let record: ExecutionRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record.state, ExecutionState::Settled);
+        assert!(record.settled_at.is_some());
+        assert_eq!((record.leader_pid, record.process_group_id), (0, 0));
+        assert_eq!(std::fs::read(receipt_path(&path)).unwrap(), prior_receipt);
+    }
+
+    #[test]
+    fn stopped_reservation_reconciliation_refuses_changed_snapshot_and_stop() {
+        for change in ["generation", "owner", "resumed"] {
+            let dir = tempfile::tempdir().unwrap();
+            let owner = AttemptExecutionOwner {
+                project_root: dir.path().into(),
+                work_item_id: "work-1".into(),
+                attempt_id: "attempt-1".into(),
+            };
+            let transcript = dir.path().join("transcript.jsonl");
+            let reservation = prepare_launch(&transcript, Some(owner.clone())).unwrap();
+            let mut stop = crate::work_model::AttemptCancellation {
+                requested_at: reservation.record.started_at.clone(),
+                settled_at: None,
+                resumed_at: None,
+            };
+            match change {
+                "generation" => {
+                    prepare_launch(&transcript, Some(owner.clone())).unwrap();
+                }
+                "owner" => {
+                    mutate_record(&reservation.path, |r| {
+                        r.owner_pid += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+                "resumed" => stop.resumed_at = Some(crate::work_model::now_iso8601()),
+                _ => unreachable!(),
+            }
+            let before = std::fs::read(&reservation.path).unwrap();
+            assert!(
+                reconcile_unused_after_stop(&reservation.path, &reservation.record, &owner, &stop)
+                    .is_err(),
+                "{change}"
+            );
+            assert_eq!(
+                std::fs::read(&reservation.path).unwrap(),
+                before,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn unused_reservation_settlement_retains_generation_and_prior_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        assert!(
+            output(&mut Command::new("true"), &transcript)
+                .unwrap()
+                .status
+                .success()
+        );
+        let path = record_path_for_transcript(&transcript);
+        let prior_receipt = std::fs::read(receipt_path(&path)).unwrap();
+        let reservation = prepare_launch(&transcript, None).unwrap();
+        reservation.settle_unused().unwrap();
+        let settled: ExecutionRecord =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(settled.state, ExecutionState::Settled);
+        assert!(settled.settled_at.is_some());
+        assert_eq!(
+            settled.launch_generation,
+            reservation.record.launch_generation
+        );
+        assert_eq!(settled.owner_pid, reservation.record.owner_pid);
+        assert_eq!(settled.leader_pid, 0);
+        assert_eq!(settled.process_group_id, 0);
+        assert_eq!(std::fs::read(receipt_path(&path)).unwrap(), prior_receipt);
+        let bytes = std::fs::read(&path).unwrap();
+        reservation.settle_unused().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn unused_reservation_settlement_refuses_changed_or_active_identity() {
+        for change in [
+            "generation",
+            "owner",
+            "owner-pid",
+            "cancel",
+            "lock",
+            "receipt",
+            "malformed-receipt",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let transcript = dir.path().join("transcript.jsonl");
+            let reservation = prepare_launch(&transcript, None).unwrap();
+            let path = &reservation.path;
+            let mut held = None;
+            match change {
+                "generation" => {
+                    prepare_launch(&transcript, None).unwrap();
+                }
+                "owner" => {
+                    mutate_record(path, |record| {
+                        record.attempt_owner = Some(AttemptExecutionOwner {
+                            project_root: dir.path().into(),
+                            work_item_id: "other".into(),
+                            attempt_id: "attempt-2".into(),
+                        });
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+                "owner-pid" => {
+                    mutate_record(path, |record| {
+                        record.owner_pid += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+                "cancel" => {
+                    cancel(path).unwrap();
+                }
+                "lock" => {
+                    held = Some(crate::lease::acquire_blocking(&identity_lock_path(path)).unwrap());
+                }
+                "receipt" => {
+                    std::fs::write(
+                        receipt_path(path),
+                        format!(
+                            "2 {} {:010}\n",
+                            reservation.record.launch_generation.as_deref().unwrap(),
+                            std::process::id()
+                        ),
+                    )
+                    .unwrap();
+                }
+                "malformed-receipt" => {
+                    std::fs::write(receipt_path(path), "unknown child").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let bytes = std::fs::read(path).unwrap();
+            let result = reservation.settle_unused();
+            assert_eq!(
+                result.is_err(),
+                matches!(change, "lock" | "receipt" | "malformed-receipt"),
+                "{change}"
+            );
+            assert_eq!(std::fs::read(path).unwrap(), bytes, "{change}");
+            drop(held);
+        }
+    }
+
+    #[test]
+    fn unused_reservation_settlement_preserves_launched_child_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let reservation = prepare_launch(&transcript, None).unwrap();
+        let mut command = Command::new("/bin/cat");
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null());
+        let mut child = spawn(&mut command, &transcript).unwrap();
+        let mut heartbeat = ExecutionHeartbeat::start(&transcript, child.id()).unwrap();
+        let running = std::fs::read(&reservation.path).unwrap();
+        reservation.settle_unused().unwrap();
+        assert_eq!(std::fs::read(&reservation.path).unwrap(), running);
+        assert!(execution_is_live(&reservation.path).unwrap());
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        heartbeat.settle().unwrap();
+        let settled = std::fs::read(&reservation.path).unwrap();
+        reservation.settle_unused().unwrap();
+        assert_eq!(std::fs::read(&reservation.path).unwrap(), settled);
+    }
 
     #[test]
     fn attempt_owner_survives_commands_and_heartbeat() {

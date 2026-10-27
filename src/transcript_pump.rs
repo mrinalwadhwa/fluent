@@ -831,6 +831,25 @@ fn drain_with_first_fault(
     }
 }
 
+/// Retain a transport failure that prevented launch, including any failure to
+/// persist its diagnostic. No provider ran, so capture counters remain empty.
+pub(crate) fn record_prelaunch_failure(
+    transcript_path: &Path,
+    mut error: TranscriptPumpError,
+) -> TranscriptPumpError {
+    match StatusCoordinator::spawn(file_status_store(&status_path_for(transcript_path)), None) {
+        Ok(mut coordinator) => {
+            let spec =
+                TerminalStatusSpec::failed(now_ms(), PumpSummary::default(), error.message());
+            error.with_settlement(&coordinator.finish(spec))
+        }
+        Err(settlement) => {
+            error.settlement_error = Some(bound_error(&settlement.to_string()));
+            error
+        }
+    }
+}
+
 fn capture(
     reader: impl Read,
     transcript_path: &Path,
@@ -2745,6 +2764,24 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Mutex;
     use std::sync::mpsc;
+
+    #[test]
+    fn prelaunch_failure_retains_primary_when_status_is_obstructed() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::create_dir(status_path_for(&transcript)).unwrap();
+        let error =
+            record_prelaunch_failure(&transcript, TranscriptPumpError::new("read evidence"));
+        assert_eq!(error.message(), "read evidence");
+        assert!(
+            error
+                .settlement_error()
+                .unwrap()
+                .contains("transcript-pump.json")
+        );
+        assert!(error.transport().unwrap().is_balanced());
+        assert!(!transcript.exists());
+    }
 
     /// An in-memory status store that records every status it is asked to persist.
     struct RecordingStore {

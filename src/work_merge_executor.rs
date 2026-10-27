@@ -8,6 +8,7 @@ use crate::coder::{CoderKind, CoderSandbox};
 use crate::content::ContentResolver;
 use crate::git;
 use crate::hooks::{self, HookContext, HookOutcome};
+use crate::recovery_contracts::review_coverage::ensure_landing_review_bindings as ensure_review_bindings_current;
 use crate::work_model::{
     ArtifactRef, DurableTransitionMetadata, DurableTransitionOrigin, LandingIntent, MergeCandidate,
     MergeCandidateMergeState, MergeCandidateMergeStatus, MergeReviewState, Task, TaskKind,
@@ -86,141 +87,6 @@ fn landing_authorization_digest(item: &WorkItem) -> Result<String> {
     ))
 }
 
-fn ensure_review_bindings_current(
-    project_root: &Path,
-    item: &WorkItem,
-    candidate: &MergeCandidate,
-) -> Result<()> {
-    let attempt = item
-        .attempts
-        .iter()
-        .find(|attempt| attempt.id == candidate.attempt_id)
-        .context("landing Attempt is missing")?;
-    // A passed Attempt can reuse older ordinary reviews after a later Writer
-    // changes an unrelated file. Check each recorded review's identity without
-    // requiring its commit to equal the final Merge Candidate commit.
-    let source = resolve_managed_candidate_workspace_path(
-        project_root,
-        &candidate.source_workspace.path,
-        &item.id,
-        &candidate.attempt_id,
-    )?;
-    let last_writer = attempt
-        .tasks
-        .iter()
-        .rposition(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete);
-    let tested_commit = attempt
-        .tasks
-        .iter()
-        .rev()
-        .find(|task| task.kind == TaskKind::Tester && task.status == TaskStatus::Complete)
-        .and_then(|task| task.review_context.as_ref())
-        .map(|context| context.candidate_commit.as_str());
-    let rebased_from = attempt
-        .tasks
-        .iter()
-        .rev()
-        .find(|task| task.kind == TaskKind::Rebase && task.status == TaskStatus::Complete)
-        .and_then(|task| task.output.as_ref())
-        .filter(|output| {
-            output.workspace_id == candidate.source_workspace.id
-                && output.workspace_path == candidate.source_workspace.path
-                && output.source_branch == candidate.source_branch
-        })
-        .and_then(|output| output.base_commit.as_deref());
-    let mut preceding_writer = None;
-    for (index, task) in attempt.tasks.iter().enumerate() {
-        if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
-            preceding_writer = task.output.as_ref();
-        }
-        if task.kind != TaskKind::Review
-            || task.status != TaskStatus::Complete
-            || task.evidence_review_context.is_some()
-            || !crate::review::REVIEWERS.contains(&task.role.as_str())
-        {
-            continue;
-        }
-        let authentic_commit = preceding_writer.is_some_and(|output| {
-            task.review_context.as_ref().is_some_and(|context| {
-                context.candidate_commit == output.commit
-                    || (last_writer.is_some_and(|writer_index| index > writer_index)
-                        && (tested_commit == Some(context.candidate_commit.as_str())
-                            || rebased_from == Some(context.candidate_commit.as_str())))
-                    || output
-                        .learner_canonicalization
-                        .as_ref()
-                        .is_some_and(|transition| {
-                            context.candidate_commit == transition.from_commit
-                        })
-            })
-        });
-        let valid = task.review_context.as_ref().is_some_and(|context| {
-            authentic_commit
-                && context.candidate_workspace_id == candidate.source_workspace.id
-                && context.candidate_workspace_path == candidate.source_workspace.path
-                && context.source_branch == candidate.source_branch
-                && task
-                    .workspace_access
-                    .reads
-                    .contains(&candidate.source_workspace)
-                && crate::git::run_raw(
-                    &source,
-                    &[
-                        "cat-file",
-                        "-e",
-                        &format!("{}^{{commit}}", context.candidate_commit),
-                    ],
-                )
-                .is_ok_and(|output| output.status.success())
-        });
-        anyhow::ensure!(
-            valid,
-            "ordinary {} review binding changed before landing",
-            task.role
-        );
-    }
-    // Checking recorded Tasks alone misses a role removed after a later Writer
-    // invalidated its domain. Reconstruct coverage from the Writer history.
-    // Landing provenance can rewrite Writer outputs to the rebased tip. The
-    // bindings above must be authentic before coverage uses their Writer slot.
-    let mut coverage_attempt = attempt.clone();
-    let mut writer_commit = None;
-    for task in &mut coverage_attempt.tasks {
-        if task.kind == TaskKind::Write && task.status == TaskStatus::Complete {
-            writer_commit = task.output.as_ref().map(|output| output.commit.clone());
-        } else if task.kind == TaskKind::Review {
-            if let (Some(context), Some(commit)) = (task.review_context.as_mut(), &writer_commit) {
-                context.candidate_commit.clone_from(commit);
-            }
-        }
-    }
-    let pre_rebase_tip = attempt
-        .tasks
-        .iter()
-        .rev()
-        .find(|task| task.kind == TaskKind::Rebase && task.status == TaskStatus::Complete)
-        .map(|task| {
-            task.output
-                .as_ref()
-                .and_then(|output| output.base_commit.as_deref())
-                .unwrap_or("")
-        });
-    let ordinary = crate::recovery_contracts::review_coverage::ordinary_review_tasks_for_landing(
-        project_root,
-        &coverage_attempt,
-        pre_rebase_tip,
-    );
-    for role in crate::review::REVIEWERS {
-        anyhow::ensure!(
-            ordinary.iter().any(|(task, verdict)| {
-                task.role == *role && *verdict == crate::review::Verdict::Pass
-            }),
-            "ordinary {role} review binding changed before landing"
-        );
-    }
-    Ok(())
-}
-
 fn persist_landing_intent(
     config: &WorkMergeConfig<'_>,
     candidate: &MergeCandidate,
@@ -246,6 +112,7 @@ fn persist_landing_intent(
         .iter()
         .find(|entry| entry.id == candidate.id)
         .ok_or_else(|| anyhow::anyhow!("landing candidate disappeared"))?;
+    ensure_landing_bindings(config.project_root, &current_item, current_candidate)?;
     let accepted_model_digest = accepted_landing_model_digest(&current_item, current_candidate)?;
     let authorization_digest = landing_authorization_digest(&current_item)?;
     let intent = LandingIntent {
@@ -297,6 +164,19 @@ fn persist_landing_intent(
         }
         let current = item
             .merge_candidates
+            .iter()
+            .find(|current| current.id == candidate.id)
+            .ok_or_else(|| WorkModelError::MergeCandidateNotFound {
+                candidate_id: candidate.id.clone(),
+            })?;
+        ensure_landing_bindings(config.project_root, item, current).map_err(|error| {
+            WorkModelError::InvalidRecoveryOperation {
+                attempt_id: candidate.attempt_id.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        let current = item
+            .merge_candidates
             .iter_mut()
             .find(|current| current.id == candidate.id)
             .ok_or_else(|| WorkModelError::MergeCandidateNotFound {
@@ -324,14 +204,14 @@ fn persist_landing_intent(
 }
 
 fn recognized_landing_intent(
-    config: &WorkMergeConfig<'_>,
+    project_root: &Path,
     item: &WorkItem,
     candidate: &MergeCandidate,
 ) -> Result<Option<LandingIntent>> {
     let Some(intent) = candidate.merge_state.landing_intent.as_ref() else {
         return Ok(None);
     };
-    let target = resolve_workspace_path(config.project_root, &candidate.target_workspace.path);
+    let target = resolve_workspace_path(project_root, &candidate.target_workspace.path);
     anyhow::ensure!(
         intent.schema_version == 1
             && intent.work_item_id == item.id
@@ -350,7 +230,7 @@ fn recognized_landing_intent(
             && intent.accepted_model_digest == accepted_landing_model_digest(item, candidate)?
             && intent.evidence_digest
                 == crate::verification_assessment::landing_evidence_digest(
-                    config.project_root,
+                    project_root,
                     &intent.check_artifacts,
                     &intent.review_artifacts
                 )?,
@@ -382,12 +262,33 @@ fn recognized_landing_intent(
         "target moved before the authorized landing effect"
     );
     item.ensure_execution_ready()?;
-    ensure_review_bindings_current(config.project_root, &item, &candidate)?;
+    ensure_review_bindings_current(project_root, &item, &candidate)?;
     anyhow::ensure!(
         intent.authorization_digest == landing_authorization_digest(item)?,
         "landing authorization changed before Git effect"
     );
     Ok(None)
+}
+
+/// Share read-only landing authority checks with readiness and status. Applied
+/// intents reconcile through public land even after source workspace cleanup.
+pub(crate) fn ensure_landing_bindings(
+    project_root: &Path,
+    item: &WorkItem,
+    candidate: &MergeCandidate,
+) -> Result<()> {
+    if candidate.merge_state.status == MergeCandidateMergeStatus::Merged {
+        return Ok(());
+    }
+    let result = if candidate.merge_state.landing_intent.is_some() {
+        recognized_landing_intent(project_root, item, candidate).map(|_| ())
+    } else {
+        ensure_review_bindings_current(project_root, item, candidate)
+    };
+    result.map_err(|error| anyhow::anyhow!(
+        "{error:#}; inspect `fluent merge-candidate show {} {}` and `fluent task list {} {}` before retrying `fluent merge-candidate land {} {}`",
+        item.id, candidate.id, item.id, candidate.attempt_id, item.id, candidate.id
+    ))
 }
 
 fn assert_landing_effect_ready(
@@ -410,7 +311,7 @@ fn assert_landing_effect_ready(
     anyhow::ensure!(
         candidate.merge_state.status == MergeCandidateMergeStatus::LandingPending
             && candidate.merge_state.landing_intent.is_some()
-            && recognized_landing_intent(config, &item, candidate)?.is_none(),
+            && recognized_landing_intent(config.project_root, &item, candidate)?.is_none(),
         "landing effect authority changed before Git update"
     );
     let target = resolve_workspace_path(config.project_root, &candidate.target_workspace.path);
@@ -522,7 +423,7 @@ fn merge_candidate_checked(
     }
 
     let mut recognized = if candidate.merge_state.status != MergeCandidateMergeStatus::Merged {
-        recognized_landing_intent(&config, &item, &candidate)?
+        recognized_landing_intent(config.project_root, &item, &candidate)?
     } else {
         None
     };
@@ -698,6 +599,8 @@ fn merge_candidate_checked(
     }
 
     item.ensure_execution_ready()?;
+
+    ensure_landing_bindings(config.project_root, &item, &candidate)?;
 
     // A fresh, unmerged no-expertise candidate whose Learning succeeded lands its
     // frozen reviewed SHA exactly: an identity-preserving preflight runs BEFORE any
@@ -4333,6 +4236,154 @@ mod tests {
         WorkItem,
     };
 
+    fn landing_review_history(fresh_roles: bool) -> (tempfile::TempDir, PathBuf, WorkItem) {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        for args in [
+            vec!["init", "-b", "release"],
+            vec!["config", "user.email", "test@example.test"],
+            vec!["config", "user.name", "Test"],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        ] {
+            git::run(&project, &args, "create review history").unwrap();
+        }
+        let mut item = WorkItem::planned("work-1", "Review identity");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let workspace = item.attempts[0].tasks[0].workspace_access.writes[0].clone();
+        let source = project.join(&workspace.path);
+        git::run(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                source.to_str().unwrap(),
+            ],
+            "create candidate",
+        )
+        .unwrap();
+        for round in 1..=2 {
+            if round == 2 {
+                item.add_next_write_round("attempt-1", vec![]).unwrap();
+            }
+            let path = if fresh_roles {
+                "candidate.txt"
+            } else {
+                "README.md"
+            };
+            fs::write(source.join(path), format!("round {round}\n")).unwrap();
+            git::run(&source, &["add", path], "stage candidate").unwrap();
+            git::run(
+                &source,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "Update candidate",
+                ],
+                "commit candidate",
+            )
+            .unwrap();
+            let writer = item.attempts[0].tasks.last_mut().unwrap();
+            writer.status = TaskStatus::Complete;
+            writer.output = Some(TaskOutput {
+                workspace_id: workspace.id.clone(),
+                workspace_path: workspace.path.clone(),
+                source_branch: if round == 1 { "release" } else { "integration" }.into(),
+                base_commit: None,
+                commit: head_commit(&source).unwrap(),
+                no_change: None,
+                learner_canonicalization: None,
+            });
+            let roles = if round == 1 || fresh_roles {
+                crate::review::REVIEWERS
+            } else {
+                &["documentation"]
+            };
+            item.add_next_review_tasks("attempt-1", roles).unwrap();
+            for task in &mut item.attempts[0].tasks {
+                if task.kind == TaskKind::Review && task.status == TaskStatus::Planned {
+                    task.status = TaskStatus::Complete;
+                    let area = project.join(&task.artifact_area.as_ref().unwrap().path);
+                    fs::create_dir_all(&area).unwrap();
+                    fs::write(area.join("review.md"), "Verdict: pass\n").unwrap();
+                }
+            }
+        }
+        item.attempts[0].status = AttemptStatus::Complete;
+        item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+        item.create_or_get_merge_candidate("attempt-1").unwrap();
+        (root, project, item)
+    }
+
+    #[test]
+    fn landing_reviews_authenticate_selected_original_writers() {
+        for fresh in [false, true] {
+            let (_root, project, item) = landing_review_history(fresh);
+            ensure_review_bindings_current(&project, &item, &item.merge_candidates[0]).unwrap();
+        }
+    }
+
+    #[test]
+    fn landing_reviews_reject_invalid_effective_coverage() {
+        for corruption in [
+            "branch",
+            "commit",
+            "workspace",
+            "access",
+            "missing",
+            "changed-domain",
+            "ambiguous",
+        ] {
+            let (_root, project, mut item) = landing_review_history(false);
+            let tasks = &mut item.attempts[0].tasks;
+            let selected = tasks
+                .iter_mut()
+                .find(|task| task.role == "architecture")
+                .unwrap();
+            match corruption {
+                "branch" => {
+                    selected.review_context.as_mut().unwrap().source_branch = "integration".into()
+                }
+                "commit" => {
+                    selected.review_context.as_mut().unwrap().candidate_commit = "unknown".into()
+                }
+                "workspace" => {
+                    selected
+                        .review_context
+                        .as_mut()
+                        .unwrap()
+                        .candidate_workspace_path = "../foreign".into()
+                }
+                "access" => selected.workspace_access.reads.clear(),
+                "missing" => tasks.retain(|task| task.role != "architecture"),
+                "changed-domain" => {
+                    tasks.retain(|task| task.id != "attempt-1-review-2-documentation")
+                }
+                "ambiguous" => {
+                    let mut unknown = tasks.last().unwrap().clone();
+                    unknown.role = "unknown-role".into();
+                    tasks.push(unknown);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                ensure_review_bindings_current(&project, &item, &item.merge_candidates[0]).is_err(),
+                "{corruption}"
+            );
+        }
+    }
+
     struct ReviewedHostLandingFixture {
         root: tempfile::TempDir,
         item: WorkItem,
@@ -7685,6 +7736,99 @@ exit 0
         assert_eq!(
             stored.merge_candidates[0].merge_state.status,
             MergeCandidateMergeStatus::Pending
+        );
+    }
+
+    #[test]
+    fn intent_publication_rechecks_bindings_in_both_learner_modes() {
+        for mode in [
+            crate::work_model::LearnerMode::Capture,
+            crate::work_model::LearnerMode::NoExpertise,
+        ] {
+            let fx = build_frozen_fixture(|item, _| {
+                item.learner_mode = mode;
+                item.merge_candidates[0].merge_state.status = MergeCandidateMergeStatus::Executing;
+                item.attempts[0].learning = Some(crate::work_model::AttemptLearning::succeeded(
+                    1,
+                    crate::follow_up::ArtifactRef {
+                        path: ".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json".into(),
+                        digest: "sha256:frozen".into(),
+                    },
+                ));
+                item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.role == "documentation")
+                    .unwrap()
+                    .review_context
+                    .as_mut()
+                    .unwrap()
+                    .source_branch = "altered-after-checks".into();
+            });
+            let before = target_head(&fx);
+            let item = fx.store.read_work_item("work-1").unwrap();
+            let resolver = ContentResolver::new(None);
+            let error = persist_landing_intent(
+                &frozen_config(&fx, &resolver, false),
+                &item.merge_candidates[0],
+                &fx.project_root,
+                &before,
+                &fx.reviewed_sha,
+                vec![],
+                vec![],
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("ordinary documentation review binding"),
+                "{error:#}"
+            );
+            assert_eq!(target_head(&fx), before);
+            assert!(
+                fx.store.read_work_item("work-1").unwrap().merge_candidates[0]
+                    .merge_state
+                    .landing_intent
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn no_expertise_invalid_binding_publishes_no_landing_intent() {
+        let fx = build_frozen_fixture(|item, _| {
+            item.attempts[0].learning = Some(crate::work_model::AttemptLearning::succeeded(
+                1,
+                crate::follow_up::ArtifactRef {
+                    path: ".fluent/work/artifacts/work-1/attempt-1/learner/handoff.json".into(),
+                    digest: "sha256:frozen".into(),
+                },
+            ));
+            item.attempts[0]
+                .tasks
+                .iter_mut()
+                .find(|task| task.role == "documentation")
+                .unwrap()
+                .review_context
+                .as_mut()
+                .unwrap()
+                .source_branch = "altered".into();
+        });
+        let before = target_head(&fx);
+        let resolver = ContentResolver::new(None);
+        let error = merge_candidate(frozen_config(&fx, &resolver, false)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ordinary documentation review binding"),
+            "{error:#}"
+        );
+        assert_eq!(target_head(&fx), before);
+        assert!(
+            fx.store.read_work_item("work-1").unwrap().merge_candidates[0]
+                .merge_state
+                .landing_intent
+                .is_none()
         );
     }
 

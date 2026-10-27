@@ -6,6 +6,7 @@ mod remote;
 mod screen;
 pub use attachment::EmbeddedTerminal;
 pub use input::{Input, releases_focus};
+pub(crate) use remote::DisplayRestoreFailed;
 pub use screen::{Cell, Frame, Screen};
 
 pub struct Display {

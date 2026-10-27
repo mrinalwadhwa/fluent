@@ -1893,6 +1893,887 @@ PY
     );
 }
 
+fn semantic_completion_fixture(
+    tmp: &TempDir,
+    failed_preparation: bool,
+    later_reservation: bool,
+) -> WriterRecoveryFixture {
+    let fixture = if failed_preparation {
+        no_change_completion_saved_prelaunch_fixture(tmp)
+    } else {
+        no_change_completion_pause_fixture(tmp)
+    };
+    let store = WorkModelStore::new(&fixture.project);
+    let mut item = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let attempt = &mut item.attempts[0];
+    let contract = attempt.writer_completion_contract.as_mut().unwrap();
+    contract.requirements[0].verification_refs =
+        vec!["Untestable: disposable recovery fixture".into()];
+    for (name, responsibility) in [
+        ("host", CompletionResponsibility::Host),
+        ("review", CompletionResponsibility::Review),
+        ("tester", CompletionResponsibility::Tester),
+        ("learner", CompletionResponsibility::Learner),
+    ] {
+        contract.requirements.push(WriterCompletionRequirement {
+            responsibility: Some(responsibility),
+            id: format!("plan:{name}"),
+            kind: WriterCompletionRequirementKind::Plan,
+            source: format!("plan.md#{name}"),
+            requirement: format!("Complete the {name} gate"),
+            verification_refs: vec!["`true`".into()],
+            command: (name == "host").then(|| fluent::work_model::PlanCommand {
+                applicability: Default::default(),
+                command: "true".into(),
+                working_directory: ".".into(),
+                environment: Default::default(),
+                source_row: "plan:host".into(),
+            }),
+        });
+    }
+    let contract = contract.clone();
+    let task = attempt
+        .tasks
+        .iter_mut()
+        .find(|t| t.id == fixture.task_id)
+        .unwrap();
+    let evidence = ArtifactRef {
+        producer_id: "retained-review".into(),
+        path: format!(
+            ".fluent/work/artifacts/{}/attempt-1/retained-review.md",
+            fixture.work
+        ),
+    };
+    fs::write(
+        fixture.project.join(&evidence.path),
+        "# Tests review\n\n## Required host failure\nRetain the failed host check.\n",
+    )
+    .unwrap();
+    let assignment = task.writer_correction_assignment.as_mut().unwrap();
+    assignment.findings = vec![WriterCompletionFinding {
+        id: "finding:tests:retained-host-failure".into(),
+        role: "tests".into(),
+        source: evidence.path.clone(),
+        requirement: "Resolve the required host failure".into(),
+    }];
+    assignment.evidence.push(WriterCorrectionAssignmentInput {
+        digest: format!(
+            "sha256:{:x}",
+            Sha256::digest(fs::read(fixture.project.join(&evidence.path)).unwrap())
+        ),
+        artifact: evidence.clone(),
+    });
+    // The assignment is host-owned even when the live verification view differs.
+    task.input_artifacts.push(evidence);
+    let mut matrix =
+        WriterCompletionMatrix::skeleton(&contract, &task.id, &assignment.findings, None).unwrap();
+    matrix
+        .rows
+        .last_mut()
+        .unwrap()
+        .verification
+        .push(WriterVerificationClaim {
+            command: "true".into(),
+            result: WriterVerificationResult::Pass,
+        });
+    assert!(
+        matrix
+            .status_against(&contract, &task.id, &assignment.findings)
+            .unwrap_err()
+            .contains("pending but carries completion claims")
+    );
+    fs::write(
+        fixture.area.join("writer-completion.json"),
+        serde_json::to_vec_pretty(&matrix).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(fixture.area.join("no-change.json")).unwrap();
+    let source = &attempt.tasks[0];
+    fs::write(
+        fixture
+            .project
+            .join(&source.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json"),
+        serde_json::to_vec_pretty(
+            &WriterCompletionMatrix::skeleton(&contract, &source.id, &[], None).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    if later_reservation {
+        item.add_next_write_round("attempt-1", vec![]).unwrap();
+        item.attempts[0].status = fluent::work_model::AttemptStatus::NeedsUser;
+        item.attempts[0].pause_kind = Some(fluent::work_model::PauseKind::RoundCap);
+    }
+    // Import the retained assignment before exercising recovery. Normal model
+    // mutations intentionally forbid changing an already captured assignment.
+    let task_path = store
+        .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+        .unwrap();
+    let mut stored = read_json_path(&task_path);
+    stored["writer_correction_assignment"] =
+        serde_json::to_value(&item.attempts[0].tasks[1].writer_correction_assignment).unwrap();
+    write_json_path(&task_path, &stored);
+    store.write_work_item(&item).unwrap();
+    fixture
+}
+
+#[test]
+fn semantic_completion_recovery_preserves_invalid_source() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = semantic_completion_fixture(&tmp, false, false);
+    let store = WorkModelStore::new(&fixture.project);
+    let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let source_files = snapshot_tree(&fixture.area);
+    let shown = read_work_show_json(&fixture.project, &fixture.work);
+    assert!(
+        shown["next-action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("repair-writer-completion"),
+        "{shown}"
+    );
+    no_change_completion_approve(&fixture).assert().success();
+    let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let retry = &approved.attempts[0].tasks[1];
+    assert_eq!(retry.status, TaskStatus::Planned);
+    assert_ne!(
+        retry.artifact_area,
+        before.attempts[0].tasks[1].artifact_area
+    );
+    assert_eq!(
+        retry.writer_correction_assignment,
+        before.attempts[0].tasks[1].writer_correction_assignment
+    );
+    assert!(
+        !fixture
+            .project
+            .join(&retry.artifact_area.as_ref().unwrap().path)
+            .exists()
+    );
+    assert_eq!(snapshot_tree(&fixture.area), source_files);
+    assert_eq!(approved.attempts[0].tasks[0], before.attempts[0].tasks[0]);
+    assert_eq!(
+        approved.attempts[0].writer_completion_contract,
+        before.attempts[0].writer_completion_contract
+    );
+    assert_eq!(git_head(&fixture.workspace), fixture.candidate);
+}
+
+#[test]
+fn semantic_completion_recovery_supersedes_only_unstarted_reservation() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = semantic_completion_fixture(&tmp, true, true);
+    let store = WorkModelStore::new(&fixture.project);
+    let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let source_files = snapshot_tree(&fixture.area);
+    let old_audit = fs::read(&fixture.audit).unwrap();
+    let shown = read_work_show_json(&fixture.project, &fixture.work);
+    assert!(
+        shown["next-action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("repair-writer-completion"),
+        "{shown}"
+    );
+    no_change_completion_approve(&fixture).assert().success();
+    let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+    assert_eq!(
+        approved.attempts[0].tasks.len(),
+        before.attempts[0].tasks.len()
+    );
+    assert_eq!(approved.attempts[0].tasks[0], before.attempts[0].tasks[0]);
+    let retry = &approved.attempts[0].tasks[1];
+    assert_eq!(retry.status, TaskStatus::Planned);
+    assert_ne!(
+        retry.artifact_area,
+        before.attempts[0].tasks[1].artifact_area
+    );
+    let mut expected = before.attempts[0].tasks[2].clone();
+    expected.status = TaskStatus::Superseded;
+    expected.completed_at = approved.attempts[0].tasks[2].completed_at.clone();
+    assert!(expected.completed_at.is_some());
+    assert_eq!(approved.attempts[0].tasks[2], expected);
+    let audit_ref = approved.attempts[0]
+        .artifacts
+        .iter()
+        .find(|a| a.producer_id == "writer-completion-no-change-retry")
+        .unwrap();
+    let audit = read_json_path(&fixture.project.join(&audit_ref.path));
+    let retained: fluent::work_model::Attempt =
+        serde_json::from_value(audit["before"].clone()).unwrap();
+    assert_eq!(retained, before.attempts[0]);
+    assert_eq!(snapshot_tree(&fixture.area), source_files);
+    assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+}
+
+#[test]
+fn semantic_completion_recovery_rejects_stale_or_launched_state() {
+    assert_semantic_completion_refusals(&[
+        "valid-incomplete",
+        "materialized",
+        "started-reservation",
+        "extra-reservation",
+        "matching-receipt",
+        "malformed-receipt",
+        "leader",
+        "owner",
+        "unknown-owner",
+        "wrong-attempt",
+        "old-preparation",
+        "heartbeat",
+        "matrix-after",
+        "contract-after",
+        "assignment-after",
+        "audit-after",
+        "candidate-after",
+        "reservation-after",
+        "materialized-after",
+        "receipt-after",
+        "new-file-after",
+    ]);
+}
+
+fn assert_semantic_completion_refusals(cases: &[&str]) {
+    for &case in cases {
+        let tmp = TempDir::new().unwrap();
+        let fixture = semantic_completion_fixture(&tmp, true, true);
+        let store = WorkModelStore::new(&fixture.project);
+        let approved = case.ends_with("-after");
+        if approved {
+            no_change_completion_approve(&fixture).assert().success();
+        }
+        let item = store.read_work_item_snapshot(&fixture.work).unwrap();
+        let later = &item.attempts[0].tasks[2];
+        let attempt_path = fixture.project.join(format!(
+            ".fluent/work/attempts/{}/attempt-1.json",
+            fixture.work
+        ));
+        match case {
+            "valid-incomplete" => {
+                let path = fixture.area.join("writer-completion.json");
+                let mut matrix: WriterCompletionMatrix =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                matrix.rows.last_mut().unwrap().verification.clear();
+                assert!(
+                    !matrix
+                        .status_against(
+                            item.attempts[0]
+                                .writer_completion_contract
+                                .as_ref()
+                                .unwrap(),
+                            &fixture.task_id,
+                            &item.attempts[0].tasks[1]
+                                .writer_correction_assignment
+                                .as_ref()
+                                .unwrap()
+                                .findings
+                        )
+                        .unwrap()
+                        .is_complete()
+                );
+                fs::write(path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+            }
+            "materialized" | "materialized-after" => {
+                fs::create_dir_all(
+                    fixture
+                        .project
+                        .join(&later.artifact_area.as_ref().unwrap().path),
+                )
+                .unwrap();
+            }
+            "started-reservation" | "reservation-after" => {
+                let path = store
+                    .work_task_path(&fixture.work, "attempt-1", &later.id)
+                    .unwrap();
+                let mut task = read_json_path(&path);
+                if approved {
+                    task["instructions"] = "changed reservation".into();
+                } else {
+                    task["started_at"] = "2026-10-13T22:00:00Z".into();
+                }
+                write_json_path(&path, &task);
+            }
+            "extra-reservation" => {
+                let mut extra = item.clone();
+                extra.add_next_write_round("attempt-1", vec![]).unwrap();
+                store.write_work_item(&extra).unwrap();
+            }
+            "matching-receipt" | "receipt-after" => fs::write(
+                fixture.area.join("execution-receipt"),
+                "2 0123456789abcdef0123456789abcdef 0000075536\n",
+            )
+            .unwrap(),
+            "malformed-receipt" => {
+                fs::write(fixture.area.join("execution-receipt"), "unknown launch\n").unwrap()
+            }
+            "leader" | "owner" | "unknown-owner" | "wrong-attempt" | "old-preparation"
+            | "heartbeat" => {
+                let path = fixture.area.join("execution.json");
+                let mut record = read_json_path(&path);
+                match case {
+                    "leader" => record["leader_pid"] = 75536.into(),
+                    "owner" => record["owner_pid"] = std::process::id().into(),
+                    "unknown-owner" => record["owner_pid"] = 0.into(),
+                    "wrong-attempt" => {
+                        record["attempt_owner"]["attempt_id"] = "attempt-other".into()
+                    }
+                    "old-preparation" => record["started_at"] = "2026-10-12T22:00:00Z".into(),
+                    "heartbeat" => record["heartbeat_at"] = "2026-10-13T22:00:01Z".into(),
+                    _ => unreachable!(),
+                }
+                write_json_path(&path, &record);
+            }
+            "matrix-after" => fs::write(
+                fixture.area.join("writer-completion.json"),
+                "changed matrix",
+            )
+            .unwrap(),
+            "new-file-after" => {
+                fs::write(fixture.area.join("later-evidence"), "new source bytes").unwrap()
+            }
+            "contract-after" => {
+                let mut attempt = read_json_path(&attempt_path);
+                attempt["writer_completion_contract"]["requirements"][0]["requirement"] =
+                    "Changed obligation".into();
+                write_json_path(&attempt_path, &attempt);
+            }
+            "assignment-after" => {
+                let path = store
+                    .work_task_path(&fixture.work, "attempt-1", &fixture.task_id)
+                    .unwrap();
+                let mut task = read_json_path(&path);
+                task["writer_correction_assignment"]["findings"][0]["requirement"] =
+                    "Changed finding".into();
+                write_json_path(&path, &task);
+            }
+            "audit-after" => {
+                let reference = item.attempts[0]
+                    .artifacts
+                    .iter()
+                    .find(|a| a.producer_id == "writer-completion-no-change-retry")
+                    .unwrap();
+                let path = fixture.project.join(&reference.path);
+                let mut audit = read_json_path(&path);
+                audit["resolution"] = "Changed authority".into();
+                write_json_path(&path, &audit);
+            }
+            "candidate-after" => commit_file(
+                &fixture.workspace,
+                "changed.txt",
+                "changed\n",
+                "Change candidate",
+            ),
+            _ => unreachable!(),
+        }
+        let source = snapshot_tree(&fixture.area);
+        let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+        let outcome = no_change_completion_approve(&fixture).output().unwrap();
+        assert!(
+            !outcome.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&outcome.stdout)
+        );
+        if case == "valid-incomplete" {
+            assert!(
+                String::from_utf8_lossy(&outcome.stderr)
+                    .contains("requires an invalid retained handoff")
+            );
+        }
+        if approved {
+            for args in [
+                vec![
+                    "attempt",
+                    "run",
+                    fixture.work.as_str(),
+                    "attempt-1",
+                    "--no-sandbox",
+                ],
+                vec![
+                    "queue",
+                    "resume",
+                    fixture.work.as_str(),
+                    "--attempt",
+                    "attempt-1",
+                ],
+            ] {
+                fluent_cmd()
+                    .current_dir(&fixture.project)
+                    .args(args)
+                    .assert()
+                    .failure();
+            }
+        }
+        assert_eq!(
+            store.read_work_item_snapshot(&fixture.work).unwrap(),
+            before,
+            "{case}"
+        );
+        assert_eq!(snapshot_tree(&fixture.area), source, "{case}");
+    }
+}
+
+#[test]
+fn semantic_completion_recovery_replay_preserves_gates() {
+    exercise_semantic_completion_recovery(false);
+}
+
+#[test]
+#[serial]
+fn integrated_completion_retry_preserves_attempt_home_and_gates() {
+    exercise_semantic_completion_recovery(true);
+    assert_semantic_completion_refusals(&[
+        "valid-incomplete",
+        "matching-receipt",
+        "assignment-after",
+        "audit-after",
+        "wrong-attempt",
+    ]);
+}
+
+fn exercise_semantic_completion_recovery(integrated: bool) {
+    let host = std::env::var("FLUENT_SEMANTIC_COMPLETION_HOST").as_deref() == Ok("1");
+    let output = std::env::var_os("FLUENT_SEMANTIC_COMPLETION_OUTPUT").map(PathBuf::from);
+    let record_command = |name: &str, result: &std::process::Output| {
+        if let Some(output) = &output {
+            fs::write(output.join(format!("{name}.stdout")), &result.stdout).unwrap();
+            fs::write(output.join(format!("{name}.stderr")), &result.stderr).unwrap();
+            fs::write(
+                output.join(format!("{name}.status")),
+                result.status.to_string(),
+            )
+            .unwrap();
+        }
+    };
+    let tmp = if let Some(output) = &output {
+        TempDir::new_in(output).unwrap()
+    } else {
+        TempDir::new().unwrap()
+    };
+    let fixture = semantic_completion_fixture(&tmp, true, true);
+    let store = WorkModelStore::new(&fixture.project);
+    let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let source = snapshot_tree(&fixture.area);
+    let old_audit = fs::read(&fixture.audit).unwrap();
+    let result = no_change_completion_approve(&fixture).output().unwrap();
+    record_command("approval", &result);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let approved = store.read_work_item_snapshot(&fixture.work).unwrap();
+    let result = no_change_completion_approve(&fixture).output().unwrap();
+    record_command("approval-replay", &result);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        store.read_work_item_snapshot(&fixture.work).unwrap(),
+        approved
+    );
+    let retry = &approved.attempts[0].tasks[1];
+    let area = fixture
+        .project
+        .join(&retry.artifact_area.as_ref().unwrap().path);
+    let audit_ref = approved.attempts[0]
+        .artifacts
+        .iter()
+        .find(|a| a.producer_id == "writer-completion-no-change-retry")
+        .unwrap();
+    let audit_path = fixture.project.join(&audit_ref.path);
+    let audit_bytes = fs::read(&audit_path).unwrap();
+    let protected = vec![
+        fixture.area.join("writer-completion.json"),
+        fixture.area.join("transcript.jsonl"),
+        fixture.area.join("execution.json"),
+        fixture.audit.clone(),
+        audit_path.clone(),
+    ];
+    let expected_home = fixture.project.join(format!(
+        ".fluent/work/artifacts/{}/attempt-1/claude-home",
+        fixture.work
+    ));
+    if integrated {
+        fs::create_dir_all(&expected_home).unwrap();
+        let original = std::env::var_os("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+        unsafe {
+            std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
+        }
+        let profile = fluent::work_task_executor::claude_writer_profile_for_test(
+            &fixture.project,
+            retry,
+            &expected_home,
+        )
+        .unwrap();
+        let rendered = fs::read_to_string(&profile.path).unwrap();
+        for path in &protected {
+            assert!(
+                rendered.contains(&format!("(subpath \"{}\")", path.display())),
+                "missing retained evidence {}",
+                path.display()
+            );
+        }
+        for foreign in [
+            fixture.project.join(format!(
+                ".fluent/work/artifacts/{}/attempt-other/claude-home",
+                fixture.work
+            )),
+            fixture
+                .project
+                .join(".fluent/work/artifacts/foreign/attempt-1/claude-home"),
+        ] {
+            let error = fluent::work_task_executor::claude_writer_profile_for_test(
+                &fixture.project,
+                retry,
+                &foreign,
+            )
+            .err()
+            .unwrap();
+            assert!(
+                format!("{error:#}").contains("exact current Attempt"),
+                "{error:#}"
+            );
+        }
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", value),
+                None => std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT"),
+            }
+        }
+    }
+    let provider = tmp.path().join("provider");
+    write_mock_claude(
+        &provider,
+        r#"#!/bin/bash
+set -eu
+python3 -I -S - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+area = Path(os.environ['RETRY_AREA'])
+assert Path(os.environ['HOME']) == Path(os.environ['RETRY_EXPECTED_HOME'])
+assert Path(os.environ['CLAUDE_CONFIG_DIR']) == Path(os.environ['RETRY_EXPECTED_HOME'])
+with (area / 'provider-launches').open('a') as stream:
+    stream.write('launch\n')
+if os.environ.get('FLUENT_SEMANTIC_COMPLETION_HOST') == '1':
+    for name in json.loads(os.environ['RETRY_PROTECTED']):
+        path = Path(name)
+        assert path.read_bytes(), name
+        try:
+            with path.open('ab') as stream:
+                stream.write(b'unauthorized mutation')
+        except PermissionError:
+            continue
+        raise AssertionError('historical evidence is writable: ' + name)
+    (area / 'confinement-observed').write_text('original evidence and audits are read-only\n')
+matrix = json.loads((area / 'writer-completion.json').read_text())
+assert all(row['state'] == 'pending' and not row['verification'] for row in matrix['rows'])
+subprocess.run(['true'], check=True)
+for row in matrix['rows']:
+    if row.get('responsibility', 'writer') == 'writer':
+        row['state'] = 'complete'
+        row['implementation-evidence'] = ['candidate.txt: retained implementation inspected']
+        row['verification'] = [{'command': 'true', 'result': 'pass'}]
+        if row['kind'] == 'finding':
+            row['applicable-constraints'] = [matrix['rows'][0]['id']]
+(area / 'writer-completion.json').write_text(json.dumps(matrix))
+(area / 'no-change.json').write_text(json.dumps({
+    'schema_version': 1, 'declaration_path': os.environ['RETRY_AREA_REL'] + '/no-change.json',
+    'reason': 'The fixture candidate satisfies its Writer obligations; later gates remain pending.',
+    'verification': [{'command': 'true', 'result': 'pass'}]
+}))
+PY
+"#,
+    );
+    // Production Claude readiness enforces the hook-capable CLI version.
+    let provider_path = provider.join("claude");
+    let provider_bytes = fs::read_to_string(&provider_path)
+        .unwrap()
+        .replace("2.1.211 (Claude Code)", "2.1.295 (Claude Code)");
+    fs::write(&provider_path, provider_bytes).unwrap();
+    if host {
+        write_mock_executable(
+            &provider,
+            "sandbox-exec",
+            "#!/bin/bash\nexec /usr/bin/sandbox-exec \"$@\"\n",
+        );
+    }
+    let mut run = fluent_cmd();
+    run.current_dir(&fixture.project)
+        .args(["attempt", "run", &fixture.work, "attempt-1"])
+        .env("PATH", mock_path(&provider))
+        .env("RETRY_AREA", &area)
+        .env("RETRY_EXPECTED_HOME", &expected_home)
+        .env(
+            "RETRY_AREA_REL",
+            &retry.artifact_area.as_ref().unwrap().path,
+        )
+        .env(
+            "RETRY_PROTECTED",
+            serde_json::to_string(&protected).unwrap(),
+        );
+    if host {
+        run.env_remove("FLUENT_TEST_HERMETIC_PROVIDERS")
+            .env_remove("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+    } else {
+        run.arg("--no-sandbox");
+    }
+    let result = run.output().unwrap();
+    record_command("resume", &result);
+    assert!(
+        area.join("provider-launches").exists(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(area.join("provider-launches")).unwrap(),
+        "launch\n"
+    );
+    let completed = store.read_work_item_snapshot(&fixture.work).unwrap();
+    assert_eq!(
+        completed.attempts[0].tasks[1].status,
+        TaskStatus::Complete,
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        completed.attempts[0].tasks.len(),
+        approved.attempts[0].tasks.len()
+    );
+    assert_eq!(completed.attempts[0].tasks[0], before.attempts[0].tasks[0]);
+    assert_eq!(
+        completed.attempts[0].tasks[2],
+        approved.attempts[0].tasks[2]
+    );
+    let matrix: WriterCompletionMatrix =
+        serde_json::from_slice(&fs::read(area.join("writer-completion.json")).unwrap()).unwrap();
+    for row in matrix.rows.iter().filter(|r| {
+        r.responsibility
+            .is_some_and(|r| r != CompletionResponsibility::Writer)
+    }) {
+        assert_eq!(row.state, WriterCompletionState::Pending);
+        assert!(row.implementation_evidence.is_empty() && row.verification.is_empty());
+    }
+    for iteration in 0..2 {
+        let result = no_change_completion_approve(&fixture).output().unwrap();
+        record_command(&format!("completed-approval-{iteration}"), &result);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result = run.output().unwrap();
+        record_command(&format!("completed-resume-{iteration}"), &result);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("requires host action plan:host"));
+    }
+    assert_eq!(
+        fs::read_to_string(area.join("provider-launches")).unwrap(),
+        "launch\n"
+    );
+    assert_eq!(snapshot_tree(&fixture.area), source);
+    assert_eq!(fs::read(&fixture.audit).unwrap(), old_audit);
+    assert_eq!(fs::read(&audit_path).unwrap(), audit_bytes);
+    assert!(completed.merge_candidates.is_empty());
+    assert_eq!(git_head(&fixture.workspace), fixture.candidate);
+    if host {
+        assert!(area.join("confinement-observed").is_file());
+    }
+    if let Some(output) = &output {
+        for (name, item) in [
+            ("before.json", &before),
+            ("approved.json", &approved),
+            ("completed.json", &completed),
+        ] {
+            fs::write(output.join(name), serde_json::to_vec_pretty(item).unwrap()).unwrap();
+        }
+        // Retain only fixture-owned recovery evidence, never homes or caches.
+        for (prefix, root) in [("source", &fixture.area), ("retry", &area)] {
+            for name in [
+                "writer-completion.json",
+                "transcript.jsonl",
+                "execution.json",
+                "execution-receipt",
+                "provider-launches",
+                "confinement-observed",
+            ] {
+                if let Ok(bytes) = fs::read(root.join(name)) {
+                    fs::write(output.join(format!("{prefix}-{name}")), bytes).unwrap();
+                }
+            }
+        }
+        fs::write(output.join("prior-audit.json"), old_audit).unwrap();
+        fs::write(output.join("retry-audit.json"), audit_bytes).unwrap();
+        fs::write(output.join("resume.stdout"), &result.stdout).unwrap();
+        fs::write(output.join("resume.stderr"), &result.stderr).unwrap();
+    }
+}
+
+#[test]
+fn semantic_completion_recovery_rechecks_original_owner_lock() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = semantic_completion_fixture(&tmp, true, true);
+    let lock_path = fixture.area.join("execution-owner.lock");
+    fs::write(&lock_path, b"").unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+    let owner = fs::File::open(&lock_path).unwrap();
+    rustix::fs::flock(&owner, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let before = snapshot_tree(&fixture.project.join(".fluent/work"));
+    no_change_completion_approve(&fixture)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("execution ownership remains live"));
+    for args in [
+        vec![
+            "attempt",
+            "run",
+            fixture.work.as_str(),
+            "attempt-1",
+            "--no-sandbox",
+        ],
+        vec![
+            "queue",
+            "resume",
+            fixture.work.as_str(),
+            "--attempt",
+            "attempt-1",
+        ],
+    ] {
+        fluent_cmd()
+            .current_dir(&fixture.project)
+            .args(args)
+            .assert()
+            .failure();
+    }
+    assert_eq!(snapshot_tree(&fixture.project.join(".fluent/work")), before);
+    drop(owner);
+    no_change_completion_approve(&fixture).assert().success();
+}
+
+#[test]
+fn semantic_completion_recovery_rechecks_spawn() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = semantic_completion_fixture(&tmp, true, true);
+    no_change_completion_approve(&fixture).assert().success();
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args([
+            "task",
+            "run",
+            &fixture.work,
+            "attempt-1",
+            &fixture.task_id,
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("explicit Attempt resume"));
+    let bin = tmp.path().join("semantic-retry-provider");
+    write_mock_claude(&bin, "#!/bin/bash\nexit 73\n");
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(&bin))
+        .env("FLUENT_TEST_CONTEXT_RETRY_INTERRUPT", "start-journal")
+        .args(["attempt", "run", &fixture.work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .code(86);
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["work-item", "upgrade", &fixture.work])
+        .assert()
+        .success();
+    let item = WorkModelStore::new(&fixture.project)
+        .read_work_item_snapshot(&fixture.work)
+        .unwrap();
+    let transcript = fixture
+        .project
+        .join(
+            &item.attempts[0].tasks[1]
+                .artifact_area
+                .as_ref()
+                .unwrap()
+                .path,
+        )
+        .join("transcript.jsonl");
+    let path = fixture.project.join(format!(
+        ".fluent/work/attempts/{}/attempt-1.json",
+        fixture.work
+    ));
+    let original = fs::read(&path).unwrap();
+    let mut changed = read_json_path(&path);
+    changed["writer_completion_contract"]["requirements"][0]["requirement"] =
+        "Changed at spawn".into();
+    write_json_path(&path, &changed);
+    let marker = tmp.path().join("provider-launched");
+    let spawn = || {
+        let mut command = Command::new("/bin/bash");
+        command
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "printf launched > \"$1\"",
+                "probe",
+            ])
+            .arg(&marker);
+        fluent::execution::spawn(&mut command, &transcript)
+    };
+    assert!(format!("{:#}", spawn().unwrap_err()).contains("immutable contract changed"));
+    assert!(!marker.exists());
+    fs::write(path, original).unwrap();
+    let mut child = spawn().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read(&marker).unwrap(), b"launched");
+    assert!(format!("{:#}", spawn().unwrap_err()).contains("already attempted a provider launch"));
+}
+
+#[test]
+fn semantic_completion_recovery_keeps_later_cancellation() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = semantic_completion_fixture(&tmp, true, true);
+    no_change_completion_approve(&fixture).assert().success();
+    fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["attempt", "cancel", &fixture.work, "attempt-1"])
+        .assert()
+        .success();
+    let store = WorkModelStore::new(&fixture.project);
+    let stopped = store.read_work_item_snapshot(&fixture.work).unwrap();
+    no_change_completion_approve(&fixture).assert().success();
+    assert_eq!(
+        store.read_work_item_snapshot(&fixture.work).unwrap(),
+        stopped
+    );
+    for args in [
+        vec![
+            "attempt",
+            "run",
+            fixture.work.as_str(),
+            "attempt-1",
+            "--no-sandbox",
+        ],
+        vec![
+            "queue",
+            "resume",
+            fixture.work.as_str(),
+            "--attempt",
+            "attempt-1",
+        ],
+    ] {
+        fluent_cmd()
+            .current_dir(&fixture.project)
+            .args(args)
+            .assert()
+            .failure();
+    }
+    assert_eq!(
+        store.read_work_item_snapshot(&fixture.work).unwrap(),
+        stopped
+    );
+}
+
 fn no_change_completion_saved_prelaunch_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
     use fluent::work_model::{AttemptStatus, PauseKind};
     let fixture = writer_recovery_fixture(tmp);
@@ -1960,7 +2841,8 @@ fn no_change_completion_saved_prelaunch_fixture(tmp: &TempDir) -> WriterRecovery
             "schema_version": 2, "state": "launching", "owner_pid": 2147483647u32,
             "leader_pid": 0, "process_group_id": 0,
             "started_at": "2026-10-13T22:00:00Z", "heartbeat_at": "2026-10-13T22:00:00Z",
-            "launch_generation": "0123456789abcdef0123456789abcdef"
+            "launch_generation": "0123456789abcdef0123456789abcdef",
+            "attempt_owner": {"project_root": fixture.project, "work_item_id": fixture.work, "attempt_id": "attempt-1"}
         }),
     );
     fs::write(
@@ -8549,6 +9431,801 @@ fn committed_matrix_recovery_fixture(tmp: &TempDir) -> (WriterRecoveryFixture, V
     (fixture, malformed)
 }
 
+// Reproduce a saved post-Tester correction without touching live Work. The
+// historical Tester really executes its fixture command; it has no evidence
+// for the named test on the later corrected candidate.
+fn completion_repair_after_tester_fixture(tmp: &TempDir) -> WriterRecoveryFixture {
+    let (mut fixture, _) = committed_matrix_recovery_fixture(tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    fs::create_dir_all(fixture.workspace.join("tests")).unwrap();
+    commit_file(
+        &fixture.workspace,
+        "tests/repair.rs",
+        "#[test]\nfn retained_case() {}\n",
+        "Add named fixture test",
+    );
+    let tested_candidate = git_head(&fixture.workspace);
+    let mut item = store.read_work_item(&fixture.work).unwrap();
+    item.attempts[0].tasks[0].output.as_mut().unwrap().commit = tested_candidate.clone();
+    item.attempts[0].writer_runs[0].candidate_commit = tested_candidate.clone();
+    item.attempts[0]
+        .writer_completion_contract
+        .as_mut()
+        .unwrap()
+        .requirements[0]
+        .verification_refs =
+        vec![r#"{"kind":"named-test","path":"tests/repair.rs","name":"retained_case"}"#.into()];
+    for (responsibility, name) in [
+        (CompletionResponsibility::Review, "review"),
+        (CompletionResponsibility::Tester, "tester"),
+        (CompletionResponsibility::Learner, "learner"),
+    ] {
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements
+            .push(WriterCompletionRequirement {
+                responsibility: Some(responsibility),
+                id: format!("plan:{name}"),
+                kind: WriterCompletionRequirementKind::Plan,
+                source: format!("plan.md#{name}"),
+                requirement: format!("Complete the separate {name} gate"),
+                verification_refs: vec![],
+                command: None,
+            });
+    }
+    let mut initial_matrix = WriterCompletionMatrix::skeleton(
+        item.attempts[0]
+            .writer_completion_contract
+            .as_ref()
+            .unwrap(),
+        &item.attempts[0].tasks[0].id,
+        &[],
+        None,
+    )
+    .unwrap();
+    initial_matrix.rows[0].state = WriterCompletionState::Complete;
+    initial_matrix.rows[0].implementation_evidence = vec!["candidate.txt".into()];
+    initial_matrix.rows[0].verification = vec![WriterVerificationClaim {
+        command: "true".into(),
+        result: WriterVerificationResult::Pass,
+    }];
+    fs::write(
+        fixture
+            .project
+            .join(
+                &item.attempts[0].tasks[0]
+                    .artifact_area
+                    .as_ref()
+                    .unwrap()
+                    .path,
+            )
+            .join("writer-completion.json"),
+        serde_json::to_vec_pretty(&initial_matrix).unwrap(),
+    )
+    .unwrap();
+    let tester_id = item.add_final_tester_task("attempt-1").unwrap();
+    let tester = item.attempts[0].tasks.last_mut().unwrap();
+    let results_ref = ArtifactRef {
+        producer_id: tester_id,
+        path: format!(
+            "{}/tester-results.json",
+            tester.artifact_area.as_ref().unwrap().path
+        ),
+    };
+    let tester_area = fixture
+        .project
+        .join(&tester.artifact_area.as_ref().unwrap().path);
+    fs::create_dir_all(&tester_area).unwrap();
+    fluent::tester::run(
+        &fixture.workspace,
+        &tester_area,
+        true,
+        &fluent::content::ContentResolver::new(Some(&fixture.project)),
+    )
+    .unwrap();
+    fluent::tester::bind_candidate_commit(&tester_area, &tested_candidate).unwrap();
+    tester.status = TaskStatus::Complete;
+    item.attempts[0].artifacts.push(results_ref.clone());
+    commit_file(
+        &fixture.workspace,
+        "candidate.txt",
+        "corrected after the historical Tester\n",
+        "Correct fixture candidate",
+    );
+    fixture.candidate = git_head(&fixture.workspace);
+    let source_id = item
+        .add_next_write_round("attempt-1", vec![results_ref])
+        .unwrap();
+    let mut output = item.attempts[0].tasks[0].output.clone().unwrap();
+    output.base_commit = Some(tested_candidate.clone());
+    output.commit = fixture.candidate.clone();
+    let source = item.attempts[0].tasks.last_mut().unwrap();
+    source.writer_correction_assignment = Some(WriterCorrectionAssignment {
+        schema_version: WRITER_CORRECTION_ASSIGNMENT_SCHEMA_VERSION,
+        work_item_id: fixture.work.clone(),
+        attempt_id: "attempt-1".into(),
+        writer_task_id: source_id.clone(),
+        source_task_id: "attempt-1-write-1".into(),
+        source_candidate_commit: tested_candidate,
+        source_task_inputs: vec![],
+        evidence: vec![WriterCorrectionAssignmentInput {
+            artifact: source.input_artifacts[0].clone(),
+            digest: format!(
+                "sha256:{:x}",
+                Sha256::digest(fs::read(tester_area.join("tester-results.json")).unwrap())
+            ),
+        }],
+        findings: vec![],
+        origin: WriterCorrectionAssignmentOrigin::Captured,
+    });
+    source.status = TaskStatus::Complete;
+    source.output = Some(output);
+    let source_area = fixture
+        .project
+        .join(&source.artifact_area.as_ref().unwrap().path);
+    fs::create_dir_all(&source_area).unwrap();
+    fs::write(
+        source_area.join("transcript.jsonl"),
+        "completed corrective Writer\n",
+    )
+    .unwrap();
+    // Match the incident: an otherwise structured matrix with an invalid result.
+    let mut matrix = serde_json::to_value(
+        WriterCompletionMatrix::skeleton(
+            item.attempts[0]
+                .writer_completion_contract
+                .as_ref()
+                .unwrap(),
+            &source_id,
+            &[],
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    matrix["rows"][0]["state"] = "complete".into();
+    matrix["rows"][0]["implementation-evidence"] = serde_json::json!(["candidate.txt"]);
+    matrix["rows"][0]["verification"] = serde_json::json!([
+        {"command": "true", "result": "pass; retained focused verification"}
+    ]);
+    write_json_path(&source_area.join("writer-completion.json"), &matrix);
+    let attempt = &mut item.attempts[0];
+    let mut run = attempt.writer_runs[0].clone();
+    run.task_id = source_id;
+    run.kind = fluent::work_model::WriterRunKind::Corrective;
+    run.candidate_commit = fixture.candidate.clone();
+    attempt.writer_runs.push(run);
+    attempt.status = fluent::work_model::AttemptStatus::NeedsUser;
+    attempt.pause_kind = Some(fluent::work_model::PauseKind::WriterCompletion);
+    store.write_work_item(&item).unwrap();
+    fixture.task_id = "attempt-1-write-3".into();
+    fixture.area = fixture.project.join(format!(
+        ".fluent/work/artifacts/{}/attempt-1/{}",
+        fixture.work, fixture.task_id
+    ));
+    fixture.audit = fixture.project.join(format!(
+        ".fluent/work/artifacts/{}/attempt-1/writer-completion-recoveries/{}/recovery.json",
+        fixture.work, fixture.task_id
+    ));
+    fixture
+}
+
+#[test]
+fn writer_completion_repair_after_tester_is_admitted() {
+    let tmp = TempDir::new().unwrap();
+    let fixture = completion_repair_after_tester_fixture(&tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    let before = store.read_work_item(&fixture.work).unwrap();
+    let source = before.attempts[0].tasks.last().unwrap().clone();
+    let source_area = fixture
+        .project
+        .join(&source.artifact_area.as_ref().unwrap().path);
+    let matrix = fs::read(source_area.join("writer-completion.json")).unwrap();
+    committed_matrix_repair_command(&fixture).assert().success();
+    let authorized = store.read_work_item(&fixture.work).unwrap();
+    let assessment = fluent::verification_assessment::assess_current_verification(
+        &fixture.project,
+        &authorized.attempts[0],
+    )
+    .unwrap();
+    assert!(assessment.candidate_defects().is_empty());
+    assert!(
+        assessment
+            .references
+            .iter()
+            .any(|reference| !reference.satisfied)
+    );
+
+    // Capture the rendered grants with a sandbox double. The separate host
+    // exercise verifies confinement with the production worker sandbox.
+    let bin = tmp.path().join("completion-admission-provider");
+    let profile_log = tmp.path().join("completion-repair.sb");
+    write_mock_claude(
+        &bin,
+        "#!/bin/bash\nprintf admitted > \"$REPAIR_LAUNCHED\"\nexit 73\n",
+    );
+    write_mock_executable(
+        &bin,
+        "sandbox-exec",
+        "#!/bin/bash\ncp \"$2\" \"${SANDBOX_PROFILE_LOG:?}\"\nshift 2\nexec \"$@\"\n",
+    );
+    let launched = fixture.area.join("provider-launched");
+    let output = fluent_cmd()
+        .current_dir(&fixture.project)
+        .args(["attempt", "run", &fixture.work, "attempt-1"])
+        .env("PATH", mock_path(&bin))
+        .env("SANDBOX_PROFILE_LOG", &profile_log)
+        .env("REPAIR_LAUNCHED", &launched)
+        .output()
+        .unwrap();
+    assert!(
+        launched.exists(),
+        "repair was refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = store.read_work_item(&fixture.work).unwrap();
+    assert_eq!(after.attempts[0].tasks[2], source);
+    assert_eq!(
+        fs::read(source_area.join("writer-completion.json")).unwrap(),
+        matrix
+    );
+    assert_eq!(git_head(&fixture.workspace), fixture.candidate);
+    let profile = fs::read_to_string(&profile_log).unwrap();
+    let project = fs::canonicalize(&fixture.project).unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(deny file-write* (subpath \"{}\"))",
+            project.join(".fluent/work").display()
+        )),
+        "repair must retain write denials over the source Work state"
+    );
+    for input in [source_area.join("writer-completion.json"), fixture.audit] {
+        let input = fs::canonicalize(input).unwrap();
+        assert!(
+            profile.contains(&format!(
+                "(allow file-read*  (subpath \"{}\"))",
+                input.display()
+            )),
+            "repair must grant the exact validated input: {}",
+            input.display()
+        );
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-write* (subpath \"{}\"))",
+                input.display()
+            )),
+            "repair must keep its source evidence read-only"
+        );
+        // Grant neither the input's containing directory nor an ancestor in
+        // the source project, which would expose unrelated execution state.
+        for parent in input
+            .ancestors()
+            .skip(1)
+            .take_while(|p| p.starts_with(&project))
+        {
+            for operation in ["file-read* ", "file-write*"] {
+                assert!(
+                    !profile.contains(&format!(
+                        "(allow {operation} (subpath \"{}\"))",
+                        parent.display()
+                    )),
+                    "repair must not grant {operation} to {}",
+                    parent.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn writer_completion_repair_stale_authority_is_rejected() {
+    for route in ["attempt", "task", "queue", "claim"] {
+        for fault in [
+            "matrix",
+            "transcript",
+            "contract",
+            "assignment",
+            "candidate",
+            "decision",
+            "operation",
+            "missing",
+            "ordinary",
+            "copied",
+            "cancel",
+            "owner",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let fixture = completion_repair_after_tester_fixture(&tmp);
+            committed_matrix_repair_command(&fixture).assert().success();
+            let store = WorkModelStore::new(&fixture.project);
+            if route == "claim" {
+                fluent_cmd()
+                    .current_dir(&fixture.project)
+                    .args(["queue", "resume", &fixture.work, "--attempt", "attempt-1"])
+                    .assert()
+                    .success();
+            }
+            let approved = store.read_work_item(&fixture.work).unwrap();
+            let source = &approved.attempts[0].tasks[2];
+            let source_area = fixture
+                .project
+                .join(&source.artifact_area.as_ref().unwrap().path);
+            let mut owner = None;
+            match fault {
+                "matrix" => {
+                    fs::write(source_area.join("writer-completion.json"), "changed claim").unwrap()
+                }
+                "transcript" => {
+                    fs::write(source_area.join("transcript.jsonl"), "changed source").unwrap()
+                }
+                "assignment" => {
+                    // The store forbids editing captured assignments. Tamper only
+                    // this disposable split record to test launch revalidation.
+                    let path = store
+                        .work_task_path(&fixture.work, "attempt-1", &source.id)
+                        .unwrap();
+                    let mut task = read_json_path(&path);
+                    task["writer_correction_assignment"]["evidence"][0]["digest"] =
+                        format!("sha256:{}", "0".repeat(64)).into();
+                    write_json_path(&path, &task);
+                }
+                "candidate" => {
+                    commit_file(&fixture.workspace, "drift.txt", "drift", "Change candidate")
+                }
+                "decision" => {
+                    let mut audit = read_json_path(&fixture.audit);
+                    audit["resolution"] = "a different decision".into();
+                    write_json_path(&fixture.audit, &audit);
+                }
+                "missing" => fs::remove_file(&fixture.audit).unwrap(),
+                "cancel" => {
+                    fluent_cmd()
+                        .current_dir(&fixture.project)
+                        .args(["attempt", "cancel", &fixture.work, "attempt-1"])
+                        .assert()
+                        .success();
+                }
+                "owner" => {
+                    owner = Some(
+                        fluent::lease::acquire_blocking(&fluent::lease::task_lock_path(
+                            &fixture.project,
+                            &fixture.work,
+                            &source.id,
+                        ))
+                        .unwrap(),
+                    )
+                }
+                _ => store
+                    .mutate_work_item(&fixture.work, |item| {
+                        let attempt = &mut item.attempts[0];
+                        match fault {
+                            "contract" => attempt
+                                .writer_completion_contract
+                                .as_mut()
+                                .unwrap()
+                                .requirements[0]
+                                .requirement
+                                .push_str(" changed"),
+                            "operation" => attempt.recovery_operations.clear(),
+                            "ordinary" => {
+                                let task = attempt.tasks.last_mut().unwrap();
+                                task.input_artifacts
+                                    .retain(|a| a.producer_id != "writer-completion-recovery");
+                                task.instructions =
+                                    Some("Repair missing verification evidence".into());
+                            }
+                            "copied" => {
+                                let mut task = attempt.tasks.last().unwrap().clone();
+                                task.id = "attempt-1-write-4".into();
+                                if let Some(assignment) = &mut task.writer_correction_assignment {
+                                    assignment.writer_task_id = task.id.clone();
+                                }
+                                attempt.tasks.push(task);
+                            }
+                            _ => unreachable!(),
+                        }
+                        Ok(())
+                    })
+                    .unwrap(),
+            }
+            let before = store.read_work_item_snapshot(&fixture.work).unwrap();
+            let matrix = fs::read(source_area.join("writer-completion.json")).unwrap();
+            let bin = tmp.path().join("refused-repair-provider");
+            write_mock_claude(
+                &bin,
+                "#!/bin/bash\nprintf launched > \"$REPAIR_LAUNCHED\"\nexit 73\n",
+            );
+            write_mock_sandbox_exec(&bin);
+            let launched = tmp.path().join("unexpected-launch");
+            if route == "claim" {
+                let ledger = fluent::queue::read_ledger(&fixture.project, &fixture.work).unwrap();
+                assert!(
+                    fluent::queue::claim(&fixture.project, &fixture.work, "attempt-1").is_err(),
+                    "{route}/{fault} was admitted"
+                );
+                assert_eq!(
+                    fluent::queue::read_ledger(&fixture.project, &fixture.work).unwrap(),
+                    ledger
+                );
+            } else {
+                let mut command = fluent_cmd();
+                command
+                    .current_dir(&fixture.project)
+                    .env("PATH", mock_path(&bin))
+                    .env("REPAIR_LAUNCHED", &launched);
+                match route {
+                    "attempt" => command.args(["attempt", "run", &fixture.work, "attempt-1"]),
+                    "task" => command.args([
+                        "task",
+                        "run",
+                        &fixture.work,
+                        "attempt-1",
+                        if fault == "copied" {
+                            "attempt-1-write-4"
+                        } else {
+                            &fixture.task_id
+                        },
+                    ]),
+                    "queue" => {
+                        command.args(["queue", "resume", &fixture.work, "--attempt", "attempt-1"])
+                    }
+                    _ => unreachable!(),
+                };
+                let output = command.output().unwrap();
+                assert!(!output.status.success(), "{route}/{fault} was admitted");
+                assert!(!launched.exists(), "{route}/{fault} launched a provider");
+            }
+            let after = store.read_work_item_snapshot(&fixture.work).unwrap();
+            if matches!(fault, "ordinary" | "copied") {
+                // Generic admission may capture an assignment before refusing
+                // missing verification. It must not execute or credit that work.
+                assert_eq!(
+                    &after.attempts[0].tasks[..3],
+                    &before.attempts[0].tasks[..3]
+                );
+                assert!(
+                    after.attempts[0].tasks[3..]
+                        .iter()
+                        .all(|task| task.status == TaskStatus::Planned && task.output.is_none())
+                );
+                assert!(after.merge_candidates.is_empty());
+            } else {
+                assert_eq!(after, before, "{route}/{fault}");
+            }
+            assert_eq!(
+                fs::read(source_area.join("writer-completion.json")).unwrap(),
+                matrix
+            );
+            drop(owner);
+        }
+    }
+}
+
+fn complete_repair_command(
+    fixture: &WriterRecoveryFixture,
+    bin: &Path,
+    production: bool,
+) -> LoggedCommand {
+    let mut command = fluent_cmd();
+    command
+        .current_dir(&fixture.project)
+        .env("PATH", mock_path(bin))
+        .env("REPAIR_AREA", &fixture.area)
+        .env(
+            "REPAIR_AREA_REL",
+            format!(
+                ".fluent/work/artifacts/{}/attempt-1/{}",
+                fixture.work, fixture.task_id
+            ),
+        )
+        .env("REPAIR_AUDIT", &fixture.audit)
+        .env("REPAIR_CANDIDATE", &fixture.candidate)
+        .env("REPAIR_TASK", &fixture.task_id)
+        .env(
+            "REPAIR_REQUIRE_CONFINEMENT",
+            if production { "1" } else { "0" },
+        );
+    if production {
+        command
+            .env_remove("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT")
+            .env_remove("FLUENT_TEST_HERMETIC_PROVIDERS");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("FLUENT_TEST_") {
+                command.env_remove(key);
+            }
+        }
+    }
+    command
+}
+
+struct CompletionRepairRunner<'a> {
+    fixture: &'a WriterRecoveryFixture,
+    bin: &'a Path,
+}
+
+impl fluent::scheduler::AttemptRunner for CompletionRepairRunner<'_> {
+    fn run(
+        &self,
+        project: &Path,
+        work: &str,
+        attempt: &str,
+        tester_no_sandbox: bool,
+    ) -> anyhow::Result<fluent::scheduler::AttemptOutcome> {
+        assert!(!tester_no_sandbox);
+        let ledger = fluent::queue::read_ledger(project, work)?.unwrap();
+        let dispatch = ledger.active().unwrap();
+        let output = complete_repair_command(self.fixture, self.bin, false)
+            .args([
+                "attempt",
+                "run",
+                work,
+                attempt,
+                "--dispatch-id",
+                &dispatch.dispatch_id,
+            ])
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fluent::scheduler::classify_attempt_outcome(project, work, attempt)
+    }
+}
+
+fn assert_completion_repair_gates(tmp: &TempDir, route: &str, production: bool) {
+    let fixture = completion_repair_after_tester_fixture(tmp);
+    let store = WorkModelStore::new(&fixture.project);
+    let original = store.read_work_item(&fixture.work).unwrap();
+    let source_area = fixture.project.join(
+        &original.attempts[0].tasks[2]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path,
+    );
+    let source_matrix = fs::read(source_area.join("writer-completion.json")).unwrap();
+    let source_transcript = fs::read(source_area.join("transcript.jsonl")).unwrap();
+    let tester_area = fixture.project.join(
+        &original.attempts[0].tasks[1]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path,
+    );
+    let tester_evidence = snapshot_tree(&tester_area);
+    committed_matrix_repair_command(&fixture).assert().success();
+    let audit = fs::read(&fixture.audit).unwrap();
+    let authorized = store.read_work_item(&fixture.work).unwrap();
+    // Repeating the public decision must retain the same Task and audit.
+    committed_matrix_repair_command(&fixture).assert().success();
+    assert_eq!(store.read_work_item(&fixture.work).unwrap(), authorized);
+    let before = fluent::verification_assessment::assess_current_verification(
+        &fixture.project,
+        &authorized.attempts[0],
+    )
+    .unwrap();
+    assert!(before.candidate_defects().is_empty());
+    assert!(
+        before
+            .references
+            .iter()
+            .any(|reference| !reference.satisfied)
+    );
+    let bin = fixture.workspace.join(".fluent/completion-repair-provider");
+    write_mock_claude(
+        &bin,
+        r#"#!/bin/bash
+set -eu
+python3 - <<'PYPROVIDER'
+import json, os, subprocess
+from pathlib import Path
+area = Path(os.environ['REPAIR_AREA'])
+audit_path = Path(os.environ['REPAIR_AUDIT'])
+audit = json.loads(audit_path.read_bytes())
+assert audit['task-id'] == os.environ['REPAIR_TASK']
+assert audit['candidate-commit'] == os.environ['REPAIR_CANDIDATE']
+assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == audit['candidate-commit']
+source = area.parent / audit['source-writer-task-id'] / 'writer-completion.json'
+assert source.read_bytes()
+# Exclusive creation proves that only this one authorized provider run occurs.
+with (area / 'provider-launched').open('x') as launched:
+    launched.write(audit['task-id'])
+if os.environ['REPAIR_REQUIRE_CONFINEMENT'] == '1':
+    for protected in (source, audit_path):
+        try:
+            with protected.open('r+b'):
+                pass
+        except PermissionError:
+            continue
+        raise AssertionError('worker could write protected evidence: ' + str(protected))
+    (area / 'confinement-observed').write_text('source matrix and audit writes denied\n')
+subprocess.run(['true'], check=True)
+path = area / 'writer-completion.json'
+matrix = json.loads(path.read_text())
+assert matrix['task-id'] == audit['task-id']
+for row in matrix['rows']:
+    if row.get('responsibility', 'writer') == 'writer':
+        row['state'] = 'complete'
+        row['implementation-evidence'] = ['candidate.txt: retained correction; fresh true command passed']
+        row['verification'] = [{'command': 'true', 'result': 'pass'}]
+path.write_text(json.dumps(matrix))
+(area / 'no-change.json').write_text(json.dumps({
+    'schema_version': 1,
+    'declaration_path': os.environ['REPAIR_AREA_REL'] + '/no-change.json',
+    'reason': 'The retained candidate already contains the correction; repair completion evidence only.',
+    'verification': [{'command': 'true', 'result': 'pass'}]
+}))
+PYPROVIDER
+"#,
+    );
+    if production {
+        write_mock_executable(
+            &bin,
+            "sandbox-exec",
+            "#!/bin/bash\nexec /usr/bin/sandbox-exec \"$@\"\n",
+        );
+    } else {
+        // Route coverage only; this double supplies no confinement evidence.
+        write_mock_sandbox_exec(&bin);
+    }
+    match route {
+        "queue" => {
+            fluent_cmd()
+                .current_dir(&fixture.project)
+                .args(["queue", "resume", &fixture.work, "--attempt", "attempt-1"])
+                .assert()
+                .success();
+            let dispatch = fluent::scheduler::pick_next_queued(&fixture.project)
+                .unwrap()
+                .unwrap();
+            fluent::scheduler::dispatch_one(
+                &fixture.project,
+                &dispatch,
+                &CompletionRepairRunner {
+                    fixture: &fixture,
+                    bin: &bin,
+                },
+            )
+            .unwrap();
+            let ledger = fluent::queue::read_ledger(&fixture.project, &fixture.work)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                ledger.dispatches.last().unwrap().status,
+                fluent::queue::DispatchStatus::NeedsUser
+            );
+        }
+        "attempt" | "task" => {
+            let mut command = complete_repair_command(&fixture, &bin, production);
+            command.args([route, "run", &fixture.work, "attempt-1"]);
+            if route == "task" {
+                command.arg(&fixture.task_id);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{route}: {}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                fs::read_to_string(fixture.area.join("provider-stderr.log")).unwrap_or_default()
+            );
+        }
+        _ => unreachable!(),
+    }
+    if route == "task" {
+        // Direct Task execution leaves reconciliation to the Attempt loop.
+        complete_repair_command(&fixture, &bin, production)
+            .args(["attempt", "run", &fixture.work, "attempt-1"])
+            .assert()
+            .success();
+    }
+    let after = store.read_work_item(&fixture.work).unwrap();
+    let attempt = &after.attempts[0];
+    assert_eq!(&attempt.tasks[..3], original.attempts[0].tasks.as_slice());
+    assert_eq!(
+        attempt.tasks.len(),
+        4,
+        "repair must not run downstream roles"
+    );
+    let repair = attempt.tasks.last().unwrap();
+    assert_eq!(repair.id, fixture.task_id);
+    assert_eq!(repair.status, TaskStatus::Complete);
+    assert!(repair.output.as_ref().unwrap().no_change.is_some());
+    assert_eq!(
+        fs::read_to_string(fixture.area.join("provider-launched")).unwrap(),
+        fixture.task_id
+    );
+    assert_eq!(fs::read(&fixture.audit).unwrap(), audit);
+    assert_eq!(
+        fs::read(source_area.join("writer-completion.json")).unwrap(),
+        source_matrix
+    );
+    assert_eq!(
+        fs::read(source_area.join("transcript.jsonl")).unwrap(),
+        source_transcript
+    );
+    assert_eq!(snapshot_tree(&tester_area), tester_evidence);
+    assert_eq!(git_head(&fixture.workspace), fixture.candidate);
+    assert!(after.merge_candidates.is_empty());
+    assert!(attempt.learning.is_none());
+    assert_ne!(attempt.review_state, Some(AttemptReviewState::Passed));
+    let assessment =
+        fluent::verification_assessment::assess_current_verification(&fixture.project, attempt)
+            .unwrap();
+    assert_eq!(
+        assessment.references, before.references,
+        "repair cannot satisfy named tests"
+    );
+    let matrix: WriterCompletionMatrix =
+        serde_json::from_slice(&fs::read(fixture.area.join("writer-completion.json")).unwrap())
+            .unwrap();
+    for id in [
+        "plan:host-check",
+        "plan:review",
+        "plan:tester",
+        "plan:learner",
+    ] {
+        let row = matrix.rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row.state, WriterCompletionState::Pending);
+        assert!(row.verification.is_empty() && row.implementation_evidence.is_empty());
+    }
+    complete_repair_command(&fixture, &bin, production)
+        .args(["attempt", "run", &fixture.work, "attempt-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires host action plan:host-check",
+        ));
+    assert_eq!(fs::read(&fixture.audit).unwrap(), audit);
+    assert!(!fluent::lease::is_leased(&fluent::lease::task_lock_path(
+        &fixture.project,
+        &fixture.work,
+        &fixture.task_id
+    )));
+    assert!(!fluent::lease::is_leased(
+        &fixture.area.join("execution-owner.lock")
+    ));
+    assert!(!fluent::execution::execution_is_live(&fixture.area.join("execution.json")).unwrap());
+    if production {
+        assert_eq!(
+            fs::read_to_string(fixture.area.join("confinement-observed")).unwrap(),
+            "source matrix and audit writes denied\n"
+        );
+    }
+}
+
+#[test]
+fn writer_completion_repair_does_not_credit_verification() {
+    for route in ["attempt", "task", "queue"] {
+        assert_completion_repair_gates(&TempDir::new().unwrap(), route, false);
+    }
+}
+
+#[test]
+#[ignore = "host-owned production sandbox exercise; run check-completion-repair-admission.sh"]
+fn writer_completion_repair_production_boundary() {
+    let production = std::env::var_os("FLUENT_COMPLETION_REPAIR_PRODUCTION_BIN")
+        .expect("the host script must build and select the production executable");
+    assert_eq!(std::env::var_os("FLUENT_BIN_OVERRIDE"), Some(production));
+    let output =
+        PathBuf::from(std::env::var_os("FLUENT_COMPLETION_REPAIR_HOST_OUTPUT_DIR").unwrap());
+    // Keep evidence outside shared temp grants and retain even failed exercises.
+    let tmp = tempfile::Builder::new()
+        .prefix("disposable-")
+        .tempdir_in(output)
+        .unwrap();
+    let result = std::panic::catch_unwind(|| assert_completion_repair_gates(&tmp, "attempt", true));
+    eprintln!(
+        "Retained disposable host evidence: {}",
+        tmp.keep().display()
+    );
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
 fn later_committed_matrix_recovery_fixture(tmp: &TempDir) -> (WriterRecoveryFixture, Vec<u8>) {
     let (fixture, _) = committed_matrix_recovery_fixture(tmp);
     later_recovery_from_first_fixture(tmp, fixture, false)
@@ -11208,12 +12885,18 @@ fn writer_recovery_context_rejects_invalid_delivery() {
             } else if fault == "oversized-prompt" {
                 "prompt"
             } else if fault == "missing" {
-                "does not exist or is not a file"
+                "read Writer-completion recovery authority"
             } else {
                 "Writer-completion recovery"
             }),
             "missing specific {fault} diagnostic: {diagnostic}"
         );
+        if fault == "missing" {
+            assert!(
+                diagnostic.contains(&fixture.audit.display().to_string()),
+                "the admission refusal must identify the missing authority: {diagnostic}"
+            );
+        }
         assert_eq!(git_head(&fixture.workspace), fixture.candidate);
         assert!(
             store.read_work_item(&fixture.work).unwrap().attempts[0]
@@ -14140,20 +15823,77 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     let tester_yaml =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".fluent/tester.yaml"))
             .unwrap();
+    // Preserve the frozen configuration bytes as well as its parsed command
+    // identities: public required-check occurrences bind this exact digest.
+    assert_eq!(
+        format!("{:x}", Sha256::digest(tester_yaml.as_bytes())),
+        "9173524ec78a2834e1a426fd67a0bedd9749ba3b2b60a5d0608b487ef0f85630"
+    );
     let config: serde_yaml::Value = serde_yaml::from_str(&tester_yaml).unwrap();
     let commands = config["commands"].as_sequence().unwrap();
 
-    assert_eq!(commands.len(), 4);
-    assert_eq!(
-        commands[2]["command"].as_str(),
-        Some("bash tests/host/check-native-codex-first-turn.sh")
+    let host_commands = [
+        (
+            "bash tests/host/check-native-codex-first-turn.sh",
+            "shell-harness",
+        ),
+        (
+            "bash tests/host/check-native-codex-display-backpressure.sh",
+            "shell-harness",
+        ),
+        (
+            "bash tests/host/check-ssh-agent-terminal.sh",
+            "shell-harness",
+        ),
+        (
+            "bash tests/host/check-node-worker-upgrade.sh",
+            "shell-harness",
+        ),
+        (
+            "bash tests/host/check-completion-repair-admission.sh",
+            "shell-harness",
+        ),
+        (
+            "bash tests/host/check-dashboard-terminal.sh",
+            "cargo-nextest",
+        ),
+        (
+            "bash tests/host/check-ssh-fullscreen-backpressure.sh",
+            "shell-harness",
+        ),
+    ];
+    assert_eq!(commands.len(), 2 + host_commands.len());
+    // Preserve the complete shell/Rust setup as well as each host occurrence.
+    // A command edit deliberately changes its public occurrence identity.
+    for (entry, expected) in commands[..2].iter().zip([
+        "c5ff545cd5f7400a74feefb726feaa7fe911a5df3a7f2a301fb6f47d98851475",
+        "06940ab534436dee253abe426d0caed094a82f919225afa125f03aeada1a0cea",
+    ]) {
+        assert_eq!(
+            format!(
+                "{:x}",
+                Sha256::digest(entry["command"].as_str().unwrap().as_bytes())
+            ),
+            expected
+        );
+    }
+    assert!(
+        commands[0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("cargo nextest run --features test-support")
     );
-    assert_eq!(commands[2]["test_harness"].as_str(), Some("shell-harness"));
-    assert_eq!(
-        commands[3]["command"].as_str(),
-        Some("bash tests/host/check-ssh-agent-terminal.sh")
+    assert_eq!(commands[0]["test_harness"].as_str(), Some("cargo-nextest"));
+    assert!(
+        commands[1]["command"].as_str().unwrap().contains(
+            "for script in tests/behaviors/operations/*.sh tests/behaviors/skills/*.sh; do"
+        )
     );
-    assert_eq!(commands[3]["test_harness"].as_str(), Some("shell-harness"));
+    assert_eq!(commands[1]["test_harness"].as_str(), Some("shell-harness"));
+    for (entry, (command, harness)) in commands[2..].iter().zip(host_commands) {
+        assert_eq!(entry["command"].as_str(), Some(command));
+        assert_eq!(entry["test_harness"].as_str(), Some(harness));
+    }
     assert!(commands.iter().all(|command| {
         command["reject_process_leaks"]
             .as_bool()
@@ -14162,6 +15902,260 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     assert!(!tester_yaml.contains("release-test-process-guard.sh"));
     assert!(!tester_yaml.contains("FLUENT_TEST_PROCESS_INVENTORY"));
     assert!(!tester_yaml.contains("mktemp -d"));
+}
+
+#[test]
+#[serial]
+fn confined_pinned_historical_reader_build_preserves_identity() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tmp = TempDir::new_in(repository.join("target")).unwrap();
+    let project = setup_git_project(&tmp).canonicalize().unwrap();
+    let pin = "f71d20bb11f241c9ab9ba38b401f22e692d9e19f";
+    git::run(
+        &project,
+        &[
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            repository.to_str().unwrap(),
+            pin,
+        ],
+        "fetch exact historical source",
+    )
+    .unwrap();
+    let archive = git::run_raw(&project, &["archive", pin]).unwrap().stdout;
+    let manifest = git::run_raw(&project, &["show", &format!("{pin}:Cargo.toml")])
+        .unwrap()
+        .stdout;
+    let lock = git::run_raw(&project, &["show", &format!("{pin}:Cargo.lock")])
+        .unwrap()
+        .stdout;
+    fs::write(project.join("Cargo.toml"), &manifest).unwrap();
+    fs::write(project.join("Cargo.lock"), &lock).unwrap();
+    // Supply the pinned targets so Cargo can parse this ancestor package.
+    fs::create_dir_all(project.join("src")).unwrap();
+    for path in ["src/lib.rs", "src/main.rs"] {
+        let source = git::run_raw(&project, &["show", &format!("{pin}:{path}")])
+            .unwrap()
+            .stdout;
+        fs::write(project.join(path), source).unwrap();
+    }
+    fs::create_dir_all(project.join("tests/fixtures")).unwrap();
+    fs::copy(
+        repository.join("tests/fixtures/prepare-historical-reader.py"),
+        project.join("tests/fixtures/prepare-historical-reader.py"),
+    )
+    .unwrap();
+    let command = format!(
+        "python3 tests/fixtures/prepare-historical-reader.py \"$PWD\" {pin} \"$PWD/.scratch/reader\" offline archive > reader-path"
+    );
+    fs::write(project.join(".fluent/tester.yaml"), serde_yaml::to_string(&serde_json::json!({"commands":[{"command":command,"test_harness":"shell-harness","reject_process_leaks":true}]})).unwrap()).unwrap();
+    git::run(
+        &project,
+        &[
+            "add",
+            "Cargo.toml",
+            "Cargo.lock",
+            "src",
+            "tests",
+            ".fluent/tester.yaml",
+        ],
+        "stage confined reader fixture",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-qm", "Add confined reader fixture"],
+        "commit confined reader fixture",
+    )
+    .unwrap();
+    let candidate = tmp.path().join("candidate");
+    git::run(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            candidate.to_str().unwrap(),
+            "HEAD",
+        ],
+        "create reader candidate",
+    )
+    .unwrap();
+    let candidate = candidate.canonicalize().unwrap();
+    // Validate both ancestor packages even when nested Seatbelt is unavailable.
+    for root in [&project, &candidate] {
+        let metadata = Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            metadata.status.success(),
+            "invalid ancestor package at {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+    }
+    let artifact = project.join(".fluent/work/artifacts/reader-build/attempt-1/tester");
+    let old = std::env::var_os("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+    unsafe {
+        std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
+    }
+    let prepared = fluent::work_task_executor::historical_reader_tester_sandbox_for_test(
+        &project, &candidate, &artifact, None,
+    );
+    unsafe {
+        match old {
+            Some(value) => std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", value),
+            None => std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT"),
+        }
+    }
+    let (_, profile) = prepared.unwrap();
+    let source_manifest = project.join("Cargo.toml");
+    assert!(
+        profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            source_manifest.display()
+        )),
+        "Cargo must read the exact ancestor manifest"
+    );
+    assert!(
+        !profile.contains(&format!(
+            "(allow file-read*  (subpath \"{}\"))",
+            project.display()
+        )),
+        "no broad source grant"
+    );
+    let profile_path = artifact.join("probe.sb");
+    fs::write(&profile_path, &profile).unwrap();
+    let probe = Command::new("/usr/bin/sandbox-exec")
+        .arg("-f")
+        .arg(&profile_path)
+        .arg("/usr/bin/true")
+        .output()
+        .unwrap();
+    if !probe.status.success() {
+        let reason = String::from_utf8_lossy(&probe.stderr);
+        assert!(
+            std::env::var_os("FLUENT_INTEGRATED_UPGRADE_REQUIRE_SEATBELT").is_none(),
+            "cold confined build required: {reason}"
+        );
+        assert!(reason.contains("Operation not permitted"), "{reason}");
+        eprintln!("Cold confined historical build remains a host obligation: {reason}");
+        return;
+    }
+    let foreign = project.join(".fluent/work/artifacts/foreign/private.json");
+    fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    fs::write(&foreign, "foreign Work").unwrap();
+    let private = tmp.path().join("operator-private");
+    fs::write(&private, "operator secret").unwrap();
+    let denials = Command::new("/usr/bin/sandbox-exec")
+        .arg("-f")
+        .arg(&profile_path)
+        .arg("/usr/bin/python3")
+        .args([
+            "-I",
+            "-S",
+            "-c",
+            r#"
+import sys
+from pathlib import Path
+manifest = Path(sys.argv[1])
+assert manifest.read_bytes()
+try:
+    with manifest.open('ab') as stream: stream.write(b'tamper')
+except PermissionError: pass
+else: raise AssertionError('ancestor manifest writable')
+for name in sys.argv[2:]:
+    try: Path(name).read_bytes()
+    except PermissionError: pass
+    else: raise AssertionError('foreign source or private input readable: ' + name)
+"#,
+        ])
+        .arg(&source_manifest)
+        .arg(project.join("Cargo.lock"))
+        .arg(project.join("src/lib.rs"))
+        .arg(project.join("src/main.rs"))
+        .arg(&foreign)
+        .arg(&private)
+        .output()
+        .unwrap();
+    assert!(
+        denials.status.success(),
+        "{}",
+        String::from_utf8_lossy(&denials.stderr)
+    );
+    let cache = project.join(".fluent/work/cache/historical-readers");
+    assert_eq!(
+        fs::read_dir(&cache).unwrap().count(),
+        0,
+        "build must start cold"
+    );
+    let seed =
+        PathBuf::from(std::env::var_os("CARGO_HOME").expect("use the admitted dependency cache"));
+    // The same production Tester renderer now supplies actual Cargo and rustc
+    // with a private dependency copy. No mocked compiler or executable is used.
+    let (sandbox, _) = fluent::work_task_executor::historical_reader_tester_sandbox_for_test(
+        &project,
+        &candidate,
+        &artifact,
+        Some(&seed),
+    )
+    .unwrap();
+    let outcome =
+        fluent::tester::run_with_sandbox_profile(&candidate, &artifact, &sandbox).unwrap();
+    assert_eq!(
+        outcome,
+        fluent::tester::TesterOutcome::Passed,
+        "{}",
+        fs::read_to_string(artifact.join("commands/0-stderr.log")).unwrap_or_default()
+    );
+    let executable = PathBuf::from(
+        fs::read_to_string(candidate.join("reader-path"))
+            .unwrap()
+            .trim(),
+    );
+    let executable = executable.canonicalize().unwrap();
+    let provenance = read_json_path(&executable.with_file_name("provenance.json"));
+    assert_eq!(provenance["identity"]["source_commit"], pin);
+    assert_eq!(
+        provenance["identity"]["source_archive_sha256"],
+        format!("{:x}", Sha256::digest(&archive))
+    );
+    assert_eq!(
+        provenance["identity"]["lockfile_sha256"],
+        format!("{:x}", Sha256::digest(&lock))
+    );
+    assert_eq!(
+        provenance["identity"]["build_command"],
+        serde_json::json!(["cargo", "build", "--locked", "--offline"])
+    );
+    assert_eq!(
+        provenance["binary_sha256"],
+        format!("{:x}", Sha256::digest(fs::read(&executable).unwrap()))
+    );
+    assert_eq!(
+        fs::read(candidate.join(".scratch/reader/source.tar")).unwrap(),
+        archive
+    );
+    assert_eq!(fs::read(&source_manifest).unwrap(), manifest);
+    assert_eq!(fs::read(project.join("Cargo.lock")).unwrap(), lock);
+    assert!(
+        Command::new(&executable)
+            .arg("--version")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -14258,6 +16252,8 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
     // has already printed a path, and must preserve its diagnostic and status.
     let helpers = [
         ("released-predecessor", "FLUENT_RELEASED_050_BIN"),
+        ("released-060", "FLUENT_RELEASED_060_BIN"),
+        ("claude-session", "FLUENT_CLAUDE_SESSION_OLD_BIN"),
         ("ownership", "FLUENT_OWNERSHIP_OLD_BIN"),
         ("launch-handoff", "FLUENT_LAUNCH_HANDOFF_OLD_BIN"),
         ("verification", "FLUENT_VERIFICATION_OLD_BIN"),
@@ -14308,6 +16304,10 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
         ("", 0, true),
         ("released-predecessor", 37, false),
         ("released-predecessor", 37, true),
+        ("released-060", 37, false),
+        ("released-060", 37, true),
+        ("claude-session", 37, false),
+        ("claude-session", 37, true),
         ("launch-handoff", 37, false),
         ("launch-handoff", 37, true),
         ("ownership", 37, false),
@@ -14368,8 +16368,8 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             } else {
                 String::new()
             };
-            let script = if helper == "released-predecessor" {
-                "prepare-released-predecessor.sh".to_string()
+            let script = if helper.starts_with("released-") {
+                format!("prepare-{helper}.sh")
             } else {
                 format!("build-{helper}-old-reader.sh")
             };
@@ -14388,7 +16388,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FLUENT_TEST_CARGO_CALLS"
-printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" "${FLUENT_NO_CHANGE_COMPLETION_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
+printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_RELEASED_060_BIN-unset}" "${FLUENT_CLAUDE_SESSION_OLD_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" "${FLUENT_NO_CHANGE_COMPLETION_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
 case "$1" in
     build) mkdir -p target/debug; touch target/debug/fluent ;;
     nextest) exit 0 ;;
@@ -14403,6 +16403,8 @@ esac
             .args(["-c", command])
             .current_dir(&project)
             .env_remove("FLUENT_RELEASED_050_BIN")
+            .env_remove("FLUENT_RELEASED_060_BIN")
+            .env_remove("FLUENT_CLAUDE_SESSION_OLD_BIN")
             .env_remove("FLUENT_OWNERSHIP_OLD_BIN")
             .env_remove("FLUENT_LAUNCH_HANDOFF_OLD_BIN")
             .env_remove("FLUENT_VERIFICATION_OLD_BIN")
@@ -20491,13 +22493,14 @@ fn transcript_pump_write_failure_pauses_resumably_end_to_end() {
     // cap), keep the coder out of the generic retry budget, and — once the
     // operator fixes the transport — resume through `fluent attempt run` to a
     // Merge Candidate. The failure is injected by making the write transcript
-    // path a directory, so the pump cannot create its transcript file.
+    // path a directory, so preserving evidence fails before the provider starts.
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
     let bin_dir = tmp.path().join("bin");
+    let launches = tmp.path().join("writer-launches");
     write_mock_claude(
         &bin_dir,
-        r##"#!/bin/bash
+        &r##"#!/bin/bash
 PROMPT=""
 NEXT_IS_PROMPT=0
 for arg in "$@"; do
@@ -20506,11 +22509,10 @@ for arg in "$@"; do
 done
 case "$PWD" in
   */work-*-work-1-attempt-1)
+    if ! printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+      printf 'launch\n' >> "__WRITER_LAUNCHES__"
+    fi
     printf '{"type":"result","subtype":"success"}\n'
-    # Sleep before committing so the first run — where the pump fails at once —
-    # is terminated before it can commit. The resumed run captures normally and
-    # then commits, producing the Task output.
-    sleep 2
     printf 'task output\n' > task-output.txt
     git add task-output.txt
     git commit -m "Add task output" >/dev/null 2>&1
@@ -20520,7 +22522,8 @@ case "$PWD" in
     ;;
 esac
 exit 0
-"##,
+"##
+        .replace("__WRITER_LAUNCHES__", &launches.to_string_lossy()),
     );
 
     fluent_cmd()
@@ -20535,12 +22538,12 @@ exit 0
         .success();
 
     // Break the transport: occupy the write transcript path with a directory so
-    // the pump's File::create fails immediately while the coder is alive.
+    // preserving prior invocation evidence fails before the coder launches.
     let artifact_dir = main_dir.join(".fluent/work/artifacts/work-1/attempt-1/attempt-1-write-1");
     let transcript = artifact_dir.join("transcript.jsonl");
     fs::create_dir_all(&transcript).unwrap();
 
-    // First run: the pump fails. A generous retry budget must not be spent.
+    // First run: preserve evidence fails. A generous retry budget must not be spent.
     let _ = fluent_cmd()
         .current_dir(&main_dir)
         .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
@@ -20578,6 +22581,17 @@ exit 0
         serde_json::from_slice(&fs::read(artifact_dir.join("transcript-pump.json")).unwrap())
             .unwrap();
     assert_eq!(pump_status["state"], "failed");
+    assert!(
+        pump_status["error"]
+            .as_str()
+            .unwrap()
+            .contains("read Claude invocation evidence")
+    );
+    assert!(
+        !launches.exists(),
+        "a preservation failure must not launch the provider"
+    );
+    assert!(!artifact_dir.join("claude-session-fallback.json").exists());
 
     // Fix the transport, then resume. The Attempt reopens, retries the write
     // task, and drives to a Merge Candidate.
@@ -20599,6 +22613,8 @@ exit 0
         stdout.contains("Merge Candidate attempt-1-merge-candidate is ready"),
         "resume must drive to a Merge Candidate; got:\n{stdout}"
     );
+
+    assert_eq!(fs::read_to_string(launches).unwrap(), "launch\n");
 
     // The retried write captured its transcript to a real file this time.
     assert!(
@@ -21488,6 +23504,329 @@ fn create_and_run_learner_attempt(main_dir: &Path, bin_dir: &Path) {
         .stdout(predicate::str::contains(
             "Merge Candidate attempt-1-merge-candidate is ready",
         ));
+}
+
+#[test]
+fn writer_continuation_preserves_attempt_target_after_root_branch_switch() {
+    for queued in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let project = setup_git_project(&tmp);
+        git::run(
+            &project,
+            &["branch", "-m", "release"],
+            "select non-main target",
+        )
+        .unwrap();
+        let bin = tmp.path().join("branch-provider");
+        let script =
+            learner_mock_script(r#"{"learning_summary":"target identity","follow_ups":[]}"#)
+                .replace("> loop-output.txt", ">> loop-output.txt");
+        write_mock_claude(&bin, &script);
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "work-item",
+                "create",
+                "work-1",
+                "--title",
+                "Keep Attempt target",
+            ])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "create", "work-1", "attempt-1"])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "task",
+                "run",
+                "work-1",
+                "attempt-1",
+                "attempt-1-write-1",
+                "--no-sandbox",
+            ])
+            .env("PATH", mock_path(&bin))
+            .assert()
+            .success();
+        let store = WorkModelStore::new(&project);
+        let original = store.read_work_item("work-1").unwrap().attempts[0].tasks[0].clone();
+        assert_eq!(original.output.as_ref().unwrap().source_branch, "release");
+        // Model the scheduled continuation; both execution routes launch the real
+        // Writer against the retained workspace and saved first output.
+        store
+            .mutate_work_item("work-1", |item| {
+                item.add_next_write_round("attempt-1", vec![])?;
+                Ok(())
+            })
+            .unwrap();
+        git::run(
+            &project,
+            &["checkout", "-b", "discussion"],
+            "switch root branch",
+        )
+        .unwrap();
+        if !queued {
+            for identity in ["discussion", ""] {
+                store
+                    .mutate_work_item("work-1", |item| {
+                        let mut conflicting = original.clone();
+                        conflicting.id = "attempt-1-write-conflicting".into();
+                        conflicting.output.as_mut().unwrap().source_branch = identity.into();
+                        item.attempts[0].tasks.insert(1, conflicting);
+                        Ok(())
+                    })
+                    .unwrap();
+                let before = store.read_work_item("work-1").unwrap();
+                fluent_cmd()
+                    .current_dir(&project)
+                    .args([
+                        "task",
+                        "run",
+                        "work-1",
+                        "attempt-1",
+                        "attempt-1-write-2",
+                        "--no-sandbox",
+                    ])
+                    .env("PATH", mock_path(&bin))
+                    .assert()
+                    .failure()
+                    .stderr(predicate::str::contains(if identity.is_empty() {
+                        "empty target identity"
+                    } else {
+                        "contradictory saved Writer target identities"
+                    }));
+                assert_eq!(store.read_work_item("work-1").unwrap(), before);
+                store
+                    .mutate_work_item("work-1", |item| {
+                        item.attempts[0].tasks.remove(1);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+        if queued {
+            fluent_cmd()
+                .current_dir(&project)
+                .args(["attempt", "cancel", "work-1", "attempt-1"])
+                .assert()
+                .success();
+            fluent_cmd()
+                .current_dir(&project)
+                .args(["queue", "resume", "work-1", "--attempt", "attempt-1"])
+                .assert()
+                .success();
+            let dispatch = fluent::scheduler::pick_next_queued(&project)
+                .unwrap()
+                .unwrap();
+            fluent::scheduler::dispatch_one(
+                &project,
+                &dispatch,
+                &EvidenceCliRunner { bin: bin.clone() },
+            )
+            .unwrap();
+        } else {
+            fluent_cmd()
+                .current_dir(&project)
+                .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+                .env("PATH", mock_path(&bin))
+                .assert()
+                .success();
+        }
+        let item = store.read_work_item("work-1").unwrap();
+        assert_eq!(item.attempts[0].tasks[0], original);
+        let writers = item.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| task.kind == TaskKind::Write)
+            .collect::<Vec<_>>();
+        assert_eq!(writers.len(), 2);
+        for writer in writers {
+            assert_eq!(writer.output.as_ref().unwrap().source_branch, "release");
+        }
+        assert_eq!(item.merge_candidates[0].target_branch, "release");
+        assert_eq!(
+            git::run_stdout(&project, &["branch", "--show-current"], "read root branch").unwrap(),
+            "discussion"
+        );
+    }
+}
+
+#[test]
+fn named_pytest_assessment_preserves_prefinal_history_through_capture() {
+    use fluent::verification_assessment::{VerificationCause, assess_current_verification};
+    let tmp = TempDir::new().unwrap();
+    // Native-result fixture: retain the exact project-relative pytest node ID,
+    // including the subdirectory, instead of weakening it to a short test name.
+    let extractor = r#"#!/bin/sh
+printf '%s\n' '[{"id":"service/tests/test_identity.py::test_landing_identity","test_harness":"pytest","status":"pass"}]'
+"#;
+    let (project, candidate, results) = canonical_evidence_fixture_with_sources(
+        &tmp,
+        "work-1",
+        &["true"],
+        serde_json::json!({}),
+        Some(extractor),
+        &[(
+            "service/tests/test_identity.py",
+            "def test_landing_identity():\n    assert True\n",
+        )],
+    );
+    let store = WorkModelStore::new(&project);
+    let mut tested = store.read_work_item("work-1").unwrap().attempts[0].clone();
+    tested.writer_completion_contract = Some(fluent::work_model::WriterCompletionContract {
+        version: WRITER_COMPLETION_CONTRACT_VERSION,
+        requirements: vec![WriterCompletionRequirement {
+            responsibility: None,
+            id: "behavior:identity:b1".into(),
+            kind: WriterCompletionRequirementKind::Behavior,
+            source: "behaviors.md#identity:b1".into(),
+            requirement: "Preserve identity".into(),
+            verification_refs: vec![r#"{"kind":"named-test","path":"service/tests/test_identity.py","name":"test_landing_identity"}"#.into()],
+            command: None,
+        }],
+    });
+    let mut prefinal = tested.clone();
+    prefinal.tasks.retain(|task| task.kind != TaskKind::Tester);
+    let pending = assess_current_verification(&project, &prefinal).unwrap();
+    assert_eq!(pending.references.len(), 1);
+    assert!(!pending.references[0].satisfied);
+    assert_eq!(
+        pending.references[0].cause,
+        Some(VerificationCause::MissingEvidence)
+    );
+    let historical =
+        project.join(".fluent/work/artifacts/work-1/attempt-1/prefinal-assessment.json");
+    let snapshot = serde_json::to_vec(&pending).unwrap();
+    fs::write(&historical, &snapshot).unwrap();
+    let final_view = assess_current_verification(&project, &tested).unwrap();
+    assert!(final_view.references[0].satisfied, "{final_view:?}");
+    let tester = tested
+        .tasks
+        .iter()
+        .find(|task| task.kind == TaskKind::Tester)
+        .unwrap()
+        .clone();
+    let tester_bytes = fs::read(&results).unwrap();
+    let bin = tmp.path().join("assessment-provider");
+    let script = learner_mock_script(r#"{"learning_summary":"identity","follow_ups":[]}"#)
+        .replacen("  DRAFT=", "  mkdir -p .fluent/expertise\n  printf 'Retain review history\\n' > .fluent/expertise/identity.md\n  DRAFT=", 1);
+    write_mock_claude(&bin, &script);
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin))
+        .assert()
+        .success();
+    let after = store.read_work_item("work-1").unwrap();
+    assert!(after.attempts[0].learning.as_ref().unwrap().is_succeeded());
+    let output = after.attempts[0]
+        .tasks
+        .iter()
+        .find(|task| task.kind == TaskKind::Write)
+        .unwrap()
+        .output
+        .as_ref()
+        .unwrap();
+    assert_ne!(output.commit, candidate);
+    let delta = git::run_stdout(
+        &project.join(&output.workspace_path),
+        &["diff", "--name-only", &candidate, &output.commit],
+        "check capture delta",
+    )
+    .unwrap();
+    assert_eq!(delta.trim(), ".fluent/expertise/identity.md");
+    assert_eq!(
+        *after.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Tester)
+            .unwrap(),
+        tester
+    );
+    assert_eq!(fs::read(&results).unwrap(), tester_bytes);
+    assert_eq!(fs::read(&historical).unwrap(), snapshot);
+    // The final Tester's candidate-bound assessment stays satisfied. The new
+    // expertise commit has no exact Tester yet; landing verifies that commit
+    // separately instead of silently rebinding the old evidence.
+    assert_eq!(
+        assess_current_verification(&project, &tested)
+            .unwrap()
+            .references,
+        final_view.references
+    );
+    let mut captured = after.attempts[0].clone();
+    captured.writer_completion_contract = tested.writer_completion_contract.clone();
+    let capture_view = assess_current_verification(&project, &captured).unwrap();
+    assert_eq!(capture_view.candidate_commit, output.commit);
+    assert!(!capture_view.references[0].satisfied);
+    assert_eq!(
+        capture_view.references[0].cause,
+        Some(VerificationCause::MissingEvidence)
+    );
+}
+
+#[test]
+fn attempt_readiness_rejects_changed_selected_review() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let bin = tmp.path().join("review-binding-provider");
+    write_mock_claude(
+        &bin,
+        &learner_mock_script(r#"{"learning_summary":"review binding","follow_ups":[]}"#),
+    );
+    create_and_run_learner_attempt(&project, &bin);
+    let store = WorkModelStore::new(&project);
+    store
+        .mutate_work_item("work-1", |item| {
+            item.attempts[0]
+                .tasks
+                .iter_mut()
+                .find(|task| task.role == "documentation")
+                .unwrap()
+                .review_context
+                .as_mut()
+                .unwrap()
+                .source_branch = "altered".into();
+            Ok(())
+        })
+        .unwrap();
+    let before = store.read_work_item("work-1").unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "ordinary documentation review binding",
+        ))
+        .stderr(predicate::str::contains(
+            "fluent merge-candidate show work-1",
+        ));
+    let shown = work_item_value(&project, "work-1");
+    assert!(
+        shown["recovery-blocker"]
+            .as_str()
+            .unwrap()
+            .contains("ordinary documentation review binding")
+    );
+    assert!(
+        shown["next-action"]
+            .as_str()
+            .unwrap()
+            .contains("fluent merge-candidate show work-1")
+    );
+    assert_eq!(
+        store.read_work_item("work-1").unwrap().attempts[0].tasks,
+        before.attempts[0].tasks
+    );
+    assert_eq!(
+        fluent::work_status::summarize_work_item(&before, Some(&project)).action,
+        "landing-blocked"
+    );
 }
 
 #[test]
@@ -58126,6 +60465,70 @@ fn verification_concurrency_fixture_cleans_up_on_failure() {
 }
 
 #[test]
+fn integrated_upgrade_driver_settles_foreground_attempt() {
+    // The canonical command builds this without test-support. Only the inert
+    // provider is substituted; foreground execution and cancellation are real.
+    let binary =
+        PathBuf::from(std::env::var_os("FLUENT_PRODUCTION_BIN").expect(
+            "build the production binary and set FLUENT_PRODUCTION_BIN before this selection",
+        ));
+    for mode in ["timeout", "reaped"] {
+        let tmp = TempDir::new().unwrap();
+        let project = setup_git_project(&tmp);
+        let mut item = fluent::work_model::WorkItem::planned("driver-cleanup", "Stop owned work");
+        item.add_initial_attempt("attempt-1").unwrap();
+        WorkModelStore::new(&project)
+            .create_work_item(&item)
+            .unwrap();
+        let output = tmp.path().join("evidence");
+        fs::create_dir(&output).unwrap();
+        let provider_home = tmp.path().join("provider-home");
+        fs::create_dir(&provider_home).unwrap();
+        let bin = tmp.path().join("bin");
+        write_mock_claude(
+            &bin,
+            &format!(
+                "#!/bin/bash\nexec python3 -c 'import pathlib, signal, time\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)\nsignal.signal(signal.SIGPIPE, signal.SIG_IGN)\npathlib.Path({:?}).touch()\ntime.sleep(120)'\n",
+                output.join("provider-ready").to_str().unwrap()
+            ),
+        );
+        let result = Command::new("python3")
+            .args(["-I", "-S"])
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/integrated-upgrade-cleanup.py"),
+            )
+            .arg(&binary)
+            .arg(&project)
+            .arg(&output)
+            .arg(mode)
+            .env("PATH", mock_path(&bin))
+            .env("HOME", &provider_home)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .env_remove("FLUENT_TASK_KIND")
+            .output()
+            .unwrap();
+        let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/output/integrated-upgrade-cleanup")
+            .join(tmp.path().file_name().unwrap())
+            .join(mode);
+        fs::create_dir_all(&evidence).unwrap();
+        for entry in fs::read_dir(&output).unwrap() {
+            let entry = entry.unwrap();
+            fs::copy(entry.path(), evidence.join(entry.file_name())).unwrap();
+        }
+        assert!(
+            result.status.success(),
+            "{mode}: {}\n{}\nforeground log: {}\nevidence: {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+            fs::read_to_string(output.join("00-foreground.log")).unwrap_or_default(),
+            evidence.display()
+        );
+    }
+}
+
+#[test]
 fn attempt_cancel_persists_stop_before_settling_active_execution() {
     use fluent::{execution, work_model::*};
     let tmp = TempDir::new().unwrap();
@@ -67154,6 +69557,454 @@ fn accepted_host_evidence_reaches_ordinary_review_and_tester() {
 }
 
 #[test]
+#[serial]
+fn corrective_writer_reads_bound_host_failure_without_foreign_access() {
+    use fluent::work_model::*;
+    let tmp = TempDir::new_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("target")).unwrap();
+    let work = format!("bound-failure-{}", run_token(&tmp));
+    let (project, candidate, _) = setup_ownership_fixture(&tmp, &work, true);
+    let workspace = bind_candidate_to_managed_sibling(&project, &work, &candidate);
+    fs::write(
+        project.join(format!(
+            ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1/transcript.jsonl"
+        )),
+        "completed source Writer\n",
+    )
+    .unwrap();
+    let evidence = tmp.path().join("host.json");
+    fs::write(&evidence, serde_json::to_vec(&serde_json::json!({
+        "schema_version":1,"producer":"fixture host","check":"bash tests/host.sh",
+        "working_directory":".","result":"fail","run_at":"2026-10-25T12:00:00Z","output":"complete failure diagnostic"
+    })).unwrap()).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            &work,
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--plan-row",
+            "plan:step-2",
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bin = tmp.path().join("provider");
+    write_mock_claude(
+        &bin,
+        r#"#!/bin/bash
+case "$PWD" in
+  *review*tests) printf 'Verdict: fail\nDisposition: code-change\n\n## Findings\n\n- [ ] Repair the observed host failure\n' > review.md ;;
+  *) exit 7 ;;
+esac
+"#,
+    );
+    let _ = fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin))
+        .env("FLUENT_MAX_TASK_RETRIES", "0")
+        .args(["attempt", "run", &work, "attempt-1", "--no-sandbox"])
+        .output()
+        .unwrap();
+    let store = WorkModelStore::new(&project);
+    let item = store.read_work_item(&work).unwrap();
+    let attempt = &item.attempts[0];
+    let recovery = &attempt.evidence_recoveries[0];
+    assert_eq!(recovery.state, EvidenceRecoveryState::CodeChange);
+    let writer = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write)
+        .unwrap();
+    let assignment = writer.writer_correction_assignment.as_ref().unwrap();
+    let paths = [
+        &recovery.attachment.snapshot_path,
+        &recovery.targets[0].prior_review_artifact,
+    ];
+    for path in paths {
+        assert!(
+            assignment
+                .evidence
+                .iter()
+                .any(|input| &input.artifact.path == path),
+            "missing bound corrective input: {path}"
+        );
+    }
+    let home = project.join(format!(
+        ".fluent/work/artifacts/{work}/attempt-1/claude-home"
+    ));
+    fs::create_dir_all(&home).unwrap();
+    let make_profile = || {
+        let old = std::env::var_os("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+        unsafe {
+            std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
+        }
+        let result =
+            fluent::work_task_executor::claude_writer_profile_for_test(&project, writer, &home);
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", value),
+                None => std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT"),
+            }
+        }
+        result
+    };
+    let profile = make_profile().unwrap();
+    let rendered = fs::read_to_string(&profile.path).unwrap();
+    let bound = paths.map(|path| project.join(path));
+    for path in &bound {
+        assert!(rendered.contains(&format!(
+            "(subpath {})",
+            serde_json::to_string(&path.to_string_lossy()).unwrap()
+        )));
+        assert!(!rendered.contains(&format!(
+            "(allow file-write* (subpath {}))",
+            serde_json::to_string(&path.to_string_lossy()).unwrap()
+        )));
+        assert!(!rendered.contains(&format!(
+            "(allow file-read*  (subpath {}))",
+            serde_json::to_string(&path.parent().unwrap().to_string_lossy()).unwrap()
+        )));
+    }
+    let foreign = [
+        bound[0].with_file_name("unrelated.json"),
+        project.join(".fluent/work/artifacts/foreign/attempt-1/private.json"),
+        tmp.path().join("operator-private/secret"),
+    ];
+    for path in &foreign {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "unrelated private bytes").unwrap();
+    }
+    let probe = fluent::os::preflight_profile_with(&profile, |path| {
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(path)
+            .arg("/usr/bin/true")
+            .output()
+    });
+    if let Err(error) = probe {
+        assert!(
+            std::env::var_os("FLUENT_INTEGRATED_UPGRADE_REQUIRE_SEATBELT").is_none(),
+            "host confinement required: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("Operation not permitted"),
+            "{error:#}"
+        );
+        eprintln!("Host confinement remains pending: {error:#}");
+    } else {
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&profile.path)
+            .arg("/usr/bin/python3")
+            .args([
+                "-I",
+                "-S",
+                "-c",
+                r#"
+import sys
+from pathlib import Path
+for name in sys.argv[1:3]:
+    path = Path(name)
+    assert path.read_bytes()
+    try:
+        with path.open('ab') as stream: stream.write(b'tamper')
+    except PermissionError: pass
+    else: raise AssertionError('writable bound evidence: ' + name)
+for name in sys.argv[3:]:
+    try: Path(name).read_bytes()
+    except PermissionError: pass
+    else: raise AssertionError('readable unrelated input: ' + name)
+"#,
+            ])
+            .args(&bound)
+            .args(&foreign)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let binding_bytes = fs::read(&bound[1]).unwrap();
+    fs::write(&bound[1], b"changed binding").unwrap();
+    let rejection = make_profile()
+        .err()
+        .expect("changed binding must prevent launch");
+    assert!(
+        format!("{rejection:#}").contains("Writer assignment input changed"),
+        "{rejection:#}"
+    );
+    fs::write(&bound[1], binding_bytes).unwrap();
+    assert_eq!(assignment.source_candidate_commit, candidate);
+    assert_eq!(git_head(&workspace.workspace), candidate);
+}
+
+#[test]
+fn integrated_upgrade_driver_admits_public_evidence_retry() {
+    check_integrated_upgrade_public_evidence_retry(
+        "prerequisites",
+        "plan:step-3",
+        "bash tests/host/check-integrated-upgrade-prerequisites.sh",
+    );
+    check_integrated_upgrade_public_evidence_retry(
+        "released",
+        "plan:step-4",
+        "bash tests/host/check-integrated-released-060-upgrade.sh",
+    );
+}
+
+fn check_integrated_upgrade_public_evidence_retry(mode: &str, row: &str, command: &str) {
+    let tmp = TempDir::new().unwrap();
+    let work = format!("host-retry-{}", run_token(&tmp));
+    let step = row.strip_prefix("plan:step-").unwrap();
+    let plan = format!(
+        "| # | State reached | Behaviors | Verification | Responsibility | Req? |\n\
+         |---|---|---|---|---|---|\n\
+         | 1 | Fix source. | | `cargo test fix` | writer | Yes |\n\
+         | {step} | Check host. | | `{command}` | host | Yes |\n"
+    );
+    let (project, candidate, _) = setup_ownership_fixture_with_plan(&tmp, &work, true, Some(plan));
+    let workspace = bind_candidate_to_managed_sibling(&project, &work, &candidate);
+    fs::write(
+        project.join(format!(
+            ".fluent/work/artifacts/{work}/attempt-1/attempt-1-write-1/transcript.jsonl"
+        )),
+        "completed Writer fixture\n",
+    )
+    .unwrap();
+    let evidence = tmp.path().join("host.json");
+    fs::write(
+        &evidence,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,"producer":"disposable host fixture","check":command,
+            "working_directory":".","result":"fail","run_at":"2026-10-25T12:00:00Z",
+            "output":"Pi host prerequisites failed; remaining checks did not run"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            &work,
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--plan-row",
+            row,
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bin = tmp.path().join("provider");
+    write_mock_claude(
+        &bin,
+        "#!/bin/bash\ncat > review.md <<'REVIEW'\nVerdict: fail\nDisposition: evidence-needed\nExternal-Condition: Restore the Pi host.\nAdditional-Proof: Retry the exact aggregate command.\n\n## Findings\n\n- [ ] Complete the host check\nREVIEW\n",
+    );
+    fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin))
+        .args(["attempt", "run", &work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .success();
+    // Consume actual public show output and immutable attachment/Review bytes.
+    // Only the provider is inert; no host check or retained fixture is consumed.
+    let before = snapshot_tree(&project.join(".fluent/work"));
+    let result = Command::new("python3")
+        .args([
+            "-I",
+            "-S",
+            "-c",
+            r#"
+import importlib.util, pathlib, sys
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('upgrade', sys.argv[1])
+upgrade = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(upgrade)
+binary, source, work, candidate, root, mode = sys.argv[2:]
+args = SimpleNamespace(source_root=pathlib.Path(source), work=work, attempt='attempt-1', mode=mode)
+item = upgrade.host_snapshot(binary, args, pathlib.Path(root), candidate)
+assert item['attempts'][0]['pause_kind'] == 'uncertain'
+print('ok public failed host check, evidence-needed Review and driver retry admission')
+"#,
+        ])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integrated-upgrade.py"))
+        .arg(
+            std::env::var_os("FLUENT_BIN_OVERRIDE")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_fluent").into()),
+        )
+        .arg(&project)
+        .arg(&work)
+        .arg(&candidate)
+        .arg(&workspace.workspace)
+        .arg(mode)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(snapshot_tree(&project.join(".fluent/work")), before);
+}
+
+#[test]
+fn targeted_host_review_preserves_pending_writer_finding() {
+    use fluent::work_model::*;
+    let tmp = TempDir::new().unwrap();
+    let work = format!("pending-host-{}", run_token(&tmp));
+    let (project, candidate, _) = setup_ownership_fixture(&tmp, &work, true);
+    let _workspace = bind_candidate_to_managed_sibling(&project, &work, &candidate);
+    let store = WorkModelStore::new(&project);
+    let mut item = store.read_work_item(&work).unwrap();
+    let review = ArtifactRef {
+        producer_id: "prior-review-tests".into(),
+        path: format!(".fluent/work/artifacts/{work}/attempt-1/prior-review-tests/review.md"),
+    };
+    fs::create_dir_all(project.join(&review.path).parent().unwrap()).unwrap();
+    let title = "Retain the complementary dashboard check";
+    fs::write(
+        project.join(&review.path),
+        format!("Verdict: fail\n\n## Findings\n\n- [ ] {title}\n"),
+    )
+    .unwrap();
+    let finding = WriterCompletionFinding {
+        id: format!(
+            "finding:tests:{}",
+            fluent::review::finding_identity("tests", title)
+        ),
+        role: "tests".into(),
+        source: review.path.clone(),
+        requirement: title.into(),
+    };
+    let attempt = &mut item.attempts[0];
+    let writer = &mut attempt.tasks[0];
+    writer.input_artifacts.push(review);
+    let matrix_path = project
+        .join(&writer.artifact_area.as_ref().unwrap().path)
+        .join("writer-completion.json");
+    let prior: WriterCompletionMatrix =
+        serde_json::from_slice(&fs::read(&matrix_path).unwrap()).unwrap();
+    let matrix = WriterCompletionMatrix::skeleton(
+        attempt.writer_completion_contract.as_ref().unwrap(),
+        &writer.id,
+        std::slice::from_ref(&finding),
+        Some(&prior),
+    )
+    .unwrap();
+    fs::write(&matrix_path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+    fs::write(
+        matrix_path.with_file_name("transcript.jsonl"),
+        "completed prior Writer\n",
+    )
+    .unwrap();
+    store.write_work_item(&item).unwrap();
+    let original_matrix = fs::read(&matrix_path).unwrap();
+    let evidence = tmp.path().join("host.json");
+    fs::write(&evidence, serde_json::to_vec(&serde_json::json!({
+        "schema_version":1,"producer":"fixture host","check":"bash tests/host.sh",
+        "working_directory":".","result":"pass","run_at":"2026-10-25T12:00:00Z","output":"scoped host row passed"
+    })).unwrap()).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "evidence",
+            "attach",
+            &work,
+            "attempt-1",
+            "--candidate",
+            &candidate,
+            "--plan-row",
+            "plan:step-2",
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bin = tmp.path().join("provider");
+    write_mock_claude(
+        &bin,
+        &learner_mock_script(r#"{"schema_version":1,"observations":[],"work_items":[]}"#),
+    );
+    fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin))
+        .args(["attempt", "run", &work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .success();
+    let after = store.read_work_item(&work).unwrap();
+    let attempt = &after.attempts[0];
+    assert_eq!(
+        attempt.evidence_recoveries[0].state,
+        EvidenceRecoveryState::Complete
+    );
+    assert!(
+        attempt
+            .tasks
+            .iter()
+            .all(|task| task.kind != TaskKind::Tester),
+        "pending Writer finding admitted Tester: {attempt:?}"
+    );
+    assert!(attempt.learning.is_none());
+    assert!(after.merge_candidates.is_empty());
+    assert_eq!(attempt.pause_kind, Some(PauseKind::WriterCompletion));
+    assert_eq!(fs::read(&matrix_path).unwrap(), original_matrix);
+    let source = snapshot_tree(&project.join(".fluent/work"));
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "repair-writer-completion",
+            &work,
+            "attempt-1",
+            "--resolution",
+            "Cannot repair valid pending work",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(snapshot_tree(&project.join(".fluent/work")), source);
+    // A reservation retained by an earlier coordinator must not bypass the
+    // same check on resume. Keep the accepted host row and pending claim intact.
+    let mut reserved = after.clone();
+    let tester_id = reserved.add_final_tester_task("attempt-1").unwrap();
+    reserved.attempts[0].status = AttemptStatus::Reviewing;
+    reserved.attempts[0].pause_kind = None;
+    store.write_work_item(&reserved).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin))
+        .args(["attempt", "run", &work, "attempt-1", "--no-sandbox"])
+        .assert()
+        .success();
+    let blocked = store.read_work_item(&work).unwrap();
+    assert_eq!(
+        blocked.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == tester_id)
+            .unwrap()
+            .status,
+        TaskStatus::Planned
+    );
+    assert!(blocked.attempts[0].learning.is_none());
+    assert!(blocked.merge_candidates.is_empty());
+    assert_eq!(fs::read(&matrix_path).unwrap(), original_matrix);
+}
+
+#[test]
 fn ordinary_tests_review_receives_accepted_host_evidence_from_legacy_plan() {
     use fluent::work_model::*;
     let tmp = TempDir::new().unwrap();
@@ -73466,4 +76317,335 @@ fn recorded_work_bytes(project: &Path) -> std::collections::BTreeMap<PathBuf, Ve
     let mut files = std::collections::BTreeMap::new();
     collect(&project.join(".fluent/work"), &mut files);
     files
+}
+
+// Reproduce the old native retry window from a materialized, settled child:
+// the next reservation replaces its record but retains the prior receipt.
+fn unused_cancel_retry_fixture(project: &Path, settled_stop: bool) -> (WorkModelStore, PathBuf) {
+    use fluent::{execution, work_model::*};
+    let store = WorkModelStore::new(project);
+    let mut item = WorkItem::planned("cancel-retry", "Reconcile an unused native retry");
+    item.add_initial_attempt("attempt-1").unwrap();
+    item.attempts[0].status = AttemptStatus::Executing;
+    item.attempts[0].tasks[0].status = TaskStatus::Executing;
+    let area = project.join(
+        &item.attempts[0].tasks[0]
+            .artifact_area
+            .as_ref()
+            .unwrap()
+            .path,
+    );
+    fs::create_dir_all(&area).unwrap();
+    store.create_work_item(&item).unwrap();
+    let path = area.join("execution.json");
+    let now = fluent::work_model::now_iso8601();
+    let record = execution::ExecutionRecord {
+        schema_version: 2,
+        state: execution::ExecutionState::Launching,
+        owner_pid: std::process::id(),
+        leader_pid: 0,
+        process_group_id: 0,
+        started_at: now.clone(),
+        heartbeat_at: now,
+        settled_at: None,
+        attempt_owner: Some(execution::AttemptExecutionOwner {
+            project_root: project.canonicalize().unwrap(),
+            work_item_id: item.id.clone(),
+            attempt_id: "attempt-1".into(),
+        }),
+        launch_generation: Some("a".repeat(32)),
+    };
+    fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let mut child = execution::spawn(
+        &mut Command::new("/usr/bin/true"),
+        &area.join("transcript.jsonl"),
+    )
+    .unwrap();
+    let mut heartbeat =
+        execution::ExecutionHeartbeat::start(&area.join("transcript.jsonl"), child.id()).unwrap();
+    assert!(child.wait().unwrap().success());
+    heartbeat.settle().unwrap();
+    if settled_stop {
+        fluent_cmd()
+            .current_dir(project)
+            .args(["attempt", "cancel", "cancel-retry", "attempt-1"])
+            .assert()
+            .success();
+    }
+    (store, path)
+}
+
+fn publish_unused_cancel_retry(store: &WorkModelStore, path: &Path) {
+    let item = store.read_work_item("cancel-retry").unwrap();
+    let stop = item.attempts[0].cancellation.as_ref().unwrap();
+    let mut record: fluent::execution::ExecutionRecord =
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    record.state = fluent::execution::ExecutionState::Launching;
+    record.launch_generation = Some("b".repeat(32));
+    record.leader_pid = 0;
+    record.process_group_id = 0;
+    record.started_at = stop.requested_at.clone();
+    record.heartbeat_at = record.started_at.clone();
+    record.settled_at = None;
+    fs::write(path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn repeated_cancel_reconciles_proven_unused_retry_reservation() {
+    use fluent::{execution, lease};
+    for control in [
+        "unused",
+        "identity-held",
+        "task-held",
+        "current-receipt",
+        "malformed-receipt",
+        "foreign-owner",
+        "legacy",
+        "heartbeat",
+        "pre-stop",
+        "after-settlement",
+        "materialized",
+        "terminal-resource",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let project = setup_git_project(&tmp).canonicalize().unwrap();
+        let (store, path) = unused_cancel_retry_fixture(&project, true);
+        let terminal = fs::read(&path).unwrap();
+        // Include an unrelated terminal execution in the same stopped Attempt.
+        let history = path.parent().unwrap().join("history/execution.json");
+        fs::create_dir_all(history.parent().unwrap()).unwrap();
+        fs::write(&history, &terminal).unwrap();
+        store
+            .mutate_work_item("cancel-retry", |item| {
+                item.attempts[0].artifacts.push(ArtifactRef {
+                    producer_id: "local-execution".into(),
+                    path: history
+                        .strip_prefix(&project)
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        publish_unused_cancel_retry(&store, &path);
+        let mut record: execution::ExecutionRecord =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut held = None;
+        match control {
+            "unused" => {}
+            "terminal-resource" => {
+                let resource = project.join(".fluent/work/terminal-sessions/cancel-retry/attempt-1/attempt-1-write-1/resource.json");
+                fs::create_dir_all(resource.parent().unwrap()).unwrap();
+                fs::write(resource, "{}").unwrap();
+            }
+            "identity-held" => {
+                held = Some(lease::acquire(&path.with_file_name("execution-owner.lock")).unwrap())
+            }
+            "task-held" => {
+                held = Some(
+                    lease::acquire(&lease::task_lock_path(
+                        &project,
+                        "cancel-retry",
+                        "attempt-1-write-1",
+                    ))
+                    .unwrap(),
+                )
+            }
+            "current-receipt" => fs::write(
+                path.with_file_name("execution-receipt"),
+                format!(
+                    "2 {} {:010}\n",
+                    record.launch_generation.as_ref().unwrap(),
+                    std::process::id()
+                ),
+            )
+            .unwrap(),
+            "malformed-receipt" => fs::write(
+                path.with_file_name("execution-receipt"),
+                b"unknown generation\n",
+            )
+            .unwrap(),
+            "foreign-owner" => {
+                record.attempt_owner.as_mut().unwrap().attempt_id = "attempt-2".into()
+            }
+            "legacy" => {
+                record.schema_version = 1;
+                record.launch_generation = None;
+            }
+            "heartbeat" => record.heartbeat_at = "2099-01-01T00:00:00Z".into(),
+            "pre-stop" => {
+                record.started_at = "2000-01-01T00:00:00Z".into();
+                record.heartbeat_at = record.started_at.clone();
+            }
+            "after-settlement" => {
+                record.started_at = "2099-01-01T00:00:00Z".into();
+                record.heartbeat_at = record.started_at.clone();
+            }
+            "materialized" => record.leader_pid = std::process::id(),
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let receipt = fs::read(path.with_file_name("execution-receipt")).unwrap();
+        let item_before = store.read_work_item("cancel-retry").unwrap();
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "cancel", "cancel-retry", "attempt-1"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            control == "unused",
+            "{control}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if control == "unused" {
+            let after: execution::ExecutionRecord =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(after.state, execution::ExecutionState::Canceled);
+            assert!(after.settled_at.is_some());
+            assert_eq!(after.launch_generation, record.launch_generation);
+            assert_eq!(after.started_at, record.started_at);
+            let settled = fs::read(&path).unwrap();
+            fluent_cmd()
+                .current_dir(&project)
+                .args(["attempt", "cancel", "cancel-retry", "attempt-1"])
+                .assert()
+                .success();
+            assert_eq!(fs::read(&path).unwrap(), settled);
+        } else {
+            assert_eq!(fs::read(&path).unwrap(), before, "{control}");
+            assert!(
+                !output.stderr.is_empty(),
+                "{control}: missing refusal diagnostic"
+            );
+        }
+        assert_eq!(fs::read(&history).unwrap(), terminal, "{control}");
+        assert_eq!(
+            fs::read(path.with_file_name("execution-receipt")).unwrap(),
+            receipt,
+            "{control}"
+        );
+        assert_eq!(
+            store.read_work_item("cancel-retry").unwrap(),
+            item_before,
+            "{control}: stop authority changed"
+        );
+        drop(held);
+    }
+}
+
+#[test]
+fn attempt_cancel_rechecks_execution_after_setup_unwinds() {
+    use fluent::{execution, lease};
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp).canonicalize().unwrap();
+    let (store, path) = unused_cancel_retry_fixture(&project, false);
+    let setup = lease::acquire(&lease::task_lock_path(
+        &project,
+        "cancel-retry",
+        "attempt-1-write-1",
+    ))
+    .unwrap();
+    let mut command = Command::new(assert_cmd::cargo::cargo_bin!("fluent"));
+    command
+        .current_dir(&project)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .args(["attempt", "cancel", "cancel-retry", "attempt-1"]);
+    let mut cancel = OwnedFixtureProcess::spawn(&mut command);
+    assert!(poll_until(std::time::Duration::from_secs(5), || {
+        serde_json::from_slice::<execution::ExecutionRecord>(&fs::read(&path).unwrap())
+            .unwrap()
+            .state
+            == execution::ExecutionState::Canceled
+    }));
+    assert!(cancel.try_wait().unwrap().is_none());
+    // Simulate the old setup owner publishing a retry after the first scan.
+    publish_unused_cancel_retry(&store, &path);
+    let generation =
+        serde_json::from_slice::<execution::ExecutionRecord>(&fs::read(&path).unwrap())
+            .unwrap()
+            .launch_generation;
+    drop(setup);
+    assert!(poll_until(std::time::Duration::from_secs(5), || cancel
+        .try_wait()
+        .unwrap()
+        .is_some_and(|status| {
+            assert!(status.success());
+            true
+        })));
+    let after: execution::ExecutionRecord =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(after.state, execution::ExecutionState::Canceled);
+    assert_eq!(after.launch_generation, generation);
+    assert!(after.settled_at.is_some());
+    assert!(
+        store.read_work_item("cancel-retry").unwrap().attempts[0]
+            .cancellation
+            .as_ref()
+            .unwrap()
+            .settled_at
+            .is_some()
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn repeated_cancel_rejects_changed_generation_and_resumed_stop() {
+    use fluent::execution;
+    for change in ["generation", "resumed", "receipt"] {
+        let tmp = TempDir::new().unwrap();
+        let project = setup_git_project(&tmp).canonicalize().unwrap();
+        let (store, path) = unused_cancel_retry_fixture(&project, true);
+        publish_unused_cancel_retry(&store, &path);
+        let barrier = tmp.path().join("reconcile");
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("fluent"));
+        command
+            .current_dir(&project)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .env("FLUENT_TEST_CANCEL_RECONCILE_BARRIER", &barrier)
+            .args(["attempt", "cancel", "cancel-retry", "attempt-1"]);
+        let mut cancel = OwnedFixtureProcess::spawn(&mut command);
+        assert!(poll_until(std::time::Duration::from_secs(5), || barrier
+            .with_extension("ready")
+            .exists()));
+        match change {
+            "generation" => {
+                let mut record: execution::ExecutionRecord =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                record.launch_generation = Some("c".repeat(32));
+                fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+            }
+            "resumed" => store
+                .mutate_work_item("cancel-retry", |item| {
+                    item.attempts[0].cancellation.as_mut().unwrap().resumed_at =
+                        Some(fluent::work_model::now_iso8601());
+                    Ok(())
+                })
+                .unwrap(),
+            "receipt" => fs::write(
+                path.with_file_name("execution-receipt"),
+                format!("2 {} {:010}\n", "b".repeat(32), std::process::id()),
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let bytes = fs::read(&path).unwrap();
+        let item = store.read_work_item("cancel-retry").unwrap();
+        fs::write(&barrier, "release").unwrap();
+        assert!(poll_until(std::time::Duration::from_secs(5), || cancel
+            .try_wait()
+            .unwrap()
+            .is_some_and(|status| {
+                assert!(!status.success(), "{change}");
+                true
+            })));
+        assert_eq!(fs::read(&path).unwrap(), bytes, "{change}");
+        assert_eq!(
+            store.read_work_item("cancel-retry").unwrap(),
+            item,
+            "{change}"
+        );
+    }
 }

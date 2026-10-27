@@ -10,10 +10,18 @@ Stay in the current provider session when one is available. This prompt supplies
 
 Reference paths:
 
+{{#if brief_path}}
 - Brief: {{brief_path}}
+{{/if}}
+{{#if behaviors_path}}
 - Behaviors: {{behaviors_path}}
+{{/if}}
+{{#if approach_path}}
 - Approach: {{approach_path}}
+{{/if}}
+{{#if plan_path}}
 - Plan: {{plan_path}}
+{{/if}}
 - Generated current context: {{execution_context_path}}
 {{#if has_writer_completion_matrix}}
 Rows assigned to `host`, `review`, `tester`, or `learner` are read-only context: leave their state pending and their evidence arrays empty. Complete only `writer` rows (or legacy rows with no responsibility) and applicable findings. Fluent verifies host evidence and later stages separately; assignment never authorizes host execution.

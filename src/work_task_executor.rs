@@ -393,6 +393,13 @@ fn plan_task_start(
         bail!("Task {task_id:?} is {}; expected planned", task.status);
     }
     validate(task)?;
+    if expected_kind == TaskKind::Write {
+        crate::recovery_contracts::writer_completion::validated_committed_repair_start(
+            store.project_root(),
+            &item,
+            task,
+        )?;
+    }
     // A peer that already took the Attempt terminal (a pause or failure) cannot be
     // revived by this start: reject before any side effect. reserve_task_start
     // re-checks precedence under the model lock to close the race during setup.
@@ -931,6 +938,14 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     run_write_task_with_coder(config, None)
 }
 
+#[cfg(feature = "test-support")]
+pub fn run_write_task_with_coder_for_test(
+    config: WorkTaskRunConfig<'_>,
+    coder: &dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<WorkTaskRunResult> {
+    run_write_task_with_coder(config, Some(coder))
+}
+
 /// Run a Writer Task, optionally injecting the coder factory for deterministic
 /// full-route tests.
 fn run_write_task_with_coder(
@@ -942,9 +957,43 @@ fn run_write_task_with_coder(
     // input instead derives from the plan snapshot.
     let mut item = read_work_item_or_not_found(config.store, config.work_item_id)?;
 
-    // Inputs independent of the aggregate: the source branch (git) and the Task
-    // branch name (ids).
-    let source_branch = current_branch(config.project_root)?;
+    // The first accepted Writer establishes the Attempt's target. A later root
+    // checkout is a discussion context, not authority to retarget this Attempt.
+    // Legacy histories with conflicting targets remain readable for landing,
+    // but cannot authorize a new Writer by choosing one label arbitrarily.
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .context("Writer Attempt is missing")?;
+    let mut established_target = None;
+    for writer in attempt
+        .tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    {
+        let output = writer
+            .output
+            .as_ref()
+            .context("completed Writer has no target identity")?;
+        anyhow::ensure!(
+            !output.source_branch.is_empty(),
+            "completed Writer has an empty target identity"
+        );
+        if let Some(target) = established_target {
+            anyhow::ensure!(
+                target == output.source_branch,
+                "Attempt has contradictory saved Writer target identities; inspect `fluent task list {} {}` before continuing",
+                config.work_item_id,
+                config.attempt_id
+            );
+        }
+        established_target = Some(output.source_branch.as_str());
+    }
+    let source_branch = match established_target {
+        Some(target) => target.to_string(),
+        None => current_branch(config.project_root)?,
+    };
     let branch_name = format!(
         "work/{}/{}/{}",
         config.work_item_id, config.attempt_id, config.task_id
@@ -1305,10 +1354,15 @@ fn run_write_task_with_coder(
             a.producer_id.as_str(),
             crate::recovery_contracts::context_retry::APPROVE
                 | crate::recovery_contracts::context_retry::COMPLETION_APPROVE
+                | crate::recovery_contracts::claude_session::APPROVE
         )
     }) && should_retry_coder_error(&run_result)
         && retries < max_task_retries()
     {
+        if let Err(error) = ensure_task_attempt_not_canceled(&config) {
+            run_result = Err(error);
+            break;
+        }
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -2152,6 +2206,10 @@ fn run_review_task_with_coder(
     );
     let mut retries = 0;
     while should_retry_coder_error(&run_result) && retries < max_task_retries() {
+        if let Err(error) = ensure_task_attempt_not_canceled(&config) {
+            run_result = Err(error);
+            break;
+        }
         retries += 1;
         eprintln!(
             "  Retrying coder (attempt {}/{})",
@@ -3445,6 +3503,17 @@ fn find_attempt_task_indexes(
     Some((attempt_index, task_index))
 }
 
+fn ensure_task_attempt_not_canceled(config: &WorkTaskRunConfig<'_>) -> Result<()> {
+    let item = config.store.read_work_item(config.work_item_id)?;
+    let attempt = item
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == config.attempt_id)
+        .context("retry's owning Attempt is missing")?;
+    attempt.ensure_not_canceled()?;
+    Ok(())
+}
+
 const DEFAULT_MAX_TASK_RETRIES: usize = 2;
 
 fn max_task_retries() -> usize {
@@ -3591,6 +3660,10 @@ fn acquire_task_provider_capacity(
 /// also bypasses this outer budget.
 fn should_retry_coder_error(result: &Result<()>) -> bool {
     result.is_err()
+        && !result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<crate::claude_session::FallbackStopped>())
         && !is_auth_error(result)
         && !is_transcript_pump_error(result)
         && !is_supervision_sidecar_error(result)
@@ -4731,6 +4804,14 @@ fn preflight_write_sandbox_profile(
     claude_home: Option<&Path>,
     writer_cache: &crate::writer_cache::WriterDependencyCache,
 ) -> Result<Option<os::SandboxProfile>> {
+    // A first Writer's worktree does not exist until after reservation.
+    let node_project = if workspace_path.exists() {
+        workspace_path
+    } else {
+        project_root
+    };
+    let node_tools =
+        crate::installed_tools::node_access(node_project, std::env::var_os("PATH").as_deref())?;
     // Test-support may exercise a nested Codex route without applying a
     // Seatbelt profile. Keep that exception explicit and feature-gated: the
     // production Codex worker continues to require its source-home boundary.
@@ -4835,14 +4916,146 @@ fn preflight_write_sandbox_profile(
         writer_cache.root(),
         claude_home,
     )?;
+    os::admit_installed_tools(&profile, &node_tools, workspace_path)?;
     #[cfg(not(test))]
     if let Some(worker) = codex_worker {
         os::preflight_codex_launcher(&profile, worker)?;
     } else {
         os::preflight_profile(&profile)?;
     }
-    os::preflight_readable_paths(&profile, prior_reviews)?;
+    let inputs = declared_worker_input_files(
+        project_root,
+        &task.work_item_id,
+        &[workspace_path.to_path_buf()],
+        prior_reviews,
+    )?;
+    os::preflight_readable_paths(&profile, &inputs)?;
     Ok(Some(profile))
+}
+
+/// Drive the production Writer and Tester boundaries with a deterministic coder.
+/// Host tests use the same seam with real Seatbelt enforcement.
+#[cfg(feature = "test-support")]
+pub fn node_worker_writer_for_test(
+    project: &Path,
+    candidate: &Path,
+    item: &WorkItem,
+    make_coder: impl FnOnce(CoderSandbox) -> Box<dyn crate::coder::Coder>,
+) -> Result<String> {
+    let attempt = &item.attempts[0];
+    let task = &attempt.tasks[0];
+    let cache =
+        crate::writer_cache::preflight_writer_dependency_cache(project, &item.id, &attempt.id)?;
+    crate::writer_cache::prepare_writer_dependency_cache_for_launch(
+        &cache,
+        &WorkModelStore::new(project),
+        None,
+    )?;
+    let resolver = ContentResolver::new(Some(project));
+    let profile = preflight_write_sandbox_profile(
+        task,
+        project,
+        candidate,
+        &[],
+        &resolver,
+        false,
+        CoderKind::Claude,
+        None,
+        None,
+        &cache,
+    )?
+    .context("missing Writer profile")?;
+    let text = fs::read_to_string(&profile.path)?;
+    run_task_coder_with_coder(
+        item,
+        &attempt.id,
+        &task.id,
+        project,
+        candidate,
+        &[],
+        &resolver,
+        &[],
+        CoderKind::Claude,
+        true,
+        None,
+        None,
+        &crate::transcript_pump::resolve_config(project),
+        None,
+        None,
+        &cache,
+        Some(&profile),
+        move |sandbox, _| make_coder(sandbox),
+    )?;
+    Ok(text)
+}
+
+/// Keep final Tester cache preparation, profile rendering, and candidate
+/// restoration together when probing the Node worker boundary.
+#[cfg(feature = "test-support")]
+pub fn node_worker_tester_for_test(
+    project: &Path,
+    candidate: &Path,
+    artifact: &Path,
+    item: &WorkItem,
+) -> Result<(crate::tester::TesterOutcome, String)> {
+    let cache = crate::writer_cache::preflight_writer_dependency_cache(
+        project,
+        &item.id,
+        &item.attempts[0].id,
+    )?;
+    crate::writer_cache::prepare_writer_dependency_cache_for_launch(
+        &cache,
+        &WorkModelStore::new(project),
+        None,
+    )?;
+    fs::create_dir_all(artifact)?;
+    let guard = TesterCandidateGuard::begin(candidate.to_path_buf(), &head_commit(candidate)?)?;
+    let plan = crate::tester::plan(candidate)?;
+    let settlement = crate::tester::prepare_settlement_directories(artifact, &plan)?;
+    let sandbox = crate::tester::render_sandbox_profile_with_cache(
+        candidate,
+        artifact,
+        false,
+        &ContentResolver::new(Some(project)),
+        settlement,
+        Some(&cache),
+    )?;
+    let text = fs::read_to_string(&sandbox.profile().context("missing Tester profile")?.path)?;
+    let outcome = run_tester_with_candidate_guard(&guard, artifact, &sandbox)?;
+    Ok((outcome, text))
+}
+
+/// Prepare the production Tester boundary with an explicitly admitted dependency seed.
+#[cfg(feature = "test-support")]
+pub fn historical_reader_tester_sandbox_for_test(
+    project: &Path,
+    candidate: &Path,
+    artifact: &Path,
+    seed: Option<&Path>,
+) -> Result<(crate::tester::TesterSandbox, String)> {
+    let cache = crate::writer_cache::preflight_writer_dependency_cache(
+        project,
+        "reader-build",
+        "attempt-1",
+    )?;
+    crate::writer_cache::prepare_writer_dependency_cache_for_launch(
+        &cache,
+        &WorkModelStore::new(project),
+        seed,
+    )?;
+    fs::create_dir_all(artifact)?;
+    let plan = crate::tester::plan(candidate)?;
+    let settlement = crate::tester::prepare_settlement_directories(artifact, &plan)?;
+    let sandbox = crate::tester::render_sandbox_profile_with_cache(
+        candidate,
+        artifact,
+        false,
+        &ContentResolver::new(Some(project)),
+        settlement,
+        Some(&cache),
+    )?;
+    let text = fs::read_to_string(&sandbox.profile().context("missing Tester profile")?.path)?;
+    Ok((sandbox, text))
 }
 
 /// Use the same private tool environment as a real retry launch.
@@ -4912,6 +5125,43 @@ pub fn usage_limit_profile_for_test(
         &cache,
     )?
     .context("missing retry profile")
+}
+
+/// Exercise recovery input selection and the production Claude launch profile.
+#[cfg(feature = "test-support")]
+pub fn claude_writer_profile_for_test(
+    project: &Path,
+    task: &Task,
+    home: &Path,
+) -> Result<os::SandboxProfile> {
+    let project = fs::canonicalize(project)?;
+    let attempt = task.attempt_id.as_deref().context("missing Attempt")?;
+    let workspace = resolve_managed_workspace_path(
+        &project,
+        &task.workspace_access.writes[0].path,
+        &task.work_item_id,
+        attempt,
+    )?;
+    let item = WorkModelStore::new(&project).read_work_item_snapshot(&task.work_item_id)?;
+    let inputs = resolve_writer_readable_inputs(&project, &item, task)?;
+    let cache = crate::writer_cache::preflight_writer_dependency_cache(
+        &project,
+        &task.work_item_id,
+        attempt,
+    )?;
+    preflight_write_sandbox_profile(
+        task,
+        &project,
+        &workspace,
+        &inputs,
+        &ContentResolver::new(Some(&project)),
+        false,
+        CoderKind::Claude,
+        None,
+        Some(home),
+        &cache,
+    )?
+    .context("missing Writer profile")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5055,6 +5305,12 @@ fn run_task_coder_with_coder_with_feedback(
         fs::create_dir_all(home)
             .with_context(|| format!("creating confined Claude home {}", home.display()))?;
         launch_env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
+        // Native and headless Writers must resolve the same persistent state,
+        // even when the coordinator inherited a different Claude config root.
+        launch_env.push((
+            "CLAUDE_CONFIG_DIR".to_string(),
+            home.to_string_lossy().into_owned(),
+        ));
     }
     launch_env.extend(writer_cache.launch_env());
 
@@ -5136,6 +5392,21 @@ fn run_task_coder_with_coder_with_feedback(
             crate::writer_context::WriterPromptKind::Initial,
         )
     };
+
+    if prompt_kind != crate::writer_context::WriterPromptKind::Initial
+        && let Some(instructions) = task
+            .instructions
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+    {
+        let area = task
+            .artifact_area
+            .as_ref()
+            .context("Writer assignment needs an artifact area")?;
+        let assignment = project_root.join(&area.path).join("task-assignment.md");
+        crate::atomic_write::atomic_write(&assignment, instructions.as_bytes())?;
+        prompt.push_str(&format!("\n\n## Saved Task assignment\n\nRead the saved Task assignment at {}.\nThese instructions remain required together with the current findings.\n", assignment.display()));
+    }
 
     if let Some(feedback) = handoff_feedback {
         prompt.push_str("\n\n## Writer handoff correction\n\n");
@@ -5296,6 +5567,31 @@ fn run_task_coder_with_coder_with_feedback(
         )?
     };
 
+    // The early admission probe cannot open files materialized during setup.
+    // Probe those files now under the very profile the provider will receive.
+    if let Some(profile) = sandbox_profile.or(_sandbox_profile.as_ref()) {
+        let mut inputs = declared_worker_input_files(
+            project_root,
+            &item.id,
+            &[workspace_path.to_path_buf()],
+            prior_reviews,
+        )?;
+        append_existing_worker_input_files(&mut inputs, &progress_dir.join("progress.md"))?;
+        if let Some(area) = &task.artifact_area {
+            for name in [
+                "writer-completion.json",
+                "execution-context.json",
+                "task-assignment.md",
+            ] {
+                append_existing_worker_input_files(
+                    &mut inputs,
+                    &project_root.join(&area.path).join(name),
+                )?;
+            }
+        }
+        os::preflight_readable_paths(profile, &inputs)?;
+    }
+
     let effective_model = model
         .map(str::to_string)
         .unwrap_or_else(|| coder_kind.default_model());
@@ -5336,7 +5632,7 @@ fn run_task_coder_with_coder_with_feedback(
     let correction_session = handoff_feedback
         .and_then(|_| transcript_path.as_deref())
         .and_then(crate::work_attempt_loop::writer_session_id);
-    let session = correction_session
+    let mut session = correction_session
         .as_deref()
         .map(crate::coder::CoderSession::Resume)
         .unwrap_or_else(|| {
@@ -5347,6 +5643,65 @@ fn run_task_coder_with_coder_with_feedback(
                 codex_snapshot_available,
             )
         });
+    let mut used_claude_fallback = false;
+    let claude_fallback_eligible = if coder_kind == CoderKind::Claude {
+        transcript_path
+            .as_deref()
+            .map(crate::claude_session::begin_invocation)
+            .transpose()
+            .context(crate::claude_session::FallbackStopped)?
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let mut selected_claude_home = claude_home.map(Path::to_path_buf);
+    if coder_kind == CoderKind::Claude
+        && let (Some(home), crate::coder::CoderSession::Resume(id)) = (claude_home, session)
+        && crate::claude_session::stored_session(home, id)
+            .context(crate::claude_session::FallbackStopped)?
+            == crate::claude_session::StoredSession::Missing
+    {
+        let legacy = home.join(".claude");
+        if crate::claude_session::stored_session(&legacy, id)
+            .context(crate::claude_session::FallbackStopped)?
+            != crate::claude_session::StoredSession::Missing
+        {
+            // Older headless Writers resolved HOME/.claude. Keep a surviving
+            // conversation there without copying or rewriting provider history.
+            for (name, value) in &mut launch_env {
+                if matches!(name.as_str(), "HOME" | "CLAUDE_CONFIG_DIR") {
+                    *value = legacy.to_string_lossy().into_owned();
+                }
+            }
+            selected_claude_home = Some(legacy);
+        }
+    }
+    if coder_kind == CoderKind::Claude
+        && let (Some(home), Some(transcript), crate::coder::CoderSession::Resume(id)) = (
+            selected_claude_home.as_deref(),
+            transcript_path.as_deref(),
+            session,
+        )
+        && crate::claude_session::stored_session(home, id)
+            .context(crate::claude_session::FallbackStopped)?
+            == crate::claude_session::StoredSession::Missing
+    {
+        // An existing launch may have acted even if its provider cache vanished.
+        // Only a never-launched continuation can use absence as proof.
+        anyhow::ensure!(
+            claude_fallback_eligible,
+            crate::claude_session::FallbackStopped
+        );
+        crate::claude_session::reserve_fallback(
+            transcript
+                .parent()
+                .context("Claude Writer has no artifact directory")?,
+            id,
+            "stored conversation is absent before launch",
+        )?;
+        session = crate::coder::CoderSession::FreshPersistent;
+        used_claude_fallback = true;
+    }
     let _handoff_correction =
         crate::execution::HandoffCorrection::enter(handoff_feedback.is_some());
     let native = item
@@ -5400,18 +5755,30 @@ fn run_task_coder_with_coder_with_feedback(
                 launch_env: &launch_env,
             })?;
         } else if coder_kind == CoderKind::Claude {
-            crate::native_agent::claude::run(crate::native_agent::claude::ClaudeNativeTask {
-                identity,
-                worker_profile: profile,
-                workspace: workspace_path,
-                private_home: claude_home.context("native Claude Task has no private home")?,
-                model: &effective_model,
-                effort: effort.context("native Claude Task has no resolved effort")?,
-                prompt: &prompt,
-                system_prompt: &system_prompt,
+            crate::claude_session::run_native_with_fallback(
                 session,
-                launch_env: &launch_env,
-            })?;
+                claude_fallback_eligible,
+                used_claude_fallback,
+                &artifact_dir.join("transcript.jsonl"),
+                |session| {
+                    crate::native_agent::claude::run(
+                        crate::native_agent::claude::ClaudeNativeTask {
+                            identity: identity.clone(),
+                            worker_profile: profile,
+                            workspace: workspace_path,
+                            private_home: selected_claude_home
+                                .as_deref()
+                                .context("native Claude Task has no private home")?,
+                            model: &effective_model,
+                            effort: effort.context("native Claude Task has no resolved effort")?,
+                            prompt: &prompt,
+                            system_prompt: &system_prompt,
+                            session,
+                            launch_env: &launch_env,
+                        },
+                    )
+                },
+            )?;
         } else {
             let previous_session = item
                 .attempts
@@ -5443,20 +5810,69 @@ fn run_task_coder_with_coder_with_feedback(
             sandbox,
             codex_worker.map(|worker| worker.launcher().execution_executable()),
         );
-        let completion = coder.run_captured_reported_session(
-            &prompt,
-            &system_prompt,
-            workspace_path,
-            extra_args,
-            &launch_env,
-            capture.as_ref(),
-            session,
-        );
-        match transcript_path.as_deref().and_then(Path::parent) {
+        let fallback_capture = capture
+            .as_ref()
+            .map(|capture| capture.single_claude_launch());
+        let launch = |selected_session, once| {
+            coder.run_captured_reported_session(
+                &prompt,
+                &system_prompt,
+                workspace_path,
+                extra_args,
+                &launch_env,
+                if once {
+                    fallback_capture.as_ref()
+                } else {
+                    capture.as_ref()
+                },
+                selected_session,
+            )
+        };
+        let mut completion = launch(session, used_claude_fallback);
+        if coder_kind == CoderKind::Claude
+            && claude_fallback_eligible
+            && let (Some(transcript), crate::coder::CoderSession::Resume(id)) =
+                (transcript_path.as_deref(), session)
+            && crate::claude_session::settled_failure(&completion)
+            && crate::claude_session::is_missing_conversation(
+                &fs::read(transcript).unwrap_or_default(),
+                &fs::read(crate::coder::provider_stderr_path(transcript))
+                    .unwrap_or_else(|_| b"unreadable stderr".to_vec()),
+                id,
+            )
+        {
+            crate::claude_session::reserve_fallback(
+                transcript
+                    .parent()
+                    .context("Claude Writer has no artifact directory")?,
+                id,
+                "provider rejected the exact resume target before any turn",
+            )?;
+            crate::coder::preserve_missing_claude_launch(transcript, &completion.report)
+                .context(crate::claude_session::FallbackStopped)?;
+            used_claude_fallback = true;
+            let _fallback = crate::claude_session::FallbackLaunch::enter();
+            completion = launch(crate::coder::CoderSession::FreshPersistent, true);
+        }
+        let result = match transcript_path.as_deref().and_then(Path::parent) {
             Some(artifact_dir) => {
-                crate::coder::finish_supervised_coder_run(completion, artifact_dir)?
+                let retention = if coder_kind == CoderKind::Claude {
+                    crate::coder::SupervisionReportRetention::All
+                } else {
+                    crate::coder::SupervisionReportRetention::NonClean
+                };
+                crate::coder::finish_supervised_coder_run_with_retention(
+                    completion,
+                    artifact_dir,
+                    retention,
+                )
             }
-            None => completion.into_result()?,
+            None => completion.into_result(),
+        };
+        if used_claude_fallback {
+            result.context(crate::claude_session::FallbackStopped)?
+        } else {
+            result?
         }
     };
     if let (Some(worker), Some(artifact_dir)) = (
@@ -5490,6 +5906,9 @@ fn run_task_coder_with_coder_with_feedback(
     }
     if exit_code == 0 {
         Ok(())
+    } else if used_claude_fallback {
+        Err(anyhow::anyhow!("Coder exited with code {exit_code}"))
+            .context(crate::claude_session::FallbackStopped)
     } else {
         bail!("Coder exited with code {exit_code}")
     }
@@ -6972,7 +7391,17 @@ fn writer_handoff_model_readable_roots(project_root: &Path, task: &Task) -> Resu
         item.file_name()
             .context("Work Item record has no file name")?,
     );
-    Ok(vec![item, attempts, tasks, candidates, transaction])
+    // Inspect the exact source hook even when it is absent. Without this grant,
+    // a sandbox denial could look like "no hook" and skip the host's policy.
+    let project_check = project_root.join(".fluent/hooks/check-pre-merge");
+    Ok(vec![
+        item,
+        attempts,
+        tasks,
+        candidates,
+        transaction,
+        project_check,
+    ])
 }
 
 #[cfg(test)]
@@ -7018,6 +7447,59 @@ mod writer_handoff_model_access_tests {
 
 fn general_expertise_dir(project_root: &Path) -> PathBuf {
     project_root.join(".fluent/work/expertise")
+}
+
+/// Collect exact files advertised to either worker; listing a directory alone
+/// does not prove that its files can be opened under the worker profile.
+fn declared_worker_input_files(
+    project_root: &Path,
+    work_item_id: &str,
+    workspaces: &[PathBuf],
+    input_artifacts: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut paths = input_artifacts.to_vec();
+    for root in [
+        planning_files_dir(project_root, work_item_id),
+        general_expertise_dir(project_root),
+    ] {
+        append_existing_worker_input_files(&mut paths, &root)?;
+    }
+    for workspace in workspaces {
+        append_existing_worker_input_files(&mut paths, &workspace.join(".fluent/expertise"))?;
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn append_existing_worker_input_files(paths: &mut Vec<PathBuf>, root: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect declared worker input {}", root.display()));
+        }
+    };
+    if metadata.is_dir() {
+        for entry in fs::read_dir(root)
+            .with_context(|| format!("list declared worker inputs {}", root.display()))?
+        {
+            append_existing_worker_input_files(paths, &entry?.path())?;
+        }
+    } else {
+        // Do not traverse directory symlinks or cycles while collecting inputs.
+        // The exact file probe still verifies any regular-file symlink target.
+        anyhow::ensure!(
+            fs::metadata(root)
+                .with_context(|| format!("resolve declared worker input {}", root.display()))?
+                .is_file(),
+            "declared worker input is not a regular file: {}",
+            root.display()
+        );
+        paths.push(root.to_path_buf());
+    }
+    Ok(())
 }
 
 /// Materialize the bundled general-expertise files at
@@ -8685,6 +9167,22 @@ fn run_review_coder_with_coder(
     eprintln!("  Model             {effective_model}");
     eprintln!("  Artifact area     {}", artifact_dir.display());
 
+    if let Some(profile) = sandbox_profile.or(_sandbox_profile.as_ref()) {
+        let mut inputs = declared_worker_input_files(
+            project_root,
+            &item.id,
+            readable_workspaces,
+            input_artifacts,
+        )?;
+        append_existing_worker_input_files(&mut inputs, &review_skills_dir(project_root))?;
+        append_existing_worker_input_files(
+            &mut inputs,
+            &artifact_dir.join("execution-context.json"),
+        )?;
+        append_existing_worker_input_files(&mut inputs, &artifact_dir.join("task-assignment.md"))?;
+        os::preflight_readable_paths(profile, &inputs)?;
+    }
+
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
@@ -9213,11 +9711,24 @@ fn build_work_review_prompts_with_cache(
     let user_template = resolver
         .resolve_content(user_template_name)
         .unwrap_or_else(|| panic!("bundled {user_template_name} must resolve"));
+    let assignment_path = if let Some(instructions) = task
+        .instructions
+        .as_deref()
+        .or(input.item.instructions.as_deref())
+        .filter(|text| !text.trim().is_empty())
+    {
+        let path = input.artifact_dir.join("task-assignment.md");
+        crate::atomic_write::atomic_write(&path, instructions.as_bytes())?;
+        path.display().to_string()
+    } else {
+        String::new()
+    };
     let review_prompt = crate::content::render_template(
         &user_template,
         &[
             ("work_item_id", &input.item.id),
             ("work_item_title", &input.item.title),
+            ("assignment_path", &assignment_path),
             ("role", &task.role),
             ("is_corrective", is_corrective_value),
             ("corrective_context", &corrective_context),
@@ -10466,6 +10977,14 @@ fn preflight_review_sandbox_profile(
         os::preflight_profile(&profile)?;
     }
     os::preflight_readable_paths(&profile, &readable_roots)?;
+    let mut inputs = declared_worker_input_files(
+        project_root,
+        work_item_id,
+        &readable_workspaces,
+        input_artifacts,
+    )?;
+    append_existing_worker_input_files(&mut inputs, &review_skills_dir(project_root))?;
+    os::preflight_readable_paths(&profile, &inputs)?;
     Ok(Some(profile))
 }
 
@@ -12260,7 +12779,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("reviewer cannot read declared path"),
+                .contains("worker cannot read declared path"),
             "{error:#}"
         );
     }
@@ -13592,6 +14111,9 @@ mod tests {
         assert!(recorded.iter().any(|(key, value)| {
             key == "CARGO_HOME" && Path::new(value) == writer_cache.cargo_home()
         }));
+        assert!(recorded.iter().any(|(key, value)| {
+            key == "npm_config_cache" && Path::new(value) == writer_cache.root().join("npm-cache")
+        }));
         assert!(!recorded.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"));
         let user_cargo_home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -13663,6 +14185,15 @@ mod tests {
 
     #[test]
     fn writer_sandbox_restores_native_claude_home_after_source_denial() {
+        assert_writer_sandbox_confines_claude_home("attempt-1-write-1");
+    }
+
+    #[test]
+    fn writer_sandbox_restores_recovered_claude_home_after_source_denial() {
+        assert_writer_sandbox_confines_claude_home("writer-completion-retry-runs/recovery-test");
+    }
+
+    fn assert_writer_sandbox_confines_claude_home(artifact_suffix: &str) {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = &tmp.path().join("source");
         fs::create_dir_all(project_root).unwrap();
@@ -13679,8 +14210,13 @@ mod tests {
             ..Default::default()
         };
         item.add_initial_attempt("attempt-1").unwrap();
-        let task = &item.attempts[0].tasks[0];
-        let claude_home = project_root.join(".fluent/work/artifacts/work-1/attempt-1/claude-home");
+        let task = &mut item.attempts[0].tasks[0];
+        let attempt_artifact = Path::new(".fluent/work/artifacts/work-1/attempt-1");
+        task.artifact_area.as_mut().unwrap().path = attempt_artifact
+            .join(artifact_suffix)
+            .to_string_lossy()
+            .into_owned();
+        let claude_home = project_root.join(attempt_artifact).join("claude-home");
         fs::create_dir_all(&claude_home).unwrap();
         let writer_cache = crate::writer_cache::preflight_writer_dependency_cache(
             project_root,
@@ -13733,6 +14269,45 @@ mod tests {
             terminal_rules.rfind(&home_grant).unwrap()
                 > terminal_rules.rfind(&source_denial).unwrap()
         );
+        for unrelated_home in [
+            project_root.join(".fluent/work/artifacts/work-1/attempt-2/claude-home"),
+            project_root.join(".fluent/work/artifacts/work-2/attempt-1/claude-home"),
+            project_root.join(attempt_artifact),
+            project_root
+                .join(attempt_artifact)
+                .join("writer-completion-retry-runs/claude-home"),
+            project_root
+                .join(attempt_artifact)
+                .join(artifact_suffix)
+                .join("claude-home"),
+        ] {
+            let result = preflight_write_sandbox_profile(
+                task,
+                project_root,
+                &workspace,
+                &[],
+                &resolver,
+                false,
+                CoderKind::Claude,
+                None,
+                Some(&unrelated_home),
+                &writer_cache,
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!(
+                    "accepted unrelated Claude home {}",
+                    unrelated_home.display()
+                ),
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("Writer Claude home grant must name the exact current Attempt"),
+                "unexpected rejection for {}: {error:#}",
+                unrelated_home.display()
+            );
+        }
         #[cfg(target_os = "macos")]
         {
             let sandbox_usable = std::process::Command::new("/usr/bin/sandbox-exec")
@@ -13761,6 +14336,96 @@ mod tests {
                     String::from_utf8_lossy(&owned_result.stderr)
                 );
                 assert!(!probe(&sibling).status.success());
+            }
+        }
+    }
+
+    #[test]
+    fn writer_sandbox_binds_nested_retry_home_to_exact_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("source");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        crate::git::run(
+            &project_root,
+            &["init", "-q"],
+            "initialize nested Writer retry sandbox fixture",
+        )
+        .unwrap();
+        let mut item = WorkItem::planned("work-1", "Confine nested Writer retry");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let task = &mut item.attempts[0].tasks[0];
+        let attempt_dir = project_root.join(".fluent/work/artifacts/work-1/attempt-1");
+        let claude_home = attempt_dir.join("claude-home");
+        fs::create_dir_all(&claude_home).unwrap();
+        let writer_cache = crate::writer_cache::preflight_writer_dependency_cache(
+            &project_root,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(&project_root));
+
+        for artifact in [
+            "attempt-1-write-1",
+            "writer-completion-retry-runs/operation",
+        ] {
+            task.artifact_area.as_mut().unwrap().path =
+                format!(".fluent/work/artifacts/work-1/attempt-1/{artifact}");
+            let render = |home: &Path| {
+                preflight_write_sandbox_profile(
+                    task,
+                    &project_root,
+                    &workspace,
+                    &[],
+                    &resolver,
+                    false,
+                    CoderKind::Claude,
+                    None,
+                    Some(home),
+                    &writer_cache,
+                )
+            };
+            let profile = render(&claude_home)
+                .unwrap_or_else(|error| panic!("{artifact}: {error:#}"))
+                .expect("sandboxed Writer retry has a profile");
+            let rules = fs::read_to_string(&profile.path).unwrap();
+            let source_denial = format!(
+                "(deny file-write* (subpath \"{}\"))",
+                project_root.join(".fluent/work").display()
+            );
+            let home_grant = format!(
+                "(allow file-write* (subpath \"{}\"))",
+                claude_home.display()
+            );
+            assert!(rules.rfind(&home_grant).unwrap() > rules.rfind(&source_denial).unwrap());
+            for parent in [
+                &attempt_dir,
+                &attempt_dir.join("writer-completion-retry-runs"),
+            ] {
+                assert!(!rules.contains(&format!(
+                    "(allow file-write* (subpath \"{}\"))",
+                    parent.display()
+                )));
+            }
+            for foreign_home in [
+                project_root.join(".fluent/work/artifacts/work-1/attempt-2/claude-home"),
+                project_root.join(".fluent/work/artifacts/work-2/attempt-1/claude-home"),
+                attempt_dir.join("writer-completion-retry-runs/claude-home"),
+            ] {
+                let error = render(&foreign_home).err().unwrap_or_else(|| {
+                    panic!(
+                        "{artifact} accepted foreign home {}",
+                        foreign_home.display()
+                    )
+                });
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Writer Claude home grant must name the exact current Attempt"),
+                    "{error:#}"
+                );
             }
         }
     }
@@ -14435,10 +15100,12 @@ mod tests {
         assert_eq!(diag.errno, Some(1));
     }
 
-    /// A launch-counting coder that reports a non-clean supervision report, to prove a
-    /// sidecar obstruction never relaunches the already-run coder.
+    /// Count launches and return clean or non-clean reports with an optional transport
+    /// failure to prove a sidecar obstruction never relaunches the already-run coder.
     struct CountingSupervisionCoder {
         launches: Arc<Mutex<usize>>,
+        pump_failure: bool,
+        clean_report: bool,
     }
 
     impl crate::coder::Coder for CountingSupervisionCoder {
@@ -14464,10 +15131,68 @@ mod tests {
             _capture: Option<&crate::coder::TranscriptCapture<'_>>,
         ) -> crate::coder::CoderRunCompletion {
             *self.launches.lock().unwrap() += 1;
-            crate::coder::CoderRunCompletion {
-                terminal: Ok(0),
-                report: nonclean_supervision_report(),
+            let mut report = nonclean_supervision_report();
+            if self.clean_report {
+                report.launches[0].group_sweep = crate::coder::GroupSweepDisposition::AlreadyGone;
             }
+            crate::coder::CoderRunCompletion {
+                terminal: if self.pump_failure {
+                    Err(crate::transcript_pump::TranscriptPumpError::new(
+                        "write transcript: no space left on device".to_string(),
+                    )
+                    .into())
+                } else {
+                    Ok(0)
+                },
+                report,
+            }
+        }
+
+        fn run_captured_reported_session(
+            &self,
+            prompt: &str,
+            system_prompt: &str,
+            working_dir: &Path,
+            extra_args: &[String],
+            extra_env: &[(String, String)],
+            capture: Option<&crate::coder::TranscriptCapture<'_>>,
+            session: crate::coder::CoderSession<'_>,
+        ) -> crate::coder::CoderRunCompletion {
+            if let crate::coder::CoderSession::Resume(id) = session {
+                *self.launches.lock().unwrap() += 1;
+                let transcript = capture.unwrap().path;
+                fs::write(
+                    transcript,
+                    serde_json::to_vec(&serde_json::json!({
+                        "type": "result", "subtype": "error_during_execution",
+                        "is_error": true, "num_turns": 0, "session_id": id,
+                        "errors": [format!("No conversation found with session ID: {id}")],
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                fs::write(crate::coder::provider_stderr_path(transcript), b"").unwrap();
+                fs::write(crate::transcript_pump::status_path_for(transcript), b"{}").unwrap();
+                return crate::coder::CoderRunCompletion {
+                    terminal: Ok(1),
+                    report: crate::coder::CoderSupervisionReport {
+                        launches: vec![crate::coder::CoderLaunchSupervision {
+                            exit_code: Some(1),
+                            group_sweep: crate::coder::GroupSweepDisposition::AlreadyGone,
+                            provider_liveness: None,
+                        }],
+                    },
+                };
+            }
+            assert_eq!(session, crate::coder::CoderSession::FreshPersistent);
+            self.run_captured_reported(
+                prompt,
+                system_prompt,
+                working_dir,
+                extra_args,
+                extra_env,
+                capture,
+            )
         }
 
         fn run_interactive(
@@ -14535,6 +15260,8 @@ mod tests {
             move |_sandbox, _executable| {
                 Box::new(CountingSupervisionCoder {
                     launches: Arc::clone(&launches_for_coder),
+                    pump_failure: false,
+                    clean_report: false,
                 })
             },
         )
@@ -14555,6 +15282,173 @@ mod tests {
             1,
             "the already-run coder is never relaunched after a sidecar obstruction"
         );
+    }
+
+    fn assert_claude_writer_supervision_outcome(
+        clean_report: bool,
+        pump_failure: bool,
+        obstruct_sidecar: bool,
+        fallback: bool,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Retain Claude supervision failures".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        if fallback {
+            item.attempts[0]
+                .writer_runs
+                .push(crate::work_model::WriterRun {
+                    task_id: "attempt-1-write-0".to_string(),
+                    outcome: crate::work_model::WriterOutcome::Complete,
+                    kind: crate::work_model::WriterRunKind::Initial,
+                    provider: "claude".to_string(),
+                    session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+                    continuation: 0,
+                    checked_required: 0,
+                    completed_matrix: 0,
+                    candidate_commit: "commit-1".to_string(),
+                });
+        }
+        let store = WorkModelStore::new(project_root);
+        store.create_work_item(&item).unwrap();
+        let artifact_dir = project_root.join(
+            &item.attempts[0].tasks[0]
+                .artifact_area
+                .as_ref()
+                .unwrap()
+                .path,
+        );
+        let sidecar = artifact_dir.join(crate::coder::CODER_SUPERVISION_SIDECAR);
+        if obstruct_sidecar {
+            fs::create_dir_all(&sidecar).unwrap();
+        }
+        let launches = Arc::new(Mutex::new(0));
+        let result = run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &ContentResolver::new(Some(project_root)),
+            &[],
+            CoderKind::Claude,
+            true,
+            None,
+            None,
+            &crate::transcript_pump::resolve_config(project_root),
+            None,
+            None,
+            &test_writer_cache(project_root),
+            None,
+            |_, _| {
+                Box::new(CountingSupervisionCoder {
+                    launches: Arc::clone(&launches),
+                    pump_failure,
+                    clean_report,
+                })
+            },
+        );
+        // Use the same evidence classification and retry gate as the Writer caller.
+        let result = provider_pause_error(
+            result,
+            CoderKind::Claude,
+            Some(artifact_dir.join("transcript.jsonl")),
+        );
+        if pump_failure || obstruct_sidecar {
+            let error = result.as_ref().unwrap_err();
+            assert_eq!(
+                error.is::<crate::coder::SupervisionSidecarError>(),
+                obstruct_sidecar,
+                "retain the typed publication failure: {error:#}"
+            );
+            assert_eq!(
+                error.is::<crate::claude_session::FallbackStopped>(),
+                fallback,
+                "apply the fallback budget after composing failures: {error:#}"
+            );
+            if pump_failure {
+                assert!(
+                    error.is::<crate::transcript_pump::TranscriptPumpError>(),
+                    "retain the typed transport failure: {error:#}"
+                );
+                let failure = classify_task_failure(error);
+                assert!(
+                    matches!(&failure, TaskFailure::TranscriptPump(message)
+                    if message.contains("no space left on device")),
+                    "{error:#}"
+                );
+                mark_task_failed_attempt_needs_user(
+                    &store,
+                    project_root,
+                    "work-1",
+                    "attempt-1",
+                    "attempt-1-write-1",
+                    &failure,
+                    &|_, _| {},
+                )
+                .unwrap();
+                let saved = store.read_work_item("work-1").unwrap();
+                assert_eq!(
+                    saved.attempts[0].pause_kind,
+                    Some(crate::work_model::PauseKind::TranscriptPump)
+                );
+                assert_eq!(saved.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+            }
+        } else {
+            result.as_ref().unwrap();
+        }
+        assert!(
+            !should_retry_coder_error(&result),
+            "never relaunch after publication"
+        );
+        assert_eq!(*launches.lock().unwrap(), if fallback { 2 } else { 1 });
+        assert_eq!(
+            artifact_dir
+                .join(crate::claude_session::FALLBACK_FILE)
+                .is_file(),
+            fallback
+        );
+        if !obstruct_sidecar {
+            let persisted: crate::coder::CoderSupervisionReport =
+                serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+            assert_eq!(persisted.launches.len(), 1);
+            assert_eq!(persisted.is_clean(), clean_report);
+        }
+    }
+
+    #[test]
+    fn claude_writer_route_retains_transport_failure_when_sidecar_is_obstructed() {
+        for clean_report in [true, false] {
+            for fallback in [false, true] {
+                assert_claude_writer_supervision_outcome(clean_report, true, true, fallback);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_writer_route_sidecar_obstruction_is_typed_without_transport_failure() {
+        for clean_report in [true, false] {
+            for fallback in [false, true] {
+                assert_claude_writer_supervision_outcome(clean_report, false, true, fallback);
+            }
+        }
+    }
+
+    #[test]
+    fn claude_writer_route_retains_clean_supervision_reports() {
+        for pump_failure in [true, false] {
+            for fallback in [false, true] {
+                assert_claude_writer_supervision_outcome(true, pump_failure, false, fallback);
+            }
+        }
     }
 
     #[test]
@@ -18696,6 +19590,11 @@ mod tests {
         assert!(
             cache_home.join("task-marker").is_file(),
             "Tester commands must write through the Attempt-scoped Cargo home"
+        );
+        assert!(
+            project_root
+                .join(".fluent/work/cache/writers/work-1/attempt-1/npm-cache")
+                .is_dir()
         );
         let stored = store.read_work_item("work-1").unwrap();
         assert_eq!(

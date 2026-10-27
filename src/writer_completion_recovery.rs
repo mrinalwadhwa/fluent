@@ -143,7 +143,17 @@ pub(crate) fn planned_successor_resume_ready(
         return Ok(false);
     }
     attempt.ensure_not_canceled()?;
-    ensure_settled_ownership(project_root, attempt)?;
+    crate::recovery_contracts::writer_completion::ensure_settled_ownership(
+        project_root,
+        attempt,
+        None,
+    )?;
+    crate::recovery_contracts::validate_code_change_writer_start(
+        project_root,
+        item,
+        &attempt.id,
+        &task.id,
+    )?;
     Ok(validated_writer_context(project_root, item, task)?.is_some())
 }
 
@@ -1227,7 +1237,11 @@ fn existing_recovery(
     else {
         return Ok(None);
     };
-    ensure_settled_ownership(project_root, attempt)?;
+    crate::recovery_contracts::writer_completion::ensure_settled_ownership(
+        project_root,
+        attempt,
+        None,
+    )?;
     let authority_bytes = fs::read(project_root.join(&reference.path)).with_context(|| {
         format!(
             "read Writer-completion recovery authority {}",
@@ -1375,34 +1389,6 @@ fn existing_recovery(
     }))
 }
 
-fn ensure_settled_ownership(project_root: &Path, attempt: &Attempt) -> Result<()> {
-    if attempt
-        .tasks
-        .iter()
-        .any(|task| task.status == TaskStatus::Executing)
-    {
-        bail!("Attempt has a running Task");
-    }
-    for task in &attempt.tasks {
-        crate::usage_limit_contracts::unlocked(
-            &crate::lease::task_lock_path(project_root, &attempt.work_item_id, &task.id),
-            false,
-        )?;
-        if let Some(area) = &task.artifact_area {
-            let path = project_root.join(&area.path);
-            crate::usage_limit_contracts::unlocked(&path.join("execution-owner.lock"), false)?;
-            if crate::execution::execution_is_live(&path.join("execution.json"))? {
-                bail!("Writer-completion recovery requires settled execution ownership");
-            }
-        }
-    }
-    crate::usage_limit_contracts::unlocked(
-        &crate::lease::learner_lock_path(project_root, &attempt.work_item_id, &attempt.id),
-        false,
-    )?;
-    Ok(())
-}
-
 fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRecovery> {
     if attempt.status != AttemptStatus::NeedsUser
         || attempt.pause_kind != Some(PauseKind::WriterCompletion)
@@ -1411,7 +1397,11 @@ fn inspect_eligible(project_root: &Path, attempt: &Attempt) -> Result<EligibleRe
     }
     attempt.ensure_resume_ready()?;
     attempt.ensure_not_canceled()?;
-    ensure_settled_ownership(project_root, attempt)?;
+    crate::recovery_contracts::writer_completion::ensure_settled_ownership(
+        project_root,
+        attempt,
+        None,
+    )?;
     let (source_index, source_writer) = attempt
         .tasks
         .iter()

@@ -27,18 +27,21 @@ pub(super) fn repair(
             retry.resolution == resolution,
             "completion retry authorization changed"
         );
-        if retry.source == contracts::RetrySource::InvalidCompletion
-            && (attempt.cancellation_requested()
-                || attempt
-                    .tasks
-                    .iter()
-                    .find(|task| task.id == retry.task_id)
-                    .is_some_and(|task| {
-                        matches!(
-                            task.status,
-                            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
-                        )
-                    }))
+        if matches!(
+            retry.source,
+            contracts::RetrySource::InvalidCompletion
+                | contracts::RetrySource::MissingClaudeConversation
+        ) && (attempt.cancellation_requested()
+            || attempt
+                .tasks
+                .iter()
+                .find(|task| task.id == retry.task_id)
+                .is_some_and(|task| {
+                    matches!(
+                        task.status,
+                        TaskStatus::Complete | TaskStatus::Failed | TaskStatus::NeedsUser
+                    )
+                }))
         {
             contracts::validate_retained_files(root, &retry)?;
             return Ok(Some(result(&retry, true)?));
@@ -195,6 +198,23 @@ pub(crate) fn resume(
     if !contracts::resume_ready(root, &observed, attempt_id)? {
         return Ok(());
     }
+    let attempt = observed
+        .attempts
+        .iter()
+        .find(|attempt| attempt.id == attempt_id)
+        .context("Attempt missing")?;
+    if contracts::current(root, attempt)?.is_none()
+        && crate::recovery_contracts::claude_session::recognized(root, attempt)?
+    {
+        repair(
+            root,
+            store,
+            work,
+            attempt_id,
+            crate::recovery_contracts::claude_session::RESOLUTION,
+        )?
+        .context("missing-session retry was not prepared")?;
+    }
     store.mutate_work_item_from_external(work, "resume context-repaired Writer", None, |item| {
         let attempt = item.attempts.iter().find(|a| a.id == attempt_id).unwrap();
         let retry = contracts::current(root, attempt)
@@ -247,6 +267,24 @@ pub(crate) fn before_spawn(
         .join(contracts::audit_ref(&retry)?.path)
         .with_file_name("launch.json");
     if marker.try_exists()? {
+        if retry.source == contracts::RetrySource::MissingClaudeConversation
+            && crate::claude_session::FallbackLaunch::active()
+        {
+            let fallback = marker.with_file_name("claude-fallback-launch.json");
+            anyhow::ensure!(
+                !fallback.try_exists()?,
+                "this completion retry already attempted its fresh Claude launch"
+            );
+            publish_recovery_snapshot(
+                root,
+                fallback
+                    .strip_prefix(root)?
+                    .to_str()
+                    .context("invalid Claude fallback marker path")?,
+                b"missing-claude-conversation",
+            )?;
+            return Ok(());
+        }
         anyhow::ensure!(
             handoff_correction && retry.source == contracts::RetrySource::RepairedContext,
             "this completion retry already attempted a provider launch"

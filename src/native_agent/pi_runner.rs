@@ -17,6 +17,8 @@ use crate::native_agent::pi::{
 };
 use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
 
+mod session;
+
 /// A native Pi invocation may have produced side effects before its owner
 /// loses the receiver, liveness signal, or durable evidence. The Task must
 /// pause for inspection instead of launching another generation in-process.
@@ -367,12 +369,12 @@ fn run_inner(task: PiNativeTask<'_>) -> Result<()> {
         };
         settle_pi_result(result, stop)?;
         evidence.sync_all()?;
-        ensure!(
-            session_id(&session_file)? == gate.session_id().unwrap_or_default(),
-            "Pi session identity changed before evidence copy"
-        );
-        fs::copy(&session_file, artifact.join("pi-session.jsonl"))?;
-        File::open(artifact.join("pi-session.jsonl"))?.sync_all()?;
+        session::save_snapshot(
+            &session_file,
+            gate.session_id().unwrap_or_default(),
+            &generation,
+            artifact,
+        )?;
         Ok(())
     })();
     if outcome.is_err() {

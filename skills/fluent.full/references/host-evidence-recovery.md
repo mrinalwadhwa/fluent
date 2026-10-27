@@ -784,11 +784,18 @@ fluent attempt run <work-item> <attempt>
 For scheduler-owned Work, use `fluent queue resume <work-item> --attempt
 <attempt>` after approval. The first invalid handoff must belong to a settled
 Writer with no output and an unchanged, clean candidate; its saved matrix or
-no-change declaration must be invalid. A saved pre-launch failure must have
+no-change declaration must be invalid. Invalid completion includes valid JSON
+that violates the immutable contract or assigned findings, such as a pending
+finding with verification claims. A valid incomplete matrix does not qualify.
+A saved pre-launch failure must have
 the earlier completion-recovery assignment and a native execution record
 proving that its current generation did not launch. A well-formed receipt from
 an earlier generation may remain in the Task area; a receipt for the current
-generation or an invalid receipt blocks recovery. Both cases require the same
+generation or an invalid receipt blocks recovery. The earlier transcript and
+receipt remain historical evidence that the original Writer ran. A later Writer
+may remain only as one planned, unstarted reservation with no output or artifact
+area on disk. Approval binds and supersedes exactly that reservation; changed,
+materialized, started, or additional later work blocks recovery. Both cases require the same
 candidate, valid assignment and retained source evidence, settled owners, and an
 uncanceled Attempt. A generic failed Task, changed inputs, or uncertain launch
 outcome does not qualify. The approval keeps the original failure files, Task

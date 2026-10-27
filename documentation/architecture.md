@@ -1,5 +1,20 @@
 # Architecture
 
+Corrective Writers receive the exact failed host envelope and its binding when
+a targeted Tests Review requests a code change. The coordinator binds both files
+to the assignment, validates their candidate and recovery identity before launch,
+and grants only those files. Changing either file invalidates the assignment.
+Targeted acceptance completes only its bound obligation. Before a final Tester
+or pre-land Learner advances, the coordinator rechecks pending Writer rows and
+findings, including when a Tester reservation survived public recovery.
+
+The production Tester admits existing regular ancestor `Cargo.toml` files needed
+by Cargo to discover a pinned historical reader's workspace. These exact files
+are read-only; their directories, adjacent source files, unrelated Work and
+operator private state receive no new grant. Historical readers still build from
+the original archive and lockfile into the private cache and retain their source,
+toolchain, build and executable identities.
+
 The [workflow foundation](../tests/formal/workflow/README.md) records the bounded whole-workflow model, first public-command trace, and the pending connections to the detailed scheduler protocols.
 
 Workflow and execution system for autonomous coding agents. Manages work
@@ -324,6 +339,22 @@ Tester, and Learner remain separate gates. Repeated authorization reuses the
 recorded Task and operation; changed source evidence, contract, assignment,
 candidate, or ownership rejects stale authority.
 
+A validated matrix-bound repair supplies a distinct Writer obligation even when
+named-test evidence is missing for a post-Tester corrective commit. Admission
+reuses the recovery contract against the current in-memory Work Item at Attempt
+resume, Task planning and reservation, queue admission, and scheduler claim.
+Only the exact authorized Task may use this exception; copied instructions or
+inherited audit inputs do not grant it. A later cancellation or live owner still
+blocks launch. The exception admits the repair without satisfying verification
+requirements or allocating a ready Merge Candidate.
+
+`tests/host/check-completion-repair-admission.sh` exercises that route in
+disposable state with a production executable and the production worker sandbox.
+Its hermetic provider repairs only completion evidence, observes denied writes
+to the original matrix and audit, and leaves every downstream gate pending.
+The script retains the candidate and executable identities, logs, and fixture
+state. Real-provider native and SSH acceptance remain separate required checks.
+
 The same action can recover a committed Writer stopped by the repeated-progress
 guard. Admission requires a parseable matrix with intact immutable rows,
 valid completed claims, and pending Writer-owned work. Partial claims on
@@ -337,9 +368,19 @@ binds the matrix, contract, assignment, transcript, and output to the decision,
 and schedules one corrective Writer through the existing recovery path. A
 regressed matrix or an unrelated completion pause does not grant this retry.
 
-The same public command repairs an unchanged Writer whose completion or
-no-change handoff contains an invalid result, including a saved failed retry
-that stopped during preparation before its provider launched. Approval retains
+The same public command repairs an unchanged Writer whose completion JSON
+fails parsing or violates its immutable completion contract and assigned
+findings, or whose no-change handoff contains an invalid result. A valid
+incomplete matrix remains ordinary unfinished work. Recovery includes a saved failed retry
+that stopped during preparation before its provider launched. That generation
+is separate from earlier provider execution: retain the nonempty transcript
+and any well-formed prior-generation receipt. At most one later planned Writer
+may exist, with no start, completion, output, or materialized artifact area.
+Bind its full Task identity in the audit and supersede only that reservation.
+The native preparation must match the failed Task and Attempt, with a dead
+owner and no heartbeat or settlement after preparation. Host guidance uses the
+active Writer after supersession, and Learner admission retains the exact
+reservation provenance after the retry completes. Approval retains
 the original failure files and Task snapshot, binds their bytes and the
 host-owned write baseline, and gives the same Task a fresh artifact directory.
 The current candidate comes from the latest completed Writer and clean managed
@@ -359,6 +400,25 @@ share this read-only selection. A later ordinary verdict replaces the earlier
 verdict for its domain while preserving both reports. Completed recovery checks
 all ordinary domains and separately revalidates accepted evidence through the
 Plan and canonical verification contracts.
+Landing uses the same effective coverage selection and authenticates each
+selected Review against its own preceding Writer's commit, workspace, and source
+branch. A carried Review can retain an older branch label after the project root
+switches branches; superseded Reviews do not bind the final candidate's branch.
+Rebase and Learner transitions are resolved in a temporary coverage view, leaving
+historical Review contexts unchanged.
+Later Writer rounds retain the target established by completed Writer outputs,
+even when the project root changes branch. Conflicting or empty saved target
+identities block a new Writer instead of selecting a different target.
+
+Readiness and landing share the same binding checks. A blocker appears in status
+and Work inspection with public commands to inspect the candidate and Tasks;
+repeating an Attempt cannot report unqualified readiness over that blocker.
+Both landing modes validate bindings before publishing a new intent and again
+immediately before the checked target update. A valid saved `landing-pending`
+intent uses the same public `merge-candidate land` retry after upgrade. It retains
+its accepted model, evidence, authorization, repository, and target bindings;
+an already-applied Git update reconciles publication without applying it again.
+
 Targeted evidence reviews retain their narrow scope and supply no ordinary
 coverage. Before final Tester or Learner, all five built-in domains need passing
 ordinary coverage. A missing role is scheduled even when the only preceding
@@ -781,8 +841,8 @@ into the next launch's temporary worker home. Authentication, configuration,
 hooks, and cache are not included. Older Attempts without that snapshot fall
 back to a fresh persistent session rather than attempting an unusable resume.
 
-Every autonomous Writer and final Tester receives one Fluent-owned Cargo
-dependency cache under
+Every autonomous Writer and final Tester receives Fluent-owned dependency
+caches under
 `.fluent/work/cache/writers/<work-item-id>/<attempt-id>/`. Its private
 `cargo-home/` is shared by initial, continuation, and corrective Writer Tasks
 and the final Tester in that exact Attempt, but never by another Attempt. Cargo
@@ -797,6 +857,66 @@ granting the operator's Cargo home. The cache is rebuildable execution state
 rather than a durable artifact. Existing managed-path components and copied dependency
 symlinks are checked for escapes, and cache reclamation preserves only
 Work Item/Attempt pairs still referenced by nonterminal Work.
+
+### Prepare Node workers
+
+For a project with `package.json` at its root, `installed_tools::node_access`
+resolves the selected `node`, `npm`, and `npx` from the coordinator's `PATH`.
+The first Writer uses the source project to detect Node before its worktree
+exists; subsequent preparation uses the assigned candidate. Standard macOS
+installer links such as `/usr/local/bin/npm` →
+`/usr/local/lib/node_modules/npm/bin/npm-cli.js` work without granting all of
+`/usr/local` or global `node_modules`. Direct version-manager installations and
+Homebrew installations use this same discovery path; the existing system and
+Homebrew library grants remain in place.
+
+The selected Node runtime must resolve to an executable regular file. npm and
+npx must resolve to `bin/npm-cli.js` and `bin/npx-cli.js` inside a package whose
+manifest identifies npm. The package's symlinks must resolve within that package.
+A broken or cyclic link, missing executable, invalid manifest, or escaping
+package link produces a `Node prerequisite` diagnostic naming the failing path.
+Fluent does not try a different installation or launch without confinement.
+Runtime-manager shell shims that do not resolve to those installed files need
+the selected version's real `bin` directory on `PATH` before starting Fluent.
+
+The executor and Tester pass the resolved read closure to `os`, which grants
+read/execute access and metadata traversal and denies writes to installed tools.
+It also permits metadata traversal of the inherited `PATH` directories and
+their resolved ancestors. This lets Node continue searching after a missing
+command without granting directory listings, file contents, execution, or
+writes to unselected tools. Fluent preserves the search order and project
+shell configuration.
+The assigned candidate can also map native `.node` libraries installed or built
+by npm lifecycle scripts. No new read grants include unrelated global packages or operator configuration.
+These rules apply to initial Writers, scoped retries, and final Testers.
+
+`writer_cache` creates `npm-cache/` beside `cargo-home/` under the exact Attempt
+root. Both cases of `npm_config_cache`, `npm_config_userconfig`, and
+`npm_config_globalconfig` point to that private state. npm starts with empty
+user/global config files; Fluent never seeds the operator's `.npm` or `.npmrc`.
+The candidate's project configuration remains available. The same cache reaches
+Writer rounds, the final Tester, and landing verification. Existing cache
+locking, symlink validation, and terminal reclamation cover the whole Attempt
+root, including npm logs and downloaded packages.
+
+Upgrading a 0.6.0 Node project changes worker preparation centrally. It does not
+rewrite `.fluent/config.yaml`, `.fluent/tester.yaml`, lockfiles, or saved Work.
+Configured commands install `node_modules` inside the assigned candidate;
+ignored dependencies in the source checkout supply no input to a clean worktree.
+`tests/node_worker_upgrade.rs` uses real Node/npm, local package tarballs, and
+released-0.6.0 Work records whose provenance is pinned in
+`tests/fixtures/node-worker-060/provenance.json`. Ordinary runs exercise the
+production launch and profile boundaries with a deterministic sandbox launcher.
+The local dependency compiles and loads a native Node module; no downloaded
+headers or registry packages are needed.
+The separately assigned `bash tests/host/check-node-worker-upgrade.sh` requires
+macOS and `FLUENT_NODE_WORKER_HOST=1` in the authorized host environment. It applies
+real Seatbelt, probes denied reads/writes, and retains exact
+candidate evidence under `tests/output/node-worker-host/`. It must fail if the
+host cannot apply the sandbox. The canonical Tester configuration also declares
+this check; its host prerequisite cannot be satisfied by an ordinary Writer run.
+The combined real-model upgrade exercise remains
+a separate release-acceptance obligation.
 
 Pre-review continuation and reviewed-correction prompts contain only the paths
 needed for current work, including a generated `execution-context.json`. The
@@ -1211,6 +1331,11 @@ bind that record to the owning project, Work Item, and Attempt. The shared spawn
 boundary takes the Work model lock before the execution lock, checks the durable
 Attempt stop, and holds both through child creation and identity publication.
 It releases both before waiting for the worker or settling a failed launch.
+Generic Writer and Reviewer retries reload the durable stop before retrying.
+Native terminal setup also holds the Work model lock while checking the stop
+and publishing its reservation. It retains that exact reservation until spawn;
+if launch is rejected before child handoff, guarded unused settlement preserves
+its generation and any prior child's receipt.
 Thus a reserved peer cannot start while cancellation is still settling another
 worker, even if its own execution record has not yet been marked `canceled`.
 The process tree holds an inherited `execution-owner.lock`. The parent first
@@ -1252,8 +1377,17 @@ Attempt cancellation record under the Work model lock. It also records an
 Task reservation, follow-up creation, completion, Learner capture, and readiness
 reject advancement while that stop is active. Cancellation then validates each
 owned identity before signaling, waits for process trees and execution leases to
-settle, and records settlement. Repeating the same settled cancellation changes
-no history. Explicit `attempt run` captures the current cancellation before
+settle, then reloads owned execution records before recording settlement. It
+holds the setup leases through this final check. Repeated cancellation preserves
+terminal execution bytes and the original stop timestamps. It may settle an
+unused retry reservation only for an unfinished Task in the same stopped
+Attempt: the exact record must still name the same owner and generation, its
+reservation must fall within the original stop interval, its identity lease must
+be free, its receipt must be absent or identify a prior generation, and no
+terminal resource may remain. Changed or resumed authority, live identities,
+ambiguous handoff evidence, and historical zero-PID records remain refused with
+a diagnostic. This reconciliation never signals a process or resumes Work.
+Explicit `attempt run` captures the current cancellation before
 initialization, then validates that same request under the Work model lock before
 recording resume and replanning unfinished work. Scheduler children carry their
 dispatch ID and use only the cancellation authorized by that dispatch's queue

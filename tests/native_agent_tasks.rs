@@ -830,8 +830,8 @@ fn pi_endpoint_override_preserves_effective_model() {
     let source = json!({"providers": {"local-openai": {
         "baseUrl":"http://127.0.0.1:10000/v1", "api":"openai-completions", "apiKey":"original",
         "models":[{"id":"assigned", "reasoning":true, "contextWindow":262144,
-            "maxTokens":8192, "supportsDeveloperRole":false,
-            "supportsReasoningEffort":false, "maxTokensField":"max_tokens"},
+            "maxTokens":8192, "compat":{"supportsDeveloperRole":false,
+            "supportsReasoningEffort":false, "maxTokensField":"max_tokens"}},
             {"id":"other", "contextWindow":1024}]
     }, "remote":{"models":[{"id":"remote"}]}}});
     let selected = select_local_model_config_with_endpoint(
@@ -1682,7 +1682,10 @@ fn native_terminal_controls_assigned_invocation() {
     let admission = Arc::new(NativeAdmission::new());
     let (completed, received) = mpsc::channel();
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         let settlement = Arc::clone(&admission);
         relay_codex_websockets(
@@ -1842,7 +1845,10 @@ fn codex_relay_preserves_responses_and_turn_evidence(
         release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     });
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         relay_codex_websockets(
             client,
@@ -1981,7 +1987,10 @@ fn codex_relay_delivers_overlapping_app_responses_and_turn_events() {
         release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     });
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         relay_codex_websockets_with_trace(
             client,
@@ -2092,7 +2101,10 @@ fn codex_relay_records_which_peer_exits_before_first_turn() {
         std::thread::sleep(Duration::from_millis(300));
     });
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         relay_codex_websockets_with_trace(
             client,
@@ -2156,7 +2168,10 @@ fn codex_relay_records_app_server_exit_before_first_turn() {
         socket.close(None).unwrap();
     });
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         relay_codex_websockets_with_trace(
             client,
@@ -2259,7 +2274,10 @@ fn assert_codex_display_transport_diagnostic(stall: bool) {
         release_rx.recv_timeout(Duration::from_secs(15)).unwrap();
     });
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         if !stall {
             // Keep the input side open so only the display send fails.
             client.get_ref().shutdown(Shutdown::Write).unwrap();
@@ -2317,6 +2335,398 @@ fn assert_codex_display_transport_diagnostic(stall: bool) {
         assert_eq!(failure["transport_error"]["io_kind"], "BrokenPipe");
         assert_eq!(failure["transport_error"]["raw_os_error"], libc::EPIPE);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_codex_display_bounds_preserve_canonical_completion() {
+    for mode in ["closed", "settled", "failed", "cancelled"] {
+        assert_codex_display_settlement(mode);
+    }
+    assert_codex_display_transport_diagnostic(true);
+    assert_codex_display_transport_diagnostic(false);
+    codex_websocket_backpressure_preserves_evidence_and_completion();
+}
+
+#[cfg(unix)]
+fn assert_codex_display_settlement(mode: &str) {
+    use fluent::native_agent::codex::{CodexDisplayStream, relay_codex_websockets_with_trace};
+    use std::io::{self, Write};
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+    use tungstenite::{Message, WebSocket, protocol::Role};
+
+    struct Events(Vec<u8>, mpsc::Sender<serde_json::Value>);
+    impl Write for Events {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            let _ = self.1.send(serde_json::from_slice(&self.0)?);
+            self.0.clear();
+            Ok(())
+        }
+    }
+    let (tui_stream, client) = UnixStream::pair().unwrap();
+    let (server, provider_stream) = UnixStream::pair().unwrap();
+    let cancel = server.try_clone().unwrap();
+    let buffer: libc::c_int = 4096;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    provider_stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_writer = evidence.reopen().unwrap();
+    let admission = Arc::new(NativeAdmission::new());
+    let relay_admission = Arc::clone(&admission);
+    let (trace_tx, trace_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let mode_owned = mode.to_owned();
+    let provider = std::thread::spawn(move || {
+        let mut socket = WebSocket::from_raw_socket(provider_stream, Role::Server, None);
+        socket.read().unwrap();
+        socket.send(Message::Text(json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}).to_string())).unwrap();
+        socket
+            .send(Message::Text(
+                json!({"id":1,"result":{"data":"x".repeat(1024 * 1024)}}).to_string(),
+            ))
+            .unwrap();
+        finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        if mode_owned != "cancelled" {
+            let _ = socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":if mode_owned == "failed" {"failed"} else {"completed"}}}}).to_string()));
+            let _ = socket.close(None);
+        }
+    });
+    let relay = std::thread::spawn(move || {
+        let result = relay_codex_websockets_with_trace(
+            WebSocket::from_raw_socket(CodexDisplayStream::new(client), Role::Server, None),
+            WebSocket::from_raw_socket(server, Role::Client, None),
+            "generation-1",
+            "assigned-thread",
+            relay_admission,
+            evidence_writer,
+            |c| completion_tx.send(c).map_err(anyhow::Error::new),
+            Events(Vec::new(), trace_tx),
+        );
+        let _ = done_tx.send(result);
+    });
+    let mut tui = WebSocket::from_raw_socket(tui_stream, Role::Client, None);
+    tui.send(Message::Text(
+        json!({"id":1,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
+            .to_string(),
+    ))
+    .unwrap();
+    // Require an actual blocked write, rather than sleeping and assuming the
+    // producer reached the display. The TUI never drains this frame.
+    while trace_rx.recv_timeout(Duration::from_secs(5)).unwrap()["outcome"] != "send-pending" {}
+    if mode == "closed" {
+        tui.get_ref().shutdown(Shutdown::Write).unwrap();
+        while !matches!(
+            trace_rx.recv_timeout(Duration::from_secs(5)).unwrap()["outcome"].as_str(),
+            Some("read-error" | "closed")
+        ) {}
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let started = Instant::now();
+    if mode == "cancelled" {
+        assert_eq!(admission.begin_settlement().unwrap(), 1);
+        assert!(admission.admit().is_err());
+        cancel.shutdown(Shutdown::Both).unwrap();
+    }
+    finish_tx.send(()).unwrap();
+    let result = done_rx.recv_timeout(Duration::from_secs(2));
+    let _ = tui.get_ref().shutdown(Shutdown::Both);
+    let _ = cancel.shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    relay.join().unwrap();
+    assert!(result.is_ok(), "{mode}: relay did not settle within bound");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let transcript = std::fs::read_to_string(evidence.path()).unwrap();
+    let records = transcript
+        .lines()
+        .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        records
+            .iter()
+            .all(|r| r["execution_generation"] == "generation-1"
+                && r["conversation_id"] == "assigned-thread"
+                && r["input_sequence"] == 1)
+    );
+    if matches!(mode, "closed" | "settled") {
+        assert!(
+            result.unwrap().is_ok(),
+            "{mode}: display failure invalidated provider result"
+        );
+        assert_eq!(
+            completion_rx.try_recv().unwrap(),
+            Completion::Accepted {
+                generation: "generation-1".into(),
+                turn_id: "turn-1".into(),
+                input_sequence: 1
+            }
+        );
+        assert_eq!(records.last().unwrap()["event"]["method"], "turn/completed");
+    } else {
+        assert!(
+            completion_rx.try_recv().is_err(),
+            "{mode}: false completion"
+        );
+        if mode == "failed" {
+            assert_eq!(
+                records.last().unwrap()["event"]["params"]["turn"]["status"],
+                "failed"
+            );
+        }
+    }
+}
+
+// Exercise the real WebSocket relay with a hermetic socket producer. This
+// does not replace the installed-provider host exercise or SSH acceptance.
+#[cfg(unix)]
+#[test]
+fn native_codex_display_backpressure_preserves_live_input() {
+    assert_codex_display_progress(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_codex_display_retry_keeps_assignment_fences() {
+    assert_codex_display_progress(true);
+}
+
+#[cfg(unix)]
+fn assert_codex_display_progress(refuse_unassigned: bool) {
+    use fluent::native_agent::codex::relay_codex_websockets_with_trace;
+    use std::io::{self, Read, Write};
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+    use tungstenite::{Message, WebSocket, protocol::Role};
+
+    struct SlowReader {
+        stream: UnixStream,
+        first_bytes: Option<mpsc::Sender<()>>,
+        bytes: usize,
+    }
+    impl Read for SlowReader {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            // Require more than the old three-second total deadline to drain
+            // a frame, while making progress every 500 ms.
+            std::thread::sleep(Duration::from_millis(500));
+            let limit = bytes.len().min(4096);
+            let n = self.stream.read(&mut bytes[..limit])?;
+            self.bytes += n;
+            if self.bytes >= 8192
+                && let Some(signal) = self.first_bytes.take()
+            {
+                let _ = signal.send(());
+            }
+            Ok(n)
+        }
+    }
+    impl Write for SlowReader {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.stream.write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.stream.flush()
+        }
+    }
+
+    let response = json!({"id":1,"result":{"data":"x".repeat(64 * 1024)}}).to_string();
+    let expected = response.clone();
+    let (tui_stream, relay_client) = UnixStream::pair().unwrap();
+    let (relay_server, provider_stream) = UnixStream::pair().unwrap();
+    let buffer_size: libc::c_int = 4096;
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                relay_client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer_size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    tui_stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    provider_stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let evidence_writer = evidence.reopen().unwrap();
+    let trace = tempfile::NamedTempFile::new().unwrap();
+    let trace_writer = trace.reopen().unwrap();
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let (input_tx, input_rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let provider = std::thread::spawn(move || {
+        let mut socket = WebSocket::from_raw_socket(provider_stream, Role::Server, None);
+        socket.read().unwrap();
+        socket.send(Message::Text(response)).unwrap();
+        let request = socket.read().map(|m| m.into_text().unwrap());
+        let _ = input_tx.send(request);
+        for event in [
+            json!({"method":"turn/started","params":{"threadId":"assigned-thread","turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"assigned-thread","turn":{"id":"turn-1","status":"completed"}}}),
+        ] {
+            let _ = socket.send(Message::Text(event.to_string()));
+        }
+        let _ = release_rx.recv_timeout(Duration::from_secs(12));
+    });
+    let admission = Arc::new(NativeAdmission::new());
+    let relay_admission = Arc::clone(&admission);
+    let relay = std::thread::spawn(move || {
+        relay_codex_websockets_with_trace(
+            WebSocket::from_raw_socket(
+                fluent::native_agent::codex::CodexDisplayStream::new(relay_client),
+                Role::Server,
+                None,
+            ),
+            WebSocket::from_raw_socket(relay_server, Role::Client, None),
+            "generation-1",
+            "assigned-thread",
+            relay_admission,
+            evidence_writer,
+            |c| completion_tx.send(c).map_err(anyhow::Error::new),
+            trace_writer,
+        )
+    });
+    // The second handle writes only masked client frames; one reader owns all
+    // incoming WebSocket state, including partial frames.
+    let abort = tui_stream.try_clone().unwrap();
+    let mut input = WebSocket::from_raw_socket(tui_stream.try_clone().unwrap(), Role::Client, None);
+    input
+        .send(Message::Text(
+            json!({"id":1,"method":"thread/resume","params":{"threadId":"assigned-thread"}})
+                .to_string(),
+        ))
+        .unwrap();
+    let refused = if refuse_unassigned { 4 } else { 0 };
+    let reader = std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut socket = WebSocket::from_raw_socket(
+            SlowReader {
+                stream: tui_stream,
+                first_bytes: Some(progress_tx),
+                bytes: 0,
+            },
+            Role::Client,
+            None,
+        );
+        let frames = (0..3 + refused + usize::from(refuse_unassigned))
+            .map(|_| socket.read().map(|m| m.into_text().unwrap()))
+            .collect::<Result<Vec<_>, _>>();
+        socket
+            .get_ref()
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let no_extra = frames.is_err() || socket.read().is_err();
+        (frames, started.elapsed(), no_extra)
+    });
+    progress_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    if refuse_unassigned {
+        for request in [
+            json!({"id":11,"method":"thread/start","params":{}}),
+            json!({"id":12,"method":"thread/resume","params":{"threadId":"unassigned"}}),
+            json!({"id":13,"method":"thread/read","params":{"threadId":"unassigned"}}),
+            json!({"id":14,"method":"turn/start","params":{"threadId":"unassigned","input":[]}}),
+        ] {
+            input.send(Message::Text(request.to_string())).unwrap();
+        }
+    }
+    input.send(Message::Text(json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[{"type":"text","text":"operator-after-pressure"}]}}).to_string())).unwrap();
+    let admitted = input_rx.recv_timeout(Duration::from_secs(2));
+    let completion = completion_rx.recv_timeout(Duration::from_secs(2));
+    if refuse_unassigned {
+        assert_eq!(admission.begin_settlement().unwrap(), 1);
+        input.send(Message::Text(json!({"id":21,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}}).to_string())).unwrap();
+    }
+    let (frames, elapsed, no_extra) = reader.join().unwrap();
+    let _ = release_tx.send(());
+    let _ = abort.shutdown(Shutdown::Both);
+    provider.join().unwrap();
+    let _ = relay.join().unwrap();
+    let diagnostics = std::fs::read_to_string(trace.path()).unwrap();
+    assert!(
+        admitted.is_ok(),
+        "input starved behind display flush: {admitted:?}; {diagnostics}"
+    );
+    assert!(
+        admitted
+            .unwrap()
+            .unwrap()
+            .contains("operator-after-pressure")
+    );
+    assert_eq!(
+        completion.unwrap(),
+        Completion::Accepted {
+            generation: "generation-1".into(),
+            turn_id: "turn-1".into(),
+            input_sequence: 1
+        }
+    );
+    let frames = frames.unwrap_or_else(|e| panic!("slow reader disconnected: {e}; {diagnostics}"));
+    assert!(elapsed > Duration::from_secs(3));
+    assert!(no_extra, "display duplicated a retained frame");
+    if refuse_unassigned {
+        let refusal: serde_json::Value = serde_json::from_str(frames.last().unwrap()).unwrap();
+        assert_eq!(refusal["id"], 21);
+        assert_eq!(refusal["error"]["code"], -32000);
+    }
+    assert_eq!(frames[0], expected);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&frames[1 + refused]).unwrap()["method"],
+        "turn/started"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&frames[2 + refused]).unwrap()["method"],
+        "turn/completed"
+    );
+    for (index, frame) in frames[1..1 + refused].iter().enumerate() {
+        let refusal: serde_json::Value = serde_json::from_str(frame).unwrap();
+        assert_eq!(refusal["id"], 11 + index);
+        assert_eq!(refusal["error"]["code"], -32000);
+    }
+    let records = std::fs::read_to_string(evidence.path())
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert!(
+        records
+            .iter()
+            .all(|r| r["execution_generation"] == "generation-1"
+                && r["assigned_conversation_id"] == "assigned-thread"
+                && r["input_sequence"] == 1)
+    );
+    assert!(!diagnostics.contains("send-error") && !diagnostics.contains("display-detached"));
 }
 
 #[cfg(unix)]
@@ -2406,7 +2816,10 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     });
     let (completed_tx, completed_rx) = mpsc::channel();
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         relay_codex_websockets_with_trace(
             client,
@@ -2489,7 +2902,10 @@ fn codex_websocket_backpressure_preserves_evidence_and_completion() {
     let (done_tx, done_rx) = mpsc::channel();
     let (completion_tx, completion_rx) = mpsc::channel();
     let relay = std::thread::spawn(move || {
-        let client = tungstenite::accept(relay_client).unwrap();
+        let client = tungstenite::accept(fluent::native_agent::codex::CodexDisplayStream::new(
+            relay_client,
+        ))
+        .unwrap();
         let (server, _) = tungstenite::client("ws://localhost/", relay_server).unwrap();
         let result = relay_codex_websockets_with_trace(
             client,
@@ -3338,7 +3754,21 @@ fn host_fixture_child_guard_reaps_on_panic() {
 }
 
 const HOST_NATIVE_ATTACH: &str = r#"
+proc send_native_text {text} {
+    global env
+    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} {
+        # Output pressure can delay the composer until text and Enter are
+        # buffered together. Explicit paste boundaries keep Enter a submission
+        # even when the receiver cannot observe sender-side timing gaps.
+        send -- "\033\[200~${text}\033\[201~"
+    } else {
+        send -- $text
+    }
+}
 set timeout 20
+# Set PTY dimensions before the child starts, including with captured output
+# and no parent terminal from which Expect could inherit a window size.
+set stty_init "rows 40 columns 120"
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
     spawn -noecho $env(FLUENT_NATIVE_BINARY) terminal attach --source $env(FLUENT_NATIVE_SOURCE) $env(FLUENT_NATIVE_SESSION) --control
 } else {
@@ -3359,14 +3789,10 @@ if {$env(FLUENT_NATIVE_CONTROL) eq "1" && $env(FLUENT_NATIVE_PROVIDER) eq "codex
 }
 after 300
 if {$env(FLUENT_NATIVE_CONTROL) eq "1"} {
-    send -- "Please retain result.txt and finish the Task after committing."
-    # Codex treats a rapid text burst followed immediately by Enter as a
-    # multiline paste. Wait for its composer to flush the burst before submit.
-    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} { after 300 }
+    send_native_text "Please retain result.txt and finish the Task after committing."
     send -- "\r"
     after 300
-    send -- "The final file must have exactly the requested line."
-    if {$env(FLUENT_NATIVE_PROVIDER) eq "codex"} { after 300 }
+    send_native_text "The final file must have exactly the requested line."
     if {$env(FLUENT_NATIVE_PROVIDER) eq "pi"} {
         send -- "\033\r"
     } else {
@@ -3607,7 +4033,88 @@ finally:
 }
 
 #[test]
+fn host_native_attachment_initializes_dimensions_without_parent_terminal() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let terminal = root.path().join("fake-terminal");
+    let capture = root.path().join("dimensions.json");
+    std::fs::write(
+        &terminal,
+        r#"#!/usr/bin/env python3
+import json, os, sys, termios, tty
+
+# Capture geometry immediately, before the child renders or accepts input.
+sizes = [os.get_terminal_size(fd) for fd in (0, 1)]
+with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'w') as out:
+    json.dump([{'columns': size.columns, 'rows': size.lines} for size in sizes], out)
+if any(size.columns <= 0 or size.lines <= 0 for size in sizes):
+    sys.exit(f'terminal dimensions must be positive: {sizes}')
+old = termios.tcgetattr(0)
+try:
+    tty.setraw(0)
+    print('›', flush=True)
+    data = bytearray()
+    while not data.endswith(b'\x02d'):
+        data.extend(os.read(0, 1))
+finally:
+    termios.tcsetattr(0, termios.TCSADRAIN, old)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    for control in ["1", "0"] {
+        let mut command = std::process::Command::new("expect");
+        command
+            .args(["-c", HOST_NATIVE_ATTACH])
+            .env("FLUENT_NATIVE_BINARY", &terminal)
+            .env("FLUENT_NATIVE_SOURCE", root.path())
+            .env("FLUENT_NATIVE_SESSION", "fixture")
+            .env("FLUENT_NATIVE_CONTROL", control)
+            .env("FLUENT_NATIVE_PROVIDER", "codex")
+            .env("FLUENT_NATIVE_CAPTURE", &capture)
+            .env_remove("LINES")
+            .env_remove("COLUMNS")
+            .stdin(std::process::Stdio::null());
+        // Detach from any controlling terminal even when nextest has one.
+        // setsid is async-signal-safe and does not allocate after fork.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "attachment failed with control={control}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let sizes: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&capture).unwrap()).unwrap();
+        assert_eq!(sizes.len(), 2);
+        for size in sizes {
+            assert!(size["columns"].as_u64().unwrap() > 0, "{size}");
+            assert!(size["rows"].as_u64().unwrap() > 0, "{size}");
+        }
+    }
+}
+
+#[test]
 fn host_codex_attachment_queues_both_inputs() {
+    assert_host_codex_attachment_submits_inputs(false);
+}
+
+#[test]
+fn host_codex_attachment_submits_after_buffered_output() {
+    assert_host_codex_attachment_submits_inputs(true);
+}
+
+fn assert_host_codex_attachment_submits_inputs(buffered_output: bool) {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
@@ -3617,7 +4124,59 @@ fn host_codex_attachment_queues_both_inputs() {
     let terminal = root.path().join("fake-terminal");
     std::fs::write(
         &terminal,
-        "#!/usr/bin/env python3\nimport os, select, sys, termios, time, tty\nfd = sys.stdin.fileno()\nold = termios.tcgetattr(fd)\ntry:\n    tty.setraw(fd)\n    print('fixture-ready', flush=True)\n    time.sleep(1)\n    if select.select([fd], [], [], 0)[0]:\n        open(os.environ['FLUENT_NATIVE_EARLY'], 'w').close()\n    print('›', flush=True)\n    data = bytearray()\n    draft = bytearray()\n    submitted = []\n    last_text = None\n    while not data.endswith(b'\\x02d'):\n        byte = os.read(fd, 1)\n        data.extend(byte)\n        now = time.monotonic()\n        if byte == b'\\r':\n            if last_text is not None and now - last_text >= 0.2:\n                submitted.append(draft.decode())\n                draft.clear()\n            else:\n                draft.extend(b'\\n')\n        elif byte not in (b'\\x02',) and not data.endswith(b'\\x02d'):\n            draft.extend(byte)\n            last_text = now\n    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:\n        out.write(data)\n    with open(os.environ['FLUENT_NATIVE_SUBMISSIONS'], 'w') as out:\n        out.write('\\n'.join(submitted))\nfinally:\n    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n",
+        r#"#!/usr/bin/env python3
+import os, select, sys, termios, time, tty
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    print('fixture-ready', flush=True)
+    time.sleep(1)
+    if select.select([fd], [], [], 0)[0]:
+        open(os.environ['FLUENT_NATIVE_EARLY'], 'w').close()
+    print('›', flush=True)
+    if os.environ['FLUENT_NATIVE_BUFFERED_OUTPUT'] == '1':
+        # Fill the PTY until Expect resumes draining. Sender-side delays cannot
+        # separate key events when the composer is busy writing output.
+        sys.stdout.write('output-before-input\n' * 65536)
+        sys.stdout.flush()
+    data = bytearray()
+    draft = bytearray()
+    submitted = []
+    last_text = None
+    while not data.endswith(b'\x02d'):
+        byte = os.read(fd, 1)
+        data.extend(byte)
+        now = time.monotonic()
+        if byte == b'\x1b':
+            sequence = byte
+            while not sequence.endswith(b'~'):
+                sequence += os.read(fd, 1)
+            data.extend(sequence[1:])
+            assert sequence == b'\x1b[200~', sequence
+            pasted = bytearray()
+            while not pasted.endswith(b'\x1b[201~'):
+                pasted.extend(os.read(fd, 1))
+            data.extend(pasted)
+            draft.extend(pasted[:-6])
+            # Codex handles an explicit paste independently of key timing.
+            last_text = None
+        elif byte == b'\r':
+            if last_text is None or now - last_text >= 0.2:
+                submitted.append(draft.decode())
+                draft.clear()
+            else:
+                draft.extend(b'\n')
+        elif byte not in (b'\x02',) and not data.endswith(b'\x02d'):
+            draft.extend(byte)
+            last_text = now
+    with open(os.environ['FLUENT_NATIVE_CAPTURE'], 'wb') as out:
+        out.write(data)
+    with open(os.environ['FLUENT_NATIVE_SUBMISSIONS'], 'w') as out:
+        out.write('\n'.join(submitted))
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"#,
     )
     .unwrap();
     std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3632,6 +4191,10 @@ fn host_codex_attachment_queues_both_inputs() {
         .env("FLUENT_NATIVE_CAPTURE", &capture)
         .env("FLUENT_NATIVE_SUBMISSIONS", &submissions)
         .env("FLUENT_NATIVE_EARLY", &early)
+        .env(
+            "FLUENT_NATIVE_BUFFERED_OUTPUT",
+            if buffered_output { "1" } else { "0" },
+        )
         .output()
         .unwrap();
     assert!(
@@ -3641,7 +4204,7 @@ fn host_codex_attachment_queues_both_inputs() {
     );
     assert_eq!(
         std::fs::read(capture).unwrap(),
-        b"Please retain result.txt and finish the Task after committing.\rThe final file must have exactly the requested line.\r\x02d"
+        b"\x1b[200~Please retain result.txt and finish the Task after committing.\x1b[201~\r\x1b[200~The final file must have exactly the requested line.\x1b[201~\r\x02d"
     );
     assert!(
         !early.exists(),
@@ -3714,6 +4277,114 @@ fn host_task_completion_gets_full_window_after_control_attaches() {
     assert!(clock.expired(control_attached + Duration::from_secs(600)));
 }
 
+// Match the operator input and completion inside one retained invocation.
+// Quoted output and old generations cannot satisfy the host acceptance probe.
+fn host_display_completion(transcript: &str, generation: &str) -> Option<serde_json::Value> {
+    let records: Vec<serde_json::Value> = transcript
+        .lines()
+        .filter_map(|s| serde_json::from_str(s).ok())
+        .collect();
+    let input = records.iter().rev().find(|r| {
+        native_input_event(r)
+            && r["execution_generation"] == generation
+            && r["input_sequence"].as_u64().is_some_and(|n| n > 1)
+            && r["event"]
+                .to_string()
+                .contains("native-display-input-after-pressure")
+    })?;
+    let thread = input["assigned_conversation_id"].as_str()?;
+    if input["conversation_id"] != thread || input["event"]["params"]["threadId"] != thread {
+        return None;
+    }
+    let belongs = |r: &serde_json::Value| {
+        r["format"] == "fluent-native-agent-event"
+            && r["schema_version"] == 1
+            && r["provider"] == "codex"
+            && r["execution_generation"] == generation
+            && r["assigned_conversation_id"] == thread
+            && r["conversation_id"] == thread
+            && r["event"]["params"]["threadId"] == thread
+    };
+    if !belongs(input) {
+        return None;
+    }
+    for (index, end) in records.iter().enumerate() {
+        if !belongs(end)
+            || end["input_sequence"] != input["input_sequence"]
+            || end["event"]["method"] != "turn/completed"
+            || end["event"]["params"]["turn"]["status"] != "completed"
+        {
+            continue;
+        }
+        let turn = end["turn_id"].as_str()?;
+        if end["event"]["params"]["turn"]["id"] == turn
+            && records[..index].iter().any(|r| {
+                belongs(r)
+                    && r["event"]["method"] == "turn/started"
+                    && r["turn_id"] == turn
+                    && r["event"]["params"]["turn"]["id"] == turn
+            })
+            && records[..index].contains(input)
+        {
+            return Some(end.clone());
+        }
+    }
+    None
+}
+
+#[test]
+fn host_display_probe_binds_input_and_completion() {
+    let started = host_first_turn_fixture("turn/started");
+    let mut input = started.clone();
+    input["input_sequence"] = json!(2);
+    input["event"] = json!({"id":2,"method":"turn/steer","params":{"threadId":"thread-1","input":[{"type":"text","text":"native-display-input-after-pressure"}]}});
+    let mut end = host_first_turn_fixture("turn/completed");
+    end["input_sequence"] = json!(2);
+    let transcript = format!("{started}\n{input}\n{end}");
+    assert!(host_display_completion(&transcript, "current-generation").is_some());
+    for (pointer, value) in [
+        ("/execution_generation", json!("old")),
+        ("/assigned_conversation_id", json!("other")),
+        ("/conversation_id", json!("other")),
+        ("/turn_id", json!("other")),
+        ("/input_sequence", json!(1)),
+        ("/event/params/turn/status", json!("failed")),
+    ] {
+        let mut wrong = end.clone();
+        *wrong.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            host_display_completion(
+                &format!("{started}\n{input}\n{wrong}"),
+                "current-generation"
+            )
+            .is_none()
+        );
+    }
+    let mut later = input.clone();
+    later["input_sequence"] = json!(3);
+    assert!(
+        host_display_completion(
+            &format!("{started}\n{input}\n{later}\n{end}"),
+            "current-generation"
+        )
+        .is_none()
+    );
+    let mut latest = end.clone();
+    latest["input_sequence"] = json!(3);
+    assert!(
+        host_display_completion(
+            &format!("{started}\n{input}\n{later}\n{latest}"),
+            "current-generation"
+        )
+        .is_some()
+    );
+    input["event"]["method"] = json!("item/updated");
+    assert!(
+        host_display_completion(&format!("{started}\n{input}\n{end}"), "current-generation")
+            .is_none()
+    );
+}
+
 /// Run only from the separately authorized host check. The fixture stays in
 /// its output directory so the provider transcript and candidate can be
 /// inspected together after the test exits.
@@ -3739,12 +4410,29 @@ fn host_native_agent_acceptance() {
         std::env::var("FLUENT_TEST_REAL_NATIVE_AGENT_HOST").unwrap(),
         "1"
     );
+    let display_pressure =
+        std::env::var("FLUENT_TEST_NATIVE_CODEX_DISPLAY_PRESSURE").is_ok_and(|value| value == "1");
     let first_turn_only =
         std::env::var("FLUENT_TEST_NATIVE_CODEX_FIRST_TURN_ONLY").is_ok_and(|value| value == "1");
     let output_root =
         std::path::PathBuf::from(std::env::var("FLUENT_NATIVE_HOST_OUTPUT_DIR").unwrap());
     fs::create_dir_all(&output_root).unwrap();
-    let binary = env!("CARGO_BIN_EXE_fluent");
+    let production_binary;
+    let binary = if display_pressure {
+        production_binary = std::env::var("FLUENT_PRODUCTION_BIN")
+            .expect("production candidate binary is required");
+        use sha2::Digest;
+        let launcher = fluent::codex_worker::ResolvedCodexLauncher::resolve().unwrap();
+        fs::write(output_root.join("codex-executables.json"), serde_json::to_vec_pretty(&json!({
+            "launcher":launcher.executable(),
+            "launcher_sha256":format!("{:x}", sha2::Sha256::digest(fs::read(launcher.executable()).unwrap())),
+            "native_executable":launcher.execution_executable(),
+            "native_sha256":format!("{:x}", sha2::Sha256::digest(fs::read(launcher.execution_executable()).unwrap()))
+        })).unwrap()).unwrap();
+        production_binary.as_str()
+    } else {
+        env!("CARGO_BIN_EXE_fluent")
+    };
     for (provider, model_var, effort_var) in [
         (
             "codex",
@@ -3791,7 +4479,16 @@ fn host_native_agent_acceptance() {
         run("git", &["commit", "-m", "Add fixture"]);
         let work = format!("native-{provider}");
         let forbidden = project.join("forbidden.txt");
-        let instructions = host_native_instructions(provider, &forbidden);
+        let instructions = if display_pressure {
+            assert_eq!(provider, "codex");
+            assert_eq!(model, "gpt-6-astra");
+            assert_eq!(effort, "low");
+            // This is a real tool-output producer inside the confined Writer,
+            // not a replacement provider or a synthetic app-server.
+            "Exercise this disposable native display. First run python3 -c 'import sys,time; [(sys.stdout.write(\"display-pressure-\" + \"x\"*65536 + \"\\n\"),sys.stdout.flush(),time.sleep(0.1)) for _ in range(16)]; time.sleep(60)' with max_output_tokens 300000 and yield_time_ms 1000. Poll that command to completion. Keep the same conversation alive until the operator sends native-display-input-after-pressure. After receiving that input, write result.txt containing native-display-input-after-pressure, commit it, and give a final response. Do not create additional agents or run Fluent, and do not edit global configuration.".to_owned()
+        } else {
+            host_native_instructions(provider, &forbidden)
+        };
         run(
             binary,
             &[
@@ -3950,6 +4647,129 @@ fn host_native_agent_acceptance() {
             std::thread::sleep(Duration::from_millis(100));
         };
         let (session, generation) = session;
+        if display_pressure {
+            let deadline = Instant::now() + Duration::from_secs(300);
+            let pressure = loop {
+                let trace =
+                    fs::read_to_string(artifact.join("native-codex-relay-diagnostics.jsonl"))
+                        .unwrap_or_default();
+                let pending = trace
+                    .lines()
+                    .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .find(|r| {
+                        r["execution_generation"] == generation
+                            && r["direction"] == "app-to-tui"
+                            && r["outcome"] == "send-pending"
+                            && r["input_sequence"].as_u64().is_some_and(|n| n >= 1)
+                    });
+                if let Some(pending) = pending {
+                    break pending;
+                }
+                assert!(
+                    child.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
+                    "real native output never produced observed transport pressure; no host proof"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            fs::write(
+                runtime.join("pressure.json"),
+                serde_json::to_vec_pretty(&pressure).unwrap(),
+            )
+            .unwrap();
+            let attach = HOST_NATIVE_ATTACH.replace("Please retain result.txt and finish the Task after committing.",
+                "native-display-input-after-pressure: write result.txt, commit it, and finish the Task.")
+                .replace("The final file must have exactly the requested line.",
+                    "native-display-input-after-pressure: the final file must contain exactly this marker.");
+            let status = Command::new("expect")
+                .args(["-c", &attach])
+                .env("FLUENT_NATIVE_BINARY", binary)
+                .env("FLUENT_NATIVE_SOURCE", &project)
+                .env("FLUENT_NATIVE_SESSION", &session)
+                .env("FLUENT_NATIVE_CONTROL", "1")
+                .env("FLUENT_NATIVE_PROVIDER", "codex")
+                .stdout(Stdio::from(
+                    File::create(runtime.join("display-control.log")).unwrap(),
+                ))
+                .stderr(Stdio::from(
+                    File::create(runtime.join("display-control.stderr.log")).unwrap(),
+                ))
+                .status()
+                .unwrap();
+            assert!(status.success(), "real Codex Control attachment failed");
+            let completion = loop {
+                let transcript =
+                    fs::read_to_string(artifact.join("transcript.jsonl")).unwrap_or_default();
+                if let Some(record) = host_display_completion(&transcript, &generation) {
+                    break record;
+                }
+                assert!(
+                    child.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
+                    "no matching canonical completion for admitted input after pressure"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            assert_eq!(
+                completion["assigned_conversation_id"],
+                pressure["assigned_conversation_id"]
+            );
+            let status = loop {
+                if let Some(status) = child.child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native invocation did not settle"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            assert!(
+                status.success(),
+                "native Task failed after canonical completion"
+            );
+            let trace =
+                fs::read_to_string(artifact.join("native-codex-relay-diagnostics.jsonl")).unwrap();
+            assert!(
+                !trace
+                    .lines()
+                    .filter_map(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .any(|r| r["execution_generation"] == generation
+                        && (r["outcome"] == "display-detached" || r["outcome"] == "send-error")),
+                "native display disconnected during pressure"
+            );
+            let descriptors = fluent::terminal_sessions::list(&project).unwrap();
+            assert!(
+                !descriptors
+                    .iter()
+                    .any(|d| d.execution_generation == generation
+                        && (d.can_control || d.can_observe)),
+                "settled invocation still exposes a terminal"
+            );
+            assert!(
+                !fluent::execution::verified_running_generation(
+                    &artifact.join("execution.json"),
+                    &generation
+                )
+                .unwrap(),
+                "owned execution remains running"
+            );
+            let execution: serde_json::Value =
+                serde_json::from_slice(&fs::read(artifact.join("execution.json")).unwrap())
+                    .unwrap();
+            assert_eq!(execution["launch_generation"], generation);
+            assert_eq!(execution["state"], "settled");
+            fs::write(
+                runtime.join("execution-settled.json"),
+                serde_json::to_vec_pretty(&execution).unwrap(),
+            )
+            .unwrap();
+            child.armed = false;
+            fs::write(runtime.join("display-proof.json"), serde_json::to_vec_pretty(&json!({
+                "pressure":pressure, "completion":completion, "terminal_session":session,
+                "task_exit_success":true, "owned_execution_settled":true,
+                "producer":"installed real Codex tool output; no synthetic provider or controlled process pause"
+            })).unwrap()).unwrap();
+            return;
+        }
         if first_turn_only {
             assert_eq!(provider, "codex");
             let first_turn_deadline = Instant::now() + Duration::from_secs(300);
@@ -5562,4 +6382,458 @@ fn run_host_native_task_continuation(fixture_name: &str) {
         resumed["execution_generation"]
     );
     assert_ne!(first.attempts[0].tasks[0].id, second_task.id);
+}
+
+fn native_acceptance_regression(case: &str) {
+    let output = std::process::Command::new("python3")
+        .args(["-I", "tests/fixtures/native-acceptance-tests.py", case])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn native_acceptance_wait_retains_invocation() {
+    native_acceptance_regression("NativeAcceptance.test_wait_retains_invocation");
+}
+
+#[test]
+fn native_pi_prerequisite_failure_preserves_diagnosis() {
+    use fluent::native_agent::pi::{PiEventGate, receive_event};
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let evidence = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = evidence.reopen().unwrap();
+    let mut gate = PiEventGate::new("generation-1", "/private/task/session.jsonl");
+    let failure = json!({"role":"assistant", "stopReason":"error",
+        "errorMessage":"400: Unexpected message role."});
+    for event in [
+        json!({"type":"session_start", "reason":"startup"}),
+        json!({"type":"input", "text":"assigned prompt"}),
+        json!({"type":"agent_start"}),
+        json!({"type":"message_end", "message":failure}),
+        json!({"type":"agent_before_settle", "outcome":"error"}),
+        json!({"type":"agent_settled", "aborted":false}),
+    ] {
+        let (mut client, receiver) = UnixStream::pair().unwrap();
+        let envelope = json!({"generation":"generation-1", "session_id":"assigned-session",
+            "session_file":"/private/task/session.jsonl", "event":event});
+        client
+            .write_all(format!("{envelope}\n").as_bytes())
+            .unwrap();
+        let result = receive_event(receiver, &mut gate, &mut writer);
+        if event["type"] == "agent_settled" {
+            assert!(result.unwrap_err().to_string().contains("did not complete"));
+        } else {
+            assert_eq!(result.unwrap(), Completion::Ignored);
+        }
+    }
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(evidence.path())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[3]["event"]["message"], failure);
+    assert_eq!(records[3]["input_sequence"], 1);
+    assert_eq!(records[3]["execution_generation"], "generation-1");
+    assert!(
+        records
+            .iter()
+            .all(|r| r["event"]["type"] != "agent_settled")
+    );
+    native_acceptance_regression("NativeAcceptance.test_pi_failure_preserves_diagnosis");
+    native_acceptance_regression(
+        "NativeAcceptance.test_failed_native_task_keeps_original_evidence",
+    );
+}
+
+#[test]
+fn native_acceptance_fixture_isolation() {
+    native_acceptance_regression("NativeAcceptance.test_fixture_isolation");
+    native_acceptance_regression(
+        "NativeAcceptance.test_interrupted_transport_settles_only_owned_child",
+    );
+    native_acceptance_regression("NativeAcceptance.test_disposable_project_keeps_declared_tester");
+    native_acceptance_regression(
+        "NativeAcceptance.test_ssh_preparation_keeps_exact_candidate_and_secrets_out",
+    );
+}
+
+#[test]
+fn native_acceptance_requires_completed_journeys() {
+    native_acceptance_regression("NativeAcceptance.test_requires_completed_journeys");
+    native_acceptance_regression(
+        "NativeAcceptance.test_canonical_ssh_isolates_dashboard_and_retains_failure",
+    );
+}
+
+#[test]
+fn native_acceptance_launch_preserves_installed_resources() {
+    native_acceptance_regression("NativeAcceptance.test_provider_launch_survives_isolated_home");
+    native_acceptance_regression(
+        "NativeAcceptance.test_provider_launch_rejects_external_package_resource",
+    );
+    native_acceptance_regression("NativeAcceptance.test_startup_capture_keeps_original_diagnostic");
+}
+
+#[test]
+fn native_acceptance_private_pi_config_preserves_model() {
+    native_acceptance_regression("NativeAcceptance.test_private_pi_config_preserves_model");
+}
+
+#[test]
+fn native_acceptance_stages_tmux_for_node_subprocesses() {
+    native_acceptance_regression(
+        "NativeAcceptance.test_node_tmux_subprocess_survives_isolated_home",
+    );
+    native_acceptance_regression("NativeAcceptance.test_failed_settlement_withholds_cleanup");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_acceptance_confines_tmux_subprocess_and_owner_grant() {
+    // Keep the original installation outside common.sb's temporary-directory
+    // grants, just as the host fixture keeps the operator's HOME outside them.
+    let scratch = tempfile::tempdir_in("target").unwrap();
+    let root = scratch.path().canonicalize().unwrap();
+    let home = root.join("fixture");
+    let resolver = fluent::content::ContentResolver::new(None);
+    let profile = fluent::os::render_profile_for_access_for_coder(
+        &resolver,
+        home.to_str().unwrap(),
+        &[root.join("logs")],
+        &[],
+        fluent::coder::CoderKind::Pi,
+    )
+    .unwrap();
+    let socket = tempfile::tempdir_in("/private/tmp").unwrap();
+    let outside = tempfile::tempdir_in("/private/tmp").unwrap();
+    let owner = socket.path().join("owner");
+    let peer = outside.path().join("owner");
+    std::fs::write(&owner, "owned").unwrap();
+    std::fs::write(&peer, "outside").unwrap();
+    let profile = fluent::os::profile_with_terminal_socket(&profile, socket.path()).unwrap();
+    let preflight = fluent::os::preflight_profile_with(&profile, |path| {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(path)
+            .arg("/usr/bin/true")
+            .output()
+    });
+    if let Err(error) = preflight {
+        assert!(
+            format!("{error:#}").contains("Operation not permitted"),
+            "{error:#}"
+        );
+        eprintln!(
+            "Native subprocess confinement remains unproven: enclosing sandbox denies sandbox-exec. Host evidence is still required."
+        );
+        return;
+    }
+    let output = std::process::Command::new("python3")
+        .args([
+            "-I",
+            "tests/fixtures/native-acceptance-tests.py",
+            "NativeAcceptance.test_node_tmux_subprocess_survives_isolated_home",
+        ])
+        .env("FLUENT_NATIVE_SUBPROCESS_ROOT", &root)
+        .env("FLUENT_NATIVE_SUBPROCESS_PROFILE", &profile.path)
+        .env("FLUENT_NATIVE_SUBPROCESS_OWNER", &owner)
+        .env("FLUENT_NATIVE_SUBPROCESS_OUTSIDE", &peer)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(owner).unwrap(),
+        "owned grant remains writable"
+    );
+    assert_eq!(std::fs::read_to_string(peer).unwrap(), "outside");
+}
+
+#[cfg(feature = "test-support")]
+mod cancellation {
+    use fluent::coder::{Coder, CoderSession, CodexCode, PiCode, SandboxedClaudeCode};
+    use fluent::execution::{ExecutionRecord, ExecutionState};
+    use fluent::terminal_sessions::{TerminalIdentity, TerminalSession};
+    use fluent::work_model::{AttemptCancellation, WorkItem, WorkModelStore};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn stop(project: &Path) {
+        WorkModelStore::new(project)
+            .mutate_work_item("work-1", |item| {
+                item.attempts[0].status = fluent::work_model::AttemptStatus::NeedsUser;
+                item.attempts[0].pause_kind = Some(fluent::work_model::PauseKind::Interrupted);
+                item.attempts[0].cancellation = Some(AttemptCancellation {
+                    requested_at: fluent::work_model::now_iso8601(),
+                    settled_at: None,
+                    resumed_at: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn identity(project: &Path, provider: &str) -> TerminalIdentity {
+        let mut identity =
+            TerminalIdentity::fixture(project, "work-1", "attempt-1", "attempt-1-write-1");
+        identity.provider = provider.into();
+        identity
+    }
+
+    // Build the actual native provider arguments and environment, replacing only
+    // the external executable. No socket server or installed provider is needed
+    // to exercise the shared reservation/spawn boundary.
+    fn native_command(project: &Path, provider: &str) -> Command {
+        use std::os::unix::fs::PermissionsExt;
+        let home = project.join(".fluent/work/provider-double");
+        std::fs::create_dir_all(&home).unwrap();
+        let double = home.join("provider");
+        std::fs::write(&double, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&double, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = home.join("settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let extension = home.join("extension.mjs");
+        std::fs::write(&extension, "export default () => {};\n").unwrap();
+        let original = match provider {
+            "codex" => CodexCode {
+                sandbox_profile: None,
+                trusted_sandbox: false,
+                model_override: Some("fixture-model".into()),
+                effort: Some("high".into()),
+                executable: double.clone(),
+            }
+            .native_task_command(project, &home, CoderSession::FreshPersistent, "fixture")
+            .unwrap(),
+            "claude" => SandboxedClaudeCode {
+                sandbox_profile: None,
+                trusted_sandbox: false,
+                model_override: Some("fixture-model".into()),
+                effort: Some("high".into()),
+            }
+            .native_task_command_in_terminal(
+                project,
+                &home,
+                &settings,
+                CoderSession::FreshPersistent,
+                "role",
+                "fixture",
+            )
+            .unwrap(),
+            "pi" => PiCode {
+                sandbox_profile: None,
+                trusted_sandbox: false,
+                model_override: Some("fixture-model".into()),
+            }
+            .native_task_command_in_terminal(
+                project,
+                &home,
+                &extension,
+                &home.join("session.jsonl"),
+                "high",
+                "role",
+                "fixture",
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        };
+        let mut command = Command::new(double);
+        command.args(original.get_args()).current_dir(project);
+        for (key, value) in original.get_envs() {
+            if let Some(value) = value {
+                command.env(key, value);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        command
+    }
+
+    struct CancelingNativeCoder {
+        project: PathBuf,
+        provider: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Coder for CancelingNativeCoder {
+        fn run(
+            &self,
+            _: &str,
+            _: &str,
+            _: &Path,
+            _: &[String],
+            _: &[(String, String)],
+            _: Option<&Path>,
+        ) -> anyhow::Result<i32> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut terminal = TerminalSession::start_owned_fixture(
+                identity(&self.project, self.provider),
+                native_command(&self.project, self.provider),
+                || Ok(()),
+            )?;
+            // The native invocation has unwound before the generic retry sees its
+            // error. Commit cancellation at precisely that boundary, without sleeps.
+            terminal.stop()?;
+            stop(&self.project);
+            anyhow::bail!("fixture native transport failed")
+        }
+        fn run_interactive(
+            &self,
+            _: &str,
+            _: &Path,
+            _: &[String],
+            _: &[(String, String)],
+        ) -> anyhow::Result<i32> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn cancellation_blocks_native_retry_launch() {
+        use fluent::work_task_executor::{WorkTaskRunConfig, run_write_task_with_coder_for_test};
+        for provider in ["codex", "claude", "pi"] {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().join("source");
+            std::fs::create_dir_all(project.join(".fluent/expertise")).unwrap();
+            std::fs::write(project.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+            for args in [
+                vec!["init", "-q", "-b", "main"],
+                vec!["config", "user.email", "test@test"],
+                vec!["config", "user.name", "test"],
+                vec!["add", "."],
+                vec!["commit", "-q", "-m", "Add fixture"],
+            ] {
+                assert!(
+                    Command::new("git")
+                        .args(args)
+                        .current_dir(&project)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            let project = project.canonicalize().unwrap();
+            let store = WorkModelStore::new(&project);
+            let mut item = WorkItem::planned("work-1", "Native cancellation");
+            item.add_initial_attempt("attempt-1").unwrap();
+            store.create_work_item(&item).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory = |_| {
+                Box::new(CancelingNativeCoder {
+                    project: project.clone(),
+                    provider,
+                    calls: calls.clone(),
+                }) as Box<dyn Coder>
+            };
+            let resolver = fluent::content::ContentResolver::new(Some(&project));
+            let result = run_write_task_with_coder_for_test(
+                WorkTaskRunConfig {
+                    project_root: &project,
+                    store: &store,
+                    work_item_id: "work-1",
+                    attempt_id: "attempt-1",
+                    task_id: "attempt-1-write-1",
+                    resolver: &resolver,
+                    extra_args: &[],
+                    no_sandbox: true,
+                    store_lock: None,
+                },
+                &factory,
+            );
+            assert!(result.is_err(), "{provider}: {result:?}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{provider}: retry crossed durable stop: {result:?}"
+            );
+            let record: ExecutionRecord = serde_json::from_slice(
+                &std::fs::read(
+                    identity(&project, provider)
+                        .artifact_dir
+                        .join("execution.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(record.state, ExecutionState::Canceled, "{provider}");
+            assert!(record.settled_at.is_some(), "{provider}");
+        }
+    }
+
+    #[test]
+    fn rejected_native_launch_settles_unused_reservation() {
+        for (provider, prior_child) in ["codex", "claude", "pi"]
+            .into_iter()
+            .flat_map(|provider| [(provider, false), (provider, true)])
+        {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().canonicalize().unwrap();
+            let store = WorkModelStore::new(&project);
+            let mut item = WorkItem::planned("work-1", "Reject native launch");
+            item.add_initial_attempt("attempt-1").unwrap();
+            store.create_work_item(&item).unwrap();
+            let id = identity(&project, provider);
+            let path = id.artifact_dir.join("execution.json");
+            if prior_child {
+                let mut terminal = TerminalSession::start_owned_fixture(
+                    id.clone(),
+                    native_command(&project, provider),
+                    || Ok(()),
+                )
+                .unwrap();
+                terminal.finish().unwrap();
+            }
+            let receipt = std::fs::read(path.with_file_name("execution-receipt")).ok();
+            let mut reserved = None;
+            let result = TerminalSession::start_owned_fixture(
+                id,
+                native_command(&project, provider),
+                || {
+                    reserved = Some(std::fs::read(&path).unwrap());
+                    stop(&project);
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "{provider}: launch crossed stop");
+            let before: ExecutionRecord = serde_json::from_slice(&reserved.unwrap()).unwrap();
+            let after: ExecutionRecord =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(after.state, ExecutionState::Settled, "{provider}");
+            assert!(after.settled_at.is_some(), "{provider}");
+            assert_eq!(after.launch_generation, before.launch_generation);
+            assert_eq!(after.attempt_owner, before.attempt_owner);
+            assert_eq!((after.leader_pid, after.process_group_id), (0, 0));
+            assert_eq!(
+                std::fs::read(path.with_file_name("execution-receipt")).ok(),
+                receipt
+            );
+            // A later retry must preserve the terminal record byte for byte.
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                TerminalSession::start_owned_fixture(
+                    identity(&project, provider),
+                    native_command(&project, provider),
+                    || Ok(())
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{provider}");
+        }
+    }
 }

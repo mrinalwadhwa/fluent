@@ -111,10 +111,18 @@ in the conversation. Keep the complete files for audit.
 Apply every current finding test-first while preserving the approved constraints. The original
 planning files remain available for a specific question:
 
+{{#if brief_path}}
 - Brief: {{brief_path}}
+{{/if}}
+{{#if behaviors_path}}
 - Behaviors: {{behaviors_path}}
+{{/if}}
+{{#if approach_path}}
 - Approach: {{approach_path}}
+{{/if}}
+{{#if plan_path}}
 - Plan: {{plan_path}}
+{{/if}}
 
 Run focused harness-native checks. Reuse Fluent's private `CARGO_HOME`; do not access the
 operator's Cargo home or rerun the complete configured suite. Fluent owns the one final Tester.

@@ -1153,7 +1153,7 @@ fn output_free_writer_completion_pause(attempt: &work_model::Attempt) -> bool {
             .tasks
             .iter()
             .rev()
-            .find(|task| task.kind == TaskKind::Write)
+            .find(|task| task.kind == TaskKind::Write && task.status != TaskStatus::Superseded)
             .is_some_and(|task| task.output.is_none())
 }
 

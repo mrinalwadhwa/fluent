@@ -28,9 +28,13 @@ if [[ -n "${EXPECT_CARGO_HOME:-}" && "$(cd "${CARGO_HOME:-/}" && pwd -P)" != "$(
   exit 1
 fi
 while (( $# )); do
+  if [[ "$1" == --manifest-path ]]; then manifest="$2"; fi
   if [[ "$1" == --target-dir ]]; then target="$2"; break; fi
   shift
 done
+if rg -q 'target/terminal-deps/install' "$(dirname "$manifest")/build.rs"; then
+  test -f "$(dirname "$manifest")/target/terminal-deps/install/${CARGO_BUILD_TARGET:-${FAKE_RUSTC_HOST:-fixture-target}}/lib/libghostty-vt.a"
+fi
 cargo_target="${CARGO_BUILD_TARGET:-}"
 if [[ -z "$cargo_target" && -f "$PWD/.cargo/config.toml" ]]; then
   cargo_target="$(sed -n 's/^target = "\([^"]*\)"$/\1/p' "$PWD/.cargo/config.toml")"
@@ -271,6 +275,11 @@ cp "$repository"/tests/fixtures/build-*-old-reader.sh "$temporary/worktree/tests
 cp "$repository/tests/fixtures/prepare-historical-reader.py" "$temporary/worktree/tests/fixtures/"
 (
 cd "$temporary/worktree"
+# The compiler double still requires the helper to stage every terminal input.
+terminal_inputs=target/terminal-deps/install/fixture-target
+mkdir -p "$terminal_inputs/lib" "$terminal_inputs/include/ghostty"
+printf 'terminal library\n' > "$terminal_inputs/lib/libghostty-vt.a"
+printf 'terminal header\n' > "$terminal_inputs/include/ghostty/vt.h"
 for wrapper in tests/fixtures/build-*-old-reader.sh; do
     binary="$(bash "$wrapper")"
     python3 - "$binary" "$wrapper" <<'PY'
@@ -289,8 +298,19 @@ if wrapper == 'build-ownership-old-reader.sh':
     for name in ('Cargo.toml', 'Cargo.lock', 'src/main.rs'):
         committed = subprocess.check_output(('git', 'show', f"{identity['source_commit']}:{name}"))
         assert (root / name).read_bytes() == committed
+if wrapper == 'build-claude-session-old-reader.sh':
+    provenance = json.loads((binary.resolve().parent / 'provenance.json').read_text())
+    inputs = provenance['identity']['terminal_inputs']
+    assert inputs['lib/libghostty-vt.a'] == hashlib.sha256(b'terminal library\n').hexdigest()
+    assert inputs['include/ghostty/vt.h'] == hashlib.sha256(b'terminal header\n').hexdigest()
 PY
 done
+original="$(bash tests/fixtures/build-claude-session-old-reader.sh)"
+builds_before="$(wc -l < "$BUILD_LOG")"
+printf 'changed terminal header\n' > "$terminal_inputs/include/ghostty/vt.h"
+changed="$(bash tests/fixtures/build-claude-session-old-reader.sh)"
+[[ "$(readlink "$original")" != "$(readlink "$changed")" ]]
+(( $(wc -l < "$BUILD_LOG") == builds_before + 1 ))
 stable_root="$temporary/worktree/.scratch/round-cap-approach-revision-stable-reader/bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
 assignment_root="$temporary/worktree/.scratch/writer-assignment-main-reader-bd59cf35308bf30fa5cbabc05ff5cf69cebfff5a"
 [[ "$(readlink "$stable_root/target/debug/fluent")" != "$(readlink "$assignment_root/target/debug/fluent")" ]]

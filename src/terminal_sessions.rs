@@ -330,10 +330,37 @@ fn validate(stored: &StoredTerminal, requested: &TerminalDescriptor) -> Result<(
 impl TerminalSession {
     fn start_command(
         identity: TerminalIdentity,
+        command: Command,
+        socket_dir: Option<PathBuf>,
+        attempt_owner: bool,
+        ready: impl FnOnce(Option<&Path>) -> Result<()>,
+    ) -> Result<Self> {
+        Self::start_command_at_reservation(
+            identity,
+            command,
+            socket_dir,
+            attempt_owner,
+            ready,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn start_owned_fixture(
+        identity: TerminalIdentity,
+        command: Command,
+        reserved: impl FnOnce() -> Result<()>,
+    ) -> Result<Self> {
+        Self::start_command_at_reservation(identity, command, None, true, |_| Ok(()), reserved)
+    }
+
+    fn start_command_at_reservation(
+        identity: TerminalIdentity,
         mut command: Command,
         socket_dir: Option<PathBuf>,
         attempt_owner: bool,
         ready: impl FnOnce(Option<&Path>) -> Result<()>,
+        reserved: impl FnOnce() -> Result<()>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&identity.artifact_dir)?;
         ensure!(
@@ -347,16 +374,38 @@ impl TerminalSession {
             work_item_id: identity.work_item_id.clone(),
             attempt_id: identity.attempt_id.clone(),
         });
-        execution::prepare_launch(&transcript, owner)?;
+        // Match spawn's lock order and retain the exact reservation until a
+        // child takes ownership. Raw prepare_launch also serves callers that
+        // already hold the Work model lock, so it must not acquire it itself.
+        let reservation = if let Some(owner) = &owner {
+            let store = crate::work_model::WorkModelStore::new(&owner.project_root);
+            let _model_lock = store.lock_work_item_model(&owner.work_item_id)?;
+            let item = store.read_work_item_under_model_lock(&owner.work_item_id)?;
+            let attempt = item
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == owner.attempt_id)
+                .context("terminal's owning Attempt is missing")?;
+            attempt.ensure_not_canceled()?;
+            execution::prepare_launch(&transcript, Some(owner.clone()))?
+        } else {
+            execution::prepare_launch(&transcript, None)?
+        };
         // Keep the server off the caller's terminal so a later attachment can
         // use that PTY. Attachment clients retain their own stdin configuration.
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut child = match execution::spawn(&mut command, &transcript) {
+        let mut child = match reserved().and_then(|()| execution::spawn(&mut command, &transcript))
+        {
             Ok(child) => child,
             Err(error) => {
+                if let Err(settlement) = reservation.settle_unused() {
+                    return Err(error).context(format!(
+                        "starting managed terminal server; unused reservation did not settle: {settlement:#}"
+                    ));
+                }
                 return Err(error).context("starting managed terminal server");
             }
         };
@@ -2166,7 +2215,7 @@ mod setup_cleanup_tests {
                     );
                     assert!(!resource_path(&identity).exists());
                 });
-                let _ = dashboard.handoff(|| embedded.fullscreen(size.0, size.1));
+                let handoff = dashboard.handoff(|| embedded.fullscreen(size.0, size.1));
                 assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
                 assert_eq!(dashboard.size().unwrap(), size);
                 // Match the dashboard's repeated refreshes: liveness is
@@ -2177,7 +2226,10 @@ mod setup_cleanup_tests {
                     if embedded.ended() {
                         break;
                     }
-                    assert!(Instant::now() < deadline, "ended view never appeared");
+                    assert!(
+                        Instant::now() < deadline,
+                        "ended view never appeared after full-screen attachment: {handoff:?}"
+                    );
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 assert!(!embedded.has_control());
@@ -2451,7 +2503,10 @@ mod setup_cleanup_tests {
 
     #[test]
     fn pane_query_retry_requires_confirmed_server_exit() {
-        let root = tempfile::tempdir().unwrap();
+        // Tester puts TMPDIR below its artifact tree, which can exceed the
+        // Unix socket path limit. Match the short namespace used by terminals
+        // so this check observes a missing server, not an invalid address.
+        let root = tempfile::tempdir_in("/private/tmp").unwrap();
         let socket = root.path().join("socket");
         assert!(check_pane_query_failure_at(&socket, "no server running on fixture", None).is_ok());
         assert!(
@@ -2463,6 +2518,11 @@ mod setup_cleanup_tests {
             .is_ok()
         );
         assert!(check_pane_query_failure_at(&socket, "permission denied", None).is_err());
+        // An address that cannot be queried must never prove server exit.
+        let too_long = root.path().join("x".repeat(128));
+        assert!(
+            check_pane_query_failure_at(&too_long, "no server running on fixture", None).is_err()
+        );
         // An invalid path is not evidence that the owned server has exited.
         std::fs::write(&socket, b"obstruction").unwrap();
         assert!(

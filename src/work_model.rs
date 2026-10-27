@@ -33,6 +33,7 @@ pub const WORK_MODEL_WRITER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// this version after checking every record.
 pub const WORK_MODEL_RECORD_SCHEMA_VERSION: u32 = 14;
 const NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION: u32 = 15;
+const CLAUDE_SESSION_RECORD_SCHEMA_VERSION: u32 = 16;
 pub const WORK_MODEL_UPGRADE_SCHEMA_VERSION: u32 = 1;
 pub const MIN_ADDITIONAL_WRITE_ROUNDS: usize = 1;
 pub const MAX_ADDITIONAL_WRITE_ROUNDS: usize = 3;
@@ -10165,12 +10166,10 @@ const WORK_MODEL_WRITER_ENVELOPE_FORMAT: &str = "fluent-work-item-writer";
 // union of revision audits, assignments, and separately authorized retries.
 const WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 12;
 const NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 13;
+const CLAUDE_SESSION_WRITER_ENVELOPE_SCHEMA_VERSION: u32 = 14;
 
 fn is_supported_writer_envelope_schema(version: u32) -> bool {
-    matches!(
-        version,
-        1..=NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION
-    )
+    matches!(version, 1..=CLAUDE_SESSION_WRITER_ENVELOPE_SCHEMA_VERSION)
 }
 
 /// Fence readers that deserialize the existing writer field as Option<String>.
@@ -10297,9 +10296,10 @@ impl WorkItemTransaction {
     // Preserve their modeled formats, but publish the combined format separately.
     const SCHEMA_VERSION: u32 = 14;
     const NO_CHANGE_COMPLETION_SCHEMA_VERSION: u32 = 15;
+    const CLAUDE_SESSION_SCHEMA_VERSION: u32 = 16;
 
     fn is_supported_schema(version: u32) -> bool {
-        matches!(version, 1..=Self::NO_CHANGE_COMPLETION_SCHEMA_VERSION)
+        matches!(version, 1..=Self::CLAUDE_SESSION_SCHEMA_VERSION)
     }
 
     /// Keep the base and operation list mandatory when retry authority exists.
@@ -10410,6 +10410,23 @@ struct TaskRecord {
     task: Task,
 }
 
+fn attempt_has_claude_session_authority(attempt: &Attempt) -> bool {
+    attempt.recovery_operations.iter().any(|operation| {
+        matches!(
+            operation.operation_kind.as_str(),
+            crate::recovery_contracts::claude_session::APPROVE
+                | crate::recovery_contracts::claude_session::RESUME
+                | crate::recovery_contracts::claude_session::START
+        )
+    })
+}
+
+fn has_claude_session_authority(item: &WorkItem) -> bool {
+    item.attempts
+        .iter()
+        .any(attempt_has_claude_session_authority)
+}
+
 fn attempt_has_no_change_completion_authority(attempt: &Attempt) -> bool {
     attempt.recovery_operations.iter().any(|operation| {
         operation
@@ -10429,7 +10446,9 @@ impl From<&WorkItem> for WorkItemRecord {
     fn from(work_item: &WorkItem) -> Self {
         let no_change_authority = has_no_change_completion_authority(work_item);
         Self {
-            schema_version: if no_change_authority {
+            schema_version: if has_claude_session_authority(work_item) {
+                CLAUDE_SESSION_RECORD_SCHEMA_VERSION
+            } else if no_change_authority {
                 NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
             } else {
                 WORK_MODEL_RECORD_SCHEMA_VERSION
@@ -10438,7 +10457,9 @@ impl From<&WorkItem> for WorkItemRecord {
             title: work_item.title.clone(),
             model_writer_version: Some(StoredModelWriterVersion::Envelope {
                 format: WORK_MODEL_WRITER_ENVELOPE_FORMAT.to_string(),
-                schema_version: if no_change_authority {
+                schema_version: if has_claude_session_authority(work_item) {
+                    CLAUDE_SESSION_WRITER_ENVELOPE_SCHEMA_VERSION
+                } else if no_change_authority {
                     NO_CHANGE_COMPLETION_WRITER_ENVELOPE_SCHEMA_VERSION
                 } else {
                     WORK_MODEL_WRITER_ENVELOPE_SCHEMA_VERSION
@@ -10499,7 +10520,9 @@ impl From<WorkItemRecord> for WorkItem {
 impl AttemptRecord {
     fn from_attempt(attempt: &Attempt, order: usize) -> Self {
         Self {
-            schema_version: if attempt_has_no_change_completion_authority(attempt) {
+            schema_version: if attempt_has_claude_session_authority(attempt) {
+                CLAUDE_SESSION_RECORD_SCHEMA_VERSION
+            } else if attempt_has_no_change_completion_authority(attempt) {
                 NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
             } else {
                 WORK_MODEL_RECORD_SCHEMA_VERSION
@@ -11032,7 +11055,9 @@ impl WorkModelStore {
 
         let mut upgraded = item.clone();
         let artifact_migrations = Self::plan_work_artifact_migrations(&mut upgraded);
-        let current_schema = if has_no_change_completion_authority(&item) {
+        let current_schema = if has_claude_session_authority(&item) {
+            CLAUDE_SESSION_RECORD_SCHEMA_VERSION
+        } else if has_no_change_completion_authority(&item) {
             NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
         } else {
             WORK_MODEL_RECORD_SCHEMA_VERSION
@@ -11046,7 +11071,9 @@ impl WorkModelStore {
                     .iter()
                     .find(|attempt| attempt.id == *attempt_id)
                     .expect("loaded Attempt matches its persisted record");
-                let target_schema = if attempt_has_no_change_completion_authority(attempt) {
+                let target_schema = if attempt_has_claude_session_authority(attempt) {
+                    CLAUDE_SESSION_RECORD_SCHEMA_VERSION
+                } else if attempt_has_no_change_completion_authority(attempt) {
                     NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION
                 } else {
                     WORK_MODEL_RECORD_SCHEMA_VERSION
@@ -11759,7 +11786,9 @@ impl WorkModelStore {
         };
         self.validate_managed_files(managed_files)?;
         let transaction = WorkItemTransaction {
-            schema_version: if has_no_change_completion_authority(work_item) {
+            schema_version: if has_claude_session_authority(work_item) {
+                WorkItemTransaction::CLAUDE_SESSION_SCHEMA_VERSION
+            } else if has_no_change_completion_authority(work_item) {
                 WorkItemTransaction::NO_CHANGE_COMPLETION_SCHEMA_VERSION
             } else {
                 WorkItemTransaction::SCHEMA_VERSION
@@ -11804,6 +11833,7 @@ impl WorkModelStore {
                         r.operation_kind.as_str(),
                         crate::recovery_contracts::context_retry::START
                             | crate::recovery_contracts::context_retry::COMPLETION_START
+                            | crate::recovery_contracts::claude_session::START
                     ) && transaction
                         .context_retry_publications
                         .contains(&r.operation_id)
@@ -13354,7 +13384,7 @@ fn ensure_supported_record_schema(
     record_kind: &'static str,
     version: u32,
 ) -> Result<(), WorkModelStorageError> {
-    if version <= NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION {
+    if version <= CLAUDE_SESSION_RECORD_SCHEMA_VERSION {
         return Ok(());
     }
     Err(WorkModelStorageError::InvalidModel {
@@ -13362,7 +13392,7 @@ fn ensure_supported_record_schema(
         source: WorkModelError::UnsupportedStoredRecordVersion {
             record_kind,
             found: version,
-            supported: NO_CHANGE_COMPLETION_RECORD_SCHEMA_VERSION,
+            supported: CLAUDE_SESSION_RECORD_SCHEMA_VERSION,
         },
     })
 }
