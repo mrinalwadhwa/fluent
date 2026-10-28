@@ -24422,17 +24422,12 @@ while time.monotonic() < deadline:
         else {
             panic!("new context must use compact verification");
         };
-        verification.commands.extend((0..700).map(|i| {
-            crate::work_task_executor::ExecutionContextObligation {
-                id: format!("additional-failure-{i}"),
-                owner: crate::work_model::CompletionResponsibility::Writer,
-                next_action: Some(
-                    "Repair the candidate; ".to_string() + &"authoritative detail ".repeat(40),
-                ),
-                binding_indices: vec![0],
-                diagnostics: vec!["assertion failed".to_string()],
-            }
-        }));
+        let additional = (0..700)
+            .map(|i| row(format!("additional-failure-{i}"), false))
+            .collect::<Vec<_>>();
+        verification
+            .commands
+            .extend(compact_obligations(&additional, &mut verification.bindings));
         let error = bounded_execution_context_json(&mut context).unwrap_err();
         assert!(error.to_string().contains("execution context core exceeds"));
         assert!(error.to_string().contains("actual:"));
