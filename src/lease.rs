@@ -106,17 +106,8 @@ pub fn acquire_shared_blocking(lock_path: &Path) -> io::Result<TaskLease> {
 }
 
 pub fn is_leased(lock_path: &Path) -> bool {
-    let file = match OpenOptions::new().read(true).open(lock_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => {
-            let _ = flock(&file, FlockOperation::Unlock);
-            false
-        }
-        Err(_) => true,
-    }
+    // Infrastructure failures cannot establish that ownership has settled.
+    is_leased_checked(lock_path).unwrap_or(true)
 }
 
 /// Check ownership without treating an unreadable lease as an absent owner.
@@ -126,6 +117,17 @@ pub fn is_leased_checked(lock_path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
+    // Serialize observers across processes. Each observer still probes with an
+    // exclusive lock to detect both exclusive and shared owners, but must not
+    // mistake another observer's transient probe for an owner. Owners continue
+    // to acquire the original lease directly. Lock the existing directory so
+    // observing a lease never creates files or changes persisted Work state.
+    let parent = lock_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let probe_guard = File::open(parent)?;
+    flock(&probe_guard, FlockOperation::LockExclusive).map_err(io::Error::from)?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => {
             flock(&file, FlockOperation::Unlock).map_err(io::Error::from)?;
@@ -145,6 +147,71 @@ pub fn is_leased_checked(lock_path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_observer_waits_for_probe_without_reporting_an_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.lock");
+        let file = File::create(&path).unwrap();
+        // Hold the exact locks used by an observer, pausing its exclusive probe
+        // so another observer deterministically overlaps that interval.
+        let probe = File::open(dir.path()).unwrap();
+        flock(&probe, FlockOperation::LockExclusive).unwrap();
+        flock(&file, FlockOperation::LockExclusive).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx.send(is_leased_checked(&path).unwrap()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let early = result_rx.recv_timeout(std::time::Duration::from_millis(100));
+        flock(&file, FlockOperation::Unlock).unwrap();
+        drop(probe);
+        observer.join().unwrap();
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "an observer must wait for a peer probe, got {early:?}"
+        );
+        assert!(!result_rx.recv().unwrap());
+    }
+
+    #[test]
+    fn observing_a_free_lease_keeps_the_directory_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.lock");
+        fs::write(&path, b"retained lease bytes").unwrap();
+        assert!(!is_leased_checked(&path).unwrap());
+        assert!(!is_leased(&path));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(fs::read(&path).unwrap(), b"retained lease bytes");
+    }
+
+    #[test]
+    fn observers_detect_exclusive_and_shared_owners() {
+        let dir = tempfile::tempdir().unwrap();
+        for shared in [false, true] {
+            let path = dir.path().join(format!("task-{shared}.lock"));
+            let _owner = if shared {
+                acquire_shared_blocking(&path).unwrap()
+            } else {
+                acquire(&path).unwrap()
+            };
+            assert!(is_leased_checked(&path).unwrap());
+            assert!(is_leased(&path));
+        }
+    }
+
+    #[test]
+    fn observers_fail_conservatively_on_infrastructure_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let obstruction = dir.path().join("file");
+        fs::write(&obstruction, b"not a directory").unwrap();
+        let path = obstruction.join("task.lock");
+        assert!(is_leased_checked(&path).is_err());
+        assert!(is_leased(&path));
+        assert!(!is_leased(&dir.path().join("missing.lock")));
+    }
 
     #[test]
     fn try_acquire_acquires_a_free_lock() {
