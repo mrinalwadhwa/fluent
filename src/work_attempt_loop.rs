@@ -12784,6 +12784,38 @@ mod tests {
     };
 
     #[cfg(feature = "test-support")]
+    fn assert_compact_rows(
+        compact_rows: &serde_json::Value,
+        full: &[crate::verification_assessment::RequirementAssessment],
+        bindings: &serde_json::Value,
+    ) {
+        let unresolved: Vec<&crate::verification_assessment::RequirementAssessment> =
+            full.iter().filter(|row| !row.satisfied).collect();
+        let rows = compact_rows.as_array().unwrap();
+        assert_eq!(rows.len(), unresolved.len());
+        for (row, full_row) in rows.iter().zip(unresolved.iter()) {
+            assert_eq!(row["id"], full_row.id);
+            assert_eq!(row["owner"], serde_json::to_value(&full_row.owner).unwrap());
+            assert_eq!(
+                row["next_action"],
+                serde_json::to_value(&full_row.next_action).unwrap()
+            );
+            assert_eq!(
+                serde_json::Value::Array(
+                    row["binding_indices"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|index| bindings[index.as_u64().unwrap() as usize].clone())
+                        .collect()
+                ),
+                serde_json::to_value(&full_row.bindings).unwrap()
+            );
+            assert!(row["diagnostics"].is_array());
+        }
+    }
+
+    #[cfg(feature = "test-support")]
     fn assert_compact_verification_context(
         context: &serde_json::Value,
         full: &crate::verification_assessment::VerificationAssessment,
@@ -12798,26 +12830,12 @@ mod tests {
             compact["satisfied_commands"],
             full.commands.iter().filter(|row| row.satisfied).count()
         );
-        assert_eq!(
-            compact["references"],
-            serde_json::to_value(
-                full.references
-                    .iter()
-                    .filter(|row| !row.satisfied)
-                    .collect::<Vec<_>>()
-            )
-            .unwrap()
+        assert_compact_rows(
+            &compact["references"],
+            &full.references,
+            &compact["bindings"],
         );
-        assert_eq!(
-            compact["commands"],
-            serde_json::to_value(
-                full.commands
-                    .iter()
-                    .filter(|row| !row.satisfied)
-                    .collect::<Vec<_>>()
-            )
-            .unwrap()
-        );
+        assert_compact_rows(&compact["commands"], &full.commands, &compact["bindings"]);
         let saved = fs::read(compact["full_assessment"]["path"].as_str().unwrap()).unwrap();
         assert_eq!(
             compact["full_assessment"]["digest"],

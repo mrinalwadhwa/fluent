@@ -50,6 +50,7 @@ const EXECUTION_CONTEXT_MAX_FINDING_TITLE_BYTES: usize = 300;
 const EXECUTION_CONTEXT_MAX_CHANGED_FILES: usize = 100;
 const EXECUTION_CONTEXT_MAX_EVIDENCE: usize = 25;
 const EXECUTION_CONTEXT_MAX_COMMANDS: usize = 25;
+const EXECUTION_CONTEXT_MAX_DIAGNOSTIC_BYTES: usize = 512;
 const TESTER_CANDIDATE_MUTATION_FILE: &str = "candidate-mutation.json";
 const TESTER_CANDIDATE_MUTATION_SCHEMA_VERSION: u32 = 1;
 
@@ -123,6 +124,7 @@ struct ExecutionContextV1 {
 #[serde(untagged)]
 enum ExecutionContextVerificationRecord {
     Compact(ExecutionContextVerification),
+    PreviousCompact(PreviousExecutionContextVerification),
     Legacy(LegacyExecutionContextVerification),
 }
 
@@ -134,14 +136,42 @@ struct LegacyExecutionContextVerification {
     commands: Vec<crate::verification_assessment::RequirementAssessment>,
 }
 
+// Retain saved schema-three contexts with full unresolved rows when resuming.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct ExecutionContextVerification {
+#[serde(deny_unknown_fields)]
+struct PreviousExecutionContextVerification {
     candidate_commit: String,
     references: Vec<crate::verification_assessment::RequirementAssessment>,
     commands: Vec<crate::verification_assessment::RequirementAssessment>,
     satisfied_references: usize,
     satisfied_commands: usize,
     full_assessment: crate::work_model::BoundRecheckArtifact,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ExecutionContextVerification {
+    candidate_commit: String,
+    references: Vec<ExecutionContextObligation>,
+    commands: Vec<ExecutionContextObligation>,
+    satisfied_references: usize,
+    satisfied_commands: usize,
+    full_assessment: crate::work_model::BoundRecheckArtifact,
+    /// Each obligation indexes this table to retain exact bindings once.
+    bindings: Vec<crate::work_model::BoundRecheckArtifact>,
+}
+
+/// A bounded summary of one unresolved verification obligation. It keeps the
+/// obligation's identity, candidate bindings, owning stage, and actionable
+/// next step so the writer context stays usable; the complete assessment
+/// bytes remain available behind `full_assessment`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionContextObligation {
+    id: String,
+    owner: crate::work_model::CompletionResponsibility,
+    next_action: Option<String>,
+    binding_indices: Vec<usize>,
+    diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7048,22 +7078,63 @@ fn compact_execution_verification(
         .iter()
         .filter(|row| row.satisfied)
         .count();
+    let mut bindings = Vec::new();
+    let references = compact_obligations(&assessment.references, &mut bindings);
+    let commands = compact_obligations(&assessment.commands, &mut bindings);
     Ok(ExecutionContextVerification {
         candidate_commit: assessment.candidate_commit,
-        references: assessment
-            .references
-            .into_iter()
-            .filter(|row| !row.satisfied)
-            .collect(),
-        commands: assessment
-            .commands
-            .into_iter()
-            .filter(|row| !row.satisfied)
-            .collect(),
+        references,
+        commands,
+        bindings,
         satisfied_references,
         satisfied_commands,
         full_assessment,
     })
+}
+
+fn compact_obligations(
+    rows: &[crate::verification_assessment::RequirementAssessment],
+    bindings: &mut Vec<crate::work_model::BoundRecheckArtifact>,
+) -> Vec<ExecutionContextObligation> {
+    rows.iter()
+        .filter(|row| !row.satisfied)
+        .map(|row| ExecutionContextObligation {
+            id: row.id.clone(),
+            owner: row.owner.clone(),
+            next_action: row.next_action.clone(),
+            binding_indices: row
+                .bindings
+                .iter()
+                .map(|binding| {
+                    if let Some(index) = bindings.iter().position(|saved| saved == binding) {
+                        index
+                    } else {
+                        bindings.push(binding.clone());
+                        bindings.len() - 1
+                    }
+                })
+                .collect(),
+            diagnostics: compact_diagnostics(&row.diagnostics),
+        })
+        .collect()
+}
+
+/// Compact duplicated diagnostic payloads: dedupe identical strings and bound
+/// the total bytes per obligation. The full assessment retains every detail.
+fn compact_diagnostics(diagnostics: &[String]) -> Vec<String> {
+    let mut unique = Vec::new();
+    let mut remaining = EXECUTION_CONTEXT_MAX_DIAGNOSTIC_BYTES;
+    for diagnostic in diagnostics {
+        if remaining == 0 {
+            break;
+        }
+        let compact = truncate_utf8(diagnostic, remaining);
+        if !unique.contains(&compact) {
+            remaining -= compact.len();
+            unique.push(compact);
+        }
+    }
+    unique
 }
 
 fn bounded_execution_context_json(context: &mut ExecutionContextV1) -> Result<String> {
@@ -24168,6 +24239,97 @@ while time.monotonic() < deadline:
         assert_eq!(resumed["schema-version"], 2);
         assert_eq!(resumed["verification"], saved["verification"]);
         assert_eq!(resumed["current-findings"].as_array().unwrap().len(), 1);
+
+        let mut schema_three = saved.clone();
+        schema_three["schema-version"] = serde_json::json!(3);
+        schema_three["verification"]["satisfied_references"] = serde_json::json!(2);
+        schema_three["verification"]["satisfied_commands"] = serde_json::json!(3);
+        schema_three["verification"]["full_assessment"] = serde_json::json!({
+            "path": "verification-assessment.json", "digest": "sha256:fixture"
+        });
+        let mut retained: ExecutionContextV1 =
+            serde_json::from_value(schema_three.clone()).unwrap();
+        let resumed: serde_json::Value =
+            serde_json::from_str(&bounded_execution_context_json(&mut retained).unwrap()).unwrap();
+        assert_eq!(resumed, schema_three);
+    }
+
+    #[test]
+    fn corrective_context_bounds_large_unresolved_verification() {
+        let artifact = tempfile::tempdir().unwrap();
+        let row = |index: usize| {
+            serde_json::from_value::<crate::verification_assessment::RequirementAssessment>(
+                serde_json::json!({
+                    "id": format!("canonical-obligation-{index}"),
+                    "source": "canonical Tester", "meaning": {
+                        "kind": "command", "command": "prepare pinned readers; ".repeat(2000),
+                        "command_index": index, "description": null
+                    },
+                    "check": null, "satisfied": false, "cause": "unknown",
+                    "owner": if index % 2 == 0 { "writer" } else { "tester" },
+                    "next_action": "Inspect retained logs, repair the failing assertion, then rerun the named command.",
+                    "bindings": (0..20).map(|i| serde_json::json!({
+                        "path": format!("retained/{}/{i}/tester-results.json", "candidate-bound/".repeat(20)),
+                        "digest": format!("sha256:{i:064x}")
+                    })).collect::<Vec<_>>(),
+                    "diagnostics": (0..100).map(|i| format!("diagnostic {i}: {}", "large command detail ".repeat(200))).collect::<Vec<_>>()
+                })
+            ).unwrap()
+        };
+        let assessment = crate::verification_assessment::VerificationAssessment {
+            candidate_commit: "exact-candidate".into(),
+            references: (0..24).map(row).collect(),
+            commands: (24..48).map(row).collect(),
+        };
+        let full = serde_json::to_value(&assessment).unwrap();
+        let compact = compact_execution_verification(artifact.path(), assessment).unwrap();
+        // Leave ample space for the rest of the execution context.
+        assert!(
+            serde_json::to_vec_pretty(&compact).unwrap().len() < EXECUTION_CONTEXT_MAX_BYTES / 2
+        );
+        assert_eq!(compact.candidate_commit, "exact-candidate");
+        assert_eq!(compact.bindings.len(), 20);
+        for (index, summary) in compact
+            .references
+            .iter()
+            .chain(&compact.commands)
+            .enumerate()
+        {
+            let original = if index < 24 {
+                &full["references"][index]
+            } else {
+                &full["commands"][index - 24]
+            };
+            assert_eq!(summary.id, original["id"]);
+            assert_eq!(
+                serde_json::to_value(&summary.owner).unwrap(),
+                original["owner"]
+            );
+            assert_eq!(
+                serde_json::to_value(&summary.next_action).unwrap(),
+                original["next_action"]
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    summary
+                        .binding_indices
+                        .iter()
+                        .map(|index| &compact.bindings[*index])
+                        .collect::<Vec<_>>()
+                )
+                .unwrap(),
+                original["bindings"]
+            );
+        }
+        let saved = fs::read(&compact.full_assessment.path).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&saved).unwrap(),
+            full
+        );
+        assert_eq!(
+            compact.full_assessment.digest,
+            format!("sha256:{:x}", Sha256::digest(&saved))
+        );
     }
 
     #[test]
@@ -24260,9 +24422,17 @@ while time.monotonic() < deadline:
         else {
             panic!("new context must use compact verification");
         };
-        verification
-            .commands
-            .extend((0..700).map(|i| row(format!("additional-failure-{i}"), false)));
+        verification.commands.extend((0..700).map(|i| {
+            crate::work_task_executor::ExecutionContextObligation {
+                id: format!("additional-failure-{i}"),
+                owner: crate::work_model::CompletionResponsibility::Writer,
+                next_action: Some(
+                    "Repair the candidate; ".to_string() + &"authoritative detail ".repeat(40),
+                ),
+                binding_indices: vec![0],
+                diagnostics: vec!["assertion failed".to_string()],
+            }
+        }));
         let error = bounded_execution_context_json(&mut context).unwrap_err();
         assert!(error.to_string().contains("execution context core exceeds"));
         assert!(error.to_string().contains("actual:"));
