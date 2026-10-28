@@ -65704,25 +65704,41 @@ fn assert_compact_verification(
         compact["satisfied_commands"],
         full.commands.iter().filter(|row| row.satisfied).count()
     );
-    assert_eq!(
-        compact["references"],
-        serde_json::json!(
-            full.references
+    let bindings = compact["bindings"].as_array().unwrap();
+    for (kind, rows) in [
+        ("references", &full.references),
+        ("commands", &full.commands),
+    ] {
+        let unresolved = rows.iter().filter(|row| !row.satisfied).collect::<Vec<_>>();
+        let obligations = compact[kind].as_array().unwrap();
+        assert_eq!(obligations.len(), unresolved.len(), "{kind}");
+        for (obligation, row) in obligations.iter().zip(unresolved) {
+            assert_eq!(obligation["id"], row.id);
+            assert_eq!(
+                obligation["owner"],
+                serde_json::to_value(&row.owner).unwrap()
+            );
+            assert_eq!(
+                *obligation.get("next_action").unwrap(),
+                serde_json::to_value(&row.next_action).unwrap()
+            );
+            let resolved = obligation["binding_indices"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .filter(|row| !row.satisfied)
-                .collect::<Vec<_>>()
-        )
-    );
-    assert_eq!(
-        compact["commands"],
-        serde_json::json!(
-            full.commands
-                .iter()
-                .filter(|row| !row.satisfied)
-                .collect::<Vec<_>>()
-        )
-    );
+                .map(|index| &bindings[usize::try_from(index.as_u64().unwrap()).unwrap()])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                serde_json::to_value(resolved).unwrap(),
+                serde_json::to_value(&row.bindings).unwrap()
+            );
+        }
+    }
     let saved = fs::read(compact["full_assessment"]["path"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        fluent::work_model::to_json_pretty(full).unwrap().as_bytes()
+    );
     assert_eq!(
         compact["full_assessment"]["digest"],
         format!("sha256:{:x}", Sha256::digest(&saved))
