@@ -574,12 +574,7 @@ legacy_fixture_cli() {
     FLUENT_NO_UPDATE_CHECK=1 "$@"
 }
 
-# Build the history with the published executable. No Work records are synthesized
-# for the positive cases: the old Writer and reviewers own every saved identity.
-create_legacy_branch_switch_candidate() {
-  local delta="$1"
-  mkdir -p "${TEST_DIR}/home"
-  OLD_FLUENT_BIN="$(bash "${PROJECT_DIR}/tests/fixtures/prepare-released-060.sh")" || return 1
+write_legacy_mock_claude() {
   cat > "${TEST_DIR}/bin/claude" <<'MOCK'
 #!/usr/bin/env bash
 set -eu
@@ -595,6 +590,12 @@ for arg in "$@"; do
   if [ "$previous" = "-p" ]; then PROMPT="$arg"; break; fi
   previous="$arg"
 done
+# Credential refresh is a host probe, even when it runs in a Writer directory.
+# Handle it before inferring task roles from the current directory.
+if [ "$#" -eq 3 ] && [ "$1" = --safe-mode ] && [ "$2" = -p ] && [ "$PROMPT" = ok ]; then
+  printf '{"type":"result","subtype":"success","result":"ok"}\n'
+  exit 0
+fi
 # Writer launches can point at a saved assignment instead of inlining its text.
 case "$PWD:$PROMPT" in
   */work-6-work-1-attempt-1:*'You are the Learner'*) ;;
@@ -638,6 +639,38 @@ esac
 printf '{"type":"result","subtype":"success","result":"done","session_id":"mock"}\n'
 MOCK
   chmod +x "${TEST_DIR}/bin/claude"
+}
+
+test_legacy_mock_probes_leave_source_unchanged() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  write_legacy_mock_claude
+  local before
+  before=$(git status --porcelain)
+  # A fresh token needs no refresh; an expired token runs this exact probe.
+  # Exercise it in both the source root and a managed Writer-shaped directory.
+  local directory
+  for directory in "$PWD" "$TEST_DIR/work-6-work-1-attempt-1"; do
+    mkdir -p "$directory"
+    (
+      cd "$directory"
+      export PATH="$TEST_DIR/bin:$PATH"
+      "$TEST_DIR/bin/claude" auth status --json | grep -q '"loggedIn":true' || exit 1
+      "$TEST_DIR/bin/claude" --version | grep -q '2.1.211' || exit 1
+      "$TEST_DIR/bin/claude" --safe-mode -p ok || exit 1
+      [ ! -e review.md ] && [ ! -e candidate.txt ]
+    ) || return 1
+  done
+  [ "$(git status --porcelain)" = "$before" ]
+}
+
+# Build the history with the published executable. No Work records are synthesized
+# for the positive cases: the old Writer and reviewers own every saved identity.
+create_legacy_branch_switch_candidate() {
+  local delta="$1"
+  mkdir -p "${TEST_DIR}/home"
+  OLD_FLUENT_BIN="$(bash "${PROJECT_DIR}/tests/fixtures/prepare-released-060.sh")" || return 1
+  write_legacy_mock_claude
   export LANDING_FIXTURE_DELTA="$delta"
   legacy_fixture_cli "$OLD_FLUENT_BIN" work-item create work-1 --title 'Preserve review identity' > /dev/null || return 1
   legacy_fixture_cli "$OLD_FLUENT_BIN" attempt create work-1 attempt-1 --write-coder claude --review-coder claude > /dev/null || return 1
@@ -870,6 +903,9 @@ run_test "work merge rebase failure leaves target unchanged" \
   test_work_merge_rebase_failure_leaves_target_unchanged
 run_test "work merge-candidate inspection is read-only" \
   test_work_merge_candidate_inspection_read_only
+
+run_test "legacy mock credential probes leave source unchanged" \
+  test_legacy_mock_probes_leave_source_unchanged
 
 run_test "legacy branch switch lands with fresh ordinary reviews" \
   'test_work_merge_legacy_branch_switch fresh'
