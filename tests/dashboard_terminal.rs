@@ -983,6 +983,80 @@ fn worker_escape_sequences_stay_inside_terminal_view() {
     worker.stop().unwrap();
 }
 
+const DASHBOARD_FLOOD_PRODUCER: &str = r#"deadline=$(($(date +%s) + ${4:-15}))
+alive() { [ -d "$3" ] && [ "$(date +%s)" -lt "$deadline" ]; }
+while [ ! -f "$1" ]; do
+    alive "$@" || exit 1
+    sleep 0.01
+done
+i=0
+while [ "$i" -lt 20000 ] || [ ! -f "$2" ]; do
+    if [ $((i%1000)) -eq 0 ]; then
+        alive "$@" || exit 1
+        sleep 0.01
+    fi
+    printf '\033[Hflood-%s 界\n' "$i"
+    i=$((i+1))
+done
+printf 'FLOOD-DONE\n'
+exec sleep 30
+"#;
+
+#[test]
+fn flood_producer_bounds_failed_gates() {
+    // Kill and reap even when an assertion fails; this regression must never
+    // leave the very producer it checks running after the test exits.
+    struct Producer(std::process::Child);
+    impl Drop for Producer {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for scenario in ["no-start", "no-finish", "removed-directory", "normal"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("fixture");
+        std::fs::create_dir(&directory).unwrap();
+        let start = directory.join("start");
+        let finish = directory.join("finish");
+        let output = root.path().join("output");
+        let output_text = || String::from_utf8_lossy(&std::fs::read(&output).unwrap()).into_owned();
+        let mut producer = Producer(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", DASHBOARD_FLOOD_PRODUCER, "flood"])
+                .arg(&start)
+                .arg(&finish)
+                .arg(&directory)
+                .arg("2")
+                .stdout(std::fs::File::create(&output).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(std::fs::read(&output).unwrap().is_empty());
+        if scenario != "no-start" {
+            std::fs::write(&start, b"").unwrap();
+            wait_for(|| output_text().contains("flood-19999"));
+            assert!(!output_text().contains("FLOOD-DONE"));
+        }
+        if scenario == "removed-directory" {
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+        if scenario == "normal" {
+            std::fs::write(&finish, b"").unwrap();
+            wait_for(|| output_text().contains("FLOOD-DONE"));
+        } else {
+            let mut status = None;
+            wait_for(|| {
+                status = producer.0.try_wait().unwrap();
+                status.is_some()
+            });
+            assert!(!status.unwrap().success(), "{scenario}");
+            assert!(!output_text().contains("FLOOD-DONE"));
+        }
+    }
+}
+
 #[test]
 fn display_flood_keeps_dashboard_responsive() {
     let root = tempfile::tempdir().unwrap();
@@ -997,22 +1071,10 @@ fn display_flood_keeps_dashboard_responsive() {
     let start = root.path().join("start-flood");
     let finish = root.path().join("finish-flood");
     let producer = root.path().join("flood.sh");
+    // Bound both gates and exit if panic removes the fixture directory.
     // The fixture owns output. Never inject input through the inferred client:
     // tmux 3.8 rejects send-keys from Observe even with an explicit pane target.
-    std::fs::write(
-        &producer,
-        r#"while [ ! -f "$1" ]; do sleep 0.01; done
-i=0
-while [ "$i" -lt 20000 ] || [ ! -f "$2" ]; do
-    printf '\033[Hflood-%s 界\n' "$i"
-    i=$((i+1))
-    if [ $((i%1000)) -eq 0 ]; then sleep 0.01; fi
-done
-printf 'FLOOD-DONE\n'
-exec sleep 30
-"#,
-    )
-    .unwrap();
+    std::fs::write(&producer, DASHBOARD_FLOOD_PRODUCER).unwrap();
     let output = std::process::Command::new("tmux")
         .arg("-S")
         .arg(socket)
@@ -1020,6 +1082,7 @@ exec sleep 30
         .arg(&producer)
         .arg(&start)
         .arg(&finish)
+        .arg(root.path())
         .output()
         .unwrap();
     assert!(
