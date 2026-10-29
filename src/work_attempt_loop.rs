@@ -6404,7 +6404,19 @@ pub fn cancel_local_attempt(
         for execution in cancellation_execution_paths(project_root, work_item_id, &attempt)? {
             match fs::symlink_metadata(&execution) {
                 Ok(_) => {
-                    crate::execution::cancel(&execution).with_context(|| {
+                    let completed_task = attempt.tasks.iter().any(|task| {
+                        task.status == TaskStatus::Complete
+                            && task.artifact_area.as_ref().is_some_and(|area| {
+                                crate::execution::record_path_for_artifact(project_root, &area.path)
+                                    == execution
+                            })
+                    });
+                    let result = if completed_task {
+                        crate::execution::cancel_completed_task(&execution)
+                    } else {
+                        crate::execution::cancel(&execution)
+                    };
+                    result.with_context(|| {
                         format!("cancel local execution {}", execution.display())
                     })?;
                 }

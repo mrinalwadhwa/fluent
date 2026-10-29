@@ -1008,6 +1008,15 @@ pub(crate) fn settle_managed_terminal(path: &Path) -> Result<()> {
 }
 
 pub fn cancel(path: &Path) -> Result<CancelOutcome> {
+    cancel_execution(path, false)
+}
+
+/// Stop owned resources without rewriting a completed Task's settled history.
+pub(crate) fn cancel_completed_task(path: &Path) -> Result<CancelOutcome> {
+    cancel_execution(path, true)
+}
+
+fn cancel_execution(path: &Path, completed_task: bool) -> Result<CancelOutcome> {
     let _lock = crate::lease::acquire_blocking(&lock_path(path))
         .with_context(|| format!("locking local execution record {}", path.display()))?;
     let bytes = std::fs::read(path)
@@ -1020,13 +1029,20 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
         return Ok(CancelOutcome::AlreadyStopped);
     }
 
+    // Only the Work model can establish that no later command belongs to
+    // this Task. A settled command in unfinished work still needs a stop.
+    let preserve_history =
+        completed_task && record.state == ExecutionState::Settled && record.settled_at.is_some();
+
     // A settled child may be followed by another command in the same Task.
     // Preserve the stop so that command cannot launch without a new reservation.
     if !identity_is_held(path)? {
         crate::terminal_sessions::settle_for_execution(path, &record)?;
-        record.state = ExecutionState::Canceled;
-        record.settled_at = Some(crate::work_model::now_iso8601());
-        crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+        if !preserve_history {
+            record.state = ExecutionState::Canceled;
+            record.settled_at = Some(crate::work_model::now_iso8601());
+            crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+        }
         crate::terminal_sessions::retire_for_execution(path, &record)?;
         return Ok(CancelOutcome::AlreadyStopped);
     }
@@ -1040,9 +1056,11 @@ pub fn cancel(path: &Path) -> Result<CancelOutcome> {
 
     let terminal_closed = crate::terminal_sessions::settle_for_execution(path, &record)?;
     stop_owned_process_group(path, &record, terminal_closed)?;
-    record.state = ExecutionState::Canceled;
-    record.settled_at = Some(crate::work_model::now_iso8601());
-    crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+    if !preserve_history {
+        record.state = ExecutionState::Canceled;
+        record.settled_at = Some(crate::work_model::now_iso8601());
+        crate::atomic_write::atomic_write(path, &serde_json::to_vec_pretty(&record)?)?;
+    }
     crate::terminal_sessions::retire_for_execution(path, &record)?;
     Ok(CancelOutcome::Canceled)
 }

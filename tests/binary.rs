@@ -76575,6 +76575,151 @@ fn publish_unused_cancel_retry(store: &WorkModelStore, path: &Path) {
 }
 
 #[test]
+fn attempt_cancel_preserves_completed_execution_history() {
+    use fluent::{execution, work_model::*};
+    for (active, completed_live) in [(false, false), (true, false), (false, true)] {
+        let tmp = TempDir::new().unwrap();
+        let project = setup_git_project(&tmp).canonicalize().unwrap();
+        let (store, unfinished_path) = unused_cancel_retry_fixture(&project, false);
+        let history = unfinished_path
+            .parent()
+            .unwrap()
+            .join("completed/execution.json");
+        fs::create_dir_all(history.parent().unwrap()).unwrap();
+        let mut record: execution::ExecutionRecord =
+            serde_json::from_slice(&fs::read(&unfinished_path).unwrap()).unwrap();
+        record.settled_at = Some("2000-01-01T00:00:00Z".into());
+        fs::write(&history, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        store
+            .mutate_work_item("cancel-retry", |item| {
+                let mut completed = item.attempts[0].tasks[0].clone();
+                completed.id = "attempt-1-write-completed".into();
+                set_task_terminal(&mut completed, TaskStatus::Complete);
+                completed.output = Some(TaskOutput {
+                    workspace_id: "candidate".into(),
+                    workspace_path: project.display().to_string(),
+                    source_branch: "main".into(),
+                    base_commit: None,
+                    commit: git_head(&project),
+                    no_change: None,
+                    learner_canonicalization: None,
+                });
+                completed.artifact_area.as_mut().unwrap().path = history
+                    .parent()
+                    .unwrap()
+                    .strip_prefix(&project)
+                    .unwrap()
+                    .display()
+                    .to_string();
+                item.attempts[0].tasks.push(completed);
+                // The same history can also appear in the execution inventory.
+                item.attempts[0].artifacts.push(ArtifactRef {
+                    producer_id: "local-execution".into(),
+                    path: history
+                        .strip_prefix(&project)
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        // A settled completed command may still own descendants. Cancellation
+        // must stop them without replacing the retained completion evidence.
+        let mut completed_child = if completed_live {
+            let transcript = history.with_file_name("transcript.jsonl");
+            let mut command = Command::new("/bin/sleep");
+            command.arg("120");
+            let child = execution::spawn(&mut command, &transcript).unwrap();
+            execution::ExecutionHeartbeat::start(&transcript, child.id())
+                .unwrap()
+                .settle()
+                .unwrap();
+            Some(OwnedFixtureProcess {
+                group: i32::try_from(child.id()).unwrap(),
+                child: Some(child),
+                output_dir: None,
+            })
+        } else {
+            None
+        };
+        let retained = fs::read(&history).unwrap();
+        let transcript = unfinished_path.with_file_name("transcript.jsonl");
+        let mut child = if active {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("120");
+            let child = execution::spawn(&mut command, &transcript).unwrap();
+            Some(OwnedFixtureProcess {
+                group: i32::try_from(child.id()).unwrap(),
+                child: Some(child),
+                output_dir: None,
+            })
+        } else {
+            None
+        };
+        for _ in 0..2 {
+            fluent_cmd()
+                .current_dir(&project)
+                .args(["attempt", "cancel", "cancel-retry", "attempt-1"])
+                .assert()
+                .success();
+            assert_eq!(
+                fs::read(&history).unwrap(),
+                retained,
+                "completed execution bytes and settlement time must remain unchanged"
+            );
+            let stopped: execution::ExecutionRecord =
+                serde_json::from_slice(&fs::read(&unfinished_path).unwrap()).unwrap();
+            assert_eq!(stopped.state, execution::ExecutionState::Canceled);
+            assert!(!cancellation_fixture_owns_execution(&unfinished_path));
+            if completed_live {
+                assert!(!cancellation_fixture_owns_execution(&history));
+            }
+        }
+        for child in [child.as_mut(), completed_child.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(poll_until(std::time::Duration::from_secs(3), || child
+                .try_wait()
+                .unwrap()
+                .is_some()));
+        }
+        let marker = tmp.path().join("unauthorized-launch");
+        let mut command = Command::new("touch");
+        command.arg(&marker);
+        assert!(execution::spawn(&mut command, &transcript).is_err());
+        assert!(
+            execution::spawn(&mut command, &history.with_file_name("transcript.jsonl")).is_err()
+        );
+        assert!(!marker.exists());
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "task",
+                "run",
+                "cancel-retry",
+                "attempt-1",
+                "attempt-1-write-1",
+            ])
+            .assert()
+            .failure();
+        let item = store.read_work_item("cancel-retry").unwrap();
+        assert_eq!(item.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+        assert_eq!(item.attempts[0].tasks[1].status, TaskStatus::Complete);
+        assert!(
+            item.attempts[0]
+                .cancellation
+                .as_ref()
+                .unwrap()
+                .settled_at
+                .is_some()
+        );
+        assert_eq!(fs::read(&history).unwrap(), retained);
+    }
+}
+
+#[test]
 fn repeated_cancel_reconciles_proven_unused_retry_reservation() {
     use fluent::{execution, lease};
     for control in [
