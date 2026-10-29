@@ -993,29 +993,69 @@ fn display_flood_keeps_dashboard_responsive() {
             .unwrap();
     }
     let mut worker = fixture(root.path(), "flood");
+    let socket = worker.socket_path().unwrap();
+    let start = root.path().join("start-flood");
+    let finish = root.path().join("finish-flood");
+    let producer = root.path().join("flood.sh");
+    // The fixture owns output. Never inject input through the inferred client:
+    // tmux 3.8 rejects send-keys from Observe even with an explicit pane target.
+    std::fs::write(
+        &producer,
+        r#"while [ ! -f "$1" ]; do sleep 0.01; done
+i=0
+while [ "$i" -lt 20000 ] || [ ! -f "$2" ]; do
+    printf '\033[Hflood-%s 界\n' "$i"
+    i=$((i+1))
+    if [ $((i%1000)) -eq 0 ]; then sleep 0.01; fi
+done
+printf 'FLOOD-DONE\n'
+exec sleep 30
+"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new("tmux")
+        .arg("-S")
+        .arg(socket)
+        .args(["respawn-pane", "-k", "-t", "fluent:0.0", "/bin/sh"])
+        .arg(&producer)
+        .arg(&start)
+        .arg(&finish)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut view =
         EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
-    let socket = worker.socket_path().unwrap();
-    let command = r"i=0; while [ $i -lt 20000 ]; do printf '\033[Hflood-%s 界\n' $i; i=$((i+1)); done; printf 'FLOOD-DONE\n'";
-    assert!(
-        std::process::Command::new("tmux")
+    let clients = || {
+        let output = std::process::Command::new("tmux")
             .arg("-S")
             .arg(socket)
-            .args(["send-keys", "-l", command])
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new("tmux")
-            .arg("-S")
-            .arg(socket)
-            .args(["send-keys", "Enter"])
-            .status()
-            .unwrap()
-            .success()
-    );
+            .args([
+                "list-clients",
+                "-F",
+                "#{client_width}x#{client_height}:#{client_readonly}",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // The server must confirm Observe before the producer can emit anything.
+    wait_for(|| clients().trim() == "60x10:1");
+    assert!(!worker.capture_pane_snapshot().unwrap().contains("flood-"));
+    std::fs::write(&start, b"").unwrap();
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("flood-")
+    });
     fluent::dashboard::test_support::navigate_and_refresh(root.path(), &mut view).unwrap();
+    assert_eq!(clients().trim(), "60x10:1");
+    assert!(!view.frame().text().contains("FLOOD-DONE"));
+    // Keep producing throughout navigation and refresh, then allow completion.
+    std::fs::write(&finish, b"").unwrap();
     // Reconnect discards parser state, asks tmux for a complete repaint, and
     // does not silently substitute a later generation.
     let descriptor = view.descriptor().clone();
@@ -1026,6 +1066,7 @@ fn display_flood_keeps_dashboard_responsive() {
         view.frame().text().contains("FLOOD-DONE")
     });
     assert!(view.frame().cells.len() <= 60 * 10);
+    wait_for(|| clients().trim() == "60x10:1");
     drop(view);
     worker.stop().unwrap();
 }
