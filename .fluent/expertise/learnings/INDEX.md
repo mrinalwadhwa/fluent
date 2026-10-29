@@ -85,6 +85,7 @@
 - [landing-effect-lock-protects-cancellation](landing-effect-lock-protects-cancellation.md) — Serialize Attempt cancellation with landing intent publication and the target Git effect under a project-wide effect lock
 - [landing-recovery-tests-check-publication](landing-recovery-tests-check-publication.md) — Landing recovery tests must compare the retained intent with the published merge and its downstream effects
 - [lease-acquire-types-contention-vs-infrastructure](lease-acquire-types-contention-vs-infrastructure.md) — Lock/lease acquisition must return a typed result — only a non-blocking flock WouldBlock is a live peer (fail open); every other lock-path IO error propagates as a real failure
+- [lease-observers-serialize-probes](lease-observers-serialize-probes.md) — Serialize lease observers on the existing parent directory before probing ownership, and retain uncertainty on infrastructure errors
 - [legacy-evidence-compatibility-stays-isolated](legacy-evidence-compatibility-stays-isolated.md) — Recover historical evidence through a separate exact compatibility classifier that cannot weaken current execution rules
 - [legacy-plan-commands-use-complete-approved-row](legacy-plan-commands-use-complete-approved-row.md) — Recover missing host commands from the complete approved Plan row while preserving stored command metadata and rejecting ambiguity
 - [legacy-recovery-rechecks-active-blockers](legacy-recovery-rechecks-active-blockers.md) — Historical hook output can authorize retired findings only; recheck active blockers across the complete candidate range
@@ -193,6 +194,7 @@
 - [superseded-history-requires-recovery-provenance](superseded-history-requires-recovery-provenance.md) — Admit retained Superseded Tasks to Learner retry only when recovery authority, operation, and replacement account for every one
 - [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
 - [terminal-control-lease-follows-client](terminal-control-lease-follows-client.md) — Keep Control in writable tmux clients and retain the SSH helper's lease across display handoffs
+- [terminal-flood-fixtures-own-output](terminal-flood-fixtures-own-output.md) — Gate fixture-owned tmux output around confirmed read-only Observe and concurrent dashboard navigation
 - [terminal-focus-requires-visible-identity](terminal-focus-requires-visible-identity.md) — Grant embedded input focus only when the dashboard shows the selected invocation identity and Control state
 - [terminal-host-tests-exercise-live-boundaries](terminal-host-tests-exercise-live-boundaries.md) — Prove managed terminal attachment and settlement with live PTY clients, tmux, and macOS sandbox behavior
 - [terminal-input-flags-use-independent-description](terminal-input-flags-use-independent-description.md) — Open full-screen input separately so nonblocking reads cannot change PTY output flags
