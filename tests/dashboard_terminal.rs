@@ -39,16 +39,30 @@ fn confined_child(test: &str, flood: bool) -> bool {
         return true;
     }
     let logs = tempfile::tempdir().unwrap();
+    let mut client = std::env::current_dir()
+        .unwrap()
+        .join("tests/fixtures/dashboard-terminal-client.py");
+    if flood {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Exceed the navigation probe's duration to exercise independent startup.
+        let delayed = logs.path().join("delayed-client.py");
+        std::fs::write(
+            &delayed,
+            format!(
+                "#!/usr/bin/env python3\nimport os, sys, time\ntime.sleep(0.6)\nos.execv(sys.executable, [sys.executable, {}, *sys.argv[1:]])\n",
+                serde_json::to_string(&client).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&delayed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        client = delayed;
+    }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env("FLUENT_TEST_DASHBOARD_CHILD", test)
         .env("FLUENT_TEST_DASHBOARD_FLOOD", if flood { "1" } else { "0" })
-        .env(
-            "FLUENT_TEST_TERMINAL_CLIENT",
-            std::env::current_dir()
-                .unwrap()
-                .join("tests/fixtures/dashboard-terminal-client.py"),
-        )
+        .env("FLUENT_TEST_TERMINAL_CLIENT", client)
         .env("FLUENT_TEST_TERMINAL_CLIENT_LOG", logs.path().join("input"))
         .output()
         .unwrap();
@@ -175,6 +189,10 @@ fn confined_terminal_flood_preserves_dashboard_navigation() {
     .unwrap();
     let mut view =
         EmbeddedTerminal::observe(worker.observe(worker.descriptor()).unwrap(), 60, 10).unwrap();
+    wait_for(|| {
+        view.refresh();
+        view.frame().text().contains("flood 界")
+    });
     fluent::dashboard::test_support::navigate_and_refresh(root.path(), &mut view).unwrap();
     let descriptor = view.descriptor().clone();
     view.reconnect().unwrap();
