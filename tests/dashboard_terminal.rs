@@ -1013,6 +1013,8 @@ fn flood_producer_bounds_failed_gates() {
             let _ = self.0.wait();
         }
     }
+    use std::os::unix::fs::PermissionsExt;
+
     for scenario in ["no-start", "no-finish", "removed-directory", "normal"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("fixture");
@@ -1020,7 +1022,33 @@ fn flood_producer_bounds_failed_gates() {
         let start = directory.join("start");
         let finish = directory.join("finish");
         let output = root.path().join("output");
+        let errors = root.path().join("errors");
         let output_text = || String::from_utf8_lossy(&std::fs::read(&output).unwrap()).into_owned();
+
+        // Override only this child's clock. Keep the clock outside the fixture
+        // directory so removing that directory exercises the producer's guard.
+        let clock = root.path().join("clock");
+        let clock_reads = root.path().join("clock-reads");
+        std::fs::write(&clock, b"100\n").unwrap();
+        std::fs::write(&clock_reads, b"").unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let date = bin.join("date");
+        std::fs::write(
+            &date,
+            r#"#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = '+%s' ] || exit 2
+IFS= read -r now < "$FLOOD_TEST_CLOCK" || exit 3
+printf '%s\n' "$now" >> "$FLOOD_TEST_CLOCK_READS" || exit 4
+printf '%s\n' "$now"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&date, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
         let mut producer = Producer(
             std::process::Command::new("/bin/sh")
                 .args(["-c", DASHBOARD_FLOOD_PRODUCER, "flood"])
@@ -1028,31 +1056,73 @@ fn flood_producer_bounds_failed_gates() {
                 .arg(&finish)
                 .arg(&directory)
                 .arg("2")
+                .env("PATH", path)
+                .env("FLOOD_TEST_CLOCK", &clock)
+                .env("FLOOD_TEST_CLOCK_READS", &clock_reads)
                 .stdout(std::fs::File::create(&output).unwrap())
+                .stderr(std::fs::File::create(&errors).unwrap())
                 .spawn()
                 .unwrap(),
         );
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(std::fs::read(&output).unwrap().is_empty());
+        let wait = |phase: &str, predicate: &mut dyn FnMut() -> bool| {
+            // This watchdog uses real time even if the fixture clock stalls.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !predicate() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{scenario}: timed out {phase}; output bytes: {}; stderr: {}",
+                    std::fs::metadata(&output).unwrap().len(),
+                    std::fs::read_to_string(&errors).unwrap()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // Observe both deadline initialization and the first alive() check
+        // before advancing time, even if child startup is delayed by load.
+        wait("initializing the clock", &mut || {
+            std::fs::read_to_string(&clock_reads)
+                .unwrap()
+                .lines()
+                .count()
+                >= 2
+        });
+        assert!(output_text().is_empty(), "{scenario}: output before start");
+        assert!(producer.0.try_wait().unwrap().is_none(), "{scenario}");
         if scenario != "no-start" {
             std::fs::write(&start, b"").unwrap();
-            wait_for(|| output_text().contains("flood-19999"));
-            assert!(!output_text().contains("FLOOD-DONE"));
+            wait("emitting the full flood", &mut || {
+                output_text().contains("flood-19999")
+            });
+            assert!(!output_text().contains("FLOOD-DONE"), "{scenario}");
+            assert!(producer.0.try_wait().unwrap().is_none(), "{scenario}");
         }
-        if scenario == "removed-directory" {
-            std::fs::remove_dir_all(&directory).unwrap();
+        match scenario {
+            "no-start" | "no-finish" => {
+                // Expire at the exact deadline only after the expected output.
+                // Rename atomically so date never reads a partially written time.
+                let next_clock = root.path().join("next-clock");
+                std::fs::write(&next_clock, b"102\n").unwrap();
+                std::fs::rename(&next_clock, &clock).unwrap();
+            }
+            "removed-directory" => std::fs::remove_dir_all(&directory).unwrap(),
+            "normal" => std::fs::write(&finish, b"").unwrap(),
+            _ => unreachable!(),
         }
         if scenario == "normal" {
-            std::fs::write(&finish, b"").unwrap();
-            wait_for(|| output_text().contains("FLOOD-DONE"));
+            wait("finishing normally", &mut || {
+                output_text().contains("FLOOD-DONE")
+            });
         } else {
             let mut status = None;
-            wait_for(|| {
+            wait("exiting through the guard", &mut || {
                 status = producer.0.try_wait().unwrap();
                 status.is_some()
             });
             assert!(!status.unwrap().success(), "{scenario}");
-            assert!(!output_text().contains("FLOOD-DONE"));
+            assert!(!output_text().contains("FLOOD-DONE"), "{scenario}");
+            if scenario == "no-start" {
+                assert!(output_text().is_empty(), "{scenario}");
+            }
         }
     }
 }
