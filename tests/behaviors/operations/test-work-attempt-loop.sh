@@ -160,7 +160,8 @@ json_value() {
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -Fq -- "$2"; then
+  # Match literal text without a pipe that can fail on SIGPIPE.
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
@@ -519,6 +520,28 @@ test_attempt_loop_invalid_request_preserves_state_and_completes_learning() {
   [ "$(json_value '.attempts[0].learning.runs')" -eq "$FIRST_RUNS" ] || RESULT=1
   return $RESULT
 }
+
+test_literal_output_assertions() {
+  local output
+  output="$(python3 - <<'OUTPUT'
+print("EARLY_LITERAL")
+print(("x" * 80 + "\n") * 4096, end="")
+print("LITERAL [*]")
+print("LAST_LITERAL")
+OUTPUT
+)"
+  local result=0
+  assert_contains "$output" "EARLY_LITERAL" || result=1
+  assert_contains "$output" "LAST_LITERAL" || result=1
+  assert_contains "$output" "LITERAL [*]" || result=1
+  if assert_contains "$output" "ABSENT_LITERAL" >/dev/null 2>&1; then
+    printf '    FAIL: matched an absent literal\n'
+    result=1
+  fi
+  return "$result"
+}
+
+run_test "output assertions handle large literal output" test_literal_output_assertions
 
 run_test "attempt loop passes review round" test_attempt_loop_passes_review_round
 run_test "work show includes Merge Candidate" test_work_show_includes_merge_candidate

@@ -14,14 +14,15 @@ source "${PROJECT_DIR}/tests/lib/run_test.sh"
 LOG_DIR="${PROJECT_DIR}/tests/output/$(basename "$0" .sh)"
 
 assert_output_contains() {
-  if ! echo "$1" | grep -q "$2"; then
+  # Match literal text without a pipe that can fail on SIGPIPE.
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     return 1
   fi
 }
 
 assert_output_not_contains() {
-  if echo "$1" | grep -q "$2"; then
+  if [[ "$1" == *"$2"* ]]; then
     printf '    FAIL: output unexpectedly contains "%s"\n' "$2"
     return 1
   fi
@@ -486,7 +487,34 @@ PY
   return $RESULT
 }
 
+test_literal_output_assertions() {
+  local output
+  output="$(python3 - <<'OUTPUT'
+print("EARLY_LITERAL")
+print(("x" * 80 + "\n") * 4096, end="")
+print("LITERAL [*]")
+print("LAST_LITERAL")
+OUTPUT
+)"
+  local result=0
+  assert_output_contains "$output" "EARLY_LITERAL" || result=1
+  assert_output_contains "$output" "LAST_LITERAL" || result=1
+  assert_output_contains "$output" "LITERAL [*]" || result=1
+  if assert_output_contains "$output" "ABSENT_LITERAL" >/dev/null 2>&1; then
+    printf '    FAIL: matched an absent literal\n'
+    result=1
+  fi
+  assert_output_not_contains "$output" "ABSENT_LITERAL" || result=1
+  if assert_output_not_contains "$output" "EARLY_LITERAL" >/dev/null 2>&1; then
+    printf '    FAIL: missed a present literal\n'
+    result=1
+  fi
+  return "$result"
+}
+
 printf 'test-cleanup\n\n'
+
+run_test "output assertions handle large literal output" test_literal_output_assertions
 
 run_test "cleanup handles Work Items with dry run and apply" \
   test_cleanup_work_items_dry_run_and_apply
