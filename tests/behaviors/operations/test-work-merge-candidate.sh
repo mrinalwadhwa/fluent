@@ -164,9 +164,24 @@ merge_candidate_record_value() {
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -Fq -- "$2"; then
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
+    return 1
+  fi
+}
+
+
+# Exceed a pipe buffer so an early grep match cannot hide SIGPIPE.
+test_assert_contains_large_literal_output() {
+  local output
+  output="$(printf 'literal [*].\n'; printf '%1048576s' ''; printf '\nend')"
+  assert_contains "$output" 'literal [*].' || return 1
+  assert_contains "$output" 'end' || return 1
+  if assert_contains "$output" 'missing' >/dev/null; then
+    return 1
+  fi
+  if assert_contains "$output" 'literal wildcard' >/dev/null; then
     return 1
   fi
 }
@@ -876,6 +891,8 @@ test_work_merge_reconciles_applied_intent() {
 }
 
 printf 'test-work-merge-candidate\n\n'
+
+run_test "assertions match large literal output" test_assert_contains_large_literal_output
 
 run_test "work merge lands after update and checks" \
   test_work_merge_lands_after_update_and_checks
