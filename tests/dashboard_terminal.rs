@@ -764,7 +764,13 @@ fn ended_view_does_not_follow_new_invocation_input() {
 
 #[test]
 fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
-    for partial in [false, true] {
+    for input in [
+        "control",
+        "partial",
+        "terminal-report",
+        "fragmented-report",
+        "unfinished",
+    ] {
         for mode in ["observe", "control"] {
             for outcome in ["detach", "failure"] {
                 let output = std::process::Command::new("python3")
@@ -772,12 +778,12 @@ fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
                     .arg(std::env::current_exe().unwrap())
                     .arg(mode)
                     .arg(outcome)
-                    .arg(if partial { "partial" } else { "control" })
+                    .arg(input)
                     .output()
                     .unwrap();
                 assert!(
                     output.status.success(),
-                    "{mode} {outcome} partial={partial}: {}\n{}",
+                    "{mode} {outcome} input={input}: {}\n{}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );

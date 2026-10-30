@@ -12,6 +12,7 @@ import termios
 import time
 from pathlib import Path
 
+input_case = sys.argv[4]
 pressure = len(sys.argv) > 5 and sys.argv[5] == "pressure"
 
 with tempfile.TemporaryDirectory(prefix="partial-handoff-") as directory:
@@ -60,6 +61,7 @@ sys.exit(0)
     sent = set()
     status = None
     fail_at = None
+    detach_at = None
     deadline = time.monotonic() + 6
     try:
         while time.monotonic() < deadline:
@@ -73,7 +75,12 @@ sys.exit(0)
                 output.extend(data)
                 for marker, payload in [
                     (b"PARTIAL_DASHBOARD_READY", b"f\x1b[<0;" if sys.argv[4] == "partial" else b"f"),
-                    (b"PARTIAL_FULLSCREEN_READY", (b"10;10M" if sys.argv[4] == "partial" else b"") + (b"\x02d" if sys.argv[3] == "detach" else b"")),
+                    (b"PARTIAL_FULLSCREEN_READY", {
+                        "partial": b"10;10M",
+                        "terminal-report": b"\x1b[?2026;0$y",
+                        "fragmented-report": b"\x1b[?2026;",
+                        "unfinished": b"\x1b[<0;",
+                    }.get(input_case, b"")),
                     (b"PARTIAL_DASHBOARD_RETURNED", b"ee\x1b[B\x1b[A"),
                 ]:
                     if marker in output and marker not in sent:
@@ -88,7 +95,13 @@ sys.exit(0)
                                 time.sleep(0.01)
                             assert blocked.exists(), "native display never reached backpressure"
                         os.write(master, payload)
+                        if marker == b"PARTIAL_FULLSCREEN_READY":
+                            # Let the reader consume the report or incomplete
+                            # sequence before ordinary native detach arrives.
+                            detach_at = time.monotonic() + 0.1
                         if pressure and marker == b"PARTIAL_FULLSCREEN_READY":
+                            os.write(master, b"\x02d")
+                            detach_at = None
                             deadline_detach = time.monotonic() + 1
                             while time.monotonic() < deadline_detach:
                                 try:
@@ -101,6 +114,12 @@ sys.exit(0)
                         sent.add(marker)
                         if marker == b"PARTIAL_FULLSCREEN_READY" and sys.argv[3] == "failure":
                             fail_at = time.monotonic() + 0.1
+            if detach_at is not None and time.monotonic() >= detach_at:
+                if input_case == "fragmented-report":
+                    os.write(master, b"0$y")
+                if sys.argv[3] == "detach":
+                    os.write(master, b"\x02d")
+                detach_at = None
             if fail_at is not None and time.monotonic() >= fail_at:
                 Path(directory, "fail").touch()
                 fail_at = None
@@ -117,15 +136,28 @@ sys.exit(0)
             print("ok: detached before display drain")
     finally:
         if status is None:
-            # The native clients and worker own separate sessions. Retain their
-            # exact fixture-created PIDs so the watchdog cannot orphan them.
+            # Native clients and the worker lead separate process groups.
+            # Kill each owned group before reaping the Dashboard, then verify
+            # settlement so a timeout cannot silently leave descendants alive.
+            groups = {pid}
             for name in ("client-pids", "worker-pid"):
                 path = Path(directory, name)
                 for owned_pid in path.read_text().split() if path.exists() else []:
-                    try:
-                        os.kill(int(owned_pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            os.killpg(pid, signal.SIGKILL)
+                    groups.add(int(owned_pid))
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             os.waitpid(pid, 0)
+            cleanup_deadline = time.monotonic() + 2
+            while groups and time.monotonic() < cleanup_deadline:
+                for group in list(groups):
+                    try:
+                        os.killpg(group, 0)
+                    except ProcessLookupError:
+                        groups.remove(group)
+                if groups:
+                    time.sleep(0.01)
+            assert not groups, f"owned process groups survived timeout cleanup: {groups}"
         os.close(master)
