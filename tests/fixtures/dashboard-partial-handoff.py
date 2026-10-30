@@ -12,6 +12,8 @@ import termios
 import time
 from pathlib import Path
 
+pressure = len(sys.argv) > 5 and sys.argv[5] == "pressure"
+
 with tempfile.TemporaryDirectory(prefix="partial-handoff-") as directory:
     client = Path(directory, "client.py")
     client.write_text('''#!/usr/bin/env python3
@@ -23,11 +25,21 @@ original = termios.tcgetattr(0)
 atexit.register(termios.tcsetattr, 0, termios.TCSANOW, original)
 tty.setraw(0)
 os.write(1, b"\\x1b[>1uPARTIAL_FULLSCREEN_READY")
+pressure = os.environ["FLUENT_PARTIAL_HANDOFF_PRESSURE"] == "1"
+if pressure:
+    os.set_blocking(1, False)
 data = bytearray()
 while b"\\x02d" not in data and b"\\x1b[98;5ud" not in data:
     if Path(os.environ["FLUENT_PARTIAL_HANDOFF_FAILURE"]).exists():
         sys.exit(7)
-    if select.select([0], [], [], 0.01)[0]:
+    if pressure:
+        try:
+            os.write(1, b"\\x1b[H" + b"display-pressure" * 512)
+        except BlockingIOError:
+            Path(os.environ["FLUENT_PARTIAL_HANDOFF_FAILURE"]).with_name(
+                "backpressure-" + str(os.getpid())
+            ).touch()
+    if select.select([0], [], [], 0.001 if pressure else 0.01)[0]:
         data.extend(os.read(0, 8192))
 sys.exit(0)
 ''')
@@ -38,6 +50,7 @@ sys.exit(0)
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         os.environ.update(TERM="xterm-256color", FLUENT_PARTIAL_HANDOFF_MODE=sys.argv[2],
                           FLUENT_PARTIAL_HANDOFF_OUTCOME=sys.argv[3],
+                          FLUENT_PARTIAL_HANDOFF_PRESSURE="1" if pressure else "0",
                           FLUENT_PARTIAL_HANDOFF_FAILURE=str(Path(directory, "fail")),
                           FLUENT_PARTIAL_HANDOFF_CLIENT_PIDS=str(Path(directory, "client-pids")),
                           FLUENT_PARTIAL_HANDOFF_WORKER_PID=str(Path(directory, "worker-pid")),
@@ -64,7 +77,27 @@ sys.exit(0)
                     (b"PARTIAL_DASHBOARD_RETURNED", b"ee\x1b[B\x1b[A"),
                 ]:
                     if marker in output and marker not in sent:
+                        if pressure and marker == b"PARTIAL_FULLSCREEN_READY":
+                            # Observe actual producer backpressure before
+                            # detaching. Keep this native client's exact PID;
+                            # returning may create another embedded client.
+                            client_pid = int(Path(directory, "client-pids").read_text().split()[-1])
+                            blocked = Path(directory, "backpressure-" + str(client_pid))
+                            deadline_pressure = time.monotonic() + 1
+                            while not blocked.exists() and time.monotonic() < deadline_pressure:
+                                time.sleep(0.01)
+                            assert blocked.exists(), "native display never reached backpressure"
                         os.write(master, payload)
+                        if pressure and marker == b"PARTIAL_FULLSCREEN_READY":
+                            deadline_detach = time.monotonic() + 1
+                            while time.monotonic() < deadline_detach:
+                                try:
+                                    os.kill(client_pid, 0)
+                                except ProcessLookupError:
+                                    break
+                                time.sleep(0.01)
+                            else:
+                                raise AssertionError("native detach waited for display drain")
                         sent.add(marker)
                         if marker == b"PARTIAL_FULLSCREEN_READY" and sys.argv[3] == "failure":
                             fail_at = time.monotonic() + 0.1
@@ -80,6 +113,8 @@ sys.exit(0)
         assert len(sent) == 3, output.decode(errors="replace")
         assert repr(termios.tcgetattr(master)) == Path(directory, "initial-modes").read_text(), "terminal flags or control characters changed"
         print("ok: ordinary errors overlay and selection after full-screen return")
+        if pressure:
+            print("ok: detached before display drain")
     finally:
         if status is None:
             # The native clients and worker own separate sessions. Retain their

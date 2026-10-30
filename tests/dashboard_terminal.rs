@@ -787,6 +787,25 @@ fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
 }
 
 #[test]
+fn fullscreen_handoff_accepts_detach_during_output_pressure() {
+    for mode in ["observe", "control"] {
+        let output = std::process::Command::new("python3")
+            .arg("tests/fixtures/dashboard-partial-handoff.py")
+            .arg(std::env::current_exe().unwrap())
+            .args([mode, "detach", "control", "pressure"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("detached before display drain"));
+    }
+}
+
+#[test]
 fn partial_handoff_pty_child() {
     let Ok(mode) = std::env::var("FLUENT_PARTIAL_HANDOFF_MODE") else {
         return;
