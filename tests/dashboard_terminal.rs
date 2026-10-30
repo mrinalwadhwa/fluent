@@ -795,6 +795,22 @@ fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
 }
 
 #[test]
+fn fullscreen_handoff_bounds_detach_after_slow_client_startup() {
+    let output = std::process::Command::new("python3")
+        .arg("tests/fixtures/dashboard-partial-handoff.py")
+        .arg(std::env::current_exe().unwrap())
+        .args(["control", "detach", "control", "slow-start"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn fullscreen_handoff_accepts_detach_during_output_pressure() {
     for mode in ["observe", "control"] {
         let output = std::process::Command::new("python3")

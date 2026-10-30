@@ -14,17 +14,20 @@ from pathlib import Path
 
 input_case = sys.argv[4]
 pressure = len(sys.argv) > 5 and sys.argv[5] == "pressure"
+slow_start = len(sys.argv) > 5 and sys.argv[5] == "slow-start"
 
 with tempfile.TemporaryDirectory(prefix="partial-handoff-") as directory:
     client = Path(directory, "client.py")
     client.write_text('''#!/usr/bin/env python3
-import os, sys, tty, termios, atexit, select
+import os, sys, tty, termios, atexit, select, time
 from pathlib import Path
 with open(os.environ["FLUENT_PARTIAL_HANDOFF_CLIENT_PIDS"], "a") as pids:
     pids.write(str(os.getpid()) + "\\n")
 original = termios.tcgetattr(0)
 atexit.register(termios.tcsetattr, 0, termios.TCSANOW, original)
 tty.setraw(0)
+if os.environ["FLUENT_PARTIAL_HANDOFF_SLOW_START"] == "1":
+    time.sleep(6.1)
 os.write(1, b"\\x1b[>1uPARTIAL_FULLSCREEN_READY")
 pressure = os.environ["FLUENT_PARTIAL_HANDOFF_PRESSURE"] == "1"
 if pressure:
@@ -55,6 +58,7 @@ sys.exit(0)
         os.environ.update(TERM="xterm-256color", FLUENT_PARTIAL_HANDOFF_MODE=sys.argv[2],
                           FLUENT_PARTIAL_HANDOFF_OUTCOME=sys.argv[3],
                           FLUENT_PARTIAL_HANDOFF_PRESSURE="1" if pressure else "0",
+                          FLUENT_PARTIAL_HANDOFF_SLOW_START="1" if slow_start else "0",
                           FLUENT_PARTIAL_HANDOFF_FAILURE=str(Path(directory, "fail")),
                           FLUENT_PARTIAL_HANDOFF_CLIENT_PIDS=str(Path(directory, "client-pids")),
                           FLUENT_PARTIAL_HANDOFF_CLIENT_INPUT=str(Path(directory, "client-input")),
@@ -66,7 +70,11 @@ sys.exit(0)
     status = None
     fail_at = None
     detach_at = None
-    deadline = time.monotonic() + 6
+    started = time.monotonic()
+    phases = {}
+    # Startup includes process and worker setup. Time native detach and the
+    # restored Dashboard separately so setup cannot consume their watchdogs.
+    deadline = started + 30
     try:
         while time.monotonic() < deadline:
             if select.select([master], [], [], 0.01)[0]:
@@ -90,6 +98,9 @@ sys.exit(0)
                     (b"PARTIAL_DASHBOARD_RETURNED", b"ee\x1b[B\x1b[A"),
                 ]:
                     if marker in output and marker not in sent:
+                        phases[marker.decode()] = time.monotonic() - started
+                        if marker in (b"PARTIAL_FULLSCREEN_READY", b"PARTIAL_DASHBOARD_RETURNED"):
+                            deadline = time.monotonic() + 6
                         if pressure and marker == b"PARTIAL_FULLSCREEN_READY":
                             # Observe actual producer backpressure before
                             # detaching. Keep this native client's exact PID;
@@ -144,7 +155,7 @@ sys.exit(0)
         receipt = Path(directory, "client-input")
         received = receipt.read_bytes() if receipt.exists() else b""
         assert status is not None, (
-            f"Dashboard input stalled ({sys.argv[2:]}), client input={received!r}, sent={sent}: "
+            f"Dashboard input stalled ({sys.argv[2:]}), client input={received!r}, phases={phases}: "
             + output.decode(errors="replace")
         )
         assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
