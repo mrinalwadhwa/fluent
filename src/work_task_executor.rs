@@ -7538,11 +7538,15 @@ fn declared_worker_input_files(
     input_artifacts: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let mut paths = input_artifacts.to_vec();
-    for root in [
-        planning_files_dir(project_root, work_item_id),
-        general_expertise_dir(project_root),
-    ] {
-        append_existing_worker_input_files(&mut paths, &root)?;
+    append_existing_worker_input_files(
+        &mut paths,
+        &planning_files_dir(project_root, work_item_id),
+    )?;
+    // Parallel Tasks atomically publish bundled expertise in this directory.
+    // Declare only published bundle paths, never their transient staging files.
+    let expertise = general_expertise_dir(project_root);
+    for name in crate::content::GENERAL_EXPERTISE_FILES {
+        append_existing_worker_input_files(&mut paths, &expertise.join(name))?;
     }
     for workspace in workspaces {
         append_existing_worker_input_files(&mut paths, &workspace.join(".fluent/expertise"))?;
@@ -23093,6 +23097,25 @@ while time.monotonic() < deadline:
             assert!(!body.is_empty(), "{} should not be empty", path.display());
         }
         assert_eq!(dir, tmp.path().join(".fluent/work/expertise"));
+    }
+
+    #[test]
+    fn declared_inputs_exclude_unpublished_general_expertise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = materialize_general_expertise(tmp.path()).unwrap();
+        // Parallel reviewers publish each bundle file with atomic_write. Hold
+        // one real staging file open while another reviewer collects inputs.
+        let staging = tempfile::NamedTempFile::new_in(&dir).unwrap();
+        let inputs = declared_worker_input_files(tmp.path(), "work-1", &[], &[]).unwrap();
+        assert!(
+            !inputs.contains(&staging.path().to_path_buf()),
+            "unpublished expertise must never become a declared worker input"
+        );
+        drop(staging);
+        assert_eq!(inputs.len(), crate::content::GENERAL_EXPERTISE_FILES.len());
+        for path in inputs {
+            assert!(!fs::read(path).unwrap().is_empty());
+        }
     }
 
     #[test]
