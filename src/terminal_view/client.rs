@@ -149,7 +149,7 @@ impl LocalTerminal {
                 if attachment.has_control() {
                     attachment.resize(columns, rows)?;
                 }
-                attachment.run()
+                run_fullscreen(&attachment, columns, rows)
             })()
         };
         if self.attachment.lock().unwrap().validate_live().is_err() {
@@ -315,6 +315,123 @@ impl LocalTerminal {
             }
         }
         changed
+    }
+}
+
+/// Relay the native client through an owned PTY so it never steals a suffix
+/// from Crossterm's pending Dashboard input. Keep native prefix/detach keys.
+fn run_fullscreen(attachment: &Attachment, columns: u16, rows: u16) -> Result<i32> {
+    let mut raw = super::fullscreen::RawTerminal::new()?;
+    let (mut master, slave) = open_pty(columns, rows)?;
+    let mut child = FullscreenClient(attachment.spawn_in_pty(&slave)?);
+    drop(slave);
+    let mut screen = Screen::new(columns, rows)?;
+    let mut size = (columns, rows);
+    let mut output = Vec::new();
+    let mut input = Vec::new();
+    let mut input_offset = 0;
+    let mut output_offset = 0;
+    let mut prefix = false;
+    let result = (|| {
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                return Ok(status.code().unwrap_or(1));
+            }
+            attachment.validate_live()?;
+            let current = crossterm::terminal::size()?;
+            if current != size {
+                if attachment.has_control() {
+                    attachment.resize(current.0, current.1)?;
+                }
+                let dimensions = libc::winsize {
+                    ws_col: current.0,
+                    ws_row: current.1,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                ensure!(
+                    unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &dimensions) } == 0,
+                    "resizing full-screen client PTY failed"
+                );
+                screen.resize(current.0, current.1)?;
+                size = current;
+            }
+            // One bounded display block may wait while input and liveness run.
+            if output.is_empty() {
+                let mut bytes = [0; 8192];
+                match master.read(&mut bytes) {
+                    Ok(n) => output.extend_from_slice(&bytes[..n]),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.raw_os_error() == Some(libc::EIO) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if !output.is_empty() {
+                match raw.output.write(&output[output_offset..]) {
+                    Ok(0) => anyhow::bail!("full-screen terminal output closed"),
+                    Ok(n) => {
+                        screen.write(&output[output_offset..output_offset + n]);
+                        screen.replies();
+                        output_offset += n;
+                        if output_offset == output.len() {
+                            output.clear();
+                            output_offset = 0;
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if input.is_empty() && crossterm::event::poll(Duration::ZERO)? {
+                let event = crossterm::event::read()?;
+                if attachment.has_control() {
+                    if let Input::Bytes(bytes) = super::input::fullscreen_input(&mut screen, event)?
+                    {
+                        input = bytes;
+                    }
+                } else if super::input::observe_detach(&event, &mut prefix) {
+                    return Ok(0);
+                }
+            }
+            if !input.is_empty() {
+                // Revalidate the exact invocation and lease on every write.
+                attachment.validate_input()?;
+                match master.write(&input[input_offset..]) {
+                    Ok(0) => anyhow::bail!("full-screen input closed"),
+                    Ok(n) => {
+                        input_offset += n;
+                        if input_offset == input.len() {
+                            input.clear();
+                            input_offset = 0;
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    // Settle the client and discard queued input before restoring the display.
+    drop(child);
+    raw.restore_display(|| Ok(()))?;
+    result
+}
+
+struct FullscreenClient(Child);
+impl Drop for FullscreenClient {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -485,6 +602,24 @@ fn drain(
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn fullscreen_input_retains_native_prefix_and_focus_chord() {
+        let mut screen = Screen::new(40, 8).unwrap();
+        for (code, expected) in [('b', 2), (']', 29), ('5', 29)] {
+            let event = Event::Key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL));
+            assert_eq!(
+                super::super::input::fullscreen_input(&mut screen, event).unwrap(),
+                Input::Bytes(vec![expected])
+            );
+        }
+        screen.write(b"\x1b[>1u");
+        let chord = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        assert_eq!(
+            super::super::input::fullscreen_input(&mut screen, chord).unwrap(),
+            Input::Bytes(b"\x1b[93;5u".to_vec())
+        );
+    }
 
     #[test]
     fn embedded_input_quotes_tmux_prefix_without_changing_paste() {

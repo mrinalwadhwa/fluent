@@ -695,6 +695,27 @@ fn assert_unread_display_settles(scenario: &str) {
 }
 
 #[test]
+fn ssh_fullscreen_partial_input_returns_to_dashboard() {
+    for mode in ["observe", "control"] {
+        for scenario in ["drain", "disconnect"] {
+            let output = std::process::Command::new("python3")
+                .args(["tests/fixtures/ssh-terminal-handoff.py"])
+                .arg(std::env::current_exe().unwrap())
+                .args([mode, "0.4", scenario])
+                .env("FLUENT_SSH_PARTIAL_INPUT", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode} {scenario}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
 fn ssh_fullscreen_pty_child() {
     let Ok(mode) = std::env::var("FLUENT_SSH_FULLSCREEN_CHILD") else {
         return;
@@ -822,6 +843,9 @@ fn ssh_fullscreen_pty_child() {
         return;
     }
     println!("SSH_FULLSCREEN_RETURNED");
+    if std::env::var_os("FLUENT_SSH_PARTIAL_INPUT").is_some() {
+        fluent::dashboard::test_support::assert_handoff_navigation().unwrap();
+    }
     if scenario == "disconnect" {
         assert!(result.is_err());
     } else {

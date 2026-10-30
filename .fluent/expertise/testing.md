@@ -108,3 +108,5 @@ must not launch host evidence work or disable worker sandboxing to obtain it.
 - [verify-cancellation-before-fixture-cleanup](testing/patterns/verify-cancellation-before-fixture-cleanup.md) — read when verifying cancellation during setup, child launch, or process settlement.
 
 - [test-terminal-transport-with-confined-clients](testing/patterns/test-terminal-transport-with-confined-clients.md) — read when a transport test needs real runtime admission but the Writer sandbox denies Unix socket binds.
+
+- [dashboard-partial-input-handoff](testing/patterns/dashboard-partial-input-handoff.md) — read when changing the Dashboard/full-screen input owner or testing input after a view handoff.

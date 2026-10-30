@@ -66,6 +66,10 @@ impl Screen {
         if releases_focus(&event) {
             return Ok(Input::ReleaseFocus);
         }
+        self.native_input(event)
+    }
+
+    fn native_input(&mut self, event: Event) -> Result<Input> {
         let mut out = vec![0; 256];
         let mut written = 0;
         let result = match event {
@@ -183,5 +187,34 @@ impl Screen {
         );
         out.truncate(written);
         Ok(Input::Bytes(out))
+    }
+}
+
+/// Encode native full-screen keys without the embedded navigation escape or
+/// prefix quoting. Both views keep using Crossterm's same pending input state.
+pub(super) fn fullscreen_input(screen: &mut Screen, mut event: Event) -> Result<Input> {
+    // Legacy Crossterm reports byte 0x1d as Ctrl-5. Normalize that spelling
+    // before encoding against the native client's current keyboard protocol.
+    if let Event::Key(key) = &mut event {
+        if key.code == KeyCode::Char('5') && key.modifiers == KeyModifiers::CONTROL {
+            key.code = KeyCode::Char(']');
+        }
+    }
+    screen.native_input(event)
+}
+
+/// Honor native detach in Observe without encoding or forwarding user input.
+pub(super) fn observe_detach(event: &Event, prefix: &mut bool) -> bool {
+    match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            let detach = *prefix && key.code == KeyCode::Char('d') && key.modifiers.is_empty();
+            *prefix = key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL;
+            detach
+        }
+        Event::Mouse(_) | Event::Paste(_) => {
+            *prefix = false;
+            false
+        }
+        _ => false,
     }
 }

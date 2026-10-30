@@ -215,3 +215,42 @@ pub fn render_sources(sources: Vec<project::SourceSnapshot>) -> String {
         .map(|cell| cell.symbol())
         .collect()
 }
+
+/// Verify ordinary decoded input against the real Dashboard navigation state.
+pub fn assert_handoff_navigation() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    for id in ["first", "second"] {
+        store.create_work_item(&crate::work_model::WorkItem::planned(id, id))?;
+    }
+    let mut app = App::new(load_project_snapshot(&[root.path().to_owned()], Vec::new()));
+    app.filter = project::Filter::All;
+    app.resize(100, 30);
+    let original = app.selected_key.clone();
+    for (index, expected) in [
+        KeyCode::Char('e'),
+        KeyCode::Char('e'),
+        KeyCode::Down,
+        KeyCode::Up,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ensure!(
+            event::poll(Duration::from_secs(1))?,
+            "Dashboard input timed out"
+        );
+        let CEvent::Key(key) = event::read()? else {
+            anyhow::bail!("expected ordinary key")
+        };
+        ensure!(key.code == expected, "unexpected Dashboard input: {key:?}");
+        app.handle_key(key.code, key.modifiers);
+        match index {
+            0 => ensure!(app.errors, "errors overlay did not open"),
+            1 => ensure!(!app.errors, "errors overlay did not close"),
+            2 => ensure!(app.selected_key != original, "selection did not move"),
+            _ => ensure!(app.selected_key == original, "selection did not return"),
+        }
+    }
+    Ok(())
+}

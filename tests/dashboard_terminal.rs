@@ -763,6 +763,88 @@ fn ended_view_does_not_follow_new_invocation_input() {
 }
 
 #[test]
+fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
+    for partial in [false, true] {
+        for mode in ["observe", "control"] {
+            for outcome in ["detach", "failure"] {
+                let output = std::process::Command::new("python3")
+                    .arg("tests/fixtures/dashboard-partial-handoff.py")
+                    .arg(std::env::current_exe().unwrap())
+                    .arg(mode)
+                    .arg(outcome)
+                    .arg(if partial { "partial" } else { "control" })
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode} {outcome} partial={partial}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn partial_handoff_pty_child() {
+    let Ok(mode) = std::env::var("FLUENT_PARTIAL_HANDOFF_MODE") else {
+        return;
+    };
+    use fluent::dashboard::terminal::DashboardTerminal;
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = TerminalSession::start_fixture(
+        TerminalIdentity::fixture(root.path(), "partial", "attempt-1", "writer"),
+        &format!(
+            "echo $$ > '{}'; exec sleep 15",
+            std::env::var("FLUENT_PARTIAL_HANDOFF_WORKER_PID").unwrap()
+        ),
+    )
+    .unwrap();
+    let mut view =
+        EmbeddedTerminal::observe(owner.observe(owner.descriptor()).unwrap(), 60, 10).unwrap();
+    if mode == "control" {
+        view.acquire_control().unwrap();
+    }
+    let descriptor = view.descriptor().clone();
+    let mut terminal = DashboardTerminal::open().unwrap();
+    let flags = [unsafe { libc::fcntl(0, libc::F_GETFL) }, unsafe {
+        libc::fcntl(1, libc::F_GETFL)
+    }];
+    println!("PARTIAL_DASHBOARD_READY");
+    std::io::stdout().flush().unwrap();
+    assert!(crossterm::event::poll(Duration::from_secs(1)).unwrap());
+    assert_eq!(
+        crossterm::event::read().unwrap(),
+        key(KeyCode::Char('f'), KeyModifiers::NONE)
+    );
+    let result = terminal.handoff(|| view.fullscreen(100, 30));
+    if std::env::var("FLUENT_PARTIAL_HANDOFF_OUTCOME").as_deref() == Ok("failure") {
+        assert_eq!(result.unwrap(), 7);
+    } else {
+        assert_eq!(result.unwrap(), 0);
+    }
+    assert_eq!(view.descriptor(), &descriptor);
+    assert_eq!(view.has_control(), mode == "control");
+    assert!(owner.is_live().unwrap());
+    assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+    assert_eq!(
+        flags,
+        [unsafe { libc::fcntl(0, libc::F_GETFL) }, unsafe {
+            libc::fcntl(1, libc::F_GETFL)
+        }]
+    );
+    println!("PARTIAL_DASHBOARD_RETURNED");
+    std::io::stdout().flush().unwrap();
+    fluent::dashboard::test_support::assert_handoff_navigation().unwrap();
+    drop(view);
+    owner.stop().unwrap();
+    drop(terminal);
+    assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
+}
+
+#[test]
 fn fullscreen_return_restores_dashboard_after_exit_or_failure() {
     let output = std::process::Command::new("python3")
         .arg("tests/fixtures/dashboard-terminal-handoff.py")

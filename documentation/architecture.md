@@ -3845,8 +3845,13 @@ Managed windows use manual sizing from creation. tmux's `ignore-size` flag
 alone still lets an observer determine the window size when no ordinary client
 is attached. Observe keeps that flag and read-only input, while only Control
 calls the runtime's validated resize operation. Embedded Control supplies its
-viewport dimensions; full-screen Control polls the inherited terminal's size
-without reading its input. tmux's status row is disabled so the worker receives
+viewport dimensions; full-screen Control polls the operator terminal's size.
+Standalone attachments let tmux read the inherited terminal. Dashboard
+attachments relay the native client through an owned PTY and keep Crossterm
+as the input reader across both views. This prevents a second reader from
+consuming the suffix of an escape sequence already buffered by the Dashboard.
+Full-screen events use the terminal's current keyboard modes without embedded
+prefix quoting or the navigation escape. tmux's status row is disabled so the worker receives
 the entire viewport. Detaching Control leaves the last worker size intact,
 even when observers remain attached.
 

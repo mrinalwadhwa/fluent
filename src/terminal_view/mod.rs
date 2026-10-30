@@ -1,12 +1,13 @@
 //! Display managed invocation terminals without owning worker execution.
 mod attachment;
 mod client;
+mod fullscreen;
 mod input;
 mod remote;
 mod screen;
 pub use attachment::EmbeddedTerminal;
+pub(crate) use fullscreen::DisplayRestoreFailed;
 pub use input::{Input, releases_focus};
-pub(crate) use remote::DisplayRestoreFailed;
 pub use screen::{Cell, Frame, Screen};
 
 pub struct Display {

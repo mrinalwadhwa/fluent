@@ -30,6 +30,9 @@ output = bytearray()
 status = None
 sent = False
 opened = False
+partial = os.environ.get("FLUENT_SSH_PARTIAL_INPUT") == "1"
+suffix_sent = False
+navigation_sent = False
 detach_at = None
 eof = False
 deadline = time.monotonic() + 35
@@ -47,9 +50,15 @@ try:
             eof = not chunk
             output.extend(chunk)
             if not opened and b"SSH_DASHBOARD_READY" in output:
-                os.write(master, b"f")
+                os.write(master, b"f\x1b[<0;" if partial else b"f")
                 opened = True
                 phases.append({"phase": "dashboard-ready", "elapsed": time.monotonic() - started})
+            if partial and not suffix_sent and b"SSH_FULLSCREEN_PAINT" in output:
+                os.write(master, b"10;10M")
+                suffix_sent = True
+            if partial and not navigation_sent and b"SSH_FULLSCREEN_RETURNED" in output:
+                os.write(master, b"ee\x1b[B\x1b[A")
+                navigation_sent = True
             if detach_at is None and b"SSH_FULLSCREEN_PAINT" in output:
                 phases.append({"phase": "fullscreen-paint", "elapsed": time.monotonic() - started})
                 # Pause display consumption long enough to fill the output PTY.

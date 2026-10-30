@@ -47,7 +47,10 @@ generation, and holds the same exclusive Control lease used by local clients.
 Use `Ctrl-]` to return to navigation and `f` for full-screen access. Both views
 share one SSH PTY connection and one remote lease. Native tmux detach
 (`Ctrl-b`, then `d`) returns from full-screen. Only Control can resize the
-shared worker; Observe changes only its client viewport.
+shared worker; Observe changes only its client viewport. Dashboard and
+full-screen input use the same Crossterm reader, so a view change cannot split
+an incomplete input sequence between competing readers. Full-screen keys use
+the native client's keyboard modes and retain native detach.
 
 If a Control request acquires the lease but cannot start its terminal client,
 Fluent releases that newly acquired lease and reports the setup error. Reopening
