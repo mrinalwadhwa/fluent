@@ -121,8 +121,11 @@ sys.exit(0)
                         if marker == b"PARTIAL_FULLSCREEN_READY" and sys.argv[3] == "failure":
                             fail_at = time.monotonic() + 0.1
             if detach_at is not None and time.monotonic() >= detach_at:
-                if input_case == "fragmented-report":
+                if input_case == "fragmented-report" and sys.argv[3] == "detach":
                     os.write(master, b"0$y")
+                # On failure, retain the incomplete report. Sending its suffix
+                # while asking the client to exit races Dashboard restoration
+                # and can inject the suffix as ordinary Dashboard input.
                 if sys.argv[3] == "detach":
                     if input_case == "separated-report":
                         os.write(master, b"\x02")
@@ -138,7 +141,12 @@ sys.exit(0)
             if done:
                 status = status_value
                 break
-        assert status is not None, "Dashboard input stalled: " + output.decode(errors="replace")
+        receipt = Path(directory, "client-input")
+        received = receipt.read_bytes() if receipt.exists() else b""
+        assert status is not None, (
+            f"Dashboard input stalled ({sys.argv[2:]}), client input={received!r}, sent={sent}: "
+            + output.decode(errors="replace")
+        )
         assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
         assert len(sent) == 3, output.decode(errors="replace")
         assert repr(termios.tcgetattr(master)) == Path(directory, "initial-modes").read_text(), "terminal flags or control characters changed"
