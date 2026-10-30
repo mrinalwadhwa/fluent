@@ -102,7 +102,10 @@ impl RawTerminal {
 }
 impl Drop for RawTerminal {
     fn drop(&mut self) {
+        // The native client has ended. Its unfinished report or paste must not
+        // consume ordinary Dashboard keys after the synchronous handoff.
         if self.raw {
+            crossterm::event::discard_pending_sequence();
             let _ = crossterm::terminal::disable_raw_mode();
         }
     }

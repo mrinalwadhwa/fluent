@@ -26,3 +26,20 @@ returns. `ssh_fullscreen_partial_input_returns_to_dashboard` uses the existing
 SSH helper fixture. Both call `assert_handoff_navigation` against the production
 Dashboard state machine after returning. These reproduce an established split
 reader failure path; they do not establish the exact original host bytes.
+
+## Exercise native terminal reports
+
+Also send the valid automatic terminal-mode report `ESC[?2026;0$y` after
+native paint, both together and fragmented across reads, before native detach.
+Include separated Ctrl-B and d, an unfinished CSI without its suffix, and a
+paste containing control bytes. Assert Observe sends no client input and
+Control retains paste content through the native encoder. Keep the same
+Dashboard reader alive through return and require errors-overlay and selection
+changes without recovery bytes. Compare every termios flag and control
+character after the client exits.
+
+The input relay in the retained diagnostic captured that exact report before
+an actual Observe detach failure. It establishes that reproduced mechanism;
+it does not identify the bytes in the earlier unlogged host interval. The
+focused OpenSSH/tmux doubles exercise the real helper and lease boundary;
+fresh real-provider host acceptance remains separate.

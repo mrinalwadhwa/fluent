@@ -34,3 +34,7 @@ serial_test = "3"
 
 [build-dependencies]
 sha2 = "0.10"
+
+# Keep the native display input boundary bounded on the pinned release.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

@@ -1099,3 +1099,15 @@ transports for deterministic tests. Admission, durable ingress, prompt REST
 acknowledgement, sequence persistence, worker scheduling, and attribution remain
 production code in those tests. Credentials stay in the host transport and never
 enter durable inputs or provider requests.
+
+
+## Keep native terminal reports out of pending key state
+
+Use the local Crossterm 0.28.1 patch in `vendor/crossterm` for Dashboard and
+native full-screen input. Its separate nonblocking event descriptor preserves
+inherited stdin/stdout flags, and its private CSI decoder terminates unsupported
+reports such as `ESC[?2026;0$y`. Native view cleanup clears only an unfinished
+sequence through that same reader before Dashboard dispatch resumes. Do not
+replace this with a second competing reader or operator recovery bytes. See
+[the patch provenance](../../vendor/crossterm/FLUENT-PATCH.md) and the
+[handoff regression pattern](testing/patterns/dashboard-partial-input-handoff.md).

@@ -10,11 +10,14 @@ description. Setting `O_NONBLOCK` on stdin then also changes stdout, so a large
 full-screen repaint can fail with `WouldBlock` and disconnect the display.
 Duplicating stdin retains those shared file-status flags.
 
-The SSH full-screen path opens `/dev/tty` independently for nonblocking input
-and leaves the standard-stream flags unchanged. Keep that descriptor owned by
-the raw-mode guard and preserve the dashboard's terminal restoration on return.
-This isolates file-status flags; it does not give output a separate terminal
-buffer or remove output backpressure.
+The shared Crossterm reader opens the actual terminal device independently for
+nonblocking input and leaves standard-stream flags unchanged. Resolve its name
+before opening: macOS kqueue rejects the `/dev/tty` alias. Keep this input owner
+alive across Dashboard/full-screen views. The raw-mode guard clears only an
+unfinished native sequence when the display ends, then restores terminal modes.
+The local Crossterm patch also terminates unsupported private CSI reports; file
+flags alone do not prevent such a report from swallowing later detach keys.
+This isolates file-status flags; it does not remove output backpressure.
 
 Exercise this boundary through the dashboard's actual full-screen handoff after
 its event reader consumes `f`. Withhold PTY output reads during a repaint, then

@@ -41,7 +41,10 @@ while b"\\x02d" not in data and b"\\x1b[98;5ud" not in data:
                 "backpressure-" + str(os.getpid())
             ).touch()
     if select.select([0], [], [], 0.001 if pressure else 0.01)[0]:
-        data.extend(os.read(0, 8192))
+        chunk = os.read(0, 8192)
+        with open(os.environ["FLUENT_PARTIAL_HANDOFF_CLIENT_INPUT"], "ab") as receipt:
+            receipt.write(chunk)
+        data.extend(chunk)
 sys.exit(0)
 ''')
     client.chmod(0o700)
@@ -54,6 +57,7 @@ sys.exit(0)
                           FLUENT_PARTIAL_HANDOFF_PRESSURE="1" if pressure else "0",
                           FLUENT_PARTIAL_HANDOFF_FAILURE=str(Path(directory, "fail")),
                           FLUENT_PARTIAL_HANDOFF_CLIENT_PIDS=str(Path(directory, "client-pids")),
+                          FLUENT_PARTIAL_HANDOFF_CLIENT_INPUT=str(Path(directory, "client-input")),
                           FLUENT_PARTIAL_HANDOFF_WORKER_PID=str(Path(directory, "worker-pid")),
                           FLUENT_TEST_TERMINAL_CLIENT=str(client))
         os.execv(sys.argv[1], [sys.argv[1], "--exact", "partial_handoff_pty_child", "--nocapture"])
@@ -78,6 +82,8 @@ sys.exit(0)
                     (b"PARTIAL_FULLSCREEN_READY", {
                         "partial": b"10;10M",
                         "terminal-report": b"\x1b[?2026;0$y",
+                        "separated-report": b"\x1b[?2026;0$y",
+                        "literal-paste": b"\x1b[200~\x02x\x1b[?2026;0$y\x1b[201~",
                         "fragmented-report": b"\x1b[?2026;",
                         "unfinished": b"\x1b[<0;",
                     }.get(input_case, b"")),
@@ -118,7 +124,12 @@ sys.exit(0)
                 if input_case == "fragmented-report":
                     os.write(master, b"0$y")
                 if sys.argv[3] == "detach":
-                    os.write(master, b"\x02d")
+                    if input_case == "separated-report":
+                        os.write(master, b"\x02")
+                        time.sleep(0.03)
+                        os.write(master, b"d")
+                    else:
+                        os.write(master, b"\x02d")
                 detach_at = None
             if fail_at is not None and time.monotonic() >= fail_at:
                 Path(directory, "fail").touch()
@@ -131,6 +142,14 @@ sys.exit(0)
         assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
         assert len(sent) == 3, output.decode(errors="replace")
         assert repr(termios.tcgetattr(master)) == Path(directory, "initial-modes").read_text(), "terminal flags or control characters changed"
+        receipt = Path(directory, "client-input")
+        received = receipt.read_bytes() if receipt.exists() else b""
+        if sys.argv[2] == "observe":
+            assert not received, f"Observe forwarded native input: {received!r}"
+        elif input_case == "literal-paste":
+            # The native paste encoder can sanitize ESC. Ctrl-B must remain
+            # paste content, rather than become an enhanced-key event.
+            assert b"\x02x" in received, f"paste control byte changed: {received!r}"
         print("ok: ordinary errors overlay and selection after full-screen return")
         if pressure:
             print("ok: detached before display drain")

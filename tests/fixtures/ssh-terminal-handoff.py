@@ -20,6 +20,7 @@ os.environ["FLUENT_SSH_FULLSCREEN_SIGNALS"] = signals.name
 os.environ["FLUENT_SSH_FULLSCREEN_SCENARIO"] = scenario
 pid, master = pty.fork()
 if pid == 0:
+    Path(signals.name, "initial-modes").write_text(repr(termios.tcgetattr(0)))
     if unread:
         os.environ["FLUENT_SSH_FULLSCREEN_UNREAD"] = "1"
     os.environ["FLUENT_SSH_FULLSCREEN_CHILD"] = sys.argv[2]
@@ -30,7 +31,8 @@ output = bytearray()
 status = None
 sent = False
 opened = False
-partial = os.environ.get("FLUENT_SSH_PARTIAL_INPUT") == "1"
+input_case = os.environ.get("FLUENT_SSH_PARTIAL_INPUT")
+partial = input_case in ("1", "partial")
 suffix_sent = False
 navigation_sent = False
 detach_at = None
@@ -53,10 +55,19 @@ try:
                 os.write(master, b"f\x1b[<0;" if partial else b"f")
                 opened = True
                 phases.append({"phase": "dashboard-ready", "elapsed": time.monotonic() - started})
-            if partial and not suffix_sent and b"SSH_FULLSCREEN_PAINT" in output:
-                os.write(master, b"10;10M")
+            if input_case and not suffix_sent and b"SSH_FULLSCREEN_PAINT" in output:
+                payload = {
+                    "1": b"10;10M", "partial": b"10;10M",
+                    "terminal-report": b"\x1b[?2026;0$y",
+                    "fragmented-report": b"\x1b[?2026;",
+                    "unfinished": b"\x1b[<0;",
+                }.get(input_case, b"")
+                os.write(master, payload)
+                if input_case == "fragmented-report":
+                    time.sleep(0.05)
+                    os.write(master, b"0$y")
                 suffix_sent = True
-            if partial and not navigation_sent and b"SSH_FULLSCREEN_RETURNED" in output:
+            if input_case and not navigation_sent and b"SSH_FULLSCREEN_RETURNED" in output:
                 os.write(master, b"ee\x1b[B\x1b[A")
                 navigation_sent = True
             if detach_at is None and b"SSH_FULLSCREEN_PAINT" in output:
@@ -106,6 +117,7 @@ try:
                 status = result
     assert status is not None and eof, output.decode(errors="replace")
     assert sent and os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
+    assert repr(termios.tcgetattr(master)) == Path(signals.name, "initial-modes").read_text(), "terminal flags or control characters changed"
     if not unread:
         assert b"SSH_FULLSCREEN_RETURNED" in output
     assert b"\x1b[?1049h" in output and output.rfind(b"\x1b[?1049l") > output.rfind(b"\x1b[?1049h")

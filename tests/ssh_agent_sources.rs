@@ -696,21 +696,29 @@ fn assert_unread_display_settles(scenario: &str) {
 
 #[test]
 fn ssh_fullscreen_partial_input_returns_to_dashboard() {
-    for mode in ["observe", "control"] {
-        for scenario in ["drain", "disconnect"] {
-            let output = std::process::Command::new("python3")
-                .args(["tests/fixtures/ssh-terminal-handoff.py"])
-                .arg(std::env::current_exe().unwrap())
-                .args([mode, "0.4", scenario])
-                .env("FLUENT_SSH_PARTIAL_INPUT", "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{mode} {scenario}: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+    for input in [
+        "control",
+        "partial",
+        "terminal-report",
+        "fragmented-report",
+        "unfinished",
+    ] {
+        for mode in ["observe", "control"] {
+            for scenario in ["drain", "disconnect"] {
+                let output = std::process::Command::new("python3")
+                    .args(["tests/fixtures/ssh-terminal-handoff.py"])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([mode, "0.4", scenario])
+                    .env("FLUENT_SSH_PARTIAL_INPUT", input)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode} {scenario} {input}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
     }
 }

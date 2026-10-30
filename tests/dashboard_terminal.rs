@@ -769,6 +769,8 @@ fn fullscreen_handoff_keeps_dashboard_responsive_after_partial_input() {
         "partial",
         "terminal-report",
         "fragmented-report",
+        "separated-report",
+        "literal-paste",
         "unfinished",
     ] {
         for mode in ["observe", "control"] {
