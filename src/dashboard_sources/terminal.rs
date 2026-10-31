@@ -261,13 +261,19 @@ pub fn helper_terminal(root: &Path, identity: &str, columns: u16, rows: u16) -> 
                     }
                     Action::Input { bytes } => {
                         attachment.validate_input()?;
-                        ensure!(pty.is_some(), "terminal detached");
                         ensure!(
                             bytes.len() <= 64 * 1024 && pending.len() + bytes.len() <= 128 * 1024,
                             "remote input queue is full"
                         );
-                        pending.extend(bytes);
-                        input_requires_control = true;
+                        // Native detach can reach the PTY before its response
+                        // reaches the local input owner. Discard those in-flight
+                        // bytes without closing the helper or replaying them
+                        // into the next display client. Authority still needs
+                        // validation above, even when there is no display.
+                        if pty.is_some() {
+                            pending.extend(bytes);
+                            input_requires_control = true;
+                        }
                     }
                     Action::Reply { bytes } => {
                         // tmux enforces read-only input for an Observe client.

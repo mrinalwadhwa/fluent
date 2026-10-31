@@ -541,6 +541,66 @@ fn ssh_fullscreen_client_detaches_before_display_drain() {
 }
 
 #[test]
+fn ssh_native_detach_discards_inflight_input_and_retains_control() {
+    use fluent::dashboard_sources::RemoteConnection;
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = terminal_fixture(TerminalIdentity::fixture(
+        root.path(),
+        "remote",
+        "attempt-1",
+        "writer",
+    ))
+    .unwrap();
+    let ssh = fake_ssh(root.path());
+    let original = owner.descriptor().clone();
+    let mut connection =
+        RemoteConnection::open(ssh.clone(), source(root.path()), original.clone(), 160, 50)
+            .unwrap();
+    connection.acquire_control().unwrap();
+    connection.input(b"\x02d").unwrap();
+    connection.poll().unwrap(); // Send detach without consuming its response.
+    wait_for(|| {
+        std::fs::read(root.path().join("writer.input"))
+            .unwrap_or_default()
+            .ends_with(b"\x02d")
+    });
+    // The native client has detached, but SSH has not delivered that fact to
+    // the local input owner. Automatic terminal replies can still be in flight.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    connection.input(b"\x1b[?2026;0$y").unwrap();
+    wait_for(|| {
+        connection.poll().unwrap();
+        connection.detached()
+    });
+    connection.resize(55, 42).unwrap();
+    connection.repaint().unwrap();
+    assert_eq!(connection.descriptor(), &original);
+    assert!(connection.has_control());
+    assert!(owner.is_live().unwrap());
+    let mut competitor = RemoteConnection::open(ssh, source(root.path()), original, 40, 8).unwrap();
+    assert!(
+        competitor
+            .acquire_control()
+            .unwrap_err()
+            .to_string()
+            .contains("occupied")
+    );
+    // No stale input may reach the replacement display client.
+    assert_eq!(
+        std::fs::read(root.path().join("writer.input")).unwrap(),
+        b"\x02d"
+    );
+    connection.input(b"fresh").unwrap();
+    wait_for(|| {
+        connection.poll().unwrap();
+        std::fs::read(root.path().join("writer.input")).unwrap() == b"\x02dfresh"
+    });
+    drop(competitor);
+    drop(connection);
+    owner.stop().unwrap();
+}
+
+#[test]
 fn ssh_fullscreen_handoff_keeps_remote_control_lease() {
     for mode in ["observe", "control"] {
         let output = std::process::Command::new("python3")
