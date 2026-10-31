@@ -25870,10 +25870,8 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
             .env("FLUENT_NO_UPDATE_CHECK", "1")
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
             .env_remove("FLUENT_TASK_KIND")
-            .args(["scheduler", "run", "--poll-seconds", "1"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        OwnedFixtureProcess::spawn(&mut command)
+            .args(["scheduler", "run", "--poll-seconds", "1"]);
+        OwnedFixtureProcess::spawn_with_output(&mut command)
     };
     let reached_terminal = poll_until(std::time::Duration::from_secs(60), || {
         matches!(
@@ -25885,9 +25883,22 @@ fn local_preview_walking_skeleton_closes_learning_flywheel() {
     let mut scheduler = scheduler;
     send_signal(scheduler.id(), "TERM");
     let scheduler_output = scheduler.wait_with_output().unwrap();
+    if !reached_terminal
+        || !scheduler_output.status.success()
+        || terminal_status != "candidate-ready"
+    {
+        retain_scheduler_failure(
+            &main_dir,
+            &[DERIVED_FU1],
+            "walking-skeleton",
+            &scheduler_output,
+        );
+    }
     assert!(
         reached_terminal,
-        "scheduler did not reach a terminal dispatch within 60 seconds; status={terminal_status}"
+        "scheduler did not reach a terminal dispatch within 60 seconds; status={terminal_status}; stdout={} stderr={}",
+        String::from_utf8_lossy(&scheduler_output.stdout),
+        String::from_utf8_lossy(&scheduler_output.stderr)
     );
     assert!(
         scheduler_output.status.success(),
@@ -44474,6 +44485,211 @@ fn status_reports_queued_work_without_live_scheduler() {
         .stderr(predicate::str::contains("fluent attempt run").not());
 }
 
+// Keep only public fixture state, never the service home's credentials or caches.
+// Each snapshot has at most 128 files and retains the last 64 KiB of each file.
+fn retain_scheduler_failure(
+    project: &Path,
+    work_ids: &[&str],
+    phase: &str,
+    output: &std::process::Output,
+) -> PathBuf {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let test_output = log::test_log_dir_path().join(log::test_current_test_name());
+    fs::create_dir_all(&test_output).unwrap();
+    let destination = tempfile::Builder::new()
+        .prefix(phase)
+        .tempdir_in(test_output)
+        .unwrap()
+        .keep();
+    let mut paths = vec![];
+    for id in work_ids {
+        paths.push(queue_ledger_path(project, id));
+        for directory in ["items", "attempts", "tasks", "artifacts"] {
+            paths.push(project.join(format!(".fluent/work/{directory}/{id}.json")));
+            paths.push(project.join(format!(".fluent/work/{directory}/{id}")));
+        }
+    }
+    let scheduler = project.join(".fluent/work/scheduler");
+    let service = scheduler.join("service-home/.config/fluent/scheduler");
+    for file in [
+        "service.json",
+        "registry.json",
+        "build/desired.json",
+        "build/observed.json",
+    ] {
+        paths.push(service.join(file));
+    }
+    // The event journal and any public service logs are fixture-local.
+    paths.extend([
+        scheduler.join("events"),
+        service.join("logs"),
+        scheduler.join("logs"),
+    ]);
+    for file in ["stdout.log", "stderr.log", "service.log"] {
+        paths.push(service.join(file));
+    }
+    let mut manifest = format!("child status: {}\n", output.status);
+    for (name, bytes) in [
+        ("stdout.log", &output.stdout),
+        ("stderr.log", &output.stderr),
+    ] {
+        fs::write(
+            destination.join(name),
+            &bytes[bytes.len().saturating_sub(64 * 1024)..],
+        )
+        .unwrap();
+        manifest.push_str(&format!(
+            "child {name}: {} bytes (tail retained)\n",
+            bytes.len()
+        ));
+    }
+    paths.reverse(); // Preserve the relevant queue and Work state before optional logs.
+    let mut retained = 0;
+    let mut visited = 0;
+    while let Some(path) = paths.pop() {
+        visited += 1;
+        if retained == 128 || visited > 256 {
+            manifest.push_str("snapshot file limit reached\n");
+            break;
+        }
+        // Refuse symlinks at every component, including parent directories.
+        let relative = path.strip_prefix(project).unwrap();
+        let mut component_path = project.to_path_buf();
+        let safe = relative.components().all(|component| {
+            component_path.push(component);
+            fs::symlink_metadata(&component_path).is_ok_and(|m| !m.file_type().is_symlink())
+        });
+        if !safe {
+            manifest.push_str(&format!("missing or unsafe: {}\n", relative.display()));
+            continue;
+        }
+        let artifact_path = relative.strip_prefix(".fluent/work/artifacts").ok();
+        if path.is_dir() {
+            // Artifact trees contain private worker homes too. Visit only the
+            // Work/Attempt/Task levels and the Learner's public run directories.
+            if let Some(artifact) = artifact_path {
+                let depth = artifact.components().count();
+                if depth > 3
+                    && !(depth == 4 && artifact.ends_with("runs"))
+                    && !(depth == 5 && artifact.parent().is_some_and(|p| p.ends_with("runs")))
+                {
+                    continue;
+                }
+            }
+            if let Ok(entries) = fs::read_dir(&path) {
+                // Bound traversal as well as copied output.
+                paths.extend(
+                    entries
+                        .take(128)
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path()),
+                );
+            }
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        if artifact_path.is_some()
+            && !matches!(
+                path.file_name().and_then(|s| s.to_str()),
+                Some("execution.json" | "transcript.jsonl" | "stdout.log" | "stderr.log")
+            )
+        {
+            continue;
+        }
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::File::open(&path)?;
+            let size = file.metadata()?.len();
+            file.seek(SeekFrom::Start(size.saturating_sub(64 * 1024)))?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes)?;
+            let target = destination.join(relative);
+            fs::create_dir_all(target.parent().unwrap())?;
+            fs::write(target, bytes)?;
+            manifest.push_str(&format!(
+                "{}: {size} bytes (tail retained)\n",
+                relative.display()
+            ));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            manifest.push_str(&format!("{}: {error}\n", relative.display()));
+        }
+        retained += 1;
+    }
+    fs::write(destination.join("snapshot.txt"), manifest).unwrap();
+    eprintln!("scheduler failure diagnostics: {}", destination.display());
+    destination
+}
+
+#[test]
+fn scheduler_failure_snapshot_survives_fixture_cleanup() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let queue = queue_ledger_path(project, "snapshot-work");
+    fs::create_dir_all(queue.parent().unwrap()).unwrap();
+    fs::write(&queue, "queued fixture").unwrap();
+    let execution = ".fluent/work/artifacts/snapshot-work/attempt-1/task-1/execution.json";
+    fs::create_dir_all(project.join(execution).parent().unwrap()).unwrap();
+    fs::write(project.join(execution), "owned execution state").unwrap();
+    let private_log = ".fluent/work/artifacts/snapshot-work/attempt-1/task-1/home/stdout.log";
+    fs::create_dir_all(project.join(private_log).parent().unwrap()).unwrap();
+    fs::write(project.join(private_log), "private home content").unwrap();
+    let service = project.join(".fluent/work/scheduler/service-home/.config/fluent/scheduler");
+    fs::create_dir_all(&service).unwrap();
+    fs::write(service.join("service.json"), "public service state").unwrap();
+    fs::write(service.join("credentials"), "must not copy").unwrap();
+    std::os::unix::fs::symlink(service.join("credentials"), service.join("registry.json")).unwrap();
+    let mut command = Command::new("/bin/bash");
+    command.args([
+        "-c",
+        "printf 'child stdout'; printf 'child stderr' >&2; sleep 30",
+    ]);
+    let mut child = OwnedFixtureProcess::spawn_with_output(&mut command);
+    let group = child.group;
+    assert!(poll_until(std::time::Duration::from_secs(5), || {
+        fs::read(child.output_dir.as_ref().unwrap().path().join("stderr"))
+            .is_ok_and(|bytes| !bytes.is_empty())
+    }));
+    send_signal(child.id(), "TERM");
+    let mut output = child.wait_with_output().unwrap();
+    output.stdout = vec![b'x'; 128 * 1024];
+    let saved = retain_scheduler_failure(project, &["snapshot-work"], "forced-timeout", &output);
+    drop(tmp);
+    assert_eq!(
+        fs::read(saved.join(execution)).unwrap(),
+        b"owned execution state"
+    );
+    assert!(!saved.join(private_log).exists());
+    assert_eq!(fs::read(saved.join("stdout.log")).unwrap().len(), 64 * 1024);
+    assert_eq!(fs::read(saved.join("stderr.log")).unwrap(), b"child stderr");
+    assert_eq!(
+        fs::read(saved.join(".fluent/work/queue/snapshot-work.json")).unwrap(),
+        b"queued fixture"
+    );
+    assert!(
+        saved
+            .join(".fluent/work/scheduler/service-home/.config/fluent/scheduler/service.json")
+            .is_file()
+    );
+    assert!(
+        !saved
+            .join(".fluent/work/scheduler/service-home/.config/fluent/scheduler/registry.json")
+            .exists()
+    );
+    assert!(
+        !saved
+            .join(".fluent/work/scheduler/service-home/.config/fluent/scheduler/credentials")
+            .exists()
+    );
+    assert!(
+        unsafe { libc::kill(-group, 0) } == -1,
+        "owned group survived cleanup"
+    );
+}
+
 #[test]
 fn scheduler_restart_processes_durable_waiting_work() {
     let tmp = TempDir::new().unwrap();
@@ -44529,24 +44745,36 @@ exit 0
             .current_dir(project)
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
             .env("PATH", &path_env)
-            .args(["scheduler", "run", "--poll-seconds", "1"])
-            .stderr(std::process::Stdio::piped());
-        OwnedFixtureProcess::spawn(&mut command)
+            .args(["scheduler", "run", "--poll-seconds", "1"]);
+        OwnedFixtureProcess::spawn_with_output(&mut command)
     };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !(is_terminal(&wi_a) || is_terminal(&wi_b)) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "first coordinator processed nothing"
-        );
+    let first_finished = loop {
+        if is_terminal(&wi_a) || is_terminal(&wi_b) {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
         std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    };
     send_signal(first.id(), "TERM");
     let first_status = first.wait_with_output().unwrap();
+    if !first_finished || !first_status.status.success() {
+        retain_scheduler_failure(project, &[&wi_a, &wi_b], "restart-first", &first_status);
+    }
+    assert!(
+        first_finished,
+        "first coordinator processed nothing; stdout={} stderr={}",
+        String::from_utf8_lossy(&first_status.stdout),
+        String::from_utf8_lossy(&first_status.stderr)
+    );
     assert!(
         first_status.status.success(),
-        "first coordinator drains cleanly"
+        "first coordinator drains cleanly; stdout={} stderr={}",
+        String::from_utf8_lossy(&first_status.stdout),
+        String::from_utf8_lossy(&first_status.stderr)
     );
 
     // The remaining Work stayed durably queued; a restart processes it.
@@ -44556,23 +44784,33 @@ exit 0
             .current_dir(project)
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
             .env("PATH", &path_env)
-            .args(["scheduler", "run", "--poll-seconds", "1"])
-            .stderr(std::process::Stdio::piped());
-        OwnedFixtureProcess::spawn(&mut command)
+            .args(["scheduler", "run", "--poll-seconds", "1"]);
+        OwnedFixtureProcess::spawn_with_output(&mut command)
     };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
-    while !(is_terminal(&wi_a) && is_terminal(&wi_b)) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "restart did not process the durable waiting Work"
-        );
+    let second_finished = loop {
+        if is_terminal(&wi_a) && is_terminal(&wi_b) {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
         std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    };
     send_signal(second.id(), "TERM");
-    let _ = second.wait_with_output().unwrap();
+    let second_status = second.wait_with_output().unwrap();
+    if !second_finished {
+        retain_scheduler_failure(project, &[&wi_a, &wi_b], "restart-second", &second_status);
+    }
     remove_sibling_worktrees(project, &token);
 
+    assert!(
+        second_finished,
+        "restart did not process the durable waiting Work; stdout={} stderr={}",
+        String::from_utf8_lossy(&second_status.stdout),
+        String::from_utf8_lossy(&second_status.stderr)
+    );
     assert!(is_terminal(&wi_a) && is_terminal(&wi_b));
 }
 
@@ -59767,6 +60005,99 @@ esac
     assert_eq!(git_head(&workspace.workspace), candidate);
 }
 
+fn host_plan_recovery_mock_script() -> &'static str {
+    r#"#!/bin/bash
+set -euo pipefail
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+printf 'host-plan mock invocation: cwd=%s prompt-prefix=%.200s\n' "$PWD" "$PROMPT" >&2
+case "$PROMPT" in
+  *"You are the Learner"*)
+    ROLE=learner
+    printf 'host-plan mock role=%s cwd=%s\n' "$ROLE" "$PWD" >&2
+    draft_pattern='(/[^[:space:]]*follow-up-draft[.]json)'
+    if [[ ! "$PROMPT" =~ $draft_pattern ]]; then
+      printf 'Learner invocation has no draft path\n' >&2
+      exit 86
+    fi
+    DRAFT="${BASH_REMATCH[1]}"
+    mkdir -p "$(dirname "$DRAFT")"
+    printf '%s\n' '{"learning_summary":"learned","follow_ups":[]}' > "$DRAFT"
+    ;;
+  "Review changes for this Work Item: "*)
+    ROLE=reviewer
+    printf 'host-plan mock role=%s cwd=%s\n' "$ROLE" "$PWD" >&2
+    printf 'Verdict: pass\n' > review.md
+    ;;
+  *)
+    printf 'host-plan mock: unexpected invocation\n' >&2
+    exit 86
+    ;;
+esac
+"#
+}
+
+#[test]
+fn host_plan_mock_rejects_unknown_roles_and_handles_large_prompts() {
+    let tmp = TempDir::new().unwrap();
+    let draft = tmp.path().join("follow-up-draft.json");
+    for role in [
+        "You are the Learner",
+        "Review changes for this Work Item: fixture - title.",
+        "unexpected",
+    ] {
+        let prompt = format!("{role} {} {}", "x".repeat(128 * 1024), draft.display());
+        let output = Command::new("/bin/bash")
+            .current_dir(tmp.path())
+            .args([
+                "-c",
+                host_plan_recovery_mock_script(),
+                "mock",
+                "-p",
+                &prompt,
+            ])
+            .output()
+            .unwrap();
+        if role == "unexpected" {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected invocation"));
+            assert!(!tmp.path().join("review.md").exists());
+            assert!(!draft.exists());
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(draft.exists(), role == "You are the Learner");
+            assert_eq!(
+                tmp.path().join("review.md").exists(),
+                role != "You are the Learner"
+            );
+        }
+        let _ = fs::remove_file(&draft);
+        let _ = fs::remove_file(tmp.path().join("review.md"));
+    }
+    let output = Command::new("/bin/bash")
+        .current_dir(tmp.path())
+        .args([
+            "-c",
+            host_plan_recovery_mock_script(),
+            "mock",
+            "-p",
+            "You are the Learner",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no draft path"));
+    assert!(!tmp.path().join("review.md").exists());
+}
+
 #[test]
 fn host_plan_recovery_public_commands_are_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -59790,25 +60121,7 @@ fn host_plan_recovery_public_commands_are_idempotent() {
     }
     assert_eq!(dispatch_count(&project, &id), 1);
     let bin = tmp.path().join("queue-review-provider");
-    write_scheduler_claude(
-        &bin,
-        r#"#!/bin/bash
-set -euo pipefail
-PROMPT=""
-NEXT_IS_PROMPT=0
-for arg in "$@"; do
-  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
-  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
-done
-if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
-  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
-  mkdir -p "$(dirname "$DRAFT")"
-  printf '%s\n' '{"learning_summary":"learned","follow_ups":[]}' > "$DRAFT"
-else
-  printf 'Verdict: pass\n' > review.md
-fi
-"#,
-    );
+    write_scheduler_claude(&bin, host_plan_recovery_mock_script());
     let dispatch = fluent::scheduler::pick_next_queued(&project)
         .unwrap()
         .unwrap();

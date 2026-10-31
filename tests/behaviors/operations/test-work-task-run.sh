@@ -146,7 +146,7 @@ MOCK_SCRIPT
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -Fq -- "$2"; then
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
