@@ -44427,26 +44427,68 @@ fn descendant_execution_failure_preserves_land_and_reports_recovery() {
 
 #[test]
 fn idle_scheduler_shutdown_exits_immediately() {
+    assert_idle_scheduler_shutdown(Command::new(assert_cmd::cargo::cargo_bin("fluent")));
+}
+
+#[test]
+fn idle_scheduler_shutdown_waits_for_delayed_start() {
+    let mut command = Command::new("/bin/bash");
+    command
+        .args(["-c", "sleep 2; exec \"$@\"", "delayed-scheduler"])
+        .arg(assert_cmd::cargo::cargo_bin("fluent"));
+    assert_idle_scheduler_shutdown(command);
+}
+
+fn assert_idle_scheduler_shutdown(mut command: Command) {
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join(".fluent/work/items")).unwrap();
 
     // A long poll interval would delay a naive shutdown; an idle scheduler must
     // exit promptly on SIGTERM regardless.
     let mut child = {
-        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
         command
             .current_dir(tmp.path())
             .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
-            .args(["scheduler", "run", "--poll-seconds", "30"])
-            .stderr(std::process::Stdio::piped());
-        OwnedFixtureProcess::spawn(&mut command)
+            .args(["scheduler", "run", "--poll-seconds", "30"]);
+        OwnedFixtureProcess::spawn_with_output(&mut command)
     };
 
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // Startup can outlast a fixed sleep under parallel load. The service writes
+    // this fixture-local coordinator identity after installing its signal handler.
+    let metadata = tmp.path().join(".fluent/work/scheduler/coordinator.json");
+    let ready = poll_until(std::time::Duration::from_secs(10), || {
+        child.try_wait().unwrap().is_some()
+            || fs::read(&metadata).is_ok_and(|bytes| {
+                serde_json::from_slice::<fluent::scheduler::CoordinatorMetadata>(&bytes).is_ok_and(
+                    |metadata| {
+                        metadata.pid == child.id()
+                            && metadata.state == fluent::scheduler::CoordinatorState::Running
+                    },
+                )
+            })
+    }) && child.try_wait().unwrap().is_none();
+    if !ready {
+        child.terminate_and_wait();
+        let output = child.wait_with_output().unwrap();
+        let saved = retain_scheduler_failure(tmp.path(), &[], "idle-startup", &output);
+        panic!(
+            "idle scheduler did not start; diagnostics: {}",
+            saved.display()
+        );
+    }
     let signalled = std::time::Instant::now();
     send_signal(child.id(), "TERM");
-    let output = child.wait_with_output().unwrap();
+    let exited = poll_until(std::time::Duration::from_secs(10), || {
+        child.try_wait().unwrap().is_some()
+    });
     let elapsed = signalled.elapsed();
+    if !exited {
+        child.terminate_and_wait();
+    }
+    let output = child.wait_with_output().unwrap();
+    if !exited || !output.status.success() || elapsed >= std::time::Duration::from_secs(10) {
+        retain_scheduler_failure(tmp.path(), &[], "idle-shutdown", &output);
+    }
 
     assert!(
         output.status.success(),
@@ -44455,7 +44497,7 @@ fn idle_scheduler_shutdown_exits_immediately() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
+        exited && elapsed < std::time::Duration::from_secs(10),
         "idle scheduler exits without waiting the poll interval, took {elapsed:?}"
     );
 }
@@ -44522,6 +44564,7 @@ fn retain_scheduler_failure(
     }
     // The event journal and any public service logs are fixture-local.
     paths.extend([
+        scheduler.join("coordinator.json"),
         scheduler.join("events"),
         service.join("logs"),
         scheduler.join("logs"),
@@ -44639,6 +44682,8 @@ fn scheduler_failure_snapshot_survives_fixture_cleanup() {
     fs::write(project.join(private_log), "private home content").unwrap();
     let service = project.join(".fluent/work/scheduler/service-home/.config/fluent/scheduler");
     fs::create_dir_all(&service).unwrap();
+    let coordinator = ".fluent/work/scheduler/coordinator.json";
+    fs::write(project.join(coordinator), "owned coordinator identity").unwrap();
     fs::write(service.join("service.json"), "public service state").unwrap();
     fs::write(service.join("credentials"), "must not copy").unwrap();
     std::os::unix::fs::symlink(service.join("credentials"), service.join("registry.json")).unwrap();
@@ -44663,6 +44708,10 @@ fn scheduler_failure_snapshot_survives_fixture_cleanup() {
         b"owned execution state"
     );
     assert!(!saved.join(private_log).exists());
+    assert_eq!(
+        fs::read(saved.join(coordinator)).unwrap(),
+        b"owned coordinator identity"
+    );
     assert_eq!(fs::read(saved.join("stdout.log")).unwrap().len(), 64 * 1024);
     assert_eq!(fs::read(saved.join("stderr.log")).unwrap(), b"child stderr");
     assert_eq!(
