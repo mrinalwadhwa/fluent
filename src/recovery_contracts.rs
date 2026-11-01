@@ -7044,6 +7044,62 @@ pub(crate) mod verification_tests {
     }
 
     #[test]
+    fn canonical_checker_rejects_unmanaged_checkout_with_exact_objects() {
+        let (root, mut item) = fixture(false);
+        let checkout = tempfile::tempdir().unwrap();
+        fs::rename(root.path().join(".git"), checkout.path().join(".git")).unwrap();
+        crate::git::run(root.path(), &["init", "-q"], "create project repository").unwrap();
+        // An arbitrary repository containing the right SHA does not grant
+        // authority to use it as the managed candidate checkout.
+        item.attempts[0].tasks[0]
+            .output
+            .as_mut()
+            .unwrap()
+            .workspace_path = checkout.path().display().to_string();
+        let error = assess_canonical_checks(root.path(), &item.attempts[0])
+            .err()
+            .expect("an absolute unmanaged checkout must be refused");
+        assert!(error.to_string().contains("must be relative"), "{error:#}");
+    }
+
+    #[test]
+    fn canonical_checker_rejects_symbolic_or_abbreviated_commit_bindings() {
+        let (root, item) = fixture(false);
+        let commit = item.attempts[0].tasks[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .commit
+            .clone();
+        for candidate in ["HEAD", &commit[..8]] {
+            let mut item = item.clone();
+            let attempt = &mut item.attempts[0];
+            attempt.tasks[0].output.as_mut().unwrap().commit = candidate.into();
+            let tester = attempt
+                .tasks
+                .iter_mut()
+                .find(|task| task.kind == TaskKind::Tester)
+                .unwrap();
+            tester.review_context.as_mut().unwrap().candidate_commit = candidate.into();
+            let results_path = root
+                .path()
+                .join(&tester.artifact_area.as_ref().unwrap().path)
+                .join("tester-results.json");
+            let mut results: crate::tester::TesterResults =
+                serde_json::from_slice(&fs::read(&results_path).unwrap()).unwrap();
+            results.candidate_commit = Some(candidate.into());
+            fs::write(results_path, serde_json::to_vec(&results).unwrap()).unwrap();
+            let error = assess_canonical_checks(root.path(), attempt)
+                .err()
+                .expect("only exact commit SHAs may bind checker evidence");
+            assert!(
+                error.to_string().contains("full lowercase commit SHAs"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn canonical_checker_rejects_missing_objects_in_both_repositories() {
         let (root, mut item) = fixture(false);
         let workspace = tempfile::Builder::new()
