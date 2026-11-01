@@ -63,6 +63,7 @@
 - [external-review-feedback-binds-source-candidate](external-review-feedback-binds-source-candidate.md) — Persist immutable review-thread identities and an explicit source commit so selected feedback routes to the candidate it actually reviewed
 - [extract-logic-to-avoid-test-duplication](extract-logic-to-avoid-test-duplication.md) — Extract multi-step logic into standalone functions so integration tests call real code rather than reimplementing it
 - [first-writer-binds-committed-source](first-writer-binds-committed-source.md) — A missing initial Writer workspace binds only from committed source; non-Fluent dirt rejects before reservation, Git setup, baseline persistence, or coder launch
+- [fixture-diagnostics-survive-temporary-state](fixture-diagnostics-survive-temporary-state.md) — Retain bounded public scheduler diagnostics outside temporary fixtures before assertions or cleanup remove their state
 - [fixture-output-capture-precedes-polling](fixture-output-capture-precedes-polling.md) — Capture scheduler fixture output while polling progress so unread pipes cannot block completion or exit
 - [follow-up-journal-schema-boundary](follow-up-journal-schema-boundary.md) — Keep post-land journal interpretation in follow_up so cleanup does not become a second schema owner
 - [formal-workflow-bounds-need-witnesses](formal-workflow-bounds-need-witnesses.md) — Require reachable witnesses and successor coverage for bounded workflow safety searches
@@ -141,6 +142,7 @@
 - [python-test-selectors-use-static-class-ownership](python-test-selectors-use-static-class-ownership.md) — Resolve Python selectors from committed declarations with exact class ownership and space/tab keyword boundaries
 - [queue-admission-rechecks-after-evidence-preflight](queue-admission-rechecks-after-evidence-preflight.md) — Queue admission runs evidence checks outside the queue lock and rechecks the ledger before creating or reusing a dispatch
 - [readiness-gate-at-selection-not-permanent-skip](readiness-gate-at-selection-not-permanent-skip.md) — A shared readiness predicate must gate at every projection including auto-merge selection, and a retryable gate must withhold selection, never select-then-fail-then-mark a permanent skip
+- [readme-gif-rendering-preserves-palette](readme-gif-rendering-preserves-palette.md) — Preserve FFmpeg's GIF palette and frame rectangles so README asset checks do not drift from redundant gifsicle optimization
 - [rebase-preserves-review-invalidation-provenance](rebase-preserves-review-invalidation-provenance.md) — Preserve the pre-rebase Writer tip so landing can reconstruct ordinary review invalidation
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Record accepted Approach deviations in decisions.md; editing expertise alone cannot resolve conflicting requirements
 - [recoverable-parent-child-materialization](recoverable-parent-child-materialization.md) — Stage the exact parent intent before publishing multiple child records, resume matching partial publication, and gate downstream execution until materialization completes
