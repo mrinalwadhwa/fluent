@@ -77673,6 +77673,148 @@ fn tester_verify_retains_final_tester_after_no_change_writers() {
 }
 
 #[test]
+fn tester_verify_accepts_no_expertise_learner_gate_after_no_change_writer() {
+    use fluent::candidate_gate::{CANDIDATE_GATE_FILE, CandidateGatePhase};
+    use fluent::work_model::{
+        LearnerMode, NoChangeOutput, NoChangeVerification, NoChangeVerificationResult,
+    };
+
+    // Build real review, Tester, Learner gate and handoff evidence with a
+    // Learner that leaves the candidate unchanged. Then reproduce the retained
+    // no-expertise route without requiring nested Seatbelt in the final Tester.
+    let tmp = TempDir::new().unwrap();
+    let (project, bin, candidate, results) = release_acceptance_fixture(&tmp, true, false);
+    let store = WorkModelStore::new(&project);
+    let mut item = store.read_work_item_snapshot("work-1").unwrap();
+    item.learner_mode = LearnerMode::NoExpertise;
+    let attempt = &mut item.attempts[0];
+    let mut writer = attempt
+        .tasks
+        .iter()
+        .find(|task| task.kind == TaskKind::Write)
+        .unwrap()
+        .clone();
+    writer.id = "attempt-1-write-2".into();
+    let area = fluent::work_model::work_artifact_path("work-1", "attempt-1", &writer.id);
+    writer.artifact_area.as_mut().unwrap().path = area.clone();
+    let output = writer.output.as_mut().unwrap();
+    output.base_commit = Some(candidate.clone());
+    output.no_change = Some(NoChangeOutput {
+        schema_version: 1,
+        declaration_path: format!("{area}/no-change.json"),
+        reason: "The exact tested candidate needs no correction".into(),
+        verification: vec![NoChangeVerification {
+            command: "true".into(),
+            result: NoChangeVerificationResult::Pass,
+        }],
+    });
+    fs::create_dir_all(project.join(&area)).unwrap();
+    fs::write(
+        project.join(&output.no_change.as_ref().unwrap().declaration_path),
+        serde_json::to_vec(&output.no_change).unwrap(),
+    )
+    .unwrap();
+    attempt.tasks.push(writer);
+    let separate_gates = attempt
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.path.contains("/candidate-gates/")
+                && artifact.path.ends_with(CANDIDATE_GATE_FILE)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for artifact in separate_gates {
+        let gate: fluent::candidate_gate::CandidateGateEvidence =
+            serde_json::from_slice(&fs::read(project.join(&artifact.path)).unwrap()).unwrap();
+        if gate.phase == CandidateGatePhase::FinalTester {
+            fs::remove_file(project.join(&artifact.path)).unwrap();
+            attempt.artifacts.retain(|entry| entry != &artifact);
+        }
+    }
+    let gate_path = project.join(format!(
+        "{}/runs/run-{}/{}",
+        fluent::learner::handoff_dir_rel("work-1", "attempt-1"),
+        attempt.learning.as_ref().unwrap().runs,
+        CANDIDATE_GATE_FILE
+    ));
+    let bytes = fs::read(&gate_path).unwrap();
+    let gate: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(gate["phase"], "learner");
+    assert_eq!(gate["base_commit"], candidate);
+    assert_eq!(gate["candidate_commit"], candidate);
+    assert_eq!(
+        project.join(gate["tester_results_path"].as_str().unwrap()),
+        results
+    );
+    store.write_work_item(&item).unwrap();
+    assert_release_verification(&project, &candidate, true);
+    land_work_1(&project, &bin, true);
+    assert_eq!(git_head(&project), candidate);
+    assert_release_verification(&project, &candidate, true);
+
+    fs::remove_file(&gate_path).unwrap();
+    assert_release_verification(&project, &candidate, false);
+    fs::write(&gate_path, b"{malformed").unwrap();
+    assert_release_verification(&project, &candidate, false);
+    for change in [
+        "schema",
+        "phase",
+        "disposition",
+        "base",
+        "candidate",
+        "tester",
+        "failed-check",
+        "missing-check",
+        "duplicate-check",
+    ] {
+        let mut corrupted = gate.clone();
+        match change {
+            "schema" => corrupted["schema_version"] = serde_json::json!(999),
+            "phase" => corrupted["phase"] = serde_json::json!("final-tester"),
+            "disposition" => corrupted["disposition"] = serde_json::json!("rejected"),
+            "base" => corrupted["base_commit"] = serde_json::json!("0".repeat(40)),
+            "candidate" => corrupted["candidate_commit"] = serde_json::json!("0".repeat(40)),
+            "tester" => {
+                corrupted["tester_results_path"] = serde_json::json!(
+                    ".fluent/work/artifacts/work-1/attempt-1/attempt-1-baseline-tester/tester-results.json"
+                )
+            }
+            "failed-check" => corrupted["checks"][0]["status"] = serde_json::json!("failed"),
+            "missing-check" => {
+                corrupted["checks"].as_array_mut().unwrap().pop();
+            }
+            "duplicate-check" => {
+                let check = corrupted["checks"][0].clone();
+                corrupted["checks"].as_array_mut().unwrap().push(check);
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&gate_path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        if change == "tester" {
+            fluent_cmd()
+                .current_dir(&project)
+                .args([
+                    "tester",
+                    "verify",
+                    "work-1",
+                    "attempt-1",
+                    "--candidate",
+                    &candidate,
+                ])
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains(
+                    "Learner candidate gate names different Tester evidence",
+                ));
+        }
+    }
+    fs::write(&gate_path, bytes).unwrap();
+    assert_release_verification(&project, &candidate, true);
+}
+
+#[test]
 fn tester_verify_accepts_landed_no_expertise_host_checks() {
     // A no-expertise Learner requires Seatbelt. The configured Tester itself
     // runs under Seatbelt, where macOS refuses to apply a nested profile.

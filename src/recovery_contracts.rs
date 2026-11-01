@@ -930,6 +930,24 @@ pub(crate) fn validate_completed_downstream_evidence(
     project_root: &Path,
     attempt: &work_model::Attempt,
 ) -> Result<()> {
+    validate_completed_downstream_evidence_with_gate(project_root, attempt, false)
+}
+
+/// A no-expertise release retains the Learner's exact-candidate gate even when
+/// host-check recovery did not publish a separate FinalTester gate. Approach
+/// recovery still requires its own FinalTester gate through the entry above.
+pub(crate) fn validate_completed_no_expertise_release_evidence(
+    project_root: &Path,
+    attempt: &work_model::Attempt,
+) -> Result<()> {
+    validate_completed_downstream_evidence_with_gate(project_root, attempt, true)
+}
+
+fn validate_completed_downstream_evidence_with_gate(
+    project_root: &Path,
+    attempt: &work_model::Attempt,
+    use_learner_gate: bool,
+) -> Result<()> {
     let writer_index = attempt
         .tasks
         .iter()
@@ -1056,38 +1074,92 @@ pub(crate) fn validate_completed_downstream_evidence(
         );
     }
 
-    let gate_path = format!(
-        "{}/{}/{}",
-        work_model::work_artifact_path(&attempt.work_item_id, &attempt.id, "candidate-gates"),
-        tester.id,
-        crate::candidate_gate::CANDIDATE_GATE_FILE
-    );
-    let gate_ref = attempt
-        .artifacts
-        .iter()
-        .rev()
-        .find(|artifact| artifact.path == gate_path)
-        .with_context(|| format!("completed final Tester gate {} is not recorded", gate_path))?;
-    let gate_path = resolve_input_artifact_path(project_root, &gate_ref.path)?;
-    let gate_bytes = fs::read(&gate_path)
-        .with_context(|| format!("read final Tester candidate gate {}", gate_path.display()))?;
-    let gate: crate::candidate_gate::CandidateGateEvidence = serde_json::from_slice(&gate_bytes)
-        .with_context(|| format!("parse final Tester candidate gate {}", gate_path.display()))?;
+    let (gate_path, gate_phase, gate_name) = if use_learner_gate {
+        let learning = attempt
+            .learning
+            .as_ref()
+            .context("completed release has no Learning state")?;
+        anyhow::ensure!(
+            learning.is_succeeded() && learning.runs > 0,
+            "completed release Learning has not succeeded with a recorded run"
+        );
+        (
+            format!(
+                "{}/runs/run-{}/{}",
+                crate::learner::handoff_dir_rel(&attempt.work_item_id, &attempt.id),
+                learning.runs,
+                crate::candidate_gate::CANDIDATE_GATE_FILE
+            ),
+            crate::candidate_gate::CandidateGatePhase::Learner,
+            "Learner",
+        )
+    } else {
+        let path = format!(
+            "{}/{}/{}",
+            work_model::work_artifact_path(&attempt.work_item_id, &attempt.id, "candidate-gates"),
+            tester.id,
+            crate::candidate_gate::CANDIDATE_GATE_FILE
+        );
+        anyhow::ensure!(
+            attempt
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.path == path),
+            "completed final Tester gate {} is not recorded",
+            path
+        );
+        (
+            path,
+            crate::candidate_gate::CandidateGatePhase::FinalTester,
+            "final Tester",
+        )
+    };
+    let gate_path =
+        crate::verification_assessment::validate_managed_file_path(project_root, &gate_path)
+            .with_context(|| format!("resolve {gate_name} candidate gate {gate_path}"))?;
+    let gate = crate::candidate_gate::read_prior_writer_gate(&gate_path)
+        .map_err(|reason| anyhow::anyhow!("read {gate_name} candidate gate: {reason}"))?;
     anyhow::ensure!(
         gate.schema_version == crate::candidate_gate::CANDIDATE_GATE_SCHEMA_VERSION
-            && gate.phase == crate::candidate_gate::CandidateGatePhase::FinalTester
+            && gate.phase == gate_phase
             && gate.disposition == crate::candidate_gate::CandidateGateDisposition::Passed,
-        "final Tester candidate gate is not a passing current gate"
+        "{gate_name} candidate gate is not a passing current gate"
     );
     anyhow::ensure!(
         gate.base_commit == output.commit && gate.candidate_commit == output.commit,
-        "final Tester candidate gate is not bound to candidate {}",
+        "{gate_name} candidate gate is not bound to candidate {}",
         output.commit
     );
     anyhow::ensure!(
         gate.tester_results_path.as_deref() == Some(tester_results_ref.path.as_str()),
-        "final Tester candidate gate names different Tester evidence"
+        "{gate_name} candidate gate names different Tester evidence"
     );
+    if use_learner_gate {
+        let expected_checks = [
+            "candidate-identity",
+            "whitespace",
+            "commit-metadata",
+            "behavior-references",
+            "tester-reference-evidence",
+            "project-check",
+        ];
+        anyhow::ensure!(
+            gate.metadata_rewrite.is_none()
+                && gate.checks.len() == expected_checks.len()
+                && expected_checks.iter().all(|name| {
+                    gate.checks
+                        .iter()
+                        .filter(|check| check.name == *name)
+                        .count()
+                        == 1
+                })
+                && gate.checks.iter().any(|check| {
+                    check.name == "candidate-identity"
+                        && check.status == crate::candidate_gate::CandidateCheckStatus::Passed
+                }),
+            "Learner candidate gate has incomplete or malformed checks"
+        );
+    }
     anyhow::ensure!(
         gate.checks.iter().all(|check| {
             !matches!(
@@ -1096,7 +1168,7 @@ pub(crate) fn validate_completed_downstream_evidence(
                     | crate::candidate_gate::CandidateCheckStatus::Error
             )
         }),
-        "final Tester candidate gate contains a failed or errored check"
+        "{gate_name} candidate gate contains a failed or errored check"
     );
 
     let learning = attempt

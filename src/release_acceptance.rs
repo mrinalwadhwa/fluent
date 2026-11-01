@@ -136,7 +136,11 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
         crate::execution::verify_settled(&path, &owner)?;
     }
     recovery_contracts::review_coverage::ensure_landing_review_bindings(root, &item, candidate)?;
-    recovery_contracts::validate_completed_downstream_evidence(root, attempt)?;
+    if item.learner_mode == crate::work_model::LearnerMode::NoExpertise {
+        recovery_contracts::validate_completed_no_expertise_release_evidence(root, attempt)?;
+    } else {
+        recovery_contracts::validate_completed_downstream_evidence(root, attempt)?;
+    }
     let assessment = verification_assessment::assess_canonical_checks(root, attempt)?;
     ensure!(
         assessment.is_satisfied()
