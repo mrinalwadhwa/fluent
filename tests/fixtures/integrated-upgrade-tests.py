@@ -1377,7 +1377,7 @@ class ReleasedFixture(unittest.TestCase):
         self.make_independent_manifest()
         original = copy.deepcopy(self.dynamic)
         for change in ('failure-task', 'failure-turns', 'failure-session', 'initial-output', 'initial-workspace',
-                       'initial-tag', 'release-version', 'binary-hash', 'snapshot'):
+                       'initial-tag', 'release-version', 'candidate-version', 'binary-hash', 'snapshot'):
             with self.subTest(change=change):
                 manifest = copy.deepcopy(original)
                 if change == 'failure-task': manifest['failure']['task_id'] = self.old_task['id']
@@ -1387,6 +1387,7 @@ class ReleasedFixture(unittest.TestCase):
                 if change == 'initial-workspace': manifest['initial']['assigned_workspace'] = str(self.root)
                 if change == 'initial-tag': manifest['initial']['host_tag'] = 'missing-tag'
                 if change == 'release-version': manifest['released']['version'] = 'fluent 0.6.1'
+                if change == 'candidate-version': manifest['candidate']['version'] = 'fluent 0.6.0 ' + self.candidate[:8]
                 if change == 'binary-hash': manifest['candidate']['binary_sha256'] = '0' * 64
                 if change == 'snapshot': manifest['original_public_snapshot']['original-item.json'] = '0' * 64
                 self.save(self.manifest_path, manifest)
