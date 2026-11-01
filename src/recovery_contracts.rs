@@ -962,15 +962,42 @@ pub(crate) fn validate_completed_downstream_evidence(
         );
     }
 
-    let tester = attempt.tasks[writer_index + 1..]
+    let (tester_index, tester) = attempt
+        .tasks
         .iter()
+        .enumerate()
         .rev()
-        .find(|task| {
+        .find(|(_, task)| {
             task.kind == TaskKind::Tester
                 && task.status == TaskStatus::Complete
                 && !task.is_failed_command_recheck()
         })
         .context("completed Approach recovery has no final Tester")?;
+    anyhow::ensure!(
+        attempt.tasks[..tester_index]
+            .iter()
+            .any(|task| { task.kind == TaskKind::Write && task.status == TaskStatus::Complete }),
+        "completed Approach recovery has no final Tester after a Writer"
+    );
+    // A retained Tester remains final only when every later accepted Writer
+    // explicitly preserves its exact candidate. Equal commits alone do not
+    // establish accepted no-change completion, nor may a changed round be
+    // hidden by a subsequent Writer returning to the tested commit.
+    for task in &attempt.tasks[tester_index + 1..] {
+        if task.kind != TaskKind::Write || task.status != TaskStatus::Complete {
+            continue;
+        }
+        task.validate()?;
+        anyhow::ensure!(
+            task.output.as_ref().is_some_and(|later| {
+                later.no_change.is_some()
+                    && later.commit == output.commit
+                    && later.base_commit.as_deref() == Some(output.commit.as_str())
+            }),
+            "Writer {} does not preserve the final Tester candidate with accepted no-change output",
+            task.id
+        );
+    }
     let tester_area = tester
         .artifact_area
         .as_ref()

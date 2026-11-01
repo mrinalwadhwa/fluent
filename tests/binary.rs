@@ -77556,6 +77556,123 @@ fn tester_verify_accepts_complete_candidate_bound_release() {
 }
 
 #[test]
+fn tester_verify_retains_final_tester_after_no_change_writers() {
+    use fluent::work_model::{NoChangeOutput, NoChangeVerification, NoChangeVerificationResult};
+
+    for host in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let (project, bin, candidate, results) = release_acceptance_fixture(&tmp, host, false);
+        let store = WorkModelStore::new(&project);
+        let mut item = store.read_work_item_snapshot("work-1").unwrap();
+        let original = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Write)
+            .unwrap()
+            .clone();
+        for round in [2, 3] {
+            let mut writer = original.clone();
+            writer.id = format!("attempt-1-write-{round}");
+            let area = fluent::work_model::work_artifact_path("work-1", "attempt-1", &writer.id);
+            writer.artifact_area.as_mut().unwrap().path = area.clone();
+            let output = writer.output.as_mut().unwrap();
+            output.base_commit = Some(candidate.clone());
+            output.learner_canonicalization = None;
+            output.no_change = Some(NoChangeOutput {
+                schema_version: 1,
+                declaration_path: format!("{area}/no-change.json"),
+                reason: "Focused verification confirms the candidate needs no correction".into(),
+                verification: vec![NoChangeVerification {
+                    command: "true".into(),
+                    result: NoChangeVerificationResult::Pass,
+                }],
+            });
+            fs::create_dir_all(project.join(&area)).unwrap();
+            fs::write(
+                project.join(&output.no_change.as_ref().unwrap().declaration_path),
+                serde_json::to_vec(&output.no_change).unwrap(),
+            )
+            .unwrap();
+            item.attempts[0].tasks.push(writer);
+            store.write_work_item(&item).unwrap();
+            assert_release_verification(&project, &candidate, true);
+        }
+
+        // Even an intermediate Writer must preserve the exact tested candidate and
+        // carry accepted, well-formed no-change output.
+        let path = store
+            .work_task_path("work-1", "attempt-1", "attempt-1-write-2")
+            .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        for change in [
+            "changed",
+            "unaccepted",
+            "schema",
+            "reason",
+            "verification",
+            "base",
+        ] {
+            let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match change {
+                "changed" => {
+                    record["output"]["commit"] = serde_json::json!("0".repeat(40));
+                    record["output"]["no_change"] = serde_json::Value::Null;
+                }
+                "unaccepted" => record["output"]["no_change"] = serde_json::Value::Null,
+                "schema" => record["output"]["no_change"]["schema_version"] = serde_json::json!(2),
+                "reason" => record["output"]["no_change"]["reason"] = serde_json::json!(""),
+                "verification" => {
+                    record["output"]["no_change"]["verification"] = serde_json::json!([])
+                }
+                "base" => record["output"]["base_commit"] = serde_json::json!("0".repeat(40)),
+                _ => unreachable!(),
+            }
+            fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert_release_verification(&project, &candidate, false);
+            fs::write(&path, &bytes).unwrap();
+        }
+        let bytes = fs::read(&results).unwrap();
+        fs::remove_file(&results).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        let mut failed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        failed["commands"][0]["exit_code"] = serde_json::json!(7);
+        fs::write(&results, serde_json::to_vec(&failed).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&results, bytes).unwrap();
+
+        let review = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Review)
+            .unwrap();
+        let path = store
+            .work_task_path("work-1", "attempt-1", &review.id)
+            .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        stale["review_context"]["candidate_commit"] = serde_json::json!("0".repeat(40));
+        fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&path, bytes).unwrap();
+
+        land_work_1(&project, &bin, true);
+        assert_eq!(git_head(&project), candidate);
+        assert_release_verification(&project, &candidate, true);
+        let landed = store.read_work_item_snapshot("work-1").unwrap();
+        let path = store
+            .work_merge_candidate_path("work-1", &landed.merge_candidates[0].id)
+            .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        stale["merge_state"]["landing_intent"]["evidence_digest"] =
+            serde_json::json!("sha256:changed");
+        fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&path, bytes).unwrap();
+    }
+}
+
+#[test]
 fn tester_verify_accepts_landed_no_expertise_host_checks() {
     // A no-expertise Learner requires Seatbelt. The configured Tester itself
     // runs under Seatbelt, where macOS refuses to apply a nested profile.
