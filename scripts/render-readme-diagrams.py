@@ -258,9 +258,10 @@ def render_gif(source: Path, output: Path, theme: str, temporary: Path) -> None:
     run(
         [
             "gifsicle",
-            "-O3",
-            "--colors",
-            "128",
+            # FFmpeg already quantizes the frames. Preserve its palette and
+            # frame rectangles: reoptimizing can change bytes across gifsicle
+            # versions even when every displayed frame remains identical.
+            "-O0",
             "--loopcount=0",
             str(unoptimized),
             "-o",
