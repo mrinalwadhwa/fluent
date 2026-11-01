@@ -77380,3 +77380,254 @@ fn repeated_cancel_rejects_changed_generation_and_resumed_stop() {
         );
     }
 }
+
+fn release_acceptance_fixture(tmp: &TempDir, host: bool) -> (PathBuf, PathBuf, String, PathBuf) {
+    let project = setup_git_project(tmp);
+    let commands = if host {
+        vec!["true", "false"]
+    } else {
+        vec!["true", "true"]
+    };
+    let definitions = commands
+        .iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": command, "test_harness": "shell-harness"
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        serde_json::to_vec(&serde_json::json!({"commands": definitions})).unwrap(),
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["add", ".fluent/tester.yaml"],
+        "stage release checks",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add release checks"],
+        "commit release checks",
+    )
+    .unwrap();
+    let bin = tmp.path().join("release-provider");
+    write_mock_claude(
+        &bin,
+        &learner_land_mock_script(r#"{"learning_summary":"release","follow_ups":[]}"#),
+    );
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Release acceptance",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+    let store = WorkModelStore::new(&project);
+    let mut item = store.read_work_item("work-1").unwrap();
+    item.attempts[0].writer_completion_contract =
+        Some(fluent::work_model::WriterCompletionContract {
+            version: fluent::work_model::WRITER_COMPLETION_CONTRACT_VERSION,
+            requirements: vec![],
+        });
+    store.write_work_item(&item).unwrap();
+    let run = || {
+        let mut command = fluent_cmd();
+        command
+            .current_dir(&project)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .env("PATH", mock_path(&bin));
+        command
+    };
+    run().assert().success();
+    let store = WorkModelStore::new(&project);
+    let item = store.read_work_item_snapshot("work-1").unwrap();
+    let candidate = item.attempts[0]
+        .current_candidate_commit()
+        .unwrap()
+        .to_string();
+    let tester = item.attempts[0]
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == fluent::work_model::TaskKind::Tester)
+        .unwrap();
+    let results = project
+        .join(&tester.artifact_area.as_ref().unwrap().path)
+        .join("tester-results.json");
+    if host {
+        attach_canonical_fixture_result(tmp, &project, "work-1", &candidate, 1, "false");
+        run()
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("is ready"));
+    }
+    assert_eq!(
+        store
+            .read_work_item_snapshot("work-1")
+            .unwrap()
+            .merge_candidates[0]
+            .candidate_commit,
+        candidate
+    );
+    // Verification operates on the actual exact checkout. A detached source
+    // checkout also exercises landing's saved target-branch binding.
+    git::run(
+        &project,
+        &["checkout", "--detach", &candidate],
+        "select exact release checkout",
+    )
+    .unwrap();
+    (project, bin, candidate, results)
+}
+
+fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
+    let before = snapshot_tree(&project.join(".fluent/work"));
+    let assertion = fluent_cmd()
+        .current_dir(project)
+        .args([
+            "tester",
+            "verify",
+            "work-1",
+            "attempt-1",
+            "--candidate",
+            candidate,
+        ])
+        .assert();
+    if passes {
+        assertion
+            .success()
+            .stdout(predicate::str::contains("Release acceptance verified"));
+    } else {
+        assertion.failure();
+    }
+    assert_eq!(
+        snapshot_tree(&project.join(".fluent/work")),
+        before,
+        "release verification must leave Work records and artifacts unchanged"
+    );
+}
+
+#[test]
+fn tester_verify_accepts_complete_candidate_bound_release() {
+    for host in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let (project, bin, candidate, results) = release_acceptance_fixture(&tmp, host);
+        let original = fs::read(&results).unwrap();
+        assert_release_verification(&project, &candidate, true);
+        assert_eq!(fs::read(&results).unwrap(), original);
+        // The exact same reviewed commit remains verifiable after landing retires
+        // the managed source workspace. No descendant receives this authority.
+        land_work_1(&project, &bin, true);
+        assert_eq!(git_head(&project), candidate);
+        assert_release_verification(&project, &candidate, true);
+    }
+}
+
+#[test]
+fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, true);
+    assert_release_verification(&project, &candidate, true);
+    assert_release_verification(&project, &candidate[..8], false);
+    assert_release_verification(&project, &"0".repeat(40), false);
+    fs::write(project.join("untracked-release-input"), "dirty").unwrap();
+    assert_release_verification(&project, &candidate, false);
+    fs::remove_file(project.join("untracked-release-input")).unwrap();
+    let store = WorkModelStore::new(&project);
+    let saved = store.read_work_item_snapshot("work-1").unwrap();
+    for change in [
+        "learning",
+        "candidate",
+        "ordinary-review",
+        "targeted-review",
+        "unsettled",
+        "host-digest",
+    ] {
+        let attempt = &saved.attempts[0];
+        let path = match change {
+            "candidate" => store
+                .work_merge_candidate_path("work-1", &saved.merge_candidates[0].id)
+                .unwrap(),
+            "ordinary-review" | "targeted-review" | "unsettled" => {
+                let task = attempt
+                    .tasks
+                    .iter()
+                    .find(|task| match change {
+                        "ordinary-review" => {
+                            task.kind == fluent::work_model::TaskKind::Review
+                                && task.role == "architecture"
+                                && task.evidence_review_context.is_none()
+                        }
+                        "targeted-review" => task.evidence_review_context.is_some(),
+                        _ => task.kind == fluent::work_model::TaskKind::Write,
+                    })
+                    .unwrap();
+                store
+                    .work_task_path("work-1", "attempt-1", &task.id)
+                    .unwrap()
+            }
+            _ => store.work_attempt_path("work-1", "attempt-1").unwrap(),
+        };
+        let bytes = fs::read(&path).unwrap();
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        match change {
+            "learning" => record["learning"] = serde_json::Value::Null,
+            "candidate" => record["candidate_commit"] = serde_json::json!("0".repeat(40)),
+            "ordinary-review" | "targeted-review" => record["status"] = serde_json::json!("failed"),
+            "unsettled" => record["status"] = serde_json::json!("executing"),
+            "host-digest" => {
+                record["evidence_recoveries"][0]["attachment"]["digest"] =
+                    serde_json::json!("sha256:changed")
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&path, bytes).unwrap();
+    }
+    let original = fs::read(&results).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    for change in [
+        "candidate",
+        "missing-command",
+        "wrong-command",
+        "unexplained-failure",
+        "summary",
+    ] {
+        let mut corrupted = value.clone();
+        match change {
+            "candidate" => corrupted["candidate_commit"] = serde_json::json!("0".repeat(40)),
+            "missing-command" => {
+                corrupted["commands"].as_array_mut().unwrap().pop();
+            }
+            "wrong-command" => corrupted["commands"][0]["command"] = serde_json::json!("foreign"),
+            "unexplained-failure" => corrupted["commands"][0]["exit_code"] = serde_json::json!(7),
+            "summary" => corrupted["summary"]["total"] = serde_json::json!(999),
+            _ => unreachable!(),
+        }
+        fs::write(&results, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&results, &original).unwrap();
+    }
+    let manifest_path = results.with_file_name("canonical-run.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    manifest["config_digest"] = serde_json::json!("sha256:changed");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_release_verification(&project, &candidate, false);
+    fs::write(&manifest_path, original).unwrap();
+    fs::remove_file(results.parent().unwrap().join("commands/0-stdout.log")).unwrap();
+    assert_release_verification(&project, &candidate, false);
+}

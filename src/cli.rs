@@ -1120,6 +1120,16 @@ pub enum QueueCommands {
 
 #[derive(Subcommand)]
 pub enum TesterCommands {
+    /// Verify retained release acceptance without running tests or changing Work
+    Verify {
+        /// Work Item that owns the reviewed release
+        work_item_id: String,
+        /// Successful Attempt that owns the exact candidate
+        attempt_id: String,
+        /// Full commit SHA of the clean current release checkout
+        #[arg(long)]
+        candidate: String,
+    },
     /// Validate Tester readiness and run declared test commands
     Check {
         /// Disable sandbox

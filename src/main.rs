@@ -2031,6 +2031,19 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
     let store = WorkModelStore::new(project_root);
     let resolver = ContentResolver::new(Some(project_root));
     match command {
+        TesterCommands::Verify {
+            work_item_id,
+            attempt_id,
+            candidate,
+        } => {
+            fluent::release_acceptance::verify(
+                project_root,
+                &work_item_id,
+                &attempt_id,
+                &candidate,
+            )?;
+            println!("Release acceptance verified for {work_item_id} {attempt_id} at {candidate}");
+        }
         TesterCommands::Check { no_sandbox } => {
             match fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)? {
                 fluent::tester::TesterOutcome::Passed => println!("Tester passed"),

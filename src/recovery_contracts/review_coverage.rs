@@ -59,14 +59,16 @@ fn ordinary_review_tasks_with_target<'a>(
                     "ordinary review coverage workspace",
                 )
                 .map_err(anyhow::Error::from)
-                .and_then(|workspace| {
+                .and_then(|_workspace| {
                     let compared_tip = if Some(index) == last_writer {
                         pre_rebase_tip.unwrap_or(&output.commit)
                     } else {
                         &output.commit
                     };
+                    // Compare shared Git objects even after landing retires
+                    // the managed source checkout; retain its path validation.
                     crate::review_invalidation::changed_paths_between(
-                        &workspace,
+                        project_root,
                         &prior.commit,
                         compared_tip,
                     )
@@ -138,7 +140,7 @@ pub(crate) fn ensure_landing_review_bindings(
         .iter()
         .find(|attempt| attempt.id == candidate.attempt_id)
         .context("landing Attempt is missing")?;
-    let source = crate::work_model::resolve_expected_candidate_workspace_path(
+    let _source = crate::work_model::resolve_expected_candidate_workspace_path(
         project_root,
         &candidate.source_workspace.path,
         &item.id,
@@ -241,7 +243,7 @@ pub(crate) fn ensure_landing_review_bindings(
                         .reads
                         .contains(&candidate.source_workspace)
                     && crate::git::run_raw(
-                        &source,
+                        project_root,
                         &[
                             "cat-file",
                             "-e",

@@ -553,8 +553,9 @@ fn assess_canonical_checks_at(
         crate::tester_evidence::preexisting_failed_tester_commands(&results, baseline_results);
     let mut preexisting = Vec::new();
     let committed_bytes = |path: &str| -> Result<Vec<u8>> {
+        // Git objects outlive the managed candidate checkout after landing.
         let committed = crate::git::run_raw(
-            &workspace,
+            project_root,
             &["show", &format!("{}:{path}", candidate_commit)],
         )?;
         anyhow::ensure!(

@@ -256,7 +256,10 @@ fn workflow_release_build_public_workflow() {
     let binary = root.join("target/release/fluent");
     let version = run(root, binary.to_str().unwrap(), &["version"]);
     assert!(version.status.success());
-    assert!(String::from_utf8_lossy(&version.stdout).contains(&format!("fluent {}", env!("CARGO_PKG_VERSION"))));
+    assert!(
+        String::from_utf8_lossy(&version.stdout)
+            .contains(&format!("fluent {}", env!("CARGO_PKG_VERSION")))
+    );
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     assert!(
