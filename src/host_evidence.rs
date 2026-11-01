@@ -3960,6 +3960,19 @@ mod tests {
         )
         .unwrap();
 
+        crate::git::run(
+            project.path(),
+            &["init", "-q"],
+            "initialize project objects",
+        )
+        .unwrap();
+        crate::git::run(
+            project.path(),
+            &["fetch", workspace.path().to_str().unwrap(), &candidate],
+            "retain candidate objects",
+        )
+        .unwrap();
+
         let store = WorkModelStore::new(project.path());
         let mut item = work_model::WorkItem::planned("work-1", "Attach gate evidence");
         item.add_initial_attempt("attempt-1").unwrap();

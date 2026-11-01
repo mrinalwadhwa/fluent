@@ -320,6 +320,47 @@ pub(crate) fn candidate_workspace_path(
     }
 }
 
+/// Prefer retained project objects; otherwise require the managed candidate
+/// repository to contain every exact commit needed by the assessment.
+pub(crate) fn committed_object_repository(
+    project_root: &Path,
+    workspace_path: &str,
+    commits: &[&str],
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !commits.is_empty()
+            && commits.iter().all(|commit| {
+                commit.len() == 40
+                    && commit
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            }),
+        "committed object lookup requires full lowercase commit SHAs"
+    );
+    let contains_commits = |repository: &Path| {
+        commits.iter().all(|commit| {
+            crate::git::run_raw(
+                repository,
+                &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+            )
+            .is_ok_and(|output| output.status.success())
+        })
+    };
+    if contains_commits(project_root) {
+        return Ok(project_root.to_path_buf());
+    }
+    let workspace = work_model::resolve_managed_sibling_workspace_path(
+        project_root,
+        workspace_path,
+        "committed object workspace",
+    )?;
+    anyhow::ensure!(
+        contains_commits(&workspace),
+        "exact committed objects are unavailable"
+    );
+    Ok(workspace)
+}
+
 pub(crate) fn validate_managed_file_path(project_root: &Path, relative: &str) -> Result<PathBuf> {
     let relative_path = Path::new(relative);
     let managed_root = Path::new(".fluent/work/artifacts");
@@ -466,17 +507,14 @@ fn assess_canonical_checks_at(
     attempt: &work_model::Attempt,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<CanonicalCheckAssessment> {
-    let (candidate_commit, workspace) = if let Some(output) = attempt
+    let (candidate_commit, workspace_path) = if let Some(output) = attempt
         .tasks
         .iter()
         .rev()
         .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
         .and_then(|task| task.output.as_ref())
     {
-        (
-            output.commit.as_str(),
-            candidate_workspace_path(project_root, output),
-        )
+        (output.commit.as_str(), output.workspace_path.as_str())
     } else {
         anyhow::ensure!(
             attempt.kind.is_review_only_like(),
@@ -491,9 +529,10 @@ fn assess_canonical_checks_at(
             .context("review-only Tester comparison context is missing")?;
         (
             context.candidate_commit.as_str(),
-            project_root.join(&context.candidate_workspace_path),
+            context.candidate_workspace_path.as_str(),
         )
     };
+    let workspace = project_root.join(workspace_path);
     let tester = attempt
         .tasks
         .iter()
@@ -552,10 +591,11 @@ fn assess_canonical_checks_at(
     let preexisting_commands =
         crate::tester_evidence::preexisting_failed_tester_commands(&results, baseline_results);
     let mut preexisting = Vec::new();
+    let object_repository =
+        committed_object_repository(project_root, workspace_path, &[candidate_commit])?;
     let committed_bytes = |path: &str| -> Result<Vec<u8>> {
-        // Git objects outlive the managed candidate checkout after landing.
         let committed = crate::git::run_raw(
-            project_root,
+            &object_repository,
             &["show", &format!("{}:{path}", candidate_commit)],
         )?;
         anyhow::ensure!(

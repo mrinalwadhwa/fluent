@@ -4889,6 +4889,18 @@ mod tests {
             &serde_json::json!({"commands":configured}).to_string(),
             "Add configured checks",
         );
+        crate::git::run(
+            fixture.project.path(),
+            &["init", "-q"],
+            "initialize project objects",
+        )
+        .unwrap();
+        crate::git::run(
+            fixture.project.path(),
+            &["fetch", fixture.root.path().to_str().unwrap(), &candidate],
+            "retain candidate objects",
+        )
+        .unwrap();
         let mut tester = fixture.artifacts.path().join("tester-results.json");
         let values = tests.as_array().unwrap();
         let results = serde_json::json!({"candidate_commit": candidate, "commands": commands, "tests": tests,

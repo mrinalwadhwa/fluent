@@ -4237,6 +4237,13 @@ mod tests {
     };
 
     fn landing_review_history(fresh_roles: bool) -> (tempfile::TempDir, PathBuf, WorkItem) {
+        landing_review_history_in_repository(fresh_roles, false)
+    }
+
+    fn landing_review_history_in_repository(
+        fresh_roles: bool,
+        isolated: bool,
+    ) -> (tempfile::TempDir, PathBuf, WorkItem) {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         fs::create_dir(&project).unwrap();
@@ -4259,18 +4266,39 @@ mod tests {
         item.add_initial_attempt("attempt-1").unwrap();
         let workspace = item.attempts[0].tasks[0].workspace_access.writes[0].clone();
         let source = project.join(&workspace.path);
-        git::run(
-            &project,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "candidate",
-                source.to_str().unwrap(),
-            ],
-            "create candidate",
-        )
-        .unwrap();
+        if isolated {
+            git::run(
+                &project,
+                &["clone", "--no-local", ".", source.to_str().unwrap()],
+                "clone candidate",
+            )
+            .unwrap();
+            git::run(
+                &source,
+                &["config", "user.email", "test@example.test"],
+                "configure candidate",
+            )
+            .unwrap();
+            git::run(
+                &source,
+                &["config", "user.name", "Test"],
+                "configure candidate",
+            )
+            .unwrap();
+        } else {
+            git::run(
+                &project,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "candidate",
+                    source.to_str().unwrap(),
+                ],
+                "create candidate",
+            )
+            .unwrap();
+        }
         for round in 1..=2 {
             if round == 2 {
                 item.add_next_write_round("attempt-1", vec![]).unwrap();
@@ -4332,6 +4360,22 @@ mod tests {
             let (_root, project, item) = landing_review_history(fresh);
             ensure_review_bindings_current(&project, &item, &item.merge_candidates[0]).unwrap();
         }
+    }
+
+    #[test]
+    fn landing_reviews_resolve_isolated_objects_then_retired_checkout() {
+        let (_root, project, item) = landing_review_history_in_repository(false, true);
+        let candidate = &item.merge_candidates[0];
+        ensure_review_bindings_current(&project, &item, candidate).unwrap();
+        let source = project.join(&candidate.source_workspace.path);
+        git::run(
+            &project,
+            &["fetch", source.to_str().unwrap(), "HEAD"],
+            "retain candidate objects",
+        )
+        .unwrap();
+        fs::remove_dir_all(source).unwrap();
+        ensure_review_bindings_current(&project, &item, candidate).unwrap();
     }
 
     #[test]

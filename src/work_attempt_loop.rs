@@ -14867,6 +14867,13 @@ mod tests {
         let candidate =
             crate::git::run_stdout(&workspace, &["rev-parse", "HEAD"], "read fixture candidate")
                 .unwrap();
+        crate::git::run(project_root, &["init", "-q"], "initialize project objects").unwrap();
+        crate::git::run(
+            project_root,
+            &["fetch", workspace.to_str().unwrap(), &candidate],
+            "retain candidate objects",
+        )
+        .unwrap();
         let attempt = &mut item.attempts[0];
         attempt.tasks[0].status = TaskStatus::Complete;
         attempt.tasks[0].output = Some(TaskOutput {

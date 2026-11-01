@@ -1346,6 +1346,23 @@ fn claude_session_recovery_fences_prechange_writer() {
             .output()
             .unwrap()
     };
+    // The package-version fence remains independent of the session schema.
+    let before = snapshot(&control.project.join(".fluent/work"));
+    let refused = mutate(&control);
+    assert!(
+        !refused.status.success(),
+        "v0.6 accepted a current-version Work Item"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("older"));
+    assert_eq!(snapshot(&control.project.join(".fluent/work")), before);
+
+    // Exercise the historical session boundary with a historical model version.
+    let path = control
+        .project
+        .join(format!(".fluent/work/items/{}.json", control.work));
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["model_writer_version"]["version"] = json!("0.6.0");
+    fs::write(path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     let supported = mutate(&control);
     assert!(
         supported.status.success(),

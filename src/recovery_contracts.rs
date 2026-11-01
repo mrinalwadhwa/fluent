@@ -6999,6 +6999,72 @@ pub(crate) mod verification_tests {
     }
 
     #[test]
+    fn canonical_checker_objects_survive_isolated_checkout_retirement() {
+        let (root, mut item) = fixture(false);
+        let workspace = tempfile::Builder::new()
+            .prefix("work-checker-")
+            .tempdir_in(root.path().parent().unwrap())
+            .unwrap();
+        let relative = format!(
+            "../{}",
+            workspace.path().file_name().unwrap().to_str().unwrap()
+        );
+        // Keep the candidate objects only in the managed checkout. Uncommitted
+        // checker bytes must never replace the exact candidate's configuration.
+        fs::rename(root.path().join(".git"), workspace.path().join(".git")).unwrap();
+        fs::create_dir_all(workspace.path().join(".fluent")).unwrap();
+        fs::write(
+            workspace.path().join(".fluent/tester.yaml"),
+            "invalid working copy",
+        )
+        .unwrap();
+        crate::git::run(root.path(), &["init", "-q"], "create project repository").unwrap();
+        for task in &mut item.attempts[0].tasks {
+            if let Some(output) = &mut task.output {
+                output.workspace_path = relative.clone();
+            }
+            if let Some(context) = &mut task.review_context {
+                context.candidate_workspace_path = relative.clone();
+            }
+        }
+        let attempt = &item.attempts[0];
+        let before = assess_canonical_checks(root.path(), attempt).unwrap();
+        assert!(before.blockers.is_empty(), "{:?}", before.blockers);
+        let commit = &attempt.tasks[0].output.as_ref().unwrap().commit;
+        crate::git::run(
+            root.path(),
+            &["fetch", workspace.path().to_str().unwrap(), commit],
+            "retain landed objects",
+        )
+        .unwrap();
+        workspace.close().unwrap();
+        let after = assess_canonical_checks(root.path(), attempt).unwrap();
+        assert_eq!(before.config_digest, after.config_digest);
+        assert_eq!(before.checks, after.checks);
+    }
+
+    #[test]
+    fn canonical_checker_rejects_missing_objects_in_both_repositories() {
+        let (root, mut item) = fixture(false);
+        let workspace = tempfile::Builder::new()
+            .prefix("work-missing-")
+            .tempdir_in(root.path().parent().unwrap())
+            .unwrap();
+        item.attempts[0].tasks[0]
+            .output
+            .as_mut()
+            .unwrap()
+            .workspace_path = format!(
+            "../{}",
+            workspace.path().file_name().unwrap().to_str().unwrap()
+        );
+        fs::remove_dir_all(root.path().join(".git")).unwrap();
+        crate::git::run(root.path(), &["init", "-q"], "create empty project").unwrap();
+        crate::git::run(workspace.path(), &["init", "-q"], "create empty candidate").unwrap();
+        assert!(assess_canonical_checks(root.path(), &item.attempts[0]).is_err());
+    }
+
+    #[test]
     fn reviewed_command_satisfies_named_reference_without_rewriting_results() {
         let (root, mut item) = unique_harness_fixture();
         let before = assess_canonical_checks(root.path(), &item.attempts[0]).unwrap();

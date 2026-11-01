@@ -65,10 +65,13 @@ fn ordinary_review_tasks_with_target<'a>(
                     } else {
                         &output.commit
                     };
-                    // Compare shared Git objects even after landing retires
-                    // the managed source checkout; retain its path validation.
-                    crate::review_invalidation::changed_paths_between(
+                    let repository = crate::verification_assessment::committed_object_repository(
                         project_root,
+                        &output.workspace_path,
+                        &[&prior.commit, compared_tip],
+                    )?;
+                    crate::review_invalidation::changed_paths_between(
+                        &repository,
                         &prior.commit,
                         compared_tip,
                     )
@@ -242,15 +245,12 @@ pub(crate) fn ensure_landing_review_bindings(
                         .workspace_access
                         .reads
                         .contains(&candidate.source_workspace)
-                    && crate::git::run_raw(
+                    && crate::verification_assessment::committed_object_repository(
                         project_root,
-                        &[
-                            "cat-file",
-                            "-e",
-                            &format!("{}^{{commit}}", context.candidate_commit),
-                        ],
+                        &output.workspace_path,
+                        &[&context.candidate_commit],
                     )
-                    .is_ok_and(|result| result.status.success())
+                    .is_ok()
             })
         });
         anyhow::ensure!(
