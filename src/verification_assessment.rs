@@ -190,57 +190,92 @@ pub(crate) fn assess_landed_tester_history(
             .iter()
             .any(|command| command.exit_code != 0)
     {
-        let baseline = baseline_path.ok_or_else(|| {
-            anyhow::anyhow!("retained Tester result does not record a passing run")
-        })?;
-        let (_, bytes) = crate::verification_assessment::bound_recovery_artifact(root, baseline)?;
-        let baseline_results: crate::tester::TesterResults = serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(
-            baseline_results.error.is_none(),
-            "retained target baseline has a harness error"
-        );
-        anyhow::ensure!(
-            baseline_results.candidate_commit.as_deref()
-                == candidate
-                    .merge_state
-                    .landing_intent
-                    .as_ref()
-                    .map(|intent| intent.target_before.as_str()),
-            "retained target baseline does not match the landing target"
-        );
-        let native_match = crate::tester_evidence::introduced_tester_failures(
-            &root.join(&path),
-            Some(&root.join(baseline)),
-        ) == 0
-            && crate::tester_evidence::unexplained_failed_tester_commands(
+        if let Some(baseline) = baseline_path {
+            let (_, bytes) =
+                crate::verification_assessment::bound_recovery_artifact(root, baseline)?;
+            let baseline_results: crate::tester::TesterResults = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                baseline_results.error.is_none(),
+                "retained target baseline has a harness error"
+            );
+            anyhow::ensure!(
+                baseline_results.candidate_commit.as_deref()
+                    == candidate
+                        .merge_state
+                        .landing_intent
+                        .as_ref()
+                        .map(|intent| intent.target_before.as_str()),
+                "retained target baseline does not match the landing target"
+            );
+            let native_match = crate::tester_evidence::introduced_tester_failures(
                 &root.join(&path),
                 Some(&root.join(baseline)),
-            ) == 0;
-        if !native_match {
-            anyhow::ensure!(
-                candidate.merge_state.landing_intent.is_some()
-                    && candidate
-                        .merge_state
-                        .check_artifacts
-                        .iter()
-                        .any(|artifact| {
-                            artifact.producer_id == "merge-tester-manifest"
-                                && artifact.path == manifest_path
-                        }),
-                "reviewed host proof requires the landing manifest bound in retained evidence"
-            );
-        }
-        anyhow::ensure!(
-            native_match
-                || crate::tester_evidence::reviewed_host_proof_covers_expertise_only_merge(
-                    root,
-                    attempt,
-                    merged_commit,
+            ) == 0
+                && crate::tester_evidence::unexplained_failed_tester_commands(
                     &root.join(&path),
                     Some(&root.join(baseline)),
-                )?,
-            "retained Tester result has new failures or unexplained failed commands"
-        );
+                ) == 0;
+            if !native_match {
+                anyhow::ensure!(
+                    candidate.merge_state.landing_intent.is_some()
+                        && candidate
+                            .merge_state
+                            .check_artifacts
+                            .iter()
+                            .any(|artifact| {
+                                artifact.producer_id == "merge-tester-manifest"
+                                    && artifact.path == manifest_path
+                            }),
+                    "reviewed host proof requires the landing manifest bound in retained evidence"
+                );
+            }
+            anyhow::ensure!(
+                native_match
+                    || crate::tester_evidence::reviewed_host_proof_covers_expertise_only_merge(
+                        root,
+                        attempt,
+                        merged_commit,
+                        &root.join(&path),
+                        Some(&root.join(baseline)),
+                    )?,
+                "retained Tester result has new failures or unexplained failed commands"
+            );
+        } else {
+            // Frozen no-expertise landing retains the original Tester rather
+            // than running a second merge Tester. Its host-only commands may
+            // have failed in the worker sandbox and passed through reviewed,
+            // exact-command host evidence before the candidate was accepted.
+            let assessment = assess_canonical_checks(root, attempt)?;
+            anyhow::ensure!(
+                assessment.results_path == root.join(&path)
+                    && assessment.is_satisfied()
+                    && assessment.preexisting.is_empty()
+                    && assessment.reconstruction.is_none()
+                    && results.commands.iter().enumerate().all(|(index, command)| {
+                        command.exit_code == 0 || assessment.accepted.contains(&index)
+                    }),
+                "retained Tester result does not record a passing run or complete reviewed host proof"
+            );
+            let identities = results
+                .commands
+                .iter()
+                .map(|command| (command.command.as_str(), command.test_harness.as_str()))
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                results
+                    .tests
+                    .iter()
+                    .filter(|test| test.status == "fail")
+                    .all(|test| {
+                        failed_test_covered_by_accepted_command(
+                            &identities,
+                            &assessment.accepted,
+                            test,
+                        )
+                    }),
+                "retained Tester result has failures outside reviewed host proof"
+            );
+        }
     }
     anyhow::ensure!(
         results.summary.total == results.tests.len()

@@ -77381,7 +77381,11 @@ fn repeated_cancel_rejects_changed_generation_and_resumed_stop() {
     }
 }
 
-fn release_acceptance_fixture(tmp: &TempDir, host: bool) -> (PathBuf, PathBuf, String, PathBuf) {
+fn release_acceptance_fixture(
+    tmp: &TempDir,
+    host: bool,
+    no_expertise: bool,
+) -> (PathBuf, PathBuf, String, PathBuf) {
     let project = setup_git_project(tmp);
     let marker = tmp.path().join("release-command-runs");
     let passing = format!("printf 'run\\n' >> '{}'", marker.display());
@@ -77418,19 +77422,26 @@ fn release_acceptance_fixture(tmp: &TempDir, host: bool) -> (PathBuf, PathBuf, S
     let bin = tmp.path().join("release-provider");
     write_mock_claude(
         &bin,
-        &learner_land_mock_script(r#"{"learning_summary":"release","follow_ups":[]}"#),
+        &if no_expertise {
+            no_expertise_probe_learner_mock_script(
+                r#"{"learning_summary":"release","follow_ups":[]}"#,
+            )
+        } else {
+            learner_land_mock_script(r#"{"learning_summary":"release","follow_ups":[]}"#)
+        },
     );
-    fluent_cmd()
-        .current_dir(&project)
-        .args([
-            "work-item",
-            "create",
-            "work-1",
-            "--title",
-            "Release acceptance",
-        ])
-        .assert()
-        .success();
+    let mut create = fluent_cmd();
+    create.current_dir(&project).args([
+        "work-item",
+        "create",
+        "work-1",
+        "--title",
+        "Release acceptance",
+    ]);
+    if no_expertise {
+        create.args(["--learner-mode", "no-expertise"]);
+    }
+    create.assert().success();
     fluent_cmd()
         .current_dir(&project)
         .args(["attempt", "create", "work-1", "attempt-1"])
@@ -77532,7 +77543,7 @@ fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
 fn tester_verify_accepts_complete_candidate_bound_release() {
     for host in [false, true] {
         let tmp = TempDir::new().unwrap();
-        let (project, bin, candidate, results) = release_acceptance_fixture(&tmp, host);
+        let (project, bin, candidate, results) = release_acceptance_fixture(&tmp, host, false);
         let original = fs::read(&results).unwrap();
         assert_release_verification(&project, &candidate, true);
         assert_eq!(fs::read(&results).unwrap(), original);
@@ -77545,9 +77556,34 @@ fn tester_verify_accepts_complete_candidate_bound_release() {
 }
 
 #[test]
+fn tester_verify_accepts_landed_no_expertise_host_checks() {
+    // A no-expertise Learner requires Seatbelt. The configured Tester itself
+    // runs under Seatbelt, where macOS refuses to apply a nested profile.
+    if !real_sandbox_exec_is_usable() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let (project, bin, candidate, _results) = release_acceptance_fixture(&tmp, true, true);
+    assert_release_verification(&project, &candidate, true);
+    land_work_1(&project, &bin, true);
+    assert_eq!(git_head(&project), candidate);
+    let item = WorkModelStore::new(&project)
+        .read_work_item_snapshot("work-1")
+        .unwrap();
+    assert!(
+        !item.merge_candidates[0]
+            .merge_state
+            .check_artifacts
+            .iter()
+            .any(|artifact| artifact.producer_id == "merge-tester")
+    );
+    assert_release_verification(&project, &candidate, true);
+}
+
+#[test]
 fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
     let tmp = TempDir::new().unwrap();
-    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, true);
+    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, true, false);
     assert_release_verification(&project, &candidate, true);
     assert_release_verification(&project, &candidate[..8], false);
     assert_release_verification(&project, &"0".repeat(40), false);
@@ -77720,7 +77756,7 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
 #[test]
 fn tester_verify_rejects_advisory_baseline_substitution() {
     let tmp = TempDir::new().unwrap();
-    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, false);
+    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, false, false);
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&results).unwrap()).unwrap();
     value["commands"][0]["exit_code"] = serde_json::json!(7);
