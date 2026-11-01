@@ -1156,6 +1156,12 @@ def verify_file_map(root, files):
         require(digest(selected_path(root, name)) == sha, f'immutable evidence changed: {name}')
 
 
+def package_version():
+    """Read the current package version without changing released identities."""
+    cargo = (Path(__file__).resolve().parents[2] / 'Cargo.toml').read_text()
+    return re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE).group(1)
+
+
 def independent_manifest(manifest, fixture, candidate, binary):
     """Validate B's own released state before interpreting any current proof."""
     require(manifest.get('schema_version') == 1 and
@@ -1170,7 +1176,7 @@ def independent_manifest(manifest, fixture, candidate, binary):
             'independent released executable changed')
     require(current.get('commit') == candidate and
             digest(current['binary_path']) == current['binary_sha256'] and
-            current.get('version') == 'fluent 0.6.0 ' + candidate[:8] and
+            current.get('version') == 'fluent ' + package_version() + ' ' + candidate[:8] and
             read_command([current['binary_path'], 'version'], source) == current['version'] and
             read_command([binary, 'version'], source) == current['version'],
             'independent candidate executable changed')

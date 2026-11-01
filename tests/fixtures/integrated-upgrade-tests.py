@@ -1052,7 +1052,7 @@ class ReleasedFixture(unittest.TestCase):
             released=dict(path=self.manifest['released_binary'], sha256=upgrade.RELEASE_SHA256,
                           version='fluent 0.6.0 be19732c'),
             candidate=dict(commit=self.candidate, binary_path=str(self.binary),
-                           binary_sha256=upgrade.digest(self.binary), version='fluent 0.6.0 ' + self.candidate[:8]),
+                           binary_sha256=upgrade.digest(self.binary), version='fluent ' + upgrade.package_version() + ' ' + self.candidate[:8]),
             initial=dict(seed_commit=self.seed, writer_commit=self.initial, writer_task_id=self.old_task['id'],
                          writer_output=self.old_task['output'], assigned_workspace=str(self.workspace), host_tag='original-writer'),
             failure=dict(task_id=self.writer['id'], session_id=session,
