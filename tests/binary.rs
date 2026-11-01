@@ -50562,6 +50562,74 @@ fn classified_writer_context_identifies_current_assignment() {
     classified_writer_delivery_probe(true, false);
 }
 
+fn classified_scheduler_mock_script(writer_workspace_suffix: &str, marker_path: &str) -> String {
+    format!(
+        r##"#!/bin/bash
+set -euo pipefail
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [[ "$PROMPT" == *"You are the Learner"* ]]; then
+  draft_pattern='(/[^[:space:]]*follow-up-draft[.]json)'
+  if [[ ! "$PROMPT" =~ $draft_pattern ]]; then
+    printf 'Learner invocation has no draft path\n' >&2
+    exit 86
+  fi
+  DRAFT="${{BASH_REMATCH[1]}}"
+  mkdir -p "$(dirname "$DRAFT")"
+  printf '%s\n' '{{"learning_summary":"learned","follow_ups":[]}}' > "$DRAFT"
+else
+case "$PWD" in
+  *{writer_workspace_suffix})
+    printf invoked >> "{marker_path}"
+    printf 'scheduler classified correction\n' >> README.md
+    git add README.md
+    git commit -m "Apply scheduler classified correction" >/dev/null
+    ;;
+  *)
+    printf 'Verdict: pass\n\nScheduler follow-up review.\n' > review.md
+    ;;
+esac
+fi
+exit 0
+"##
+    )
+}
+
+#[test]
+fn classified_scheduler_mock_handles_large_learner_prompts() {
+    let tmp = TempDir::new().unwrap();
+    let draft = tmp.path().join("follow-up-draft.json");
+    let marker = tmp.path().join("writer-marker");
+    let later_draft = tmp.path().join("later/follow-up-draft.json");
+    // Repeat the path to exercise both role matching and first-path extraction.
+    let prompt = format!(
+        "You are the Learner\n{}\n{}\n{}",
+        draft.display(),
+        "x".repeat(128 * 1024),
+        later_draft.display()
+    );
+    let output = Command::new("/bin/bash")
+        .current_dir(tmp.path())
+        .args([
+            "-c",
+            &classified_scheduler_mock_script("unused-writer", marker.to_str().unwrap()),
+            "mock",
+            "-p",
+            &prompt,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(read_json_path(&draft)["learning_summary"], "learned");
+    assert!(!tmp.path().join("review.md").exists());
+    assert!(!marker.exists());
+    assert!(!later_draft.exists());
+}
+
 #[test]
 fn classified_host_evidence_scheduler_claim_dispatches_one_writer() {
     let tmp = TempDir::new().unwrap();
@@ -50613,35 +50681,7 @@ fn classified_host_evidence_scheduler_claim_dispatches_one_writer() {
     let bin_dir = tmp.path().join("classified-scheduler-writer-bin");
     let marker_path = marker.to_string_lossy();
     let writer_workspace_suffix = format!("{work_item_id}-attempt-1");
-    let script = format!(
-        r##"#!/bin/bash
-set -euo pipefail
-PROMPT=""
-NEXT_IS_PROMPT=0
-for arg in "$@"; do
-  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
-  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
-done
-if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
-  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
-  mkdir -p "$(dirname "$DRAFT")"
-  printf '%s\n' '{{"learning_summary":"learned","follow_ups":[]}}' > "$DRAFT"
-else
-case "$PWD" in
-  *{writer_workspace_suffix})
-    printf invoked >> "{marker_path}"
-    printf 'scheduler classified correction\n' >> README.md
-    git add README.md
-    git commit -m "Apply scheduler classified correction" >/dev/null
-    ;;
-  *)
-    printf 'Verdict: pass\n\nScheduler follow-up review.\n' > review.md
-    ;;
-esac
-fi
-exit 0
-"##
-    );
+    let script = classified_scheduler_mock_script(&writer_workspace_suffix, &marker_path);
     write_scheduler_claude(&bin_dir, &script);
 
     let scheduler_output =

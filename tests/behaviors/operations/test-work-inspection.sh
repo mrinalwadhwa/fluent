@@ -52,7 +52,7 @@ write_work_item() {
 }
 
 assert_contains() {
-  if ! printf '%s' "$1" | grep -Fq "$2"; then
+  if [[ "$1" != *"$2"* ]]; then
     printf '    FAIL: output does not contain "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
@@ -60,7 +60,7 @@ assert_contains() {
 }
 
 assert_not_contains() {
-  if printf '%s' "$1" | grep -Fq "$2"; then
+  if [[ "$1" == *"$2"* ]]; then
     printf '    FAIL: output unexpectedly contains "%s"\n' "$2"
     printf '    Output:\n%s\n' "$1"
     return 1
@@ -72,6 +72,22 @@ assert_fails() {
     printf '    FAIL: command unexpectedly succeeded: %s\n' "$*"
     printf '    Stdout:\n%s\n' "$(cat "$TEST_DIR/stdout")"
     printf '    Stderr:\n%s\n' "$(cat "$TEST_DIR/stderr")"
+    return 1
+  fi
+}
+
+test_assertions_handle_large_literal_output() {
+  local output
+  output="literal [*]
+$(printf '%1000000s' '')"
+  assert_contains "$output" 'literal [*]' || return 1
+  assert_not_contains "$output" 'missing [*]' || return 1
+  if (assert_contains "$output" 'missing [*]') > /dev/null; then
+    printf '    FAIL: positive assertion accepted missing literal content\n'
+    return 1
+  fi
+  if (assert_not_contains "$output" 'literal [*]') > /dev/null; then
+    printf '    FAIL: negative assertion accepted present literal content\n'
     return 1
   fi
 }
@@ -536,6 +552,7 @@ test_work_list_id_mismatch_fails() {
 
 printf 'test-work-inspection\n\n'
 
+run_test "assertions handle large literal output" test_assertions_handle_large_literal_output
 run_test "work create writes minimal Work Item" test_work_create_writes_minimal_item
 run_test "work create existing item fails" test_work_create_existing_item_fails
 run_test "work create invalid id fails" test_work_create_invalid_id_fails
