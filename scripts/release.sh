@@ -3,6 +3,19 @@ set -euo pipefail
 
 if [[ "${TRACE-0}" == "1" ]]; then set -o xtrace; fi
 
+if [[ $# -ne 2 ]]; then
+  printf 'usage: %s <work-item-id> <attempt-id>\n' "$0" >&2
+  exit 2
+fi
+for identity in "$@"; do
+  if [[ ! "$identity" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ || "$identity" == . || "$identity" == .. ]]; then
+    printf 'usage: %s <work-item-id> <attempt-id>\n' "$0" >&2
+    exit 2
+  fi
+done
+readonly RELEASE_WORK="$1"
+readonly RELEASE_ATTEMPT="$2"
+
 command -v cargo >/dev/null 2>&1 || { printf 'error: cargo not found\n' >&2; exit 1; }
 command -v gh >/dev/null 2>&1    || { printf 'error: gh CLI not found\n' >&2; exit 1; }
 command -v codesign >/dev/null 2>&1 || { printf 'error: codesign not found\n' >&2; exit 1; }
@@ -113,7 +126,11 @@ done
 printf 'Running exact release gates ...\n'
 cargo fmt --all --manifest-path "$REPO_ROOT/Cargo.toml" -- --check
 cargo check --tests --features test-support --manifest-path "$REPO_ROOT/Cargo.toml"
-"$REPO_ROOT/target/$HOST_TARGET/release/fluent" --no-sandbox tester check
+(
+  cd "$REPO_ROOT"
+  "$REPO_ROOT/target/$HOST_TARGET/release/fluent" tester verify \
+    "$RELEASE_WORK" "$RELEASE_ATTEMPT" --candidate "$HEAD_COMMIT"
+)
 
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]]; then
   printf 'error: release gates changed the source tree\n' >&2

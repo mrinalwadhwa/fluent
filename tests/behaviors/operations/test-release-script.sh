@@ -61,6 +61,14 @@ case "$*" in
     cat > "$FAKE_RELEASE_ROOT/target/$target/release/fluent" <<'BINARY'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_RELEASE_LOG"
+if [ "$*" != "tester verify release-work attempt-1 --candidate ${FAKE_HEAD:-aaaaaaaa}" ]; then
+  printf 'unexpected release verifier invocation: %s\n' "$*" >&2
+  exit 2
+fi
+if [ -n "${FAKE_PROOF_ERROR:-}" ]; then
+  printf 'invalid release proof: %s\n' "$FAKE_PROOF_ERROR" >&2
+  exit 1
+fi
 exit "${FAKE_TESTER_EXIT:-0}"
 BINARY
     chmod +x "$FAKE_RELEASE_ROOT/target/$target/release/fluent"
@@ -124,7 +132,7 @@ run_release() {
   FAKE_GH_LOG="$tmp/gh.log" \
   FAKE_UPLOAD_DIR="$tmp/uploads" \
   PATH="$tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    env "$@" bash "$tmp/project/scripts/release.sh"
+    env "$@" bash "$tmp/project/scripts/release.sh" release-work attempt-1
 }
 
 test_publishes_both_mac_architectures_at_exact_commit_after_gates() {
@@ -135,7 +143,7 @@ test_publishes_both_mac_architectures_at_exact_commit_after_gates() {
 
   run_release "$tmp" > "$tmp/output" 2>&1
 
-  grep -Fq -- '--no-sandbox tester check' "$tmp/release.log"
+  grep -Fxq -- 'tester verify release-work attempt-1 --candidate aaaaaaaa' "$tmp/release.log"
   grep -Fq -- 'release create v9.8.7 --target aaaaaaaa' "$tmp/gh.log"
   grep -Fq -- '--notes-file' "$tmp/gh.log"
   grep -Fq -- 'documentation/releases/v9.8.7.md' "$tmp/gh.log"
@@ -287,6 +295,42 @@ test_rejects_missing_release_notes() {
   [ ! -e "$tmp/gh.log" ]
 }
 
+test_rejects_missing_or_invalid_acceptance_identity_before_builds() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  setup_fixture "$tmp"
+  local scenario
+  for scenario in missing partial extra option; do
+    case "$scenario" in
+      missing) set -- ;;
+      partial) set -- release-work ;;
+      extra) set -- release-work attempt-1 extra ;;
+      option) set -- --work attempt-1 ;;
+    esac
+    if PATH="$tmp/bin:/usr/bin:/bin" bash "$tmp/project/scripts/release.sh" "$@" > "$tmp/arguments" 2>&1; then
+      return 1
+    fi
+    grep -Fq 'usage:' "$tmp/arguments" || return 1
+    [ ! -e "$tmp/cargo.log" ] || return 1
+    [ ! -e "$tmp/gh.log" ] || return 1
+  done
+}
+
+test_rejects_stale_missing_or_unresolved_acceptance_before_publication() {
+  local tmp reason
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  setup_fixture "$tmp"
+  for reason in stale-candidate missing-canonical-run unresolved-host-proof changed-artifact-digest; do
+    if run_release "$tmp" FAKE_PROOF_ERROR="$reason" > "$tmp/proof" 2>&1; then
+      return 1
+    fi
+    grep -Fq "invalid release proof: $reason" "$tmp/proof" || return 1
+    [ ! -e "$tmp/gh.log" ] || return 1
+  done
+}
+
 printf 'test-release-script\n\n'
 
 run_test "publishes both Mac architectures at exact commit after gates" \
@@ -307,4 +351,6 @@ run_test "rejects missing release notes" \
   test_rejects_missing_release_notes
 
 run_test "rejects failed native preparation before publication" test_rejects_failed_native_preparation_before_publication
+run_test "rejects missing or invalid acceptance identity before builds" test_rejects_missing_or_invalid_acceptance_identity_before_builds
+run_test "rejects stale missing or unresolved acceptance before publication" test_rejects_stale_missing_or_unresolved_acceptance_before_publication
 summarize_and_exit

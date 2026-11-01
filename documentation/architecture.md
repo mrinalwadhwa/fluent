@@ -3567,8 +3567,26 @@ checksum, or release-gate failure stops before publication.
 
 Publication also requires a clean `origin/main` commit, a new tag, and committed
 `documentation/releases/<tag>.md` notes. Formatting, compilation, and the exact
-configured Tester commands must pass. The script passes the committed notes to
-GitHub with `--notes-file`. `tools/install.sh` maps Apple Silicon to
+configured Tester commands must pass for that exact reviewed commit. Invoke
+`bash scripts/release.sh <work-item-id> <attempt-id>` only after the release
+candidate has completed ordinary reviews, the final canonical Tester, required
+host acceptance with targeted Tests Review, and successful Learning.
+
+Before publication, the newly built host binary runs
+`fluent tester verify <work-item-id> <attempt-id> --candidate <full-commit>`
+from the release checkout. This read-only command verifies the clean current
+HEAD, its ready or landed Merge Candidate, effective ordinary Reviews,
+verified Learning handoff, and the complete canonical run against the committed
+Tester configuration and extractor. Each configured command occurrence needs
+passing results or its candidate-bound reviewed host evidence. Changed or
+missing artifacts, unresolved failures, live execution, and advisory baseline
+results cannot authorize publication. The verifier never executes tests or
+changes Work state. Standalone `fluent tester check` retains its existing
+execution behavior; terminal-only checks must be completed through the
+existing host-evidence process before release verification.
+
+The script passes the committed notes to GitHub with `--notes-file`.
+`tools/install.sh` maps Apple Silicon to
 `aarch64-apple-darwin` and Intel to `x86_64-apple-darwin`, downloads that
 architecture's binary and checksum, and applies the checksum gate before
 replacing an existing installation.
