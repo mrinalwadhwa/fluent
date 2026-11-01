@@ -11415,3 +11415,32 @@ THE SYSTEM SHALL use the operator's explicitly selected SSH destination without
 provisioning a host or copying provider credentials to it.
 Test: {"kind":"named-test","path":"tests/ssh_agent_sources.rs","name":"ssh_source_uses_existing_host_without_provider_credentials"}
 Derived: This feature accesses Fluent work already running on a configured host.
+
+## Release acceptance
+
+### B1
+
+WHEN the operator verifies an explicitly identified Work Item, Attempt and exact
+current clean commit for release, THE SYSTEM SHALL report success without
+executing tests or changing Work state only when that commit has a ready or
+landed Merge Candidate, verified successful Learning, passing effective ordinary
+Reviews, and a complete settled canonical run whose configured command
+occurrences are satisfied by passing results or candidate-bound host evidence
+accepted by targeted Tests Review.
+Test: tests/binary.rs (tester_verify_accepts_complete_candidate_bound_release)
+
+### B2
+
+IF the candidate, configuration, command occurrence, artifact digest, Review,
+execution settlement or required result cannot be verified, THEN THE SYSTEM
+SHALL reject release verification without changing Work state.
+Test: tests/binary.rs (tester_verify_rejects_stale_or_incomplete_release_evidence)
+Test: tests/binary.rs (tester_verify_rejects_advisory_baseline_substitution)
+
+### B3
+
+WHEN the release script publishes a release, THE SYSTEM SHALL first verify the
+explicitly supplied Work Item and Attempt's acceptance for the exact release
+HEAD while retaining every existing build, source, format, check, architecture,
+signature and checksum gate.
+Test: tests/behaviors/operations/test-release-script.sh

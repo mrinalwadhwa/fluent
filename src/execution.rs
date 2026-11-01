@@ -937,6 +937,24 @@ pub fn execution_is_live(path: &Path) -> Result<bool> {
     identity_is_held(path)
 }
 
+/// Verify a retained execution's terminal state and owner without taking a
+/// writable record lock or repairing an interrupted launch.
+pub(crate) fn verify_settled(path: &Path, owner: &AttemptExecutionOwner) -> Result<()> {
+    let record: ExecutionRecord = serde_json::from_slice(&std::fs::read(path)?)?;
+    check_protocol(&record)?;
+    anyhow::ensure!(
+        matches!(
+            record.state,
+            ExecutionState::Settled | ExecutionState::Canceled
+        ) && record.settled_at.is_some()
+            && record.attempt_owner.as_ref() == Some(owner)
+            && !identity_is_held(path)?,
+        "execution is unsettled, live, or belongs to another Attempt: {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Confirm the generation and child-owned receipt before another client uses an
 /// execution as attachment authority.
 pub fn verified_running_generation(path: &Path, generation: &str) -> Result<bool> {

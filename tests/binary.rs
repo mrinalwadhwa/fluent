@@ -77383,10 +77383,12 @@ fn repeated_cancel_rejects_changed_generation_and_resumed_stop() {
 
 fn release_acceptance_fixture(tmp: &TempDir, host: bool) -> (PathBuf, PathBuf, String, PathBuf) {
     let project = setup_git_project(tmp);
+    let marker = tmp.path().join("release-command-runs");
+    let passing = format!("printf 'run\\n' >> '{}'", marker.display());
     let commands = if host {
-        vec!["true", "false"]
+        vec![passing.as_str(), "false"]
     } else {
-        vec!["true", "true"]
+        vec![passing.as_str(), "true"]
     };
     let definitions = commands
         .iter()
@@ -77494,6 +77496,8 @@ fn release_acceptance_fixture(tmp: &TempDir, host: bool) -> (PathBuf, PathBuf, S
 
 fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
     let before = snapshot_tree(&project.join(".fluent/work"));
+    let marker = project.parent().unwrap().join("release-command-runs");
+    let runs = fs::read(&marker).unwrap();
     let assertion = fluent_cmd()
         .current_dir(project)
         .args([
@@ -77516,6 +77520,11 @@ fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
         snapshot_tree(&project.join(".fluent/work")),
         before,
         "release verification must leave Work records and artifacts unchanged"
+    );
+    assert_eq!(
+        fs::read(&marker).unwrap(),
+        runs,
+        "verification must not execute configured commands"
     );
 }
 
@@ -77547,6 +77556,14 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
     fs::remove_file(project.join("untracked-release-input")).unwrap();
     let store = WorkModelStore::new(&project);
     let saved = store.read_work_item_snapshot("work-1").unwrap();
+    let lease = fluent::lease::acquire_blocking(&fluent::lease::learner_lock_path(
+        &project,
+        "work-1",
+        "attempt-1",
+    ))
+    .unwrap();
+    assert_release_verification(&project, &candidate, false);
+    drop(lease);
     for change in [
         "learning",
         "candidate",
@@ -77597,6 +77614,27 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
         assert_release_verification(&project, &candidate, false);
         fs::write(&path, bytes).unwrap();
     }
+    let execution = saved.attempts[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.producer_id == "local-execution")
+        .unwrap();
+    let path = project.join(&execution.path);
+    let bytes = fs::read(&path).unwrap();
+    for change in ["launching", "missing-settlement", "foreign-owner"] {
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        match change {
+            "launching" => record["state"] = serde_json::json!("launching"),
+            "missing-settlement" => record["settled_at"] = serde_json::Value::Null,
+            "foreign-owner" => {
+                record["attempt_owner"]["attempt_id"] = serde_json::json!("attempt-99")
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&path, &bytes).unwrap();
+    }
     let original = fs::read(&results).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
     for change in [
@@ -77605,6 +77643,7 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
         "wrong-command",
         "unexplained-failure",
         "summary",
+        "process-leak",
     ] {
         let mut corrupted = value.clone();
         match change {
@@ -77615,6 +77654,11 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
             "wrong-command" => corrupted["commands"][0]["command"] = serde_json::json!("foreign"),
             "unexplained-failure" => corrupted["commands"][0]["exit_code"] = serde_json::json!(7),
             "summary" => corrupted["summary"]["total"] = serde_json::json!(999),
+            "process-leak" => {
+                corrupted["commands"][0]["process_settlement"] = serde_json::json!({
+                    "settlement_directory": "retained", "leaks": [{"pid": 123, "kind": "live", "settlement_directory": "retained"}]
+                })
+            }
             _ => unreachable!(),
         }
         fs::write(&results, serde_json::to_vec(&corrupted).unwrap()).unwrap();
@@ -77623,11 +77667,92 @@ fn tester_verify_rejects_stale_or_incomplete_release_evidence() {
     }
     let manifest_path = results.with_file_name("canonical-run.json");
     let original = fs::read(&manifest_path).unwrap();
-    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    manifest["config_digest"] = serde_json::json!("sha256:changed");
-    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    for field in ["config_digest", "extractor_digest", "full_run"] {
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        manifest[field] = if field == "full_run" {
+            serde_json::json!(false)
+        } else {
+            serde_json::json!("sha256:changed")
+        };
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&manifest_path, &original).unwrap();
+    }
+    fs::remove_file(&manifest_path).unwrap();
     assert_release_verification(&project, &candidate, false);
     fs::write(&manifest_path, original).unwrap();
+    for artifact in [
+        project.join(
+            &saved.attempts[0]
+                .learning
+                .as_ref()
+                .unwrap()
+                .handoff
+                .as_ref()
+                .unwrap()
+                .path,
+        ),
+        project.join(format!(
+            "{}/review.md",
+            saved.attempts[0]
+                .tasks
+                .iter()
+                .find(|task| task.evidence_review_context.is_some())
+                .unwrap()
+                .artifact_area
+                .as_ref()
+                .unwrap()
+                .path
+        )),
+        results.parent().unwrap().join("commands/0-stdout.log"),
+    ] {
+        let bytes = fs::read(&artifact).unwrap();
+        let mut changed = bytes.clone();
+        changed.extend_from_slice(b"\nchanged evidence\n");
+        fs::write(&artifact, changed).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&artifact, bytes).unwrap();
+    }
     fs::remove_file(results.parent().unwrap().join("commands/0-stdout.log")).unwrap();
     assert_release_verification(&project, &candidate, false);
+}
+
+#[test]
+fn tester_verify_rejects_advisory_baseline_substitution() {
+    let tmp = TempDir::new().unwrap();
+    let (project, _bin, candidate, results) = release_acceptance_fixture(&tmp, false);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&results).unwrap()).unwrap();
+    value["commands"][0]["exit_code"] = serde_json::json!(7);
+    value["tests"] = serde_json::json!([{
+        "id": "fixture-known-failure", "test_harness": "shell-harness", "status": "fail"
+    }]);
+    value["summary"] = serde_json::json!({"total": 1, "pass": 0, "fail": 1, "skipped": 0});
+    fs::write(&results, serde_json::to_vec(&value).unwrap()).unwrap();
+    let baseline = project.join(
+        ".fluent/work/artifacts/work-1/attempt-1/attempt-1-baseline-tester/tester-results.json",
+    );
+    let mut baseline_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&baseline).unwrap()).unwrap();
+    baseline_value["commands"][0]["exit_code"] = serde_json::json!(7);
+    baseline_value["tests"] = value["tests"].clone();
+    baseline_value["summary"] = value["summary"].clone();
+    fs::write(baseline, serde_json::to_vec(&baseline_value).unwrap()).unwrap();
+    let before = snapshot_tree(&project.join(".fluent/work"));
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "tester",
+            "verify",
+            "work-1",
+            "attempt-1",
+            "--candidate",
+            &candidate,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "baseline or reconstructed results",
+        ));
+    assert_eq!(snapshot_tree(&project.join(".fluent/work")), before);
 }

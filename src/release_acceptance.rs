@@ -94,6 +94,47 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
         "release Attempt has unsettled Tasks"
     );
     recovery_contracts::writer_completion::ensure_settled_ownership(root, attempt, None)?;
+    // Task areas locate normal worker records; registered local executions
+    // also include Learner runs and retries that have no separate Task.
+    let mut records = attempt
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.producer_id == "local-execution")
+        .map(|artifact| artifact.path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for task in &attempt.tasks {
+        if let Some(area) = &task.artifact_area {
+            let path = format!("{}/execution.json", area.path);
+            match std::fs::symlink_metadata(root.join(&path)) {
+                Ok(_) => {
+                    records.insert(path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let owner = crate::execution::AttemptExecutionOwner {
+        project_root: root.canonicalize()?,
+        work_item_id: work.into(),
+        attempt_id: attempt_id.into(),
+    };
+    let prefix = format!(
+        "{}/{work}/{attempt_id}/",
+        crate::work_model::WORK_ARTIFACTS_DIR
+    );
+    for record in records {
+        ensure!(
+            record.starts_with(&prefix) && record.ends_with("/execution.json"),
+            "execution record is outside its owning release Attempt"
+        );
+        let path = verification_assessment::validate_managed_file_path(root, &record)?;
+        crate::usage_limit_contracts::unlocked(
+            &path.with_file_name("execution-owner.lock"),
+            false,
+        )?;
+        crate::execution::verify_settled(&path, &owner)?;
+    }
     recovery_contracts::review_coverage::ensure_landing_review_bindings(root, &item, candidate)?;
     recovery_contracts::validate_completed_downstream_evidence(root, attempt)?;
     let assessment = verification_assessment::assess_canonical_checks(root, attempt)?;
@@ -129,6 +170,7 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
         .as_ref()
         .and_then(|learning| learning.handoff.as_ref())
         .context("release Learning handoff is missing")?;
+    verification_assessment::validate_managed_file_path(root, &handoff_ref.path)?;
     let handoff = crate::learner::load_verified_handoff(root, handoff_ref)?;
     ensure!(
         handoff.source_work_item_id == work
