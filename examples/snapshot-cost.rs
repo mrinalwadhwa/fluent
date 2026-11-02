@@ -1,4 +1,16 @@
 //! Run with --release --features snapshot-profile on an idle, readable checkout.
+//!
+//! Build with `cargo build --release --features snapshot-profile --example snapshot-cost`.
+//! Invoke `target/release/examples/snapshot-cost ROOT REPETITIONS profile|plain`.
+//! ROOT must permit enumeration and reads of its entire `.fluent/work` tree,
+//! plus any evidence files, workspaces, and Git repositories used by projection.
+//! Establish idle landing conditions independently before collecting a baseline.
+//!
+//! The untimed input digest reads Work bytes before the first snapshot and warms
+//! the filesystem cache. `first_read` identifies the first snapshot in this
+//! process; measure cold filesystem behavior separately when required. The digest
+//! checks Work bytes only: freeze or independently verify Git refs, external
+//! workspaces, and process liveness when comparing baseline and optimized reads.
 fn main() -> anyhow::Result<()> {
     use anyhow::{Context, ensure};
     use fluent::{dashboard::project::SourceSnapshot, snapshot_profile};
