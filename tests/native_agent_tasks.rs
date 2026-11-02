@@ -2732,6 +2732,31 @@ fn assert_codex_display_progress(refuse_unassigned: bool) {
 #[cfg(unix)]
 #[test]
 fn codex_websocket_backpressure_recovers_required_frame_once() {
+    assert_codex_required_frame_recovery(assert_codex_required_response);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_required_frame_validation_does_not_block_provider_turn() {
+    assert_codex_required_frame_recovery(|response| {
+        // Model validation that outlasts the provider's four-second input wait.
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        assert_codex_required_response(response);
+    });
+}
+
+#[cfg(unix)]
+fn assert_codex_required_response(response: &str) {
+    let response: serde_json::Value = serde_json::from_str(response).unwrap();
+    assert_eq!(response["id"], 1);
+    assert_eq!(
+        response["result"]["data"].as_str().unwrap().len(),
+        8 * 1024 * 1024
+    );
+}
+
+#[cfg(unix)]
+fn assert_codex_required_frame_recovery(validate_response: impl FnOnce(&str)) {
     use fluent::native_agent::codex::relay_codex_websockets_with_trace;
     use std::io::{self, Write};
     use std::net::Shutdown;
@@ -2741,6 +2766,8 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     use std::time::Duration;
     use tungstenite::Message;
 
+    let provider_response =
+        json!({"id":1,"result":{"data":"x".repeat(8 * 1024 * 1024)}}).to_string();
     let (tui_stream, relay_client) = UnixStream::pair().unwrap();
     let (relay_server, provider_stream) = UnixStream::pair().unwrap();
     // Make a single large response exceed the socket buffer while the TUI
@@ -2793,11 +2820,7 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
             serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(resume["method"], "thread/resume");
         assert_eq!(resume["params"]["threadId"], "assigned-thread");
-        socket
-            .send(Message::Text(
-                json!({"id":1,"result":{"data":"x".repeat(8 * 1024 * 1024)}}).to_string(),
-            ))
-            .unwrap();
+        socket.send(Message::Text(provider_response)).unwrap();
         let turn: serde_json::Value =
             serde_json::from_str(&socket.read().unwrap().into_text().unwrap()).unwrap();
         assert_eq!(turn["method"], "turn/start");
@@ -2848,13 +2871,7 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     // for display; pause this peer past its socket write timeout.
     response_rx.recv_timeout(Duration::from_secs(4)).unwrap();
     std::thread::sleep(Duration::from_millis(700));
-    let response: serde_json::Value =
-        serde_json::from_str(&tui.read().unwrap().into_text().unwrap()).unwrap();
-    assert_eq!(response["id"], 1);
-    assert_eq!(
-        response["result"]["data"].as_str().unwrap().len(),
-        8 * 1024 * 1024
-    );
+    let response = tui.read().unwrap().into_text().unwrap();
     tui.send(Message::Text(
         json!({"id":2,"method":"turn/start","params":{"threadId":"assigned-thread","input":[]}})
             .to_string(),
@@ -2881,6 +2898,9 @@ fn codex_websocket_backpressure_recovers_required_frame_once() {
     provider.join().unwrap();
     // Closing this test peer can reset the relay's concurrent read.
     let _ = relay.join().unwrap();
+    // Validate large payloads only after the protocol exchange and peer
+    // settlement, so fixture CPU work cannot consume a provider read deadline.
+    validate_response(&response);
 }
 
 #[cfg(unix)]
