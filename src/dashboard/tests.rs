@@ -24,6 +24,14 @@ fn snapshot_profile_reports_failed_input_operation_and_path() {
 fn snapshot_profile_attributes_git_and_resets_between_reads() {
     use crate::snapshot_profile::{capture, mark};
     let root = tempfile::tempdir().unwrap();
+    // Keep Git discovery inside the fixture: Tester temp directories can sit
+    // below ancestors that the subprocess sandbox cannot inspect.
+    crate::git::run(
+        root.path(),
+        &["init", "-b", "main"],
+        "initialize profile fixture",
+    )
+    .unwrap();
     let (_, first) = capture(|| {
         mark("enumeration");
         crate::git::run_stdout(root.path(), &["--version"], "profile fixture").unwrap();
