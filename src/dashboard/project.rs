@@ -118,6 +118,7 @@ impl SourceSnapshot {
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let _objects = crate::git::snapshot_object_reads();
         profile_stage!("setup");
         let path = path.canonicalize()?;
         let id = path.to_string_lossy().into_owned();

@@ -4,6 +4,61 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
+// Only the synchronous local snapshot reader activates this scope. Ordinary
+// status and mutation callers always execute Git and make their own decisions.
+thread_local! {
+    static SNAPSHOT_OBJECTS: std::cell::RefCell<Option<SnapshotObjects>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[derive(Default)]
+struct SnapshotObjects {
+    outputs: std::collections::BTreeMap<(std::path::PathBuf, Vec<String>), Output>,
+    bytes: usize,
+}
+
+pub(crate) struct SnapshotObjectReads {
+    previous: Option<SnapshotObjects>,
+    // A scope must be dropped on the thread that owns its cache.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// Reuse successful, fully addressed blob reads until this snapshot finishes.
+pub(crate) fn snapshot_object_reads() -> SnapshotObjectReads {
+    let previous = SNAPSHOT_OBJECTS.with(|slot| slot.replace(Some(SnapshotObjects::default())));
+    SnapshotObjectReads {
+        previous,
+        _thread: std::marker::PhantomData,
+    }
+}
+
+impl Drop for SnapshotObjectReads {
+    fn drop(&mut self) {
+        SNAPSHOT_OBJECTS.with(|slot| slot.replace(self.previous.take()));
+    }
+}
+
+fn snapshot_object_key(cwd: &Path, args: &[&str]) -> Option<(std::path::PathBuf, Vec<String>)> {
+    if !SNAPSHOT_OBJECTS.with(|slot| slot.borrow().is_some()) {
+        return None;
+    }
+    // No options, revision expressions, abbreviated IDs, mutable refs, index
+    // reads, or environment overrides qualify. Retain the complete arguments.
+    let ["show", spec] = args else { return None };
+    let (object, path) = spec.split_once(':')?;
+    if !matches!(object.len(), 40 | 64)
+        || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || path.is_empty()
+    {
+        return None;
+    }
+    Some((
+        cwd.canonicalize().ok()?,
+        args.iter().map(|arg| (*arg).into()).collect(),
+    ))
+}
+
 const LOCK_RETRY_MAX_ATTEMPTS: usize = 8;
 const LOCK_RETRY_BASE_MS: u64 = 20;
 const LOCK_RETRY_CAP_MS: u64 = 320;
@@ -195,7 +250,32 @@ pub fn run_stdout_with_stdin_and_env(
 
 /// Run `git <args>` in `cwd`, return the raw `Output`.
 pub fn run_raw(cwd: &Path, args: &[&str]) -> Result<Output> {
-    run_with_lock_retry(|| build_command(cwd, args))
+    let key = snapshot_object_key(cwd, args);
+    if let Some(key) = &key {
+        if let Some(output) = SNAPSHOT_OBJECTS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .and_then(|cache| cache.outputs.get(key).cloned())
+        }) {
+            return Ok(output);
+        }
+    }
+    let output = run_with_lock_retry(|| build_command(cwd, args))?;
+    if output.status.success() {
+        if let Some(key) = key {
+            SNAPSHOT_OBJECTS.with(|slot| {
+                if let Some(cache) = slot.borrow_mut().as_mut() {
+                    let bytes = output.stdout.len() + output.stderr.len();
+                    // Bound retained source bytes as well as the scope lifetime.
+                    if cache.bytes + bytes <= 64 * 1024 * 1024 {
+                        cache.bytes += bytes;
+                        cache.outputs.insert(key, output.clone());
+                    }
+                }
+            });
+        }
+    }
+    Ok(output)
 }
 
 /// The effective ignore rule Git reports for one path.
@@ -356,6 +436,91 @@ fn format_output(output: &Output) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    #[cfg(feature = "snapshot-profile")]
+    fn snapshot_object_reads_reuse_only_successful_immutable_queries() {
+        let root = TempDir::new().unwrap();
+        run(root.path(), &["init"], "init").unwrap();
+        run(
+            root.path(),
+            &["config", "user.name", "Fixture"],
+            "configure",
+        )
+        .unwrap();
+        run(
+            root.path(),
+            &["config", "user.email", "fixture@example.com"],
+            "configure",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("file"), "first").unwrap();
+        run(root.path(), &["add", "."], "stage").unwrap();
+        run(root.path(), &["commit", "-m", "Initial"], "commit").unwrap();
+        let commit = run_stdout(root.path(), &["rev-parse", "HEAD"], "resolve").unwrap();
+        let other = TempDir::new().unwrap();
+        run(other.path(), &["init"], "init second repository").unwrap();
+        let spec = format!("{commit}:file");
+        let missing = format!("{commit}:missing");
+        let (_, profile) = crate::snapshot_profile::capture(|| {
+            let _scope = snapshot_object_reads();
+            for _ in 0..2 {
+                assert_eq!(
+                    run_raw(root.path(), &["show", &spec]).unwrap().stdout,
+                    b"first"
+                );
+                assert!(
+                    !run_raw(root.path(), &["show", &missing])
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    run_raw(root.path(), &["show", "HEAD:file"]).unwrap().stdout,
+                    b"first"
+                );
+            }
+            assert!(
+                !run_raw(other.path(), &["show", &spec])
+                    .unwrap()
+                    .status
+                    .success(),
+                "an identical object query in another repository must execute"
+            );
+            let abbreviated = format!("{}:file", &commit[..12]);
+            for _ in 0..2 {
+                assert_eq!(
+                    run_raw(root.path(), &["show", &abbreviated])
+                        .unwrap()
+                        .stdout,
+                    b"first"
+                );
+            }
+        });
+        assert_eq!(
+            profile.git.len(),
+            8,
+            "only the full object read may be reused"
+        );
+        let (_, refresh) = crate::snapshot_profile::capture(|| {
+            let _scope = snapshot_object_reads();
+            run_raw(root.path(), &["show", &spec]).unwrap();
+        });
+        assert_eq!(refresh.git.len(), 1, "each snapshot must start empty");
+        let _ = std::panic::catch_unwind(|| {
+            let _scope = snapshot_object_reads();
+            panic!("release scope on unwind");
+        });
+        let (_, after) = crate::snapshot_profile::capture(|| {
+            run_raw(root.path(), &["show", &spec]).unwrap();
+            run_raw(root.path(), &["show", &spec]).unwrap();
+        });
+        assert_eq!(
+            after.git.len(),
+            2,
+            "ordinary Git callers must remain uncached"
+        );
+    }
 
     #[test]
     fn build_command_sets_non_interactive_env() {
