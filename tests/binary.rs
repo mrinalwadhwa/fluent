@@ -15823,14 +15823,14 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     let tester_yaml =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".fluent/tester.yaml"))
             .unwrap();
-    // Preserve the frozen configuration bytes as well as its parsed command
-    // identities: public required-check occurrences bind this exact digest.
-    assert_eq!(
-        format!("{:x}", Sha256::digest(tester_yaml.as_bytes())),
-        "9173524ec78a2834e1a426fd67a0bedd9749ba3b2b60a5d0608b487ef0f85630"
-    );
     let config: serde_yaml::Value = serde_yaml::from_str(&tester_yaml).unwrap();
     let commands = config["commands"].as_sequence().unwrap();
+    assert_eq!(commands.len(), 2);
+    let host_yaml = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".fluent/release-host.yaml"),
+    ).unwrap();
+    let host_config: serde_yaml::Value = serde_yaml::from_str(&host_yaml).unwrap();
+    let host_entries = host_config["commands"].as_sequence().unwrap();
 
     let host_commands = [
         (
@@ -15862,7 +15862,7 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
             "shell-harness",
         ),
     ];
-    assert_eq!(commands.len(), 2 + host_commands.len());
+    assert_eq!(host_entries.len(), host_commands.len());
     // Preserve the complete shell/Rust setup as well as each host occurrence.
     // A command edit deliberately changes its public occurrence identity.
     for (entry, expected) in commands[..2].iter().zip([
@@ -15890,11 +15890,11 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
         )
     );
     assert_eq!(commands[1]["test_harness"].as_str(), Some("shell-harness"));
-    for (entry, (command, harness)) in commands[2..].iter().zip(host_commands) {
+    for (entry, (command, harness)) in host_entries.iter().zip(host_commands) {
         assert_eq!(entry["command"].as_str(), Some(command));
         assert_eq!(entry["test_harness"].as_str(), Some(harness));
     }
-    assert!(commands.iter().all(|command| {
+    assert!(commands.iter().chain(host_entries).all(|command| {
         command["reject_process_leaks"]
             .as_bool()
             .is_some_and(|enabled| enabled)

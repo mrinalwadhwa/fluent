@@ -22,6 +22,7 @@ node_modules/
 !.fluent/hooks/
 !.fluent/Dockerfile
 !.fluent/tester.yaml
+!.fluent/release-host.yaml
 !.fluent/extract-tester-results
 
 

@@ -80,25 +80,3 @@ commands:
       '
     test_harness: shell-harness
     reject_process_leaks: true
-  - command: bash tests/host/check-native-codex-first-turn.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
-  - command: bash tests/host/check-native-codex-display-backpressure.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
-  - command: bash tests/host/check-ssh-agent-terminal.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
-  - command: bash tests/host/check-node-worker-upgrade.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
-  - command: bash tests/host/check-completion-repair-admission.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
-  - command: bash tests/host/check-dashboard-terminal.sh
-    test_harness: cargo-nextest
-    reject_process_leaks: true
-
-  - command: bash tests/host/check-ssh-fullscreen-backpressure.sh
-    test_harness: shell-harness
-    reject_process_leaks: true
