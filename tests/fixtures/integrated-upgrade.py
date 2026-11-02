@@ -411,11 +411,20 @@ def settle_coordinator(child):
                 pass
             child.wait(timeout=5)
     # Once reaped, a numeric group is only a diagnostic. Never signal it.
-    try:
-        os.killpg(child.pid, 0)
-    except ProcessLookupError:
-        return True
-    return False
+    # Darwin can briefly deny this probe while exited group members disappear.
+    # Retry only that unknown result; denial itself never proves settlement.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+            continue
+        return False
 
 
 class Commands:

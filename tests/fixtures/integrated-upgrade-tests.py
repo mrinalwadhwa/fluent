@@ -483,6 +483,25 @@ class IntegratedUpgrade(unittest.TestCase):
             self.assertTrue(all(call.args[1] == 0 for call in kill.call_args_list),
                             'a reaped coordinator cannot authorize signaling a numeric group')
 
+    def test_reaped_group_retries_denied_probe_until_absence(self):
+        child = mock.Mock(returncode=0, pid=12345)
+        with mock.patch.object(upgrade.os, 'killpg',
+                               side_effect=[PermissionError('exited group'), ProcessLookupError()]) as probe, \
+                mock.patch.object(upgrade.time, 'sleep'):
+            self.assertTrue(upgrade.settle_coordinator(child))
+        self.assertEqual(probe.call_args_list, [mock.call(child.pid, 0)] * 2)
+        child.wait.assert_not_called()
+
+    def test_reaped_group_denial_cannot_receive_settlement_credit(self):
+        child = mock.Mock(returncode=0, pid=12345)
+        with mock.patch.object(upgrade.os, 'killpg', side_effect=PermissionError('denied')) as probe, \
+                mock.patch.object(upgrade.time, 'monotonic', side_effect=[0, 0.1, 3]), \
+                mock.patch.object(upgrade.time, 'sleep'):
+            self.assertFalse(upgrade.settle_coordinator(child))
+        self.assertTrue(probe.call_args_list)
+        self.assertTrue(all(call.args == (child.pid, 0) for call in probe.call_args_list))
+        child.wait.assert_not_called()
+
     def test_failed_cancellation_retains_receipt_without_forced_coordinator_cleanup(self):
         import os
         with tempfile.TemporaryDirectory() as directory:

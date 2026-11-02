@@ -67,8 +67,14 @@ def main():
 
     commands = upgrade.Commands(project, output, dict(os.environ))
     signal_group = os.killpg
+    denied_probe = False
 
     def checked_signal(group, sig):
+        nonlocal denied_probe
+        if mode == 'denied-probe' and group == coordinator.pid and not sig and not denied_probe:
+            assert coordinator.returncode is not None, 'probe must follow reaping'
+            denied_probe = True
+            raise PermissionError('injected denied probe after coordinator exit')
         if sig:
             assert coordinator.returncode is None, 'cannot signal a reaped coordinator group'
             state = upgrade.show(binary, project, work)['attempts'][0]
@@ -100,6 +106,8 @@ def main():
         receipt = json.loads((output / '00-foreground.json').read_text())
         assert receipt['status'] != 0 and receipt['attempt_cleanup']['settled']
         assert receipt['group_settled'] and 'cleanup_error' not in receipt
+        if mode == 'denied-probe':
+            assert denied_probe, 'exercise the denied process-group probe'
         assert (output / '00-foreground.log').is_file()
         assert (output / '00-foreground-cancel.log').is_file()
         # Preserve the inspected state before the finally block's fallback.

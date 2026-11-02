@@ -60964,7 +60964,7 @@ fn integrated_upgrade_driver_settles_foreground_attempt() {
         PathBuf::from(std::env::var_os("FLUENT_PRODUCTION_BIN").expect(
             "build the production binary and set FLUENT_PRODUCTION_BIN before this selection",
         ));
-    for mode in ["timeout", "reaped"] {
+    for mode in ["timeout", "reaped", "denied-probe"] {
         let tmp = TempDir::new().unwrap();
         let project = setup_git_project(&tmp);
         let mut item = fluent::work_model::WorkItem::planned("driver-cleanup", "Stop owned work");
