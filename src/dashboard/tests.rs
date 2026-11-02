@@ -2540,3 +2540,48 @@ fn initial_local_read_does_not_block_first_draw() {
     drop(local);
     drop(session.writer.take());
 }
+
+#[test]
+fn initial_snapshot_preserves_view_and_remote_updates() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = loading_project_app();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let next = project_app(vec![project_source(
+        "/local",
+        vec![row("local", "executing")],
+    )])
+    .snapshot;
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    local.start(&mut app, move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        next
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut remote = project_source("ssh:remote", vec![row("remote", "executing")]);
+    apply_remote_results(&mut app, vec![remote.clone()]);
+    assert!(text(&app, 140, 24).contains("remote title"));
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    app.select_key(project::RowKey::work("ssh:remote", "remote"));
+    let selected = app.selected_key.clone();
+    remote.work[0].status.title = "New remote state".into();
+    remote.diagnostics.push("Remote item diagnostic".into());
+    apply_remote_results(&mut app, vec![remote.clone()]);
+    assert!(!local.poll(&mut app));
+    assert!(text(&app, 140, 24).contains("New remote state"));
+    release_tx.send(()).unwrap();
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(app.selected_key, selected);
+    assert_eq!(app.filter, project::Filter::Running);
+    assert_eq!(app.snapshot.sources[1], remote);
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("Remote item diagnostic"))
+    );
+    assert!(text(&app, 140, 24).contains("> ▸ New remote state"));
+    assert!(text(&app, 140, 24).contains("local title"));
+}

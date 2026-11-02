@@ -115,11 +115,7 @@ fn run_project_loop(
     loop {
         local.poll(app);
         if remote.poll() {
-            let mut snapshot = app.snapshot.clone();
-            snapshot.sources.retain(|s| !s.id.starts_with("ssh:"));
-            snapshot.sources.extend(remote.snapshots());
-            snapshot.errors = project_diagnostics(&snapshot.sources);
-            app.refresh(snapshot);
+            apply_remote_results(app, remote.snapshots());
         }
         if let Some(terminal) = &mut embedded {
             if terminal.focused() && !app.terminal_visible() {
@@ -193,6 +189,23 @@ fn run_project_loop(
         }
     }
     Ok(())
+}
+
+/// Apply remote completions to the current local and interaction state.
+fn apply_remote_results(app: &mut App, sources: Vec<project::SourceSnapshot>) {
+    let mut snapshot = app.snapshot.clone();
+    // Replace diagnostics only for sources included in this completion.
+    for source in sources {
+        if let Some(index) = snapshot.sources.iter().position(|old| old.id == source.id) {
+            let old_errors = project_diagnostics(&snapshot.sources[index..=index]);
+            snapshot.errors.retain(|error| !old_errors.contains(error));
+            snapshot.sources[index] = source.clone();
+        } else {
+            snapshot.sources.push(source.clone());
+        }
+        snapshot.errors.extend(project_diagnostics(&[source]));
+    }
+    app.refresh(snapshot);
 }
 
 /// Apply navigation and terminal actions before the event loop refreshes data.
