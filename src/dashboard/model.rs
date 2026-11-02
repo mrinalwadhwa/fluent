@@ -11,7 +11,16 @@ pub enum Pane {
     List,
     Detail,
 }
+/// Track reads in memory; never serialize receipt times into Work or SSH data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadHealth {
+    pub pending: bool,
+    pub last_success: Option<chrono::DateTime<chrono::Utc>>,
+    pub error: Option<String>,
+}
+
 pub struct App {
+    pub local_read: ReadHealth,
     pub snapshot: DashboardSnapshot,
     pub(super) all_work: bool,
     pub(super) selected: Option<String>,

@@ -28,28 +28,92 @@ pub fn run_dashboard(search_root: &Path) -> Result<()> {
 /// Launch the project Work view with additional local checkouts.
 pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> Result<()> {
     let home = crate::scheduler_service::runtime_home(search_root)?;
-    let (paths, discovery_errors) = project::discover_paths(search_root, explicit, &home);
-    let mut snapshot = load_project_snapshot(&paths, discovery_errors);
+    let mut app = loading_project_app();
     let config = match crate::dashboard_sources::load_sources(&home) {
         Ok(config) => config,
         Err(error) => {
-            snapshot.errors.push(format!("SSH sources: {error:#}"));
+            app.snapshot.errors.push(format!("SSH sources: {error:#}"));
             Vec::new()
         }
     };
     let mut remote = crate::dashboard_sources::RemoteSources::new(config, Default::default());
     remote.refresh();
-    snapshot.sources.extend(remote.snapshots());
+    app.snapshot.sources.extend(remote.snapshots());
     let mut session = DashboardTerminal::open()?;
-    let mut app = App::new(snapshot);
     let mut local = LocalRefresh::new(search_root, explicit, &home);
-    let size = session.terminal.size()?;
-    app.resize(size.width, size.height);
+    run_project_loop(&mut session, &mut app, &mut local, &mut remote)
+}
+
+fn loading_project_app() -> App {
+    let mut app = App::new(snapshot::DashboardSnapshot {
+        rows: Vec::new(),
+        errors: Vec::new(),
+        sources: Vec::new(),
+        project_view: true,
+    });
+    app.local_read.pending = true;
+    app
+}
+
+/// Keep terminal IO replaceable while tests drive the production event loop.
+trait DashboardSession {
+    fn size(&self) -> Result<(u16, u16)>;
+    fn draw(&mut self, app: &App) -> Result<()>;
+    fn next_event(&mut self, timeout: Duration) -> Result<Option<CEvent>>;
+    fn fullscreen(&mut self, terminal: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()>;
+    fn is_active(&self) -> bool;
+    fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()>;
+}
+
+impl DashboardSession for DashboardTerminal {
+    fn size(&self) -> Result<(u16, u16)> {
+        self.size()
+    }
+    fn draw(&mut self, app: &App) -> Result<()> {
+        self.terminal.draw(|frame| render::draw(frame, app))?;
+        Ok(())
+    }
+    fn next_event(&mut self, timeout: Duration) -> Result<Option<CEvent>> {
+        if event::poll(timeout)? {
+            Ok(Some(event::read()?))
+        } else {
+            Ok(None)
+        }
+    }
+    fn fullscreen(&mut self, terminal: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
+        let (columns, rows) = self.size()?;
+        self.handoff(|| terminal.fullscreen(columns, rows))
+            .and_then(|code| {
+                anyhow::ensure!(code == 0, "terminal attachment exited with {code}");
+                Ok(())
+            })
+    }
+    fn is_active(&self) -> bool {
+        self.is_active()
+    }
+    fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.set_mouse_enabled(enabled)
+    }
+}
+
+fn run_project_loop(
+    session: &mut impl DashboardSession,
+    app: &mut App,
+    local: &mut LocalRefresh,
+    remote: &mut crate::dashboard_sources::RemoteSources,
+) -> Result<()> {
+    let (width, height) = session.size()?;
+    app.resize(width, height);
+    // Draw a usable loading frame before even requesting local discovery.
+    if app.take_dirty() {
+        session.draw(app)?;
+    }
+    local.request(app, false);
     let mut next_poll = Instant::now() + DATA_POLL_INTERVAL;
     let mut embedded: Option<crate::terminal_view::EmbeddedTerminal> = None;
 
     loop {
-        local.poll(&mut app);
+        local.poll(app);
         if remote.poll() {
             let mut snapshot = app.snapshot.clone();
             snapshot.sources.retain(|s| !s.id.starts_with("ssh:"));
@@ -67,13 +131,12 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             }
         }
         if app.take_dirty() {
-            session.terminal.draw(|frame| render::draw(frame, &app))?;
+            session.draw(app)?;
         }
         let timeout = next_poll
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(33));
-        if event::poll(timeout)? {
-            let event = event::read()?;
+        if let Some(event) = session.next_event(timeout)? {
             let native = embedded.as_ref().is_some_and(|terminal| terminal.focused())
                 && matches!(event, CEvent::Key(_) | CEvent::Paste(_) | CEvent::Mouse(_));
             if native {
@@ -88,19 +151,9 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
             } else {
                 match event {
                     CEvent::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
-                        let effect =
-                            handle_terminal_key(&mut app, &mut embedded, key, |terminal| {
-                                let (columns, rows) = session.size()?;
-                                session
-                                    .handoff(|| terminal.fullscreen(columns, rows))
-                                    .and_then(|code| {
-                                        anyhow::ensure!(
-                                            code == 0,
-                                            "terminal attachment exited with {code}"
-                                        );
-                                        Ok(())
-                                    })
-                            });
+                        let effect = handle_terminal_key(app, &mut embedded, key, |terminal| {
+                            session.fullscreen(terminal)
+                        });
                         if !session.is_active() {
                             // Full-screen restoration exhausted its display
                             // budget. Exit without another draw or diagnostic
@@ -109,8 +162,8 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                         }
                         if effect == Effect::FullscreenTerminal {
                             let (width, height) = session.size()?;
-                            resize_terminal(&mut app, embedded.as_mut(), width, height);
-                            local.request(&mut app, true);
+                            resize_terminal(app, embedded.as_mut(), width, height);
+                            local.request(app, true);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
@@ -118,20 +171,20 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
                             session.set_mouse_enabled(enabled)?;
                         }
                         if matches!(effect, Effect::Refresh) {
-                            local.request(&mut app, true);
+                            local.request(app, true);
                             remote.refresh();
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                     }
                     CEvent::Resize(width, height) => {
-                        resize_terminal(&mut app, embedded.as_mut(), width, height);
+                        resize_terminal(app, embedded.as_mut(), width, height);
                     }
                     _ => {}
                 }
             }
         }
         if poll_due(Instant::now(), next_poll) {
-            local.request(&mut app, false);
+            local.request(app, false);
             remote.refresh();
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
@@ -369,6 +422,8 @@ impl LocalRefresh {
         app: &mut App,
         read: impl FnOnce() -> snapshot::DashboardSnapshot + Send + 'static,
     ) {
+        app.local_read.pending = true;
+        app.dirty = true;
         match std::thread::Builder::new()
             .name("local-snapshot".into())
             .spawn(read)
@@ -389,6 +444,9 @@ impl LocalRefresh {
         // Only join a finished read; quitting also never waits for a local read.
         match self.pending.take().unwrap().join() {
             Ok(mut snapshot) => {
+                app.local_read.pending = false;
+                app.local_read.last_success = Some(chrono::Utc::now());
+                app.dirty = true;
                 let remote = app
                     .snapshot
                     .sources

@@ -2454,3 +2454,89 @@ fn project_views_keep_large_counts_and_detail_overflow_visible() {
         "{rendered}"
     );
 }
+
+/// Drive the production coordinator while a real Work collection read waits on a FIFO.
+struct StartupSession {
+    fifo: PathBuf,
+    writer: Option<std::fs::File>,
+    keys: std::collections::VecDeque<KeyCode>,
+    frames: Vec<String>,
+}
+impl DashboardSession for StartupSession {
+    fn size(&self) -> Result<(u16, u16)> {
+        Ok((140, 24))
+    }
+    fn draw(&mut self, app: &App) -> Result<()> {
+        self.frames.push(text(app, 140, 24));
+        Ok(())
+    }
+    fn next_event(&mut self, _: Duration) -> Result<Option<CEvent>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if self.writer.is_none() {
+            assert!(self.frames[0].contains("Loading"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&self.fifo)
+                {
+                    Ok(writer) => {
+                        self.writer = Some(writer);
+                        break;
+                    }
+                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                        assert!(Instant::now() < deadline, "reader never reached Work FIFO");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("opening FIFO writer: {error}"),
+                }
+            }
+        }
+        Ok(Some(CEvent::Key(
+            self.keys.pop_front().expect("quit was not handled").into(),
+        )))
+    }
+    fn fullscreen(&mut self, _: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
+        unreachable!()
+    }
+    fn is_active(&self) -> bool {
+        true
+    }
+    fn set_mouse_enabled(&mut self, _: bool) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn initial_local_read_does_not_block_first_draw() {
+    let root = tempfile::tempdir().unwrap();
+    let items = root.path().join(".fluent/work/items");
+    std::fs::create_dir_all(&items).unwrap();
+    let fifo = items.join("blocked.json");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let mut session = StartupSession {
+        fifo,
+        writer: None,
+        keys: [
+            KeyCode::Tab,
+            KeyCode::Char('?'),
+            KeyCode::Char('?'),
+            KeyCode::Char('q'),
+        ]
+        .into(),
+        frames: vec![],
+    };
+    let mut app = loading_project_app();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let mut remote = crate::dashboard_sources::RemoteSources::new(vec![], Default::default());
+    run_project_loop(&mut session, &mut app, &mut local, &mut remote).unwrap();
+    assert!(app.should_quit());
+    assert_eq!(app.filter, project::Filter::NeedsYou);
+    assert!(session.frames.iter().any(|frame| frame.contains("? close")));
+    assert!(!local.pending.as_ref().unwrap().is_finished());
+    // Exit must detach the still-blocked reader, before EOF can release it.
+    drop(local);
+    drop(session.writer.take());
+}

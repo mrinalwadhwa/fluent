@@ -109,6 +109,9 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             title.push_str(&format!(" · {}", display.state));
         }
     }
+    if app.local_read.pending {
+        title.push_str(" · Loading local Work");
+    }
     if let Some(error) = &app.stale_error {
         title.push_str(&format!(" · {error}"));
     }

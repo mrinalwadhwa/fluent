@@ -20,6 +20,7 @@ impl App {
     pub fn new(snapshot: DashboardSnapshot) -> Self {
         let mut app = Self {
             snapshot,
+            local_read: Default::default(),
             all_work: false,
             selected: None,
             selected_key: None,
