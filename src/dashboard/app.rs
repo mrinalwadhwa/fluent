@@ -47,6 +47,7 @@ impl App {
         if app.project_mode() {
             app.selected_key = project::initial_key(&app.snapshot.sources, app.filter);
             app.reconcile_project_selection();
+            app.keep_selection_visible();
         } else {
             app.reconcile_selection(None);
         }

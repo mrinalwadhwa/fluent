@@ -1217,7 +1217,9 @@ fn embedded_terminal_keeps_project_context_visible() {
     let content = layout::terminal_content((140, 30), &app.terminal.as_ref().unwrap().identity);
     assert_eq!(buffer[(content.x + 7, content.y)].symbol(), "界");
     assert_eq!(buffer[(content.x + 10, content.y)].symbol(), "a");
-    assert_eq!(buffer[(content.x - 1, content.y)].symbol(), "│");
+    assert_eq!(buffer[(content.x - 1, content.y)].symbol(), " ");
+    let divider = layout::project_areas(ratatui::layout::Rect::new(0, 0, 140, 30)).divider;
+    assert_eq!(buffer[(divider.x, content.y)].symbol(), "│");
     assert!(rendered.contains("Observe"), "{rendered}");
     assert!(rendered.contains("agent-work"), "{rendered}");
 }
@@ -2872,7 +2874,12 @@ fn initial_local_read_does_not_block_first_draw() {
     run_project_loop(&mut session, &mut app, &mut local, &mut remote).unwrap();
     assert!(app.should_quit());
     assert_eq!(app.filter, project::Filter::NeedsYou);
-    assert!(session.frames.iter().any(|frame| frame.contains("? close")));
+    assert!(
+        session
+            .frames
+            .iter()
+            .any(|frame| frame.contains("?/Esc close help"))
+    );
     assert!(!local.pending.as_ref().unwrap().is_finished());
     // Exit must detach the still-blocked reader, before EOF can release it.
     drop(local);
@@ -3206,6 +3213,8 @@ fn dashboard_opens_on_current_project_work() {
                 .remove(0)
         })
         .collect();
+    let initially_selected = project_app(next.sources.clone());
+    assert!(text(&initially_selected, 100, 24).contains("> ▸ attention"));
     empty.refresh(next);
     assert_eq!(empty.selected_key, selected);
     assert!(text(&empty, 100, 24).contains("> ▸ running"));

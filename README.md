@@ -440,17 +440,19 @@ Run `fluent dashboard` from a checkout to see its Work alongside checkouts alrea
 
 The list groups Work by source. Each group shows project name, host, and path
 context; the detail pane shows the full checkout path. While dashboard navigation
-owns input, press Tab/Shift+Tab to cycle forward/backward through All, Needs you,
-Running, Ready, Waiting, and History. Ready includes Ready and Ready to land;
-Waiting includes Queued and Planned. Rows keep their exact categories. Header
+owns input, press Tab/Shift+Tab to cycle forward/backward through Current, Needs you,
+Running, Ready, Waiting, History, and All. Current opens first and excludes only
+History. Ready includes Ready and Ready to land; Waiting includes Queued and
+Planned. Rows keep their exact categories. Header
 counts reflect published Work Item lifecycle and queue state; expanding workers
 does not change them.
 
 Use Up/Down to select a row and Enter on a Work Item to expand or collapse its
-Attempt's worker Tasks. Press Right to inspect selected details or open the
-selected available worker's session in Observe mode. In compact mode, Left/Esc
-returns to the list; Tab/Shift+Tab still changes views in either pane while
-navigation owns input. Press `e` for read errors, `r` to refresh, and `?` for help.
+Attempt's worker Tasks. Press Right to focus the selected Work Item or worker's
+full details, including its condition and next action. Press `t` to open a worker
+terminal in Observe mode. The header identifies which pane owns input, and the
+footer shows its controls. Left/Esc returns to the list; Tab/Shift+Tab still changes
+views in either pane while navigation owns input. Press `e` for read errors, `r` to refresh, and `?` for help.
 
 A source that fails a later refresh keeps its last snapshot with a `STALE` label while other projects continue updating. Worker details use `unavailable` where Fluent has no recorded model, elapsed time, or provider wait. Agent-terminal availability comes from managed terminal descriptors; a headless worker has no interactive terminal.
 

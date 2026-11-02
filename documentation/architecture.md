@@ -2226,11 +2226,25 @@ inspection self-loop and allowing other actionable Work to surface. The boundary
 returns valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
 `fluent dashboard` projects those rows into a read-only operator console grouped
-by project. Counted All, Needs you, Running, Ready, Waiting, and History views
-filter Work Items; Ready includes Ready to land, and Waiting includes Queued and
-Planned. Rows retain their exact categories. The compact header has one rule,
+by project. Counted Current, Needs you, Running, Ready, Waiting, History, and All
+views filter Work Items. Current opens first and excludes only History. Initial
+selection favors Needs you, then Running, then Ready or Ready to land. Ready
+includes Ready to land, and Waiting includes Queued and Planned. Rows retain their
+exact categories. The compact header has one rule,
 and a single divider separates the list from details at 100 columns or wider.
-The list uses 65% of the width to leave room for embedded terminal output.
+The split uses 65% of the width for the list, with a blank column on both sides
+of the divider and a blank row below the header rule. Rendering, scrolling,
+terminal dimensions, and mouse translation consume `layout::project_areas`.
+Full Work titles, conditions or blockers, and canonical next actions precede
+identifiers in details; worker details lead with role and state. The shared detail
+projection wraps display cells for drawing and scroll bounds.
+`model::InputOwner` and the shared control projection identify List, Details,
+or native terminal input; the footer keeps only whole controls that fit. Right
+focuses details, while `t` explicitly opens the selected worker in Observe.
+Inspecting details can hide a retained terminal attachment without retargeting
+its invocation or changing its Control lease. The existing hidden-terminal rule
+releases native input focus. `terminal_view::Display::focused` carries ephemeral
+focus for presentation; it does not grant terminal authority.
 From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
 shows a resize message. Selection uses source, Work Item, Task, and invocation
 identity, so refresh preserves a visible selection across reordering. The old

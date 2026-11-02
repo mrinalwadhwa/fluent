@@ -119,9 +119,9 @@ def journey(binary, project, mode):
         wait_for("Tasks", "Visible Work")
         if mode == "help":
             os.write(master, b"?")
-            wait_for("Help", "j/k", "select", "f full-screen", "Tab/Shift+Tab view", "Esc close help", absent=("Visible Work",))
+            wait_for("Help", "↑/↓ select", "→ details", "Enter workers", "Tab/⇧Tab view", "?/Esc close help", absent=("Visible Work", "i Control", "f full-screen"))
             os.write(master, b"\x1b")
-            wait_for("Tasks", "Visible Work", absent=("Esc close help",))
+            wait_for("Tasks", "Visible Work", absent=("?/Esc close help",))
         elif mode == "refresh":
             wait_for("> ▸ Visible Work", "Second Work")
             # Opening the writer proves that a real snapshot read has reached
