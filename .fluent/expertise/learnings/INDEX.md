@@ -45,6 +45,7 @@
 - [dashboard-display-metadata-preserves-ssh-schema](dashboard-display-metadata-preserves-ssh-schema.md) — Keep local dashboard display metadata out of strict SSH snapshots until an explicit protocol compatibility change
 - [dashboard-layout-contract-is-acyclic](dashboard-layout-contract-is-acyclic.md) — Keep dashboard interaction state and rendering acyclic by placing shared geometry and line projection in the layout contract
 - [dashboard-local-refresh-owns-no-ui-state](dashboard-local-refresh-owns-no-ui-state.md) — Keep local snapshot workers read-only, merge completion into current UI and SSH state, and detach unfinished reads on exit
+- [dashboard-pty-assertions-reconstruct-frames](dashboard-pty-assertions-reconstruct-frames.md) — Replay Ratatui cursor updates into a screen before asserting visible dashboard text in PTY captures
 - [dashboard-rendered-overflow-tests](dashboard-rendered-overflow-tests.md) — Dashboard overflow and responsive-layout tests must render constrained TestBackend frames and assert visible content and pane bounds
 - [dashboard-responsiveness-tests-gate-real-reads](dashboard-responsiveness-tests-gate-real-reads.md) — Hold a confirmed snapshot read open while testing dashboard navigation, rendered views, and exit through a PTY
 - [dashboard-source-projection-keeps-typed-state](dashboard-source-projection-keeps-typed-state.md) — Keep dashboard source loading and worker lookup typed; format operator detail lines in a separate presentation boundary
@@ -145,6 +146,7 @@
 - [queue-admission-rechecks-after-evidence-preflight](queue-admission-rechecks-after-evidence-preflight.md) — Queue admission runs evidence checks outside the queue lock and rechecks the ledger before creating or reusing a dispatch
 - [readiness-gate-at-selection-not-permanent-skip](readiness-gate-at-selection-not-permanent-skip.md) — A shared readiness predicate must gate at every projection including auto-merge selection, and a retryable gate must withhold selection, never select-then-fail-then-mark a permanent skip
 - [readme-gif-rendering-preserves-palette](readme-gif-rendering-preserves-palette.md) — Preserve FFmpeg's GIF palette and frame rectangles so README asset checks do not drift from redundant gifsicle optimization
+- [reaped-coordinator-probes-require-absent-group](reaped-coordinator-probes-require-absent-group.md) — After reaping an upgrade fixture coordinator, probe its group without signaling and require absence to prove settlement
 - [rebase-preserves-review-invalidation-provenance](rebase-preserves-review-invalidation-provenance.md) — Preserve the pre-rebase Writer tip so landing can reconstruct ordinary review invalidation
 - [record-divergence-in-decisions-md](record-divergence-in-decisions-md.md) — Record accepted Approach deviations in decisions.md; editing expertise alone cannot resolve conflicting requirements
 - [recoverable-parent-child-materialization](recoverable-parent-child-materialization.md) — Stage the exact parent intent before publishing multiple child records, resume matching partial publication, and gate downstream execution until materialization completes
