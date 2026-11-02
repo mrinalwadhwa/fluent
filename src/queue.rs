@@ -350,6 +350,8 @@ fn legacy_status_to_dispatch(status: &str) -> DispatchStatus {
 /// priority, queue time, and outcome. A malformed file is an error so callers
 /// can surface it for operator inspection.
 pub fn read_ledger(project_root: &Path, work_item_id: &str) -> Result<Option<DispatchLedger>> {
+    #[cfg(feature = "snapshot-profile")]
+    crate::snapshot_profile::operation("read_ledger");
     let path = queue_file(project_root, work_item_id);
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,

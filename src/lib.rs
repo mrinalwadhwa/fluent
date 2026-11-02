@@ -51,6 +51,8 @@ pub mod review_diff_command;
 pub(crate) mod review_inspection;
 pub(crate) mod review_invalidation;
 pub mod review_only_worktree;
+#[cfg(feature = "snapshot-profile")]
+pub mod snapshot_profile;
 pub mod transcript;
 // Crate-private: the byte pump, its typed `TranscriptPumpError`, and the pump
 // handle are used only by coder supervision, retry classification, and config

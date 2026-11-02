@@ -4,6 +4,268 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
+#[cfg(feature = "test-support")]
+fn snapshot_profile_attributes_git_and_resets_between_reads() {
+    use crate::snapshot_profile::{capture, mark};
+    let root = tempfile::tempdir().unwrap();
+    let (_, first) = capture(|| {
+        mark("enumeration");
+        crate::git::run_stdout(root.path(), &["--version"], "profile fixture").unwrap();
+        mark("workers");
+    });
+    assert_eq!(first.git.len(), 1);
+    assert_eq!(first.git[0].stage, "enumeration");
+    assert!(first.git[0].args.iter().any(|arg| arg == "--version"));
+    assert_eq!(first.git[0].cwd, root.path());
+    assert!(first.git[0].elapsed_ms > 0.0);
+    assert!(first.stages_ms.contains_key("workers"));
+    let (_, second) = capture(|| mark("empty"));
+    assert!(second.git.is_empty());
+    assert!(!second.stages_ms.contains_key("enumeration"));
+    let (_, stdin) = capture(|| {
+        mark("immutable-object");
+        crate::git::run_stdout_with_stdin_and_env(
+            root.path(),
+            &["hash-object", "--stdin"],
+            b"fixture",
+            ("GIT_CONFIG_SYSTEM", &root.path().join("no-system-config")),
+            "profile stdin",
+        )
+        .unwrap();
+        crate::git::run_with_stdin(
+            root.path(),
+            &["hash-object", "--stdin"],
+            b"fixture",
+            "profile stdin",
+        )
+        .unwrap();
+    });
+    assert_eq!(stdin.git.len(), 2);
+    assert!(
+        stdin
+            .git
+            .iter()
+            .all(|call| call.stage == "immutable-object")
+    );
+    let _ = std::panic::catch_unwind(|| capture(|| panic!("profile fixture")));
+    let (_, after_panic) = capture(|| mark("after-panic"));
+    assert!(after_panic.git.is_empty());
+}
+
+#[test]
+fn snapshot_projection_preserves_results_across_refreshes() {
+    use crate::work_model::{
+        AttemptStatus, MergeCandidateMergeStatus, MergeReviewState, TaskOutput, TaskStatus,
+        WorkItem, WorkModelStore,
+    };
+    fn tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            let metadata = path.symlink_metadata().unwrap();
+            let contents = if metadata.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), out);
+                }
+                Vec::new()
+            } else if metadata.is_symlink() {
+                std::fs::read_link(path)
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else {
+                std::fs::read(path).unwrap()
+            };
+            out.insert(path.strip_prefix(root).unwrap().into(), contents);
+        }
+        let mut out = Default::default();
+        visit(root, root, &mut out);
+        out
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = WorkModelStore::new(root.path());
+    for id in ["running", "queued", "blocked", "ready", "landed", "unknown"] {
+        let mut item = WorkItem::planned(id, id);
+        item.add_initial_attempt("attempt-1").unwrap();
+        match id {
+            "running" => {
+                item.attempts[0].status = AttemptStatus::Executing;
+                item.attempts[0].tasks[0].status = TaskStatus::Executing;
+            }
+            "blocked" => {
+                item.attempts[0].status = AttemptStatus::NeedsUser;
+                item.attempts[0].tasks[0].status = TaskStatus::NeedsUser;
+            }
+            "landed" => {
+                let attempt = &mut item.attempts[0];
+                attempt.status = AttemptStatus::Complete;
+                attempt.review_state = Some(crate::work_model::AttemptReviewState::Passed);
+                attempt.tasks[0].status = TaskStatus::Complete;
+                attempt.tasks[0].output = Some(TaskOutput {
+                    workspace_id: "candidate".into(),
+                    workspace_path: ".".into(),
+                    source_branch: "main".into(),
+                    base_commit: None,
+                    commit: "abc123".into(),
+                    no_change: None,
+                    learner_canonicalization: None,
+                });
+                item.create_or_get_merge_candidate("attempt-1").unwrap();
+                let candidate = &mut item.merge_candidates[0];
+                candidate.merge_review_state = MergeReviewState::Passed;
+                candidate.merge_state.status = MergeCandidateMergeStatus::Merged;
+                candidate.merge_state.merged_commit = Some("abc123".into());
+            }
+            _ => {}
+        }
+        store.create_work_item(&item).unwrap();
+    }
+    crate::queue::add(root.path(), "queued", None).unwrap();
+    std::fs::write(
+        root.path().join(".fluent/work/queue/unknown.json"),
+        "broken ledger",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".fluent/work/items/malformed.json"),
+        "broken item",
+    )
+    .unwrap();
+    let evidence = root
+        .path()
+        .join(".fluent/work/artifacts/retained-transcript.txt");
+    std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+    std::fs::write(&evidence, "retained evidence").unwrap();
+    let running = store.read_work_item_snapshot("running").unwrap();
+    let lock =
+        crate::lease::task_lock_path(root.path(), "running", &running.attempts[0].tasks[0].id);
+    let _running_lease = crate::lease::acquire(&lock).unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+    let registry = canonical.join(
+        ".fluent/work/terminal-sessions/running/attempt-1/attempt-1-write-1/terminal-session.json",
+    );
+    std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    let descriptor = crate::terminal_sessions::TerminalDescriptor {
+        schema_version: 1,
+        source_id: canonical.to_string_lossy().into_owned(),
+        project_identity: canonical.to_string_lossy().into_owned(),
+        work_item_id: "running".into(),
+        attempt_id: "attempt-1".into(),
+        task_id: running.attempts[0].tasks[0].id.clone(),
+        execution_generation: "retained-generation".into(),
+        session_id: "retained-session".into(),
+        role: "author".into(),
+        provider: "Codex".into(),
+        lifecycle: crate::terminal_sessions::TerminalLifecycle::Ended,
+        can_observe: false,
+        can_control: false,
+        unavailable_reason: None,
+    };
+    std::fs::write(&registry, serde_json::to_vec(&serde_json::json!({
+        "descriptor": descriptor,
+        "registry_path": registry,
+        "execution_record": canonical.join(".fluent/work/artifacts/running/attempt-1/attempt-1-write-1/execution.json"),
+        "socket": null,
+    })).unwrap()).unwrap();
+    let before = tree(root.path());
+    let first = project::SourceSnapshot::load(root.path()).unwrap();
+    #[cfg(feature = "test-support")]
+    let (second, profile) =
+        crate::snapshot_profile::capture(|| project::SourceSnapshot::load(root.path()).unwrap());
+    #[cfg(feature = "test-support")]
+    {
+        for stage in [
+            "work-items",
+            "terminals",
+            "queue",
+            "status-verification-recovery",
+            "display-attempt",
+            "workers-transitions",
+        ] {
+            assert!(profile.stages_ms.contains_key(stage), "missing {stage}");
+        }
+        assert!(profile.operations["read_ledger"] >= 6);
+        assert!(profile.operations["display_attempt"] >= 6);
+    }
+    #[cfg(not(feature = "test-support"))]
+    let second = project::SourceSnapshot::load(root.path()).unwrap();
+    assert_eq!(first, second);
+    let worker = &first
+        .work
+        .iter()
+        .find(|w| w.status.id == "running")
+        .unwrap()
+        .workers[0];
+    assert_eq!(
+        worker.key.execution_generation.as_deref(),
+        Some("retained-generation")
+    );
+    let terminal = worker.terminal.as_ref().unwrap();
+    assert!(!terminal.can_observe && !terminal.can_control);
+    assert!(worker.unavailable_reason.contains("invocation has ended"));
+    assert_eq!(tree(root.path()), before);
+    assert!(first.diagnostics.iter().any(|d| d.contains("malformed")));
+    for (id, category) in [
+        ("running", project::Category::Running),
+        ("queued", project::Category::Queued),
+        ("blocked", project::Category::NeedsYou),
+        ("ready", project::Category::Ready),
+        ("landed", project::Category::History),
+        ("unknown", project::Category::Unknown),
+    ] {
+        let work = first.work.iter().find(|w| w.status.id == id).unwrap();
+        assert_eq!(work.category, category, "{id}");
+        let item = store.read_work_item_snapshot(id).unwrap();
+        assert_eq!(
+            work.status,
+            crate::work_status::summarize_work_item(&item, Some(root.path()))
+        );
+    }
+    let mut changed = store.read_work_item_snapshot("ready").unwrap();
+    changed.title = "Updated after the prior snapshot".into();
+    store.write_work_item(&changed).unwrap();
+    std::fs::remove_file(root.path().join(".fluent/work/queue/unknown.json")).unwrap();
+    std::fs::remove_file(&registry).unwrap();
+    let changed_bytes = tree(root.path());
+    let third = project::SourceSnapshot::load(root.path()).unwrap();
+    assert!(
+        third
+            .work
+            .iter()
+            .find(|w| w.status.id == "running")
+            .unwrap()
+            .workers[0]
+            .terminal
+            .is_none()
+    );
+    assert_eq!(tree(root.path()), changed_bytes);
+    assert_eq!(
+        third
+            .work
+            .iter()
+            .find(|w| w.status.id == "ready")
+            .unwrap()
+            .status
+            .title,
+        changed.title
+    );
+    assert_eq!(
+        third
+            .work
+            .iter()
+            .find(|w| w.status.id == "unknown")
+            .unwrap()
+            .category,
+        project::Category::Ready
+    );
+    let items = root.path().join(".fluent/work/items");
+    std::fs::rename(&items, root.path().join("saved-items")).unwrap();
+    std::fs::write(&items, "collection obstruction").unwrap();
+    let failed_bytes = tree(root.path());
+    assert!(project::SourceSnapshot::load(root.path()).is_err());
+    assert_eq!(tree(root.path()), failed_bytes);
+}
+
+#[test]
 fn dashboard_snapshot_is_nonmutating() {
     fn tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
         fn visit(

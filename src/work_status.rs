@@ -548,6 +548,8 @@ pub(crate) fn display_attempt<'a>(
     item: &'a WorkItem,
     project_root: Option<&Path>,
 ) -> Option<&'a Attempt> {
+    #[cfg(feature = "snapshot-profile")]
+    crate::snapshot_profile::operation("display_attempt");
     let bound_attempt = project_root
         .and_then(|root| crate::queue::read_ledger(root, &item.id).ok().flatten())
         .and_then(|ledger| {

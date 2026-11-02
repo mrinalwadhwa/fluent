@@ -7,6 +7,14 @@ use crate::work_model::{TaskKind, WorkModelStore};
 use crate::{queue, work_status};
 use sha2::{Digest, Sha256};
 
+// Compile profiling out of production; the release example opts in explicitly.
+macro_rules! profile_stage {
+    ($stage:literal) => {
+        #[cfg(feature = "snapshot-profile")]
+        crate::snapshot_profile::mark($stage);
+    };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Category {
     NeedsYou,
@@ -110,6 +118,7 @@ impl SourceSnapshot {
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        profile_stage!("setup");
         let path = path.canonicalize()?;
         let id = path.to_string_lossy().into_owned();
         let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into());
@@ -117,8 +126,10 @@ impl SourceSnapshot {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| id.clone());
+        profile_stage!("work-items");
         let snapshot = WorkModelStore::new(&path).snapshot_work_items()?;
         let mut diagnostics = snapshot.diagnostics.clone();
+        profile_stage!("terminals");
         let descriptors = match terminal_sessions::list(&path) {
             Ok(value) => value,
             Err(error) => {
@@ -126,6 +137,7 @@ impl SourceSnapshot {
                 Vec::new()
             }
         };
+        profile_stage!("queue");
         let mut queued_work_item_ids = Vec::new();
         let mut queue_error_ids = BTreeSet::new();
         for item in &snapshot.items {
@@ -151,6 +163,7 @@ impl SourceSnapshot {
             .items
             .iter()
             .map(|item| {
+                profile_stage!("status-verification-recovery");
                 let status = work_status::summarize_work_item(item, Some(&path));
                 let queued = queued_work_item_ids.contains(&item.id);
                 let category =
@@ -159,7 +172,9 @@ impl SourceSnapshot {
                     } else {
                         Category::from_published_action(&status.action, queued)
                     };
+                profile_stage!("display-attempt");
                 let attempt = work_status::display_attempt(item, Some(&path));
+                profile_stage!("workers-transitions");
                 let phase = match status.action.as_str() {
                     "merging" | "landing-pending" => Some("Landing".into()),
                     "reviewing" => Some("Reviewing".into()),
@@ -286,6 +301,7 @@ impl SourceSnapshot {
                 }
             })
             .collect();
+        profile_stage!("assemble");
         Ok(Self {
             schema_version: 1,
             id,

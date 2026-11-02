@@ -49,7 +49,13 @@ fn backoff_duration(attempt: usize) -> Duration {
 fn run_with_lock_retry(cmd_builder: impl Fn() -> Command) -> Result<Output> {
     let mut last_output: Option<Output> = None;
     for attempt in 1..=LOCK_RETRY_MAX_ATTEMPTS {
-        let output = cmd_builder().output().context("Failed to invoke git")?;
+        let mut command = cmd_builder();
+        #[cfg(feature = "snapshot-profile")]
+        let started = std::time::Instant::now();
+        let output = command.output();
+        #[cfg(feature = "snapshot-profile")]
+        crate::snapshot_profile::git(&command, started);
+        let output = output.context("Failed to invoke git")?;
 
         if output.status.success() {
             return Ok(output);
@@ -163,13 +169,18 @@ pub fn run_stdout_with_stdin_and_env(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(feature = "snapshot-profile")]
+    let started = std::time::Instant::now();
     let mut child = command.spawn().context("Failed to invoke git")?;
     child
         .stdin
         .take()
         .context("Failed to open git stdin")?
         .write_all(input)?;
-    let output = child.wait_with_output().context("Failed to wait for git")?;
+    let output = child.wait_with_output();
+    #[cfg(feature = "snapshot-profile")]
+    crate::snapshot_profile::git(&command, started);
+    let output = output.context("Failed to wait for git")?;
     if !output.status.success() {
         bail!(
             "git {} failed (exit {}) while {action}\n  cwd: {}\n{}",
@@ -295,18 +306,23 @@ pub fn run_with_stdin(cwd: &Path, args: &[&str], input: &[u8], action: &str) -> 
 }
 
 fn run_raw_with_stdin(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Output> {
-    let mut child = build_command(cwd, args)
+    let mut command = build_command(cwd, args);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to invoke git")?;
+        .stderr(Stdio::piped());
+    #[cfg(feature = "snapshot-profile")]
+    let started = std::time::Instant::now();
+    let mut child = command.spawn().context("Failed to invoke git")?;
     child
         .stdin
         .take()
         .context("Failed to open git stdin")?
         .write_all(input)?;
-    child.wait_with_output().context("Failed to wait for git")
+    let output = child.wait_with_output();
+    #[cfg(feature = "snapshot-profile")]
+    crate::snapshot_profile::git(&command, started);
+    output.context("Failed to wait for git")
 }
 
 fn exit_code_display(output: &Output) -> String {
