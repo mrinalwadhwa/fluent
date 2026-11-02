@@ -2133,7 +2133,9 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
             let lines = rendered.lines().collect::<Vec<_>>();
             assert!(lines[0].starts_with("Fluent work"), "{rendered}");
             assert!(
-                lines[1].contains("All 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0"),
+                lines[1].contains(
+                    "Current 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0  All 1"
+                ),
                 "{rendered}"
             );
             assert!(lines[2].chars().all(|c| c == '─'), "{rendered}");
@@ -2208,7 +2210,7 @@ fn tab_views_preserve_selection_and_exact_categories() {
     source.work[4].category = C::Queued;
     let mut app = project_app(vec![source]);
     let selected = app.selected_key.clone();
-    assert_eq!(app.project_keys().len(), 8);
+    assert_eq!(app.project_keys().len(), 7);
     let cases = [
         (Filter::NeedsYou, vec!["attention"]),
         (Filter::Running, vec!["run"]),
@@ -2244,11 +2246,9 @@ fn tab_views_preserve_selection_and_exact_categories() {
         }
         let rendered = text(&app, 120, 28);
         assert!(
-            rendered
-                .lines()
-                .nth(1)
-                .unwrap()
-                .contains("All 8  Needs you 1  Running 1  Ready 2  Waiting 2  History 1")
+            rendered.lines().nth(1).unwrap().contains(
+                "Current 7  Needs you 1  Running 1  Ready 2  Waiting 2  History 1  All 8"
+            )
         );
         if filter == Filter::Ready {
             assert!(rendered.contains("Ready to land"));
@@ -2610,7 +2610,7 @@ fn narrow_view_keeps_filter_and_return_keys_distinct() {
     for width in [60, 80, 99] {
         app.resize(width, 24);
         app.pane = app::Pane::List;
-        app.filter = project::Filter::All;
+        app.filter = project::Filter::Current;
         assert!(!text(&app, width, 24).contains("Work Item: work"));
         app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.filter, project::Filter::NeedsYou);
@@ -2620,7 +2620,7 @@ fn narrow_view_keeps_filter_and_return_keys_distinct() {
         assert!(rendered.contains("Work Item: work"), "{rendered}");
         assert!(rendered.contains("←/Esc list"), "{rendered}");
         app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(app.filter, project::Filter::All);
+        assert_eq!(app.filter, project::Filter::Current);
         assert_eq!(app.pane, app::Pane::Detail);
         app.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.pane, app::Pane::List);
@@ -2753,7 +2753,7 @@ fn project_views_keep_large_counts_and_detail_overflow_visible() {
             .collect(),
     )]);
     app.resize(60, 15);
-    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
     assert!(
         text(&app, 60, 15)
             .lines()
@@ -3148,4 +3148,57 @@ fn project_details_wrap_full_context_to_the_last_line() {
             assert_eq!(app.detail_scroll, app.scroll_bounds().detail_max_scroll);
         }
     }
+}
+
+#[test]
+fn dashboard_opens_on_current_project_work() {
+    let history = project_source("/old", vec![row("past", "merged")]);
+    let active = project_source(
+        "ssh:remote",
+        vec![
+            row("unknown", "future"),
+            row("ready", "task-ready"),
+            row("running", "executing"),
+            row("attention", "needs-user"),
+        ],
+    );
+    let mut app = project_app(vec![history.clone(), active.clone()]);
+    assert_eq!(app.filter.label(), "Current");
+    assert_eq!(app.project_keys().len(), 4);
+    assert_eq!(app.selected_id(), Some("attention"));
+    assert!(text(&app, 140, 24).contains("Current 4"));
+    let mut completed = active.clone();
+    completed.work.pop();
+    app.refresh(project_app(vec![history.clone(), completed.clone()]).snapshot);
+    let mut fresh = project_app(vec![history.clone(), completed.clone()]);
+    assert_eq!(fresh.selected_id(), Some("running"));
+    completed.work.pop();
+    fresh = project_app(vec![history.clone(), completed]);
+    assert_eq!(fresh.selected_id(), Some("ready"));
+    let mut empty = project_app(vec![history.clone()]);
+    assert!(empty.selected_key.is_none());
+    assert!(text(&empty, 100, 24).contains("Current 0"));
+    empty.refresh(project_app(vec![history, active]).snapshot);
+    assert_eq!(empty.selected_id(), Some("attention"));
+    // A completed asynchronous refresh must retain and reveal a visible selection.
+    empty.select_key(project::RowKey::work("ssh:remote", "running"));
+    let selected = empty.selected_key.clone();
+    let mut next = empty.snapshot.clone();
+    next.sources[0].work = (0..30)
+        .map(|i| {
+            project_source("/old", vec![row(&format!("new-{i}"), "planned")])
+                .work
+                .remove(0)
+        })
+        .collect();
+    empty.refresh(next);
+    assert_eq!(empty.selected_key, selected);
+    assert!(text(&empty, 100, 24).contains("> ▸ running"));
+    empty.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(empty.filter, project::Filter::History);
+    assert!(empty.project_keys().is_empty());
+    empty.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(empty.filter, project::Filter::All);
+    empty.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(empty.filter.label(), "Current");
 }

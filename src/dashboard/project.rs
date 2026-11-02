@@ -387,6 +387,7 @@ pub fn refresh_sources(previous: &[SourceSnapshot], paths: &[PathBuf]) -> Vec<So
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
+    Current,
     All,
     NeedsYou,
     Running,
@@ -395,16 +396,18 @@ pub enum Filter {
     History,
 }
 impl Filter {
-    pub const VIEWS: [Self; 6] = [
-        Self::All,
+    pub const VIEWS: [Self; 7] = [
+        Self::Current,
         Self::NeedsYou,
         Self::Running,
         Self::Ready,
         Self::Waiting,
         Self::History,
+        Self::All,
     ];
     pub fn matches(self, category: Category) -> bool {
         match self {
+            Self::Current => category != Category::History,
             Self::All => true,
             Self::NeedsYou => category == Category::NeedsYou,
             Self::Running => category == Category::Running,
@@ -415,6 +418,7 @@ impl Filter {
     }
     pub fn label(self) -> &'static str {
         match self {
+            Self::Current => "Current",
             Self::All => "All",
             Self::NeedsYou => "Needs you",
             Self::Running => "Running",

@@ -82,8 +82,8 @@ Test: src/dashboard/tests.rs (dashboard_controls_leave_work_state_unchanged)
 ### B1
 
 WHEN the project dashboard renders at 100 columns or wider, THE SYSTEM SHALL
-show two compact header lines with counted All, Needs you, Running, Ready,
-Waiting, and History views, one horizontal rule, and one continuous divider
+show two compact header lines with counted Current, Needs you, Running, Ready,
+Waiting, History, and All views, one horizontal rule, and one continuous divider
 between the project list and details or terminal, without pane boxes. Leave one
 blank column on each side of the divider and one blank row below the header
 rule. Keep navigation and quit controls visible at the minimum supported size.
@@ -113,8 +113,10 @@ Test: src/dashboard/tests.rs (project_details_wrap_full_context_to_the_last_line
 
 WHEN navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHALL
 cycle counted views forward or backward and preserve a selection that remains
-visible.
+visible. Start in Current, which excludes only History, and initially favor Needs
+you, then Running, then Ready or Ready to land, then other unfinished Work.
 Test: src/dashboard/tests.rs (tab_views_preserve_selection_and_exact_categories)
+Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 
 ### B5
 

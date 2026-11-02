@@ -26,7 +26,7 @@ impl App {
             all_work: false,
             selected: None,
             selected_key: None,
-            filter: Filter::All,
+            filter: Filter::Current,
             expanded: BTreeSet::new(),
             selected_index: 0,
             pane: Pane::List,
@@ -117,6 +117,9 @@ impl App {
     pub fn resize(&mut self, width: u16, height: u16) {
         self.size = (width, height);
         self.clamp_scrolls();
+        if self.project_mode() && self.terminal.is_none() {
+            self.keep_selection_visible();
+        }
         self.dirty = true;
     }
     pub fn refresh(&mut self, snapshot: DashboardSnapshot) {
@@ -140,6 +143,9 @@ impl App {
             self.reconcile_selection(prior);
         }
         self.clamp_scrolls();
+        if self.project_mode() && self.terminal.is_none() {
+            self.keep_selection_visible();
+        }
         self.dirty = true;
     }
     pub fn refresh_failed(&mut self, error: String) {
