@@ -15,6 +15,7 @@ pub struct Display {
     pub identity: String,
     pub state: String,
     pub focused: bool,
+    pub has_control: bool,
 }
 
 impl EmbeddedTerminal {
@@ -24,6 +25,7 @@ impl EmbeddedTerminal {
             identity: self.identity(),
             state: self.state_label(),
             focused: self.focused(),
+            has_control: self.has_control(),
         }
     }
 }

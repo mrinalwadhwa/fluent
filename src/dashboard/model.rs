@@ -120,7 +120,6 @@ impl App {
                 "? help",
                 "t reconnect",
                 "o Observe",
-                "] literal",
             ]
         } else {
             let mut controls = vec!["q quit", "? help", "←/Esc list", "↑/↓ scroll"];
@@ -144,7 +143,16 @@ impl App {
         // A retained attachment can still be explicitly focused from the list.
         if self.terminal.is_some() && self.terminal_fits() && self.input_owner() == InputOwner::List
         {
-            controls.extend(["i Control", "f full-screen", "o Observe", "] literal"]);
+            controls.extend(["i Control", "f full-screen", "o Observe"]);
+        }
+        if self.terminal_fits()
+            && self
+                .terminal
+                .as_ref()
+                .is_some_and(|display| display.has_control)
+            && (self.input_owner() == InputOwner::List || !self.show_details)
+        {
+            controls.push("] literal");
         }
         controls
     }

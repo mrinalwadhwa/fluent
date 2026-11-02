@@ -1208,6 +1208,7 @@ fn embedded_terminal_keeps_project_context_visible() {
         identity: "agent-work / attempt-1 / writer / generation-1".into(),
         state: "Observe".into(),
         focused: false,
+        has_control: false,
     });
     let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
     terminal.draw(|frame| render::draw(frame, &app)).unwrap();
@@ -1234,6 +1235,7 @@ fn terminal_display() -> crate::terminal_view::Display {
         identity: LONG_TERMINAL_IDENTITY.into(),
         state: "Observe".into(),
         focused: false,
+        has_control: false,
     }
 }
 
@@ -1258,6 +1260,7 @@ fn narrow_terminal_focus_actions_reveal_control() {
                 effect
             );
             app.terminal.as_mut().unwrap().state = "Control · Ctrl-] navigate".into();
+            app.terminal.as_mut().unwrap().has_control = true;
             let rendered = text(&app, width, height);
             for expected in [
                 "Control · Ctrl-] navigate",
@@ -1399,6 +1402,7 @@ fn terminal_controls_require_an_open_view() {
         identity: "selected generation".into(),
         state: "Observe".into(),
         focused: false,
+        has_control: false,
     });
     assert_eq!(
         app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
@@ -2661,6 +2665,7 @@ fn terminal_mode_and_focus_remain_explicit() {
             app.pane = app::Pane::Detail;
             let mut display = terminal_display();
             display.state = state.into();
+            display.has_control = state.starts_with("Control");
             app.set_terminal(display);
             let rendered = text(&app, width, height);
             assert!(rendered.contains(state), "{width}x{height}: {rendered}");
@@ -3284,6 +3289,161 @@ fn dashboard_focus_and_footer_follow_input_owner() {
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.errors);
     }
+    #[cfg(feature = "test-support")]
+    with_terminal_client("dashboard_focus_and_footer_follow_input_owner", || {
+        use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
+        use crossterm::event::{Event, KeyEvent};
+        for (width, height) in [(60, 15), (99, 18), (100, 24), (240, 28)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut item = crate::work_model::WorkItem::planned("work", "Control hints");
+            item.add_initial_attempt("attempt-1").unwrap();
+            let task = item.attempts[0].tasks[0].id.clone();
+            crate::work_model::WorkModelStore::new(root.path())
+                .create_work_item(&item)
+                .unwrap();
+            let mut session = TerminalSession::start_fixture(
+                TerminalIdentity::fixture(root.path(), "work", "attempt-1", &task),
+                "sleep 30",
+            )
+            .unwrap();
+            let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
+            app.resize(width, height);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            let mut embedded = None;
+            handle_terminal_key(
+                &mut app,
+                &mut embedded,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+                |_| Ok(()),
+            );
+            assert_terminal_client_ready(embedded.as_mut().unwrap());
+            let selected = app.selected_key.clone();
+            let invocation = embedded.as_ref().unwrap().descriptor().clone();
+            app.set_terminal(embedded.as_ref().unwrap().display());
+            assert!(!embedded.as_ref().unwrap().has_control());
+            assert!(embedded.as_mut().unwrap().send_literal_escape().is_err());
+            for pane in [app::Pane::Detail, app::Pane::List] {
+                app.pane = pane;
+                assert!(
+                    !app.project_controls().contains(&"] literal"),
+                    "Observe {pane:?}"
+                );
+                assert!(
+                    !text(&app, width, height)
+                        .lines()
+                        .last()
+                        .unwrap()
+                        .contains("] literal")
+                );
+                app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+                let help = text(&app, width, height);
+                assert!(!help.contains("] literal"), "Observe {width}: {help}");
+                app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            }
+            assert_eq!(
+                handle_terminal_key(
+                    &mut app,
+                    &mut embedded,
+                    KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                    |_| Ok(())
+                ),
+                Effect::ControlTerminal
+            );
+            // Control reconnects the client. Wait for its new paint rather than
+            // accepting the Observe frame retained from the previous client.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let terminal = embedded.as_mut().unwrap();
+            while !(terminal.refresh() && terminal.frame().text().contains("SSH_FULLSCREEN_PAINT"))
+            {
+                assert!(Instant::now() < deadline, "Control client did not paint");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            assert!(embedded.as_ref().unwrap().has_control());
+            let return_to_navigation =
+                |app: &mut App, embedded: &mut Option<crate::terminal_view::EmbeddedTerminal>| {
+                    let terminal = embedded.as_mut().unwrap();
+                    terminal
+                        .send(Event::Key(KeyEvent::new(
+                            KeyCode::Char(']'),
+                            KeyModifiers::CONTROL,
+                        )))
+                        .unwrap();
+                    assert!(!terminal.focused());
+                    assert!(terminal.has_control());
+                    app.set_terminal(terminal.display());
+                };
+            return_to_navigation(&mut app, &mut embedded);
+            let input_log =
+                PathBuf::from(std::env::var_os("FLUENT_TEST_TERMINAL_CLIENT_LOG").unwrap());
+            for pane in [app::Pane::Detail, app::Pane::List] {
+                app.pane = pane;
+                assert!(
+                    app.project_controls().contains(&"] literal"),
+                    "Control {pane:?}"
+                );
+                if width == 240 {
+                    assert!(
+                        text(&app, width, height)
+                            .lines()
+                            .last()
+                            .unwrap()
+                            .contains("] literal")
+                    );
+                }
+                app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+                let help = text(&app, width, height);
+                assert!(help.contains("] literal"), "Control {width}: {help}");
+                app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+                let received = || {
+                    std::fs::read(&input_log)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|&&byte| byte == 29)
+                        .count()
+                };
+                let before = received();
+                assert_eq!(
+                    handle_terminal_key(
+                        &mut app,
+                        &mut embedded,
+                        KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+                        |_| Ok(())
+                    ),
+                    Effect::LiteralEscape
+                );
+                assert!(app.stale_error.is_none(), "{:?}", app.stale_error);
+                assert!(embedded.as_ref().unwrap().focused());
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while received() == before {
+                    assert!(
+                        Instant::now() < deadline,
+                        "literal chord did not reach the Control client"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(app.selected_key, selected);
+                assert_eq!(embedded.as_ref().unwrap().descriptor(), &invocation);
+                return_to_navigation(&mut app, &mut embedded);
+            }
+            assert_eq!(
+                handle_terminal_key(
+                    &mut app,
+                    &mut embedded,
+                    KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+                    |_| Ok(())
+                ),
+                Effect::ObserveTerminal
+            );
+            assert!(!embedded.as_ref().unwrap().has_control());
+            assert!(!app.project_controls().contains(&"] literal"));
+            app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+            assert!(!text(&app, width, height).contains("] literal"));
+            drop(embedded);
+            session.stop().unwrap();
+        }
+    });
 }
 
 #[test]
@@ -3294,6 +3454,7 @@ fn focused_control_only_advertises_native_return_path() {
         app.pane = app::Pane::Detail;
         let mut display = terminal_display();
         display.focused = true;
+        display.has_control = true;
         display.state = "Control · Ctrl-] navigate".into();
         app.set_terminal(display);
         let rendered = text(&app, width, height);

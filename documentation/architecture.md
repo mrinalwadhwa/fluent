@@ -2244,7 +2244,9 @@ focuses details, while `t` explicitly opens the selected worker in Observe.
 Inspecting details can hide a retained terminal attachment without retargeting
 its invocation or changing its Control lease. The existing hidden-terminal rule
 releases native input focus. `terminal_view::Display::focused` carries ephemeral
-focus for presentation; it does not grant terminal authority.
+focus for presentation, and `Display::has_control` reports its retained lease so
+Observe help and footers omit `] literal`. Neither field grants terminal authority;
+the attachment still validates every input against the live lease and invocation.
 From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
 shows a resize message. Selection uses source, Work Item, Task, and invocation
 identity, so refresh preserves a visible selection across reordering. The old
