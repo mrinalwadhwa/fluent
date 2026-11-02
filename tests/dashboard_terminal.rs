@@ -11,15 +11,28 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 
 #[test]
 fn canonical_dashboard_host_gate_keeps_real_tmux_required() {
-    let config: serde_yaml::Value =
+    let ordinary: serde_yaml::Value =
         serde_yaml::from_str(include_str!("../.fluent/tester.yaml")).unwrap();
+    assert!(
+        ordinary["commands"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .all(|command| !command["command"]
+                .as_str()
+                .unwrap()
+                .contains("tests/host/check-")),
+        "ordinary Tester must leave host checks to release acceptance"
+    );
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(include_str!("../.fluent/release-host.yaml")).unwrap();
     let commands = config["commands"].as_sequence().unwrap();
     let command = commands
         .iter()
         .find(|command| {
             command["command"].as_str() == Some("bash tests/host/check-dashboard-terminal.sh")
         })
-        .expect("real tmux coverage must remain a required canonical command");
+        .expect("real tmux coverage must remain a required release host command");
     assert_eq!(command["test_harness"].as_str(), Some("cargo-nextest"));
     assert_eq!(command["reject_process_leaks"].as_bool(), Some(true));
     let output = std::process::Command::new("bash")
