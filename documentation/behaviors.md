@@ -121,11 +121,13 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 ### B5
 
 WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL expand or collapse its
-workers. WHEN Right is pressed on a worker, THE SYSTEM SHALL open only that
-worker's available session in Observe or show why it is unavailable, without
-starting or retargeting Work.
-Test: src/dashboard/tests.rs (arrow_drill_requires_selected_available_worker)
-Test: src/dashboard/tests.rs (arrow_drill_observes_without_retargeting_on_selection)
+workers. WHEN Right is pressed on a Work Item or worker, THE SYSTEM SHALL focus
+its details. WHEN t is pressed on a worker, open only that worker's available
+session in Observe or show why it is unavailable, without starting or retargeting
+Work. Help and footer controls SHALL describe these explicit bindings.
+Test: src/dashboard/tests.rs (worker_arrow_opens_details_and_t_opens_terminal)
+Test: src/dashboard/tests.rs (worker_details_hide_retained_terminal_until_explicit_open)
+Test: src/dashboard/tests.rs (terminal_shortcut_observes_without_retargeting_on_selection)
 
 ### B6
 

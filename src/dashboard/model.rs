@@ -59,6 +59,7 @@ pub struct App {
     pub(super) quit: bool,
     pub stale_error: Option<String>,
     pub terminal: Option<crate::terminal_view::Display>,
+    pub show_details: bool,
 }
 impl App {
     pub fn input_owner(&self) -> InputOwner {
@@ -110,7 +111,7 @@ impl App {
                 controls.push("Enter workers");
             }
             controls
-        } else if self.terminal.is_some() && self.terminal_fits() {
+        } else if !self.show_details && self.terminal.is_some() && self.terminal_fits() {
             vec![
                 "q quit",
                 "←/Esc list",

@@ -42,6 +42,7 @@ impl App {
             quit: false,
             stale_error: None,
             terminal: None,
+            show_details: false,
         };
         if app.project_mode() {
             app.selected_key = project::initial_key(&app.snapshot.sources, app.filter);
@@ -110,6 +111,7 @@ impl App {
     }
     pub fn terminal_visible(&self) -> bool {
         self.project_mode()
+            && !self.show_details
             && !self.help
             && !self.errors
             && self.terminal_fits()
@@ -213,6 +215,7 @@ impl App {
             match key {
                 KeyCode::Char('i' | ']') if self.terminal_fits() => {
                     self.pane = Pane::Detail;
+                    self.show_details = false;
                     self.dirty = true;
                     return if key == KeyCode::Char('i') {
                         Effect::ControlTerminal
@@ -227,6 +230,7 @@ impl App {
         }
         if self.project_mode() && key == KeyCode::Char('t') && !self.help && !self.errors {
             self.pane = Pane::Detail;
+            self.show_details = false;
             return Effect::OpenTerminal;
         }
         if (modifiers.contains(KeyModifiers::CONTROL) && key == KeyCode::Char('c'))
@@ -274,25 +278,9 @@ impl App {
         match key {
             KeyCode::Right if self.project_mode() => {
                 self.pane = Pane::Detail;
+                self.show_details = true;
                 self.detail_scroll = 0;
                 self.dirty = true;
-                if let Some(worker) = self
-                    .selected_key
-                    .as_ref()
-                    .and_then(|key| project::find_worker(&self.snapshot.sources, key))
-                {
-                    if worker
-                        .terminal
-                        .as_ref()
-                        .is_some_and(|terminal| terminal.can_observe)
-                    {
-                        return Effect::OpenTerminal;
-                    }
-                    self.stale_error = Some(format!(
-                        "Terminal unavailable: {}",
-                        worker.unavailable_reason
-                    ));
-                }
             }
             KeyCode::Tab | KeyCode::BackTab if self.project_mode() => {
                 self.filter = if key == KeyCode::BackTab || modifiers.contains(KeyModifiers::SHIFT)

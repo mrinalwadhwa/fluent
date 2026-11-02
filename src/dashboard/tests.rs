@@ -2407,7 +2407,7 @@ fn worker_row(source: &str, task: &str) -> project::Worker {
 }
 
 #[test]
-fn arrow_drill_requires_selected_available_worker() {
+fn worker_arrow_opens_details_and_t_opens_terminal() {
     let mut source = project_source("/one", vec![row("work", "executing")]);
     let mut available = worker_row("/one", "writer");
     available.terminal = Some(crate::terminal_sessions::TerminalDescriptor {
@@ -2441,6 +2441,18 @@ fn arrow_drill_requires_selected_available_worker() {
     let selected = app.selected_key.clone();
     assert_eq!(
         app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+        Effect::None
+    );
+    assert_eq!(app.pane, app::Pane::Detail);
+    assert!(app.terminal.is_none());
+    let details = text(&app, 120, 28);
+    assert!(details.contains("Worker: writer"), "{details}");
+    assert!(
+        details.lines().last().unwrap().contains("t terminal"),
+        "{details}"
+    );
+    assert_eq!(
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
         Effect::OpenTerminal
     );
     assert_eq!(app.selected_key, selected);
@@ -2471,9 +2483,9 @@ fn arrow_drill_requires_selected_available_worker() {
 
 #[test]
 #[cfg(feature = "test-support")]
-fn arrow_drill_observes_without_retargeting_on_selection() {
+fn terminal_shortcut_observes_without_retargeting_on_selection() {
     with_terminal_client(
-        "arrow_drill_observes_without_retargeting_on_selection",
+        "terminal_shortcut_observes_without_retargeting_on_selection",
         || {
             use crate::terminal_sessions::{TerminalIdentity, TerminalSession};
             use crossterm::event::KeyEvent;
@@ -2513,7 +2525,7 @@ fn arrow_drill_observes_without_retargeting_on_selection() {
             handle_terminal_key(
                 &mut app,
                 &mut embedded,
-                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
                 |_| Ok(()),
             );
             assert!(
@@ -2537,13 +2549,13 @@ fn arrow_drill_observes_without_retargeting_on_selection() {
             );
             assert!(
                 embedded.is_none(),
-                "moving selection must wait for Right before opening another worker"
+                "moving selection must wait for t before opening another worker"
             );
             assert!(app.terminal.is_none());
             handle_terminal_key(
                 &mut app,
                 &mut embedded,
-                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
                 |_| Ok(()),
             );
             let terminal = embedded.as_mut().unwrap();
@@ -2705,7 +2717,7 @@ fn hidden_terminal_releases_input_focus() {
         handle_terminal_key(
             &mut app,
             &mut embedded,
-            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
             |_| Ok(()),
         );
         handle_terminal_key(
@@ -3232,6 +3244,7 @@ fn dashboard_focus_and_footer_follow_input_owner() {
         assert!(!detail.lines().last().unwrap().contains("Enter workers"));
         app.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.pane, app::Pane::List);
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE);
         app.set_terminal(terminal_display());
         app.pane = app::Pane::Detail;
         let observe = text(&app, width, height);
@@ -3288,5 +3301,39 @@ fn focused_control_only_advertises_native_return_path() {
         let navigation = text(&app, width, height);
         assert!(navigation.lines().next().unwrap().contains("· Details"));
         assert!(navigation.lines().last().unwrap().contains("q quit"));
+    }
+}
+
+#[test]
+fn worker_details_hide_retained_terminal_until_explicit_open() {
+    for width in [60, 100, 140] {
+        let mut source = project_source("/one", vec![row("work", "executing")]);
+        source.work[0].workers.push(worker_row("/one", "writer"));
+        let mut app = project_app(vec![source]);
+        app.resize(width, 24);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE);
+        app.set_terminal(terminal_display());
+        let selected = app.selected_key.clone();
+        assert!(text(&app, width, 24).contains("native prompt"));
+        assert_eq!(
+            app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+            Effect::None
+        );
+        let details = text(&app, width, 24);
+        assert!(details.contains("Worker: writer"), "{details}");
+        assert!(!details.contains("native prompt"), "{details}");
+        assert!(!app.terminal_visible());
+        // Keep the attachment and invocation; only an explicit action reveals it.
+        assert!(app.terminal.is_some());
+        app.set_terminal(terminal_display());
+        assert!(!app.terminal_visible());
+        assert_eq!(app.selected_key, selected);
+        assert_eq!(
+            app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
+            Effect::OpenTerminal
+        );
+        assert!(app.terminal_visible());
     }
 }

@@ -340,7 +340,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
-    if let Some(display) = &app.terminal {
+    if let Some(display) = app.terminal.as_ref().filter(|_| app.terminal_visible()) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }

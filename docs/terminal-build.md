@@ -31,8 +31,9 @@ To prepare the other macOS release target, pass `x86_64-apple-darwin` or
 Installed Fluent executables contain the static library. Operators need tmux,
 but do not need Zig or a separate Ghostty installation.
 
-The dashboard groups Work by project. Use Tab/Shift+Tab to cycle All, Needs you,
-Running, Ready, Waiting, and History. Ready includes Ready to land; Waiting
+The dashboard groups Work by project. Use Tab/Shift+Tab to cycle Current, Needs you,
+Running, Ready, Waiting, History, and All. Current opens first and excludes only
+History. Ready includes Ready to land; Waiting
 includes Queued and Planned. Each row keeps its exact status. The Updated UTC
 column uses the latest published transition (or recorded task start/completion)
 and shows `—` when no timestamp is available, including the current SSH snapshot.
@@ -40,8 +41,8 @@ The `f`/`F` filter aliases and `a` History/All shortcut remain available when
 navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
 
 Use Up/Down to select a Work Item and Enter to expand or collapse its workers.
-Right inspects Work details or opens the selected available worker in Observe;
-`t` remains the terminal/reconnect alias. Moving selection releases the previous
+Right focuses the selected Work Item or worker details. Press `t` explicitly to
+open the selected worker terminal in Observe or reconnect its existing view. Moving selection releases the previous
 attachment and waits for an explicit open command before attaching elsewhere.
 At 60–99 columns, Right opens details and Left/Esc returns to the list. Tab and
 Shift+Tab keep switching views in either pane while navigation owns focus. Observe clients use tmux's

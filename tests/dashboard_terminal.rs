@@ -550,7 +550,7 @@ fn terminal_control_input_pty_child() {
         .unwrap();
     dashboard.key(read_pty_input("navigation")).unwrap();
     dashboard
-        .key(key(KeyCode::Right, KeyModifiers::NONE))
+        .key(key(KeyCode::Char('t'), KeyModifiers::NONE))
         .unwrap();
     let selected = dashboard.terminal();
     assert_eq!(selected.descriptor(), second.descriptor());
