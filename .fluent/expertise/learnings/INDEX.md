@@ -45,7 +45,7 @@
 - [dashboard-display-metadata-preserves-ssh-schema](dashboard-display-metadata-preserves-ssh-schema.md) — Keep local dashboard display metadata out of strict SSH snapshots until an explicit protocol compatibility change
 - [dashboard-layout-contract-is-acyclic](dashboard-layout-contract-is-acyclic.md) — Keep dashboard interaction state and rendering acyclic by placing shared geometry and line projection in the layout contract
 - [dashboard-local-refresh-owns-no-ui-state](dashboard-local-refresh-owns-no-ui-state.md) — Keep local snapshot workers read-only, merge completion into current UI and SSH state, and detach unfinished reads on exit
-- [dashboard-pty-assertions-reconstruct-frames](dashboard-pty-assertions-reconstruct-frames.md) — Replay Ratatui cursor updates into a screen before asserting visible dashboard text in PTY captures
+- [dashboard-pty-assertions-reconstruct-frames](dashboard-pty-assertions-reconstruct-frames.md) — Reconstruct dashboard PTY frames and wait for rendered readiness before sending keys or asserting Work content
 - [dashboard-rendered-overflow-tests](dashboard-rendered-overflow-tests.md) — Dashboard overflow and responsive-layout tests must render constrained TestBackend frames and assert visible content and pane bounds
 - [dashboard-responsiveness-tests-gate-real-reads](dashboard-responsiveness-tests-gate-real-reads.md) — Hold a confirmed snapshot read open while testing dashboard navigation, rendered views, and exit through a PTY
 - [dashboard-source-projection-keeps-typed-state](dashboard-source-projection-keeps-typed-state.md) — Keep dashboard source loading and worker lookup typed; format operator detail lines in a separate presentation boundary
@@ -196,6 +196,7 @@
 - [shell-tests-invisible-to-compiler](shell-tests-invisible-to-compiler.md) — Shell behavior tests query JSON via jq and are not caught by the compiler when serialized field names change
 - [skill-reference-files-keep-main-bundle-small](skill-reference-files-keep-main-bundle-small.md) — Keep the full skill under its line budget and move low-frequency procedures into explicitly discoverable reference files
 - [smoke-root-identity-binding](smoke-root-identity-binding.md) — A multi-phase manifest must record and verify the smoke root so copied or moved roots are rejected
+- [snapshot-git-reads-stay-in-load-scope](snapshot-git-reads-stay-in-load-scope.md) — Reuse only successful fully addressed Git object reads within one synchronous local snapshot load
 - [source-correction-recovery-binds-full-frontier](source-correction-recovery-binds-full-frontier.md) — Source-correction recovery must bind the complete review, evidence, candidate, and Writer frontier before mutation or replay
 - [split-record-recovery-tests-cover-child-publication](split-record-recovery-tests-cover-child-publication.md) — Interrupt Work-model recovery after child writes to verify replay and read-only inspection of partially published aggregates
 - [ssh-input-acknowledgement-does-not-prove-delivery](ssh-input-acknowledgement-does-not-prove-delivery.md) — Acknowledge and discard validated SSH input after display detach while retaining the helper and Control lease
