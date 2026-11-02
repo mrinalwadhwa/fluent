@@ -72,10 +72,7 @@ pub fn project_scroll_bounds(
     }
     let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
     let inner_height = areas.list.height.saturating_sub(1);
-    let groups = sources
-        .iter()
-        .filter(|source| source.work.iter().any(|work| filter.matches(work.category)))
-        .count();
+    let groups = sources.len();
     let work = sources
         .iter()
         .flat_map(|source| &source.work)
@@ -87,7 +84,7 @@ pub fn project_scroll_bounds(
         .filter(|work| filter.matches(work.category) && expanded.contains(&work.key))
         .map(|work| work.workers.len())
         .sum::<usize>();
-    let lines = groups + work + workers + usize::from(groups == 0);
+    let lines = groups + work + workers + usize::from(work == 0);
     let detail_width = areas.detail.width.max(1) as usize;
     let details = selected_key
         .map(|key| project_detail_values(sources, key))

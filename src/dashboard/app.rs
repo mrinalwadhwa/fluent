@@ -21,6 +21,8 @@ impl App {
         let mut app = Self {
             snapshot,
             local_read: Default::default(),
+            source_reads: Default::default(),
+            configuration_errors: Vec::new(),
             all_work: false,
             selected: None,
             selected_key: None,
@@ -47,6 +49,38 @@ impl App {
             app.reconcile_selection(None);
         }
         app
+    }
+
+    pub fn begin_local_read(&mut self) {
+        self.local_read.pending = true;
+        for source in &self.snapshot.sources {
+            if !source.id.starts_with("ssh:") {
+                self.source_reads
+                    .entry(source.id.clone())
+                    .or_default()
+                    .pending = true;
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn record_source_read(&mut self, source: &project::SourceSnapshot) {
+        self.source_reads
+            .entry(source.id.clone())
+            .or_default()
+            .complete(source.stale.as_deref());
+        // Even an equal snapshot represents a new observation or error.
+        self.dirty = true;
+    }
+
+    pub fn local_read_failed(&mut self, error: String) {
+        self.local_read.complete(Some(&error));
+        for (id, health) in &mut self.source_reads {
+            if !id.starts_with("ssh:") && health.pending {
+                health.complete(Some(&error));
+            }
+        }
+        self.refresh_failed(error);
     }
 
     pub fn select_key(&mut self, key: RowKey) {
@@ -364,9 +398,6 @@ impl App {
                     .iter()
                     .filter(|work| self.filter.matches(work.category))
                     .collect::<Vec<_>>();
-                if matching.is_empty() {
-                    continue;
-                }
                 line += 1;
                 for work in matching {
                     if &work.key == selected {

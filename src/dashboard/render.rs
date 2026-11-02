@@ -110,7 +110,14 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         }
     }
     if app.local_read.pending {
-        title.push_str(" · Loading local Work");
+        title.push_str(if app.local_read.last_success.is_some() {
+            " · Refreshing local Work"
+        } else {
+            " · Loading local Work"
+        });
+    }
+    if let Some(error) = &app.local_read.error {
+        title.push_str(&format!(" · Local read failed: {error}"));
     }
     if let Some(error) = &app.stale_error {
         title.push_str(&format!(" · {error}"));
@@ -162,6 +169,28 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         "↑/↓ select  Enter workers  → details/session  ← back  ? help  q quit"
     };
     frame.render_widget(Paragraph::new(controls), areas.footer);
+}
+
+fn read_health_label(health: &super::model::ReadHealth) -> String {
+    let observed = health
+        .last_success
+        .map(|time| format!("Last read UTC {}", time.format("%m-%d %H:%M:%S")));
+    let state = if health.pending {
+        if health.last_success.is_some() {
+            "Refreshing"
+        } else {
+            "Loading"
+        }
+    } else if health.error.is_some() {
+        "Read failed"
+    } else {
+        ""
+    };
+    match (state, observed) {
+        ("", Some(observed)) => observed,
+        (state, Some(observed)) => format!("{state} · {observed}"),
+        (state, None) => state.to_owned(),
+    }
 }
 
 fn updated_time(value: Option<&str>) -> String {
@@ -225,9 +254,6 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .filter(|work| app.filter.matches(work.category))
             .collect::<Vec<_>>();
-        if work.is_empty() {
-            continue;
-        }
         let parent = source
             .path
             .parent()
@@ -237,8 +263,24 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
         // Keep staleness at the front so a long source name cannot hide it.
         lines.push(Line::styled(
             format!(
-                "{}{} · {parent}/{} · {}",
-                if source.stale.is_some() {
+                "{}{}{} · {parent}/{} · {}",
+                app.source_reads
+                    .get(&source.id)
+                    .map(|health| {
+                        let label = read_health_label(health);
+                        if label.is_empty() {
+                            label
+                        } else {
+                            format!("{label} · ")
+                        }
+                    })
+                    .unwrap_or_default(),
+                if source.stale.is_some()
+                    && app
+                        .source_reads
+                        .get(&source.id)
+                        .is_none_or(|health| health.error.is_some())
+                {
                     "STALE · "
                 } else {
                     ""
@@ -293,7 +335,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-    if lines.is_empty() {
+    if app.project_keys().is_empty() {
         lines.push(Line::from("No Work Items in this view"));
     }
     frame.render_widget(

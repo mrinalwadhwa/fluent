@@ -507,6 +507,13 @@ fn local_reader_panic_keeps_snapshot_and_allows_retry() {
     local.start(&mut app, move || before);
     finish_local_refresh(&mut local, &mut app);
     assert!(app.stale_error.is_none());
+    assert!(!app.local_read.pending);
+    assert!(app.local_read.error.is_none());
+    assert!(
+        app.source_reads
+            .values()
+            .all(|health| !health.pending && health.error.is_none())
+    );
 }
 
 fn finish_local_refresh(local: &mut LocalRefresh, app: &mut App) {
@@ -2584,4 +2591,147 @@ fn initial_snapshot_preserves_view_and_remote_updates() {
     );
     assert!(text(&app, 140, 24).contains("> ▸ New remote state"));
     assert!(text(&app, 140, 24).contains("local title"));
+}
+
+#[test]
+fn refresh_health_distinguishes_loading_success_and_error() {
+    let root = tempfile::tempdir().unwrap();
+    let id = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut app = loading_project_app();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    assert!(text(&app, 160, 30).contains("Loading local Work"));
+    // A collection failure on the first read must not masquerade as empty success.
+    let items = root.path().join(".fluent/work/items");
+    std::fs::create_dir_all(items.parent().unwrap()).unwrap();
+    std::fs::write(&items, "obstruct enumeration").unwrap();
+    local.request(&mut app, false);
+    finish_local_refresh(&mut local, &mut app);
+    assert!(app.source_reads[&id].error.is_some());
+    assert_eq!(app.source_reads[&id].last_success, None);
+    assert_eq!(app.local_read.last_success, None);
+    assert!(!app.source_reads[&id].pending);
+    assert!(text(&app, 160, 30).contains("Read failed"));
+    std::fs::remove_file(&items).unwrap();
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    store
+        .create_work_item_with_transition(
+            &crate::work_model::WorkItem::planned("work", "Keep good Work"),
+            &crate::work_model::DurableTransitionMetadata {
+                origin: Default::default(),
+                reason: None,
+                evidence_ref: None,
+            },
+        )
+        .unwrap();
+    local.request(&mut app, true);
+    finish_local_refresh(&mut local, &mut app);
+    let observed = app.source_reads[&id].last_success.unwrap();
+    let updated = app.snapshot.sources[0].work[0].updated_at.clone();
+    assert!(updated.is_some());
+    assert!(app.source_reads[&id].error.is_none());
+    assert!(text(&app, 160, 30).contains("Last read UTC"));
+    assert!(text(&app, 160, 30).contains("Updated UTC"));
+    // Equal source values still record a new successful read and request a draw.
+    app.take_dirty();
+    local.request(&mut app, false);
+    assert!(text(&app, 160, 30).contains("Refreshing"));
+    assert_eq!(app.source_reads[&id].last_success, Some(observed));
+    finish_local_refresh(&mut local, &mut app);
+    assert!(app.source_reads[&id].last_success.unwrap() > observed);
+    assert_eq!(app.snapshot.sources[0].work[0].updated_at, updated);
+    assert!(app.take_dirty());
+    let observed = app.source_reads[&id].last_success;
+    std::fs::remove_dir_all(&items).unwrap();
+    std::fs::write(&items, "obstruct enumeration again").unwrap();
+    local.request(&mut app, true);
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(app.source_reads[&id].last_success, observed);
+    assert!(app.source_reads[&id].error.is_some());
+    apply_remote_results(&mut app, vec![project_source("ssh:remote", vec![])]);
+    assert!(app.source_reads[&id].error.is_some());
+    assert_eq!(app.source_reads[&id].last_success, observed);
+    assert_eq!(
+        app.snapshot.sources[0].work[0].status.title,
+        "Keep good Work"
+    );
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    assert!(text(&app, 160, 30).contains("STALE"));
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    // A successful partial snapshot clears the read error and keeps diagnostics.
+    std::fs::remove_file(&items).unwrap();
+    store
+        .create_work_item(&crate::work_model::WorkItem::planned(
+            "work",
+            "Recovered Work",
+        ))
+        .unwrap();
+    std::fs::write(items.join("malformed.json"), "broken").unwrap();
+    local.request(&mut app, true);
+    finish_local_refresh(&mut local, &mut app);
+    assert!(app.source_reads[&id].error.is_none());
+    assert!(app.source_reads[&id].last_success > observed);
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("malformed.json"))
+    );
+    assert!(text(&app, 160, 30).contains("Recovered Work"));
+    // A different source completing cannot erase local diagnostics or health.
+    apply_remote_results(&mut app, vec![project_source("ssh:remote", vec![])]);
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("malformed.json"))
+    );
+    assert!(app.source_reads[&id].error.is_none());
+}
+
+#[test]
+fn remote_read_health_tracks_receipts_independently() {
+    let mut app = loading_project_app();
+    let mut failed = project_source("ssh:failed", vec![row("retained", "executing")]);
+    let healthy = project_source("ssh:healthy", vec![]);
+    apply_remote_results(&mut app, vec![failed.clone(), healthy.clone()]);
+    let observed = app.source_reads["ssh:failed"].last_success;
+    assert!(observed.is_some());
+    assert!(app.snapshot.sources[0].work[0].updated_at.is_none());
+    failed.stale = Some("host unavailable".into());
+    apply_remote_results(&mut app, vec![failed]);
+    apply_remote_results(&mut app, vec![healthy]);
+    assert_eq!(app.source_reads["ssh:failed"].last_success, observed);
+    assert_eq!(
+        app.source_reads["ssh:failed"].error.as_deref(),
+        Some("host unavailable")
+    );
+    assert!(app.source_reads["ssh:healthy"].error.is_none());
+    assert!(
+        app.snapshot
+            .errors
+            .iter()
+            .any(|error| error.contains("host unavailable"))
+    );
+    assert!(text(&app, 160, 30).contains("Read failed"));
+}
+
+#[test]
+fn source_diagnostics_remain_scoped_when_remote_paths_match() {
+    let mut app = loading_project_app();
+    let mut first = project_source("ssh:first", vec![]);
+    let mut second = project_source("ssh:second", vec![]);
+    for source in [&mut first, &mut second] {
+        source.path = "/same/path".into();
+        source.diagnostics.push("Unreadable item".into());
+    }
+    apply_remote_results(&mut app, vec![first, second.clone()]);
+    second.diagnostics.clear();
+    apply_remote_results(&mut app, vec![second]);
+    assert_eq!(app.snapshot.errors.len(), 1);
+    assert!(app.snapshot.errors[0].contains("ssh:first"));
 }

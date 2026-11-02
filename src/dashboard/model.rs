@@ -4,7 +4,7 @@ use super::{
     project::{self, Filter, RowKey},
     snapshot::DashboardSnapshot,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
@@ -19,8 +19,20 @@ pub struct ReadHealth {
     pub error: Option<String>,
 }
 
+impl ReadHealth {
+    pub fn complete(&mut self, error: Option<&str>) {
+        self.pending = false;
+        self.error = error.map(str::to_owned);
+        if error.is_none() {
+            self.last_success = Some(chrono::Utc::now());
+        }
+    }
+}
+
 pub struct App {
     pub local_read: ReadHealth,
+    pub source_reads: BTreeMap<String, ReadHealth>,
+    pub configuration_errors: Vec<String>,
     pub snapshot: DashboardSnapshot,
     pub(super) all_work: bool,
     pub(super) selected: Option<String>,

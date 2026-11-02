@@ -32,13 +32,15 @@ pub fn run_dashboard_with_projects(search_root: &Path, explicit: &[PathBuf]) -> 
     let config = match crate::dashboard_sources::load_sources(&home) {
         Ok(config) => config,
         Err(error) => {
-            app.snapshot.errors.push(format!("SSH sources: {error:#}"));
+            let error = format!("SSH sources: {error:#}");
+            app.configuration_errors.push(error.clone());
+            app.snapshot.errors.push(error);
             Vec::new()
         }
     };
     let mut remote = crate::dashboard_sources::RemoteSources::new(config, Default::default());
-    remote.refresh();
     app.snapshot.sources.extend(remote.snapshots());
+    refresh_remote(&mut app, &mut remote);
     let mut session = DashboardTerminal::open()?;
     let mut local = LocalRefresh::new(search_root, explicit, &home);
     run_project_loop(&mut session, &mut app, &mut local, &mut remote)
@@ -114,8 +116,9 @@ fn run_project_loop(
 
     loop {
         local.poll(app);
-        if remote.poll() {
-            apply_remote_results(app, remote.snapshots());
+        let completed = remote.poll_results();
+        if !completed.is_empty() {
+            apply_remote_results(app, completed);
         }
         if let Some(terminal) = &mut embedded {
             if terminal.focused() && !app.terminal_visible() {
@@ -137,7 +140,7 @@ fn run_project_loop(
                 && matches!(event, CEvent::Key(_) | CEvent::Paste(_) | CEvent::Mouse(_));
             if native {
                 let terminal = embedded.as_mut().unwrap();
-                let event = terminal_input_event(&app, event);
+                let event = terminal_input_event(app, event);
                 if let Some(event) = event {
                     if let Err(error) = terminal.send(event) {
                         app.refresh_failed(format!("{error:#}"));
@@ -160,7 +163,7 @@ fn run_project_loop(
                             let (width, height) = session.size()?;
                             resize_terminal(app, embedded.as_mut(), width, height);
                             local.request(app, true);
-                            remote.refresh();
+                            refresh_remote(app, remote);
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                         if let Effect::ToggleMouse(enabled) = effect {
@@ -168,7 +171,7 @@ fn run_project_loop(
                         }
                         if matches!(effect, Effect::Refresh) {
                             local.request(app, true);
-                            remote.refresh();
+                            refresh_remote(app, remote);
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                     }
@@ -181,7 +184,7 @@ fn run_project_loop(
         }
         if poll_due(Instant::now(), next_poll) {
             local.request(app, false);
-            remote.refresh();
+            refresh_remote(app, remote);
             next_poll = Instant::now() + DATA_POLL_INTERVAL;
         }
         if app.should_quit() {
@@ -191,11 +194,20 @@ fn run_project_loop(
     Ok(())
 }
 
+fn refresh_remote(app: &mut App, remote: &mut crate::dashboard_sources::RemoteSources) {
+    remote.refresh();
+    for id in remote.pending_ids() {
+        app.source_reads.entry(id).or_default().pending = true;
+    }
+    app.dirty = true;
+}
+
 /// Apply remote completions to the current local and interaction state.
 fn apply_remote_results(app: &mut App, sources: Vec<project::SourceSnapshot>) {
     let mut snapshot = app.snapshot.clone();
     // Replace diagnostics only for sources included in this completion.
     for source in sources {
+        app.record_source_read(&source);
         if let Some(index) = snapshot.sources.iter().position(|old| old.id == source.id) {
             let old_errors = project_diagnostics(&snapshot.sources[index..=index]);
             snapshot.errors.retain(|error| !old_errors.contains(error));
@@ -375,16 +387,23 @@ fn project_diagnostics(sources: &[project::SourceSnapshot]) -> Vec<String> {
     sources
         .iter()
         .flat_map(|source| {
-            let prefix = format!("{}: ", source.path.display());
+            let prefix = if source.id.starts_with("ssh:") {
+                format!("{} ({}): ", source.id, source.path.display())
+            } else {
+                format!("{}: ", source.path.display())
+            };
             source
                 .diagnostics
                 .iter()
-                .map(move |diagnostic| format!("{prefix}{diagnostic}"))
+                .map({
+                    let prefix = prefix.clone();
+                    move |diagnostic| format!("{prefix}{diagnostic}")
+                })
                 .chain(
                     source
                         .stale
                         .iter()
-                        .map(move |reason| format!("{}: STALE: {reason}", source.path.display())),
+                        .map(move |reason| format!("{prefix}STALE: {reason}")),
                 )
         })
         .collect()
@@ -435,14 +454,13 @@ impl LocalRefresh {
         app: &mut App,
         read: impl FnOnce() -> snapshot::DashboardSnapshot + Send + 'static,
     ) {
-        app.local_read.pending = true;
-        app.dirty = true;
+        app.begin_local_read();
         match std::thread::Builder::new()
             .name("local-snapshot".into())
             .spawn(read)
         {
             Ok(handle) => self.pending = Some(handle),
-            Err(error) => app.refresh_failed(format!("Local snapshot reader: {error}")),
+            Err(error) => app.local_read_failed(format!("Local snapshot reader: {error}")),
         }
     }
 
@@ -457,9 +475,16 @@ impl LocalRefresh {
         // Only join a finished read; quitting also never waits for a local read.
         match self.pending.take().unwrap().join() {
             Ok(mut snapshot) => {
-                app.local_read.pending = false;
-                app.local_read.last_success = Some(chrono::Utc::now());
+                let error = snapshot
+                    .sources
+                    .iter()
+                    .find_map(|source| source.stale.as_deref());
+                app.local_read.complete(error);
                 app.dirty = true;
+                for source in &snapshot.sources {
+                    app.record_source_read(source);
+                }
+                snapshot.errors.extend(app.configuration_errors.clone());
                 let remote = app
                     .snapshot
                     .sources
@@ -471,7 +496,7 @@ impl LocalRefresh {
                 snapshot.sources.extend(remote);
                 app.refresh(snapshot);
             }
-            Err(_) => app.refresh_failed("Local snapshot reader stopped".into()),
+            Err(_) => app.local_read_failed("Local snapshot reader stopped".into()),
         }
         if std::mem::take(&mut self.manual_pending) {
             self.request(app, false);
@@ -487,7 +512,13 @@ fn refresh_projects(
     previous: &[project::SourceSnapshot],
 ) -> snapshot::DashboardSnapshot {
     let (mut paths, errors) = project::discover_paths(root, explicit, home);
+    // Keep requested paths represented even when initial canonicalization fails.
+    paths.extend(std::iter::once(root.to_path_buf()).chain(explicit.iter().cloned()));
     paths.extend(previous.iter().map(|source| source.path.clone()));
+    paths = paths
+        .into_iter()
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect();
     paths.sort();
     paths.dedup();
     let mut next = snapshot::DashboardSnapshot {
