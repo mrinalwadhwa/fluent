@@ -5,6 +5,22 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
 #[cfg(feature = "test-support")]
+fn snapshot_profile_reports_failed_input_operation_and_path() {
+    let root = tempfile::tempdir().unwrap();
+    let input = root.path().join(".fluent/work");
+    let error = crate::snapshot_profile::input_digest(root.path()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!("inspect input {}", input.display())),
+        "{error:#}"
+    );
+    assert!(
+        !input.exists(),
+        "the failed read must not create input state"
+    );
+}
+
+#[test]
+#[cfg(feature = "test-support")]
 fn snapshot_profile_attributes_git_and_resets_between_reads() {
     use crate::snapshot_profile::{capture, mark};
     let root = tempfile::tempdir().unwrap();

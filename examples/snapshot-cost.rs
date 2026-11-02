@@ -6,44 +6,6 @@ fn main() -> anyhow::Result<()> {
     use std::path::Path;
     use std::time::Instant;
 
-    // Hash names, file types, links, and bytes outside the timed region. Never
-    // follow links into another checkout or silently omit unreadable inputs.
-    fn input_digest(root: &Path) -> anyhow::Result<String> {
-        fn visit(path: &Path, digest: &mut Sha256) -> anyhow::Result<()> {
-            let metadata = path.symlink_metadata()?;
-            if metadata.is_dir() {
-                digest.update(b"directory\0");
-                let mut entries = std::fs::read_dir(path)?
-                    .map(|entry| entry.map(|entry| entry.path()))
-                    .collect::<Result<Vec<_>, _>>()?;
-                entries.sort();
-                for entry in entries {
-                    let name = entry.file_name().unwrap().as_encoded_bytes();
-                    digest.update(name.len().to_le_bytes());
-                    digest.update(name);
-                    visit(&entry, digest)?;
-                }
-                digest.update(b"end-directory\0");
-            } else if metadata.is_symlink() {
-                digest.update(b"link\0");
-                let target = std::fs::read_link(path)?;
-                let bytes = target.as_os_str().as_encoded_bytes();
-                digest.update(bytes.len().to_le_bytes());
-                digest.update(bytes);
-            } else {
-                ensure!(metadata.is_file(), "unsupported input {}", path.display());
-                digest.update(b"file\0");
-                let bytes = std::fs::read(path)?;
-                digest.update(bytes.len().to_le_bytes());
-                digest.update(bytes);
-            }
-            Ok(())
-        }
-        let mut digest = Sha256::new();
-        visit(&root.join(".fluent/work"), &mut digest)?;
-        Ok(format!("{:x}", digest.finalize()))
-    }
-
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     ensure!(
         args.len() == 3,
@@ -56,7 +18,8 @@ fn main() -> anyhow::Result<()> {
         matches!(args[2].as_str(), "profile" | "plain"),
         "choose profile or plain"
     );
-    let before = input_digest(&root).context("read benchmark input before snapshot")?;
+    let before =
+        snapshot_profile::input_digest(&root).context("read benchmark input before snapshot")?;
     let mut samples = Vec::new();
     let mut projection = None;
     for index in 0..repetitions {
@@ -89,7 +52,8 @@ fn main() -> anyhow::Result<()> {
             "projection_sha256": format!("{:x}", Sha256::digest(current.as_bytes())),
         }));
     }
-    let after = input_digest(&root).context("read benchmark input after snapshot")?;
+    let after =
+        snapshot_profile::input_digest(&root).context("read benchmark input after snapshot")?;
     ensure!(
         before == after,
         "Work inputs changed during benchmark; discard timings"

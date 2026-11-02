@@ -1,7 +1,9 @@
 //! Benchmark-only observations; never retain facts used to project Work.
+use anyhow::{Context, ensure};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
@@ -94,4 +96,47 @@ pub(crate) fn git(command: &Command, started: Instant) {
             });
         }
     });
+}
+
+/// Hash Work names, types, links, and bytes without following links or writing state.
+pub fn input_digest(root: &Path) -> anyhow::Result<String> {
+    fn visit(path: &Path, digest: &mut Sha256) -> anyhow::Result<()> {
+        let metadata = path
+            .symlink_metadata()
+            .with_context(|| format!("inspect input {}", path.display()))?;
+        if metadata.is_dir() {
+            digest.update(b"directory\0");
+            let mut entries = std::fs::read_dir(path)
+                .with_context(|| format!("enumerate input directory {}", path.display()))?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, _>>()
+                .with_context(|| format!("read input directory entry in {}", path.display()))?;
+            entries.sort();
+            for entry in entries {
+                let name = entry.file_name().unwrap().as_encoded_bytes();
+                digest.update(name.len().to_le_bytes());
+                digest.update(name);
+                visit(&entry, digest)?;
+            }
+            digest.update(b"end-directory\0");
+        } else if metadata.is_symlink() {
+            digest.update(b"link\0");
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("read input link {}", path.display()))?;
+            let bytes = target.as_os_str().as_encoded_bytes();
+            digest.update(bytes.len().to_le_bytes());
+            digest.update(bytes);
+        } else {
+            ensure!(metadata.is_file(), "unsupported input {}", path.display());
+            digest.update(b"file\0");
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("read input file {}", path.display()))?;
+            digest.update(bytes.len().to_le_bytes());
+            digest.update(bytes);
+        }
+        Ok(())
+    }
+    let mut digest = Sha256::new();
+    visit(&root.join(".fluent/work"), &mut digest)?;
+    Ok(format!("{:x}", digest.finalize()))
 }
