@@ -14,6 +14,7 @@ pub struct Display {
     pub frame: Frame,
     pub identity: String,
     pub state: String,
+    pub focused: bool,
 }
 
 impl EmbeddedTerminal {
@@ -22,6 +23,7 @@ impl EmbeddedTerminal {
             frame: self.frame().clone(),
             identity: self.identity(),
             state: self.state_label(),
+            focused: self.focused(),
         }
     }
 }

@@ -11,6 +11,13 @@ pub enum Pane {
     List,
     Detail,
 }
+/// Identify the pane that receives keys, independently of a retained Control lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputOwner {
+    List,
+    Details,
+    Terminal,
+}
 /// Track reads in memory; never serialize receipt times into Work or SSH data.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadHealth {
@@ -54,6 +61,93 @@ pub struct App {
     pub terminal: Option<crate::terminal_view::Display>,
 }
 impl App {
+    pub fn input_owner(&self) -> InputOwner {
+        if self.terminal_visible()
+            && self
+                .terminal
+                .as_ref()
+                .is_some_and(|display| display.focused)
+        {
+            InputOwner::Terminal
+        } else if self.pane == Pane::List {
+            InputOwner::List
+        } else {
+            InputOwner::Details
+        }
+    }
+
+    /// Project the active navigation controls for both help and the footer.
+    pub fn project_controls(&self) -> Vec<&'static str> {
+        if self.input_owner() == InputOwner::Terminal {
+            return vec!["Ctrl-] navigate"];
+        }
+        if self.help {
+            return vec!["q quit", "?/Esc close help"];
+        }
+        if self.errors {
+            return vec![
+                "q quit",
+                "e/Esc back",
+                "↑/↓ scroll",
+                "PgUp/PgDn page",
+                "? help",
+                "r refresh",
+            ];
+        }
+        self.project_navigation_controls()
+    }
+
+    pub fn project_navigation_controls(&self) -> Vec<&'static str> {
+        let mut controls = if self.input_owner() == InputOwner::List {
+            let mut controls = vec!["q quit", "? help", "↑/↓ select", "→ details"];
+            if self
+                .selected_key
+                .as_ref()
+                .is_some_and(|key| key.task_id.is_some())
+            {
+                controls.push("t terminal");
+            } else if self.selected_key.is_some() {
+                controls.push("Enter workers");
+            }
+            controls
+        } else if self.terminal.is_some() && self.terminal_fits() {
+            vec![
+                "q quit",
+                "←/Esc list",
+                "i Control",
+                "f full-screen",
+                "? help",
+                "t reconnect",
+                "o Observe",
+                "] literal",
+            ]
+        } else {
+            let mut controls = vec!["q quit", "? help", "←/Esc list", "↑/↓ scroll"];
+            if self
+                .selected_key
+                .as_ref()
+                .is_some_and(|key| key.task_id.is_some())
+            {
+                controls.push("t terminal");
+            }
+            controls
+        };
+        controls.extend([
+            "Tab/⇧Tab view",
+            "F next view",
+            "a History/All",
+            "e errors",
+            "r refresh",
+            "c copy",
+        ]);
+        // A retained attachment can still be explicitly focused from the list.
+        if self.terminal.is_some() && self.terminal_fits() && self.input_owner() == InputOwner::List
+        {
+            controls.extend(["i Control", "f full-screen", "o Observe", "] literal"]);
+        }
+        controls
+    }
+
     pub fn selected_id(&self) -> Option<&str> {
         self.selected_key
             .as_ref()

@@ -1,6 +1,6 @@
 use super::{
     layout,
-    model::{App, Pane},
+    model::{App, InputOwner, Pane},
     snapshot::DashboardRow,
 };
 use ratatui::{
@@ -94,14 +94,10 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             .spans
             .push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
     }
-    let position = if area.width < 100 {
-        if app.pane == Pane::List {
-            " · List"
-        } else {
-            " · Details · ←/Esc list"
-        }
-    } else {
-        ""
+    let position = match app.input_owner() {
+        InputOwner::List => " · List",
+        InputOwner::Details => " · Details · ←/Esc list",
+        InputOwner::Terminal => " · Terminal Control",
     };
     let mut title = format!("Fluent work{position}");
     if !app.terminal_visible() {
@@ -155,20 +151,15 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else {
         project_detail(frame, areas.detail, app);
     }
-    let controls = if app.help {
-        "? or Esc close help"
-    } else if app.errors {
-        "↑/↓ scroll  PgUp/PgDn page  e/Esc back  ? help  q quit"
-    } else if app.terminal_visible() {
-        "←/Esc back  i Control  f full-screen  ? help  q quit"
-    } else if app.pane == Pane::Detail && area.width < 100 {
-        "←/Esc list  ↑/↓ scroll  Tab view  ? help  q quit"
-    } else if area.width < 100 {
-        "↑/↓ select  Enter workers  → details  ? help  q quit"
-    } else {
-        "↑/↓ select  Enter workers  → details/session  ← back  ? help  q quit"
-    };
-    frame.render_widget(Paragraph::new(controls), areas.footer);
+    let mut footer = String::new();
+    for control in app.project_controls() {
+        let separator = if footer.is_empty() { "" } else { "  " };
+        if footer.width() + separator.width() + control.width() <= areas.footer.width as usize {
+            footer.push_str(separator);
+            footer.push_str(control);
+        }
+    }
+    frame.render_widget(Paragraph::new(footer), areas.footer);
 }
 
 fn read_health_label(health: &super::model::ReadHealth) -> String {
@@ -521,8 +512,9 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
+    let project_help = app.project_navigation_controls().join("; ");
     let text = if app.project_mode() {
-        "↑/↓ or j/k select; Enter workers; Tab/Shift+Tab view; → details/session; ←/Esc list; t terminal/reconnect; i Control; Ctrl-] navigate; ] literal; o Observe; f full-screen (open view); f/F next view; a History/All; e errors; r refresh; c copy; ? close; q quit"
+        project_help.as_str()
     } else if app.size.0 >= 100 {
         "j/k or arrows select; PgUp/PgDn list; a Current/All; e errors; r refresh; c copy; ? close; q quit"
     } else {

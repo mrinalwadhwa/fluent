@@ -1207,6 +1207,7 @@ fn embedded_terminal_keeps_project_context_visible() {
         frame: screen.snapshot().unwrap(),
         identity: "agent-work / attempt-1 / writer / generation-1".into(),
         state: "Observe".into(),
+        focused: false,
     });
     let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
     terminal.draw(|frame| render::draw(frame, &app)).unwrap();
@@ -1230,6 +1231,7 @@ fn terminal_display() -> crate::terminal_view::Display {
         frame: screen.snapshot().unwrap(),
         identity: LONG_TERMINAL_IDENTITY.into(),
         state: "Observe".into(),
+        focused: false,
     }
 }
 
@@ -1394,6 +1396,7 @@ fn terminal_controls_require_an_open_view() {
             .unwrap(),
         identity: "selected generation".into(),
         state: "Observe".into(),
+        focused: false,
     });
     assert_eq!(
         app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
@@ -3201,4 +3204,89 @@ fn dashboard_opens_on_current_project_work() {
     assert_eq!(empty.filter, project::Filter::All);
     empty.handle_key(KeyCode::Tab, KeyModifiers::NONE);
     assert_eq!(empty.filter.label(), "Current");
+}
+
+#[test]
+fn dashboard_focus_and_footer_follow_input_owner() {
+    for (width, height) in [(60, 15), (99, 18), (100, 24), (140, 28)] {
+        let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+        app.resize(width, height);
+        let list = text(&app, width, height);
+        assert!(list.lines().next().unwrap().contains("· List"), "{list}");
+        assert!(list.lines().last().unwrap().contains("q quit"));
+        assert!(list.lines().last().unwrap().contains("→ details"));
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        let detail = text(&app, width, height);
+        assert!(
+            detail.lines().next().unwrap().contains("· Details"),
+            "{detail}"
+        );
+        assert!(
+            detail.lines().last().unwrap().contains("↑/↓ scroll"),
+            "{detail}"
+        );
+        assert!(
+            detail.lines().last().unwrap().contains("←/Esc list"),
+            "{detail}"
+        );
+        assert!(!detail.lines().last().unwrap().contains("Enter workers"));
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.pane, app::Pane::List);
+        app.set_terminal(terminal_display());
+        app.pane = app::Pane::Detail;
+        let observe = text(&app, width, height);
+        assert!(
+            observe.lines().last().unwrap().contains("i Control"),
+            "{observe}"
+        );
+        assert!(
+            observe.lines().last().unwrap().contains("←/Esc list"),
+            "{observe}"
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Char('i'), KeyModifiers::NONE),
+            Effect::ControlTerminal
+        );
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        let help = text(&app, width, height);
+        assert!(help.contains("f full-screen"), "{help}");
+        assert!(help.lines().last().unwrap().contains("q quit"), "{help}");
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        let errors = text(&app, width, height);
+        assert!(
+            errors.lines().last().unwrap().contains("e/Esc back"),
+            "{errors}"
+        );
+        assert!(!errors.lines().last().unwrap().contains("i Control"));
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.errors);
+    }
+}
+
+#[test]
+fn focused_control_only_advertises_native_return_path() {
+    for (width, height) in [(60, 15), (100, 24), (140, 28)] {
+        let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+        app.resize(width, height);
+        app.pane = app::Pane::Detail;
+        let mut display = terminal_display();
+        display.focused = true;
+        display.state = "Control · Ctrl-] navigate".into();
+        app.set_terminal(display);
+        let rendered = text(&app, width, height);
+        assert!(
+            rendered
+                .lines()
+                .next()
+                .unwrap()
+                .contains("Terminal Control")
+        );
+        assert_eq!(rendered.lines().last().unwrap().trim(), "Ctrl-] navigate");
+        app.terminal.as_mut().unwrap().focused = false;
+        app.terminal.as_mut().unwrap().state = "Control · navigation".into();
+        let navigation = text(&app, width, height);
+        assert!(navigation.lines().next().unwrap().contains("· Details"));
+        assert!(navigation.lines().last().unwrap().contains("q quit"));
+    }
 }

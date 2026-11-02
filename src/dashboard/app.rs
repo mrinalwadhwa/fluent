@@ -1,4 +1,5 @@
 use super::layout;
+use super::model::InputOwner;
 pub(super) use super::model::{App, Pane};
 use super::project::{self, Filter, RowKey};
 use super::snapshot::DashboardSnapshot;
@@ -311,7 +312,7 @@ impl App {
                 self.clamp_scrolls();
                 self.dirty = true;
             }
-            KeyCode::Enter if self.project_mode() && self.pane == Pane::List => {
+            KeyCode::Enter if self.project_mode() && self.input_owner() == InputOwner::List => {
                 if let Some(selected) = self.selected_key.clone() {
                     if selected.task_id.is_none() {
                         if !self.expanded.remove(&selected) {
@@ -359,19 +360,19 @@ impl App {
                 self.pane = Pane::List;
                 self.dirty = true;
             }
-            KeyCode::Up | KeyCode::Char('k') if self.pane == Pane::List => {
+            KeyCode::Up | KeyCode::Char('k') if self.input_owner() == InputOwner::List => {
                 self.move_selection(-1);
             }
-            KeyCode::Down | KeyCode::Char('j') if self.pane == Pane::List => {
+            KeyCode::Down | KeyCode::Char('j') if self.input_owner() == InputOwner::List => {
                 self.move_selection(1);
             }
-            KeyCode::PageUp if self.pane == Pane::List => {
+            KeyCode::PageUp if self.input_owner() == InputOwner::List => {
                 self.list_scroll = self
                     .list_scroll
                     .saturating_sub(self.scroll_bounds().list_height.max(1));
                 self.dirty = true;
             }
-            KeyCode::PageDown if self.pane == Pane::List => {
+            KeyCode::PageDown if self.input_owner() == InputOwner::List => {
                 self.list_scroll = self
                     .list_scroll
                     .saturating_add(self.scroll_bounds().list_height.max(1))

@@ -136,9 +136,14 @@ Test: src/dashboard/tests.rs (narrow_view_keeps_filter_and_return_keys_distinct)
 
 ### B7
 
-WHEN an agent terminal is displayed, THE SYSTEM SHALL keep its Observe, Control,
-or navigation-with-Control state and the relevant return command visible.
+WHEN input focus changes, THE SYSTEM SHALL identify List, Details, or terminal
+Control input and advertise the controls that apply to that state. WHEN an
+agent terminal is displayed, keep its Observe, Control, or navigation-with-Control
+state visible. Keep quit and navigation return controls visible at minimum size;
+focused terminal Control SHALL advertise Ctrl-] to return to navigation.
 Test: src/dashboard/tests.rs (terminal_mode_and_focus_remain_explicit)
+Test: src/dashboard/tests.rs (dashboard_focus_and_footer_follow_input_owner)
+Test: src/dashboard/tests.rs (focused_control_only_advertises_native_return_path)
 
 ### B8
 
