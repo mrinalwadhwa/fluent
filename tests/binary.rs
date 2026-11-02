@@ -15828,7 +15828,8 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     assert_eq!(commands.len(), 2);
     let host_yaml = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".fluent/release-host.yaml"),
-    ).unwrap();
+    )
+    .unwrap();
     let host_config: serde_yaml::Value = serde_yaml::from_str(&host_yaml).unwrap();
     let host_entries = host_config["commands"].as_sequence().unwrap();
 
@@ -77386,6 +77387,27 @@ fn release_acceptance_fixture(
     host: bool,
     no_expertise: bool,
 ) -> (PathBuf, PathBuf, String, PathBuf) {
+    release_acceptance_fixture_with_host_contract(
+        tmp,
+        host,
+        no_expertise,
+        ReleaseHostFixture::Absent,
+    )
+}
+
+#[derive(PartialEq)]
+enum ReleaseHostFixture {
+    Absent,
+    MissingRows,
+    ReviewedRows,
+}
+
+fn release_acceptance_fixture_with_host_contract(
+    tmp: &TempDir,
+    host: bool,
+    no_expertise: bool,
+    release_host: ReleaseHostFixture,
+) -> (PathBuf, PathBuf, String, PathBuf) {
     let project = setup_git_project(tmp);
     let marker = tmp.path().join("release-command-runs");
     let passing = format!("printf 'run\\n' >> '{}'", marker.display());
@@ -77407,6 +77429,19 @@ fn release_acceptance_fixture(
         serde_json::to_vec(&serde_json::json!({"commands": definitions})).unwrap(),
     )
     .unwrap();
+    if release_host != ReleaseHostFixture::Absent {
+        fs::write(
+            project.join(".fluent/release-host.yaml"),
+            include_str!("../.fluent/release-host.yaml"),
+        )
+        .unwrap();
+        git::run(
+            &project,
+            &["add", "-f", ".fluent/release-host.yaml"],
+            "stage host contract",
+        )
+        .unwrap();
+    }
     git::run(
         &project,
         &["add", ".fluent/tester.yaml"],
@@ -77454,6 +77489,38 @@ fn release_acceptance_fixture(
             version: fluent::work_model::WRITER_COMPLETION_CONTRACT_VERSION,
             requirements: vec![],
         });
+    if release_host == ReleaseHostFixture::ReviewedRows {
+        let config: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../.fluent/release-host.yaml")).unwrap();
+        item.attempts[0]
+            .writer_completion_contract
+            .as_mut()
+            .unwrap()
+            .requirements = config["commands"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let id = format!("plan:host-{index}");
+                fluent::work_model::WriterCompletionRequirement {
+                    id: id.clone(),
+                    kind: fluent::work_model::WriterCompletionRequirementKind::Plan,
+                    responsibility: Some(fluent::work_model::CompletionResponsibility::Host),
+                    source: format!("plan.md#host-{index}"),
+                    requirement: format!("Verify release host {index}"),
+                    verification_refs: vec![],
+                    command: Some(fluent::work_model::PlanCommand {
+                        command: entry["command"].as_str().unwrap().into(),
+                        working_directory: ".".into(),
+                        source_row: id,
+                        environment: Default::default(),
+                        applicability: Default::default(),
+                    }),
+                }
+            })
+            .collect();
+    }
     store.write_work_item(&item).unwrap();
     let run = || {
         let mut command = fluent_cmd();
@@ -77463,7 +77530,55 @@ fn release_acceptance_fixture(
             .env("PATH", mock_path(&bin));
         command
     };
-    run().assert().success();
+    if release_host == ReleaseHostFixture::ReviewedRows {
+        run()
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("plan:host-0"));
+        let current = store.read_work_item_snapshot("work-1").unwrap();
+        let candidate = current.attempts[0].current_candidate_commit().unwrap();
+        for (index, row) in current.attempts[0]
+            .writer_completion_contract
+            .as_ref()
+            .unwrap()
+            .requirements
+            .iter()
+            .enumerate()
+        {
+            let evidence = tmp.path().join(format!("release-host-{index}.json"));
+            fs::write(&evidence, serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "producer":"synthetic release fixture", "check":row.command.as_ref().unwrap().command,
+                "working_directory":".", "result":"pass", "run_at":fluent::work_model::now_iso8601(), "output":"Synthetic host proof; no real host script executed"
+            })).unwrap()).unwrap();
+            fluent_cmd()
+                .current_dir(&project)
+                .args([
+                    "attempt",
+                    "evidence",
+                    "attach",
+                    "work-1",
+                    "attempt-1",
+                    "--candidate",
+                    candidate,
+                    "--plan-row",
+                    &row.id,
+                    "--evidence-file",
+                    evidence.to_str().unwrap(),
+                ])
+                .assert()
+                .success();
+            let assertion = run().assert();
+            if index == 6 {
+                assertion.success();
+            } else {
+                assertion
+                    .success()
+                    .stderr(predicate::str::contains(format!("plan:host-{}", index + 1)));
+            }
+        }
+    } else {
+        run().assert().success();
+    }
     let store = WorkModelStore::new(&project);
     let item = store.read_work_item_snapshot("work-1").unwrap();
     let candidate = item.attempts[0]
@@ -77537,6 +77652,71 @@ fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
         runs,
         "verification must not execute configured commands"
     );
+}
+
+#[test]
+fn release_verify_requires_every_host_check() {
+    // A release contract cannot be satisfied by simply omitting its host rows.
+    let missing = TempDir::new().unwrap();
+    let (project, _, candidate, _) = release_acceptance_fixture_with_host_contract(
+        &missing,
+        false,
+        false,
+        ReleaseHostFixture::MissingRows,
+    );
+    assert_release_verification(&project, &candidate, false);
+    let tmp = TempDir::new().unwrap();
+    let (project, bin, candidate, _results) = release_acceptance_fixture_with_host_contract(
+        &tmp,
+        false,
+        false,
+        ReleaseHostFixture::ReviewedRows,
+    );
+    assert_release_verification(&project, &candidate, true);
+    let item = WorkModelStore::new(&project)
+        .read_work_item_snapshot("work-1")
+        .unwrap();
+    assert_eq!(item.attempts[0].evidence_recoveries.len(), 7);
+    for recovery in &item.attempts[0].evidence_recoveries {
+        let binding_path = project.join(&recovery.targets[0].prior_review_artifact);
+        let original = fs::read(&binding_path).unwrap();
+        for (key, value) in [
+            ("candidate_commit", serde_json::json!("0".repeat(40))),
+            ("command", serde_json::json!("true")),
+            ("result", serde_json::json!("fail")),
+            ("work_item_id", serde_json::json!("another-release")),
+            ("attempt_id", serde_json::json!("attempt-2")),
+        ] {
+            let mut binding: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            binding[key] = value;
+            write_json_path(&binding_path, &binding);
+            assert_release_verification(&project, &candidate, false);
+            fs::write(&binding_path, &original).unwrap();
+        }
+        let evidence_path = project.join(&recovery.attachment.snapshot_path);
+        let evidence = fs::read(&evidence_path).unwrap();
+        fs::remove_file(&evidence_path).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&evidence_path, evidence).unwrap();
+        let reviewer = item.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| Some(&task.id) == recovery.targets[0].review_task_id.as_ref())
+            .unwrap();
+        let review_path = project
+            .join(&reviewer.artifact_area.as_ref().unwrap().path)
+            .join("review.md");
+        let review = fs::read(&review_path).unwrap();
+        fs::write(&review_path, "Verdict: fail\n").unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::remove_file(&review_path).unwrap();
+        assert_release_verification(&project, &candidate, false);
+        fs::write(&review_path, review).unwrap();
+        assert_release_verification(&project, &candidate, true);
+    }
+    land_work_1(&project, &bin, true);
+    assert_eq!(git_head(&project), candidate);
+    assert_release_verification(&project, &candidate, true);
 }
 
 #[test]

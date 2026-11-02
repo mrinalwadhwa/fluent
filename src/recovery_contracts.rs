@@ -664,6 +664,16 @@ pub(crate) fn owned_host_completion_matrix(
     project_root: &Path,
     attempt: &work_model::Attempt,
 ) -> Result<Option<(Task, ArtifactRef, work_model::WriterCompletionMatrix)>> {
+    owned_host_completion_matrix_at(project_root, attempt, None)
+}
+
+/// Release verification may use its exact clean checkout after landing retires
+/// the Writer workspace. Ordinary recovery still requires the managed source.
+pub(crate) fn owned_host_completion_matrix_at(
+    project_root: &Path,
+    attempt: &work_model::Attempt,
+    candidate_checkout: Option<&Path>,
+) -> Result<Option<(Task, ArtifactRef, work_model::WriterCompletionMatrix)>> {
     let Some(contract) = attempt
         .writer_completion_contract
         .as_ref()
@@ -687,7 +697,10 @@ pub(crate) fn owned_host_completion_matrix(
         .as_ref()
         .context("required host verification has no candidate")?;
     anyhow::ensure!(
-        candidate_workspace_is_clean_at(project_root, output, &output.commit),
+        candidate_checkout.map_or_else(
+            || candidate_workspace_is_clean_at(project_root, output, &output.commit),
+            |checkout| candidate_workspace_is_clean_at_path(checkout, &output.commit),
+        ),
         "required host verification needs the unchanged clean candidate {}",
         output.commit
     );

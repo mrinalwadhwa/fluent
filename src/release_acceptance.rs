@@ -141,6 +141,7 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
     } else {
         recovery_contracts::validate_completed_downstream_evidence(root, attempt)?;
     }
+    verify_host_contract(root, attempt, commit)?;
     let assessment = verification_assessment::assess_canonical_checks(root, attempt)?;
     ensure!(
         assessment.is_satisfied()
@@ -193,5 +194,72 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
             .is_empty(),
         "release checkout changed during verification"
     );
+    Ok(())
+}
+
+/// Use the candidate's contract, so older releases keep their original gates.
+fn verify_host_contract(
+    root: &Path,
+    attempt: &crate::work_model::Attempt,
+    commit: &str,
+) -> Result<()> {
+    use crate::work_model::{
+        CompletionResponsibility, WriterCompletionRequirementKind, WriterCompletionState,
+    };
+    let path = ".fluent/release-host.yaml";
+    let entry = git::run_stdout(
+        root,
+        &["ls-tree", commit, "--", path],
+        "inspect release host contract",
+    )?;
+    if entry.is_empty() {
+        return Ok(());
+    }
+    ensure!(
+        entry.starts_with("100644 blob ") || entry.starts_with("100755 blob "),
+        "release host contract must be a regular committed file"
+    );
+    let bytes = git::run_stdout(
+        root,
+        &["show", &format!("{commit}:{path}")],
+        "read candidate release host contract",
+    )?;
+    let config: crate::tester::TesterConfig =
+        serde_yaml::from_str(&bytes).context("parse release host contract")?;
+    ensure!(
+        !config.commands.is_empty(),
+        "release host contract has no checks"
+    );
+    let (writer, source, mut matrix) =
+        recovery_contracts::owned_host_completion_matrix_at(root, attempt, Some(root))?
+            .context("release host contract requires host-owned Plan rows and accepted evidence")?;
+    recovery_contracts::apply_completed_plan_host_evidence(
+        root,
+        attempt,
+        &writer,
+        &source,
+        &mut matrix,
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for check in config.commands {
+        ensure!(
+            !check.command.trim().is_empty() && seen.insert(check.command.clone()),
+            "release host contract has an empty or duplicate command"
+        );
+        ensure!(
+            matrix.rows.iter().any(|row| {
+                row.kind == WriterCompletionRequirementKind::Plan
+                    && row.responsibility == Some(CompletionResponsibility::Host)
+                    && row.command.as_ref().is_some_and(|command| {
+                        command.command == check.command
+                            && command.working_directory == "."
+                            && command.applicability == check.applicability
+                    })
+                    && row.state == WriterCompletionState::Complete
+            }),
+            "release host check requires accepted exact-candidate evidence: `{}`",
+            check.command
+        );
+    }
     Ok(())
 }
