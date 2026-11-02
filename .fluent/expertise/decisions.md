@@ -69,6 +69,19 @@ avoid a Control reacquisition gap. See the
 
 ---
 
+## Separate terminal visibility, focus, and Control
+
+Opening worker details may hide a terminal without discarding its attachment,
+retargeting its invocation, or releasing retained Control. Hidden terminals
+release native input focus. The dashboard projects visibility, focus, and the
+retained lease separately so help and footer controls match the current input
+owner. Display flags remain observational; the runtime attachment validates
+every input against its live lease and invocation. See the
+[focus contract](learnings/terminal-focus-requires-visible-identity.md) and
+[dashboard architecture](../../documentation/architecture.md).
+
+---
+
 ## Version SSH display credit independently of Control
 
 SSH terminal protocol version 2 requires compatible clients and helpers on both

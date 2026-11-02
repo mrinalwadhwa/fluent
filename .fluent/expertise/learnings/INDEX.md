@@ -112,7 +112,7 @@
 - [native-input-settlement-binds-identity](native-input-settlement-binds-identity.md) — Settle native Tasks only for the current execution generation, assigned conversation, and latest admitted input
 - [native-observations-supplement-command-proof](native-observations-supplement-command-proof.md) — Preserve command acceptance when separately reviewed native observations supply named-test evidence
 - [native-pi-input-failures-return-handled](native-pi-input-failures-return-handled.md) — Reject unacknowledged Pi input with a handled result because its installed runner swallows callback exceptions
-- [native-relay-tests-drain-before-comparing](native-relay-tests-drain-before-comparing.md) — Keep large-payload fixture work outside the Codex relay's bounded display drain while proving evidence settles before display consumption
+- [native-relay-tests-drain-before-comparing](native-relay-tests-drain-before-comparing.md) — Keep expensive Codex fixture validation outside live protocol deadlines and the bounded display drain
 - [needs-user-not-terminal-for-cleanup](needs-user-not-terminal-for-cleanup.md) — NeedsUser attempts are not terminal for cleanup; only Complete and Failed are reapable
 - [negative-test-cross-product-coverage](negative-test-cross-product-coverage.md) — Negative tests for a multi-condition gate must hold all other conditions fixed while varying only the dimension under test — independent variation misses cross-product gaps
 - [nested-terminal-tests-need-rpath](nested-terminal-tests-need-rpath.md) — Embed the prepared Ghostty library path in test-support executables that tmux launches
@@ -206,7 +206,7 @@
 - [terminal-coder-errors-bypass-retry-budget](terminal-coder-errors-bypass-retry-budget.md) — Classify typed coder failures that may leave invisible side effects as terminal in should_retry_coder_error, never retried
 - [terminal-control-lease-follows-client](terminal-control-lease-follows-client.md) — Keep Control in writable tmux clients and retain the SSH helper's lease across display handoffs
 - [terminal-flood-fixtures-own-output](terminal-flood-fixtures-own-output.md) — Gate fixture-owned tmux output around confirmed read-only Observe and concurrent dashboard navigation
-- [terminal-focus-requires-visible-identity](terminal-focus-requires-visible-identity.md) — Grant embedded input focus only when the dashboard shows the selected invocation identity and Control state
+- [terminal-focus-requires-visible-identity](terminal-focus-requires-visible-identity.md) — Separate terminal visibility, input focus, and retained Control when routing input and projecting dashboard controls
 - [terminal-host-tests-exercise-live-boundaries](terminal-host-tests-exercise-live-boundaries.md) — Prove managed terminal attachment and settlement with live PTY clients, tmux, and macOS sandbox behavior
 - [terminal-input-flags-use-independent-description](terminal-input-flags-use-independent-description.md) — Open full-screen input separately so nonblocking reads cannot change PTY output flags
 - [terminal-revocation-precedes-cleanup](terminal-revocation-precedes-cleanup.md) — Revoke attachment access before terminal cleanup waits for Control, retaining execution authority until settlement is verified
