@@ -27,3 +27,9 @@ The journey runs through
 Related: [[dashboard-local-refresh-owns-no-ui-state]],
 [[dashboard-rendered-overflow-tests]],
 [[terminal-host-tests-exercise-live-boundaries]].
+
+`initial_local_read_does_not_block_first_draw` also drives the production event
+loop through `DashboardSession` with a Ratatui test backend. It waits until a
+FIFO in the Work collection confirms the initial loader is blocked, then
+asserts rendered view changes, help, and quit before releasing EOF. Keep the
+initial draw and local read request inside that tested coordinator.

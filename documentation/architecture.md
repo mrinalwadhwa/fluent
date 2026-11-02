@@ -2235,18 +2235,42 @@ From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
 shows a resize message. Selection uses source, Work Item, Task, and invocation
 identity, so refresh preserves a visible selection across reordering. The old
 status-grouped snapshot remains an internal compatibility path.
-The event loop requests a read-only snapshot every two seconds or on request
-and draws only when visible state changes. After the initial synchronous load,
-`dashboard.rs` runs local discovery and reads in one background worker, keeping
-input and redraws responsive. Poll ticks reuse an in-flight read; manual requests
-during that read coalesce into one follow-up. Completed local results retain
-the current SSH snapshots and reconcile the current selection. Each failed
-source retains its last snapshot with a stale label and read diagnostics.
-`dashboard.rs` owns terminal setup and the event loop;
-`dashboard/snapshot.rs`, `dashboard/app.rs`, and
-`dashboard/render.rs` respectively own projection, interaction state, and pure
-Ratatui rendering. `dashboard/layout.rs` computes shared wrapping and scroll
-bounds and project detail text without depending on interaction state or rendering.
+The console draws an empty project view with `Loading local Work` before
+requesting its initial local discovery and Work read. The event loop requests
+later read-only snapshots every two seconds or on request and draws when visible
+state changes. `dashboard.rs` runs initial and recurring local reads in one
+background worker, keeping input and redraws responsive. Poll ticks reuse an
+in-flight read; manual requests during that read coalesce into one follow-up.
+Completed local results retain current SSH snapshots and reconcile the current
+view and selection. Quit drops an unfinished local reader without joining it;
+the reader owns its inputs and never writes Work or owns terminal authority.
+
+`dashboard/model.rs` owns ephemeral `ReadHealth` state: `pending`,
+`last_success` (a UTC receipt time), and `error`. `App::source_reads` keys that
+state by the existing source identity; `App::local_read` also covers initial
+discovery and reader failures. Every successful completion advances its source's
+receipt time and clears its read error, even when snapshot values are unchanged.
+A failed source keeps its last good snapshot and receipt time. An individually
+unreadable Work Item produces diagnostics in a successful partial snapshot;
+failure to enumerate the source's Work collection instead marks the source stale.
+SSH completions update only the completed source; pending peers gain no receipt
+time. SSH receipt times describe local observation, never remote lifecycle events.
+These fields remain outside stored Work and the SSH wire schema.
+
+`dashboard/render.rs` displays source health using `Loading` before an initial
+result, `Refreshing` during a read after a success, `Read failed` after an error,
+and `Last read UTC MM-DD HH:MM:SS` after a success. Refreshing and failed sources
+continue to show their last successful read time. The `Updated UTC` column
+continues to show recorded Work or Task transitions; unavailable remote lifecycle
+times remain unavailable. Source headers remain visible even when a source has
+no Work Items in the selected view, and `e` shows full source diagnostics. The
+header shows pending local discovery and reader failures before sources exist.
+
+`dashboard.rs` owns terminal setup and coordinates local and remote results;
+`dashboard/snapshot.rs`, `dashboard/app.rs`, and `dashboard/render.rs`
+respectively own projection, interaction state, and pure Ratatui rendering.
+`dashboard/layout.rs` computes shared wrapping and scroll bounds and project
+detail text without depending on interaction state or rendering.
 The terminal renderer consumes the same unboxed geometry for viewport size and
 mouse routing. Tab/Shift+Tab cycle views, Enter toggles workers, Right inspects
 details or an available selected session, and Left/Esc returns to the list.

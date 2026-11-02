@@ -131,6 +131,9 @@ impl App {
             // Keep the displayed generation selected until explicit navigation,
             // even when a source refresh removes its row.
             if self.terminal.is_none() {
+                if self.selected_key.is_none() {
+                    self.selected_key = project::initial_key(&self.snapshot.sources, self.filter);
+                }
                 self.reconcile_project_selection();
             }
         } else {

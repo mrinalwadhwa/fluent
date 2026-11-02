@@ -74,7 +74,19 @@ assert_not_contains() {
 }
 
 clean_dashboard_output() {
-  perl -CSDA -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/[\s\x{2502}\x{2500}]//g'
+  # Reconstruct frames before removing spaces: later draws update changed cells.
+  python3 -c '
+import runpy
+import sys
+Screen = runpy.run_path(sys.argv[1])["Screen"]
+screen = Screen(120, 30)
+# Ratatui hides the cursor after each completed frame. Retain each screen so
+# assertions can inspect both the Work list and a later errors overlay.
+for frame in sys.stdin.buffer.read().split(b"\x1b[?25l"):
+    screen.feed(frame)
+    print(screen.text())
+' "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" |
+    perl -CSDA -pe 's/[\s\x{2502}\x{2500}]//g'
 }
 
 clean_dashboard_output_tail() {

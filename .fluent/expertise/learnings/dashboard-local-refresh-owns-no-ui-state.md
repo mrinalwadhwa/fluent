@@ -5,9 +5,9 @@ metadata:
   type: architecture
 ---
 
-After the initial synchronous load, the project dashboard runs local discovery
-and Work reads in a background worker that owns copies of its inputs. Keep at
-most one local read in flight: periodic ticks do not queue more reads, while
+The project dashboard draws a usable loading frame before requesting local
+discovery and Work reads in a background worker that owns copies of its inputs.
+Keep at most one local read in flight: periodic ticks do not queue more reads, while
 manual requests during a read coalesce into one follow-up. The worker returns
 local snapshots and diagnostics; the event loop owns interaction state.
 
@@ -30,3 +30,11 @@ lives in `src/dashboard_sources/collection.rs`. Related:
 [[dashboard-collection-failures-preserve-stale-snapshot]],
 [[scheduler-workers-retain-join-ownership]],
 [[dashboard-responsiveness-tests-gate-real-reads]].
+
+Keep ephemeral source read health in `dashboard/model.rs`, separate from Work
+transition metadata and the SSH wire schema. Record each completed source's
+successful receipt even when its snapshot equals the previous value. Remote
+completion events must identify only completed sources; copying every remote
+snapshot would falsely advance pending peers' read times. Source errors and
+last good receipt times survive unrelated source completions. The state and
+label contract is published in `documentation/architecture.md`.

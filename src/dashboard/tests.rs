@@ -75,6 +75,17 @@ fn dashboard_snapshot_is_nonmutating() {
     assert_eq!(tree(root.path()), before);
     assert_eq!(snapshot.rows[0].status.title, "Published");
     assert!(snapshot.rows[0].latest_transition.is_some());
+    let mut app = loading_project_app();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    local.request(&mut app, false);
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(tree(root.path()), before);
+    assert_eq!(app.snapshot.sources[0].work[0].status.title, "Published");
+    assert!(
+        app.source_reads
+            .values()
+            .all(|health| health.last_success.is_some())
+    );
     assert!(
         snapshot
             .errors
@@ -1170,6 +1181,12 @@ fn project_view_prioritizes_initial_attention() {
         project_source("/two", vec![row("needs", "needs-user")]),
     ]);
     assert_eq!(app.selected_key.as_ref().unwrap().work_item_id, "needs");
+    let root = tempfile::tempdir().unwrap();
+    let mut loading = loading_project_app();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    local.start(&mut loading, move || app.snapshot);
+    finish_local_refresh(&mut local, &mut loading);
+    assert_eq!(loading.selected_id(), Some("needs"));
     let fallback = project_app(vec![project_source(
         "/one",
         vec![row("planned", "planned")],
