@@ -59927,15 +59927,20 @@ fn interrupted_owned_plan_writers_keep_ordinary_resume() {
 
 #[test]
 fn interrupted_plan_host_evidence_recovers_same_attempt() {
-    check_interrupted_plan_host_evidence_recovery(false);
+    check_interrupted_plan_host_evidence_recovery(false, 0);
 }
 
 #[test]
 fn interrupted_plan_host_evidence_recovers_from_repaired_source() {
-    check_interrupted_plan_host_evidence_recovery(true);
+    check_interrupted_plan_host_evidence_recovery(true, 0);
 }
 
-fn check_interrupted_plan_host_evidence_recovery(repaired_source: bool) {
+#[test]
+fn interrupted_plan_host_evidence_recovers_after_slow_startup() {
+    check_interrupted_plan_host_evidence_recovery(false, 21);
+}
+
+fn check_interrupted_plan_host_evidence_recovery(repaired_source: bool, startup_delay_secs: u64) {
     let tmp = TempDir::new().unwrap();
     let (project, candidate, passing, workspace) =
         setup_interrupted_owned_host_fixture_with_source(&tmp, "interrupted-plan", repaired_source);
@@ -60025,11 +60030,13 @@ esac
     );
     let started = tmp.path().join("review-started");
     let release = tmp.path().join("review-release");
-    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+    let mut command = scheduler_fixture_command(startup_delay_secs);
     command
         .current_dir(&project)
         .env("PATH", mock_path(&bin))
         .env_remove("FLUENT_TASK_KIND")
+        .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
         .env("FLUENT_MAX_TASK_RETRIES", "0")
         .env("HOST_REVIEW_STARTED", &started)
         .env("HOST_REVIEW_RELEASE", &release)
@@ -60039,14 +60046,22 @@ esac
             "interrupted-plan",
             "attempt-1",
             "--no-sandbox",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut owner = OwnedFixtureProcess::spawn(&mut command);
-    assert!(
-        poll_until(std::time::Duration::from_secs(20), || started.exists()),
-        "targeted reviewer did not start"
-    );
+        ]);
+    let mut owner = OwnedFixtureProcess::spawn_with_output(&mut command);
+    // Bound coordinator startup separately from the concurrent-resume assertions.
+    let observed = poll_until(SCHEDULER_STARTUP_TIMEOUT, || {
+        started.exists() || owner.try_wait().unwrap().is_some()
+    });
+    if !observed || !started.exists() {
+        owner.terminate_and_wait();
+        let output = owner.wait_with_output().unwrap();
+        panic!(
+            "targeted reviewer did not start: status={}; stdout={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let running = work_item_value(&project, "interrupted-plan");
     fluent_cmd()
         .current_dir(&project)
