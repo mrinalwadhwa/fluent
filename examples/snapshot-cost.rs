@@ -11,6 +11,13 @@
 //! process; measure cold filesystem behavior separately when required. The digest
 //! checks Work bytes only: freeze or independently verify Git refs, external
 //! workspaces, and process liveness when comparing baseline and optimized reads.
+#[cfg(not(feature = "snapshot-profile"))]
+fn main() {
+    eprintln!("snapshot-cost requires --features snapshot-profile");
+    std::process::exit(2);
+}
+
+#[cfg(feature = "snapshot-profile")]
 fn main() -> anyhow::Result<()> {
     use anyhow::{Context, ensure};
     use fluent::{dashboard::project::SourceSnapshot, snapshot_profile};

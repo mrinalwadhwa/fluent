@@ -8,10 +8,6 @@ description = "Run coding agents inside a macOS Seatbelt sandbox with session co
 test-support = ["snapshot-profile"]
 snapshot-profile = []
 
-[[example]]
-name = "snapshot-cost"
-required-features = ["snapshot-profile"]
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
