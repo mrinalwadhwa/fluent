@@ -3,6 +3,29 @@
 Observable behaviors of the fluent system. Each statement describes what
 the system does, not how. EARS format.
 
+## Ordinary Tester and release host proof
+
+### B1
+
+WHEN ordinary Work runs the project Tester without release host authorization,
+THE SYSTEM SHALL run its two unattended suites without invoking the seven
+release host scripts.
+Test: tests/behaviors/operations/test-tester-host-boundary.sh (ordinary_tester_excludes_release_host_checks)
+
+### B2
+
+WHEN release acceptance verifies a candidate, THE SYSTEM SHALL require
+successful, accepted exact-candidate evidence for every command in the
+candidate's release host contract in addition to the ordinary full Tester.
+Test: tests/binary.rs (release_verify_requires_every_host_check)
+
+### B3
+
+WHEN release publication begins, THE SYSTEM SHALL verify the release host
+contract before creating a GitHub release and SHALL preserve historical proof
+and its source commit.
+Test: tests/behaviors/operations/test-release-script.sh (release_requires_host_contract_before_publish)
+
 ## Native Codex startup
 
 ### B1
@@ -14,7 +37,7 @@ successful completion for the same execution generation, assigned conversation,
 and first turn that started.
 Test: tests/native_agent_tasks.rs (host_first_turn_probe_requires_successful_completion)
 Test: tests/native_agent_tasks.rs (host_first_turn_probe_rejects_failed_or_uncorrelated_completion)
-Test: {"kind":"command","command":"bash tests/host/check-native-codex-first-turn.sh","command_index":2,"description":"authenticated first-turn completion under the production macOS worker sandbox"}
+Test: tests/host/check-native-codex-first-turn.sh
 
 ## Dashboard operator console
 

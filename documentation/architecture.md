@@ -3585,6 +3585,26 @@ changes Work state. Standalone `fluent tester check` retains its existing
 execution behavior; terminal-only checks must be completed through the
 existing host-evidence process before release verification.
 
+Ordinary Work uses only the two unattended suites in `.fluent/tester.yaml`.
+The seven authorized host commands live in `.fluent/release-host.yaml`; ordinary
+Tester and landing do not execute them. For a new release Work Item, declare a
+required Plan row with responsibility `host` for each exact command in that
+contract, using the candidate checkout root (`.`) as its working directory.
+Run each script only on an authorized host, then attach its schema-version-1
+result with `fluent attempt evidence attach <work-item-id> <attempt-id>
+--candidate <full-commit> --plan-row <row-id> --evidence-file <path>`. Resume the
+Attempt to run its targeted Tests Review before collecting the next host check.
+The Writer leaves these rows pending; neither file presence nor an authorization
+environment variable supplies accepted proof.
+
+Release verification reads the host contract from the candidate commit and
+requires each named command's successful evidence and accepted targeted review,
+bound to the same Work Item, Attempt, and candidate. Missing, altered, stale,
+failed, or unreviewed proof blocks publication even when the ordinary suites
+pass. Candidates committed before this separate contract retain their original
+Tester requirements; the v0.7.0 release record and its nine-command
+configuration remain historical evidence.
+
 The script passes the committed notes to GitHub with `--notes-file`.
 `tools/install.sh` maps Apple Silicon to
 `aarch64-apple-darwin` and Intel to `x86_64-apple-darwin`, downloads that
