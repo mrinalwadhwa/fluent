@@ -331,6 +331,25 @@ test_rejects_stale_missing_or_unresolved_acceptance_before_publication() {
   done
 }
 
+test_release_requires_host_contract_before_publish() {
+  local tmp command reason
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  setup_fixture "$tmp"
+  while IFS= read -r command; do
+    for reason in missing stale failed unreviewed altered-command; do
+      if run_release "$tmp" FAKE_PROOF_ERROR="$reason:$command" > "$tmp/proof" 2>&1; then
+        return 1
+      fi
+      grep -Fq "invalid release proof: $reason:$command" "$tmp/proof" || return 1
+      [ ! -e "$tmp/gh.log" ] || return 1
+    done
+  done < <(sed -n 's/^  - command: //p' "$PROJECT_DIR/.fluent/release-host.yaml")
+  run_release "$tmp" > "$tmp/proof" 2>&1 || return 1
+  grep -Fxq 'tester verify release-work attempt-1 --candidate aaaaaaaa' "$tmp/release.log" || return 1
+  grep -Fq 'release create v9.8.7 --target aaaaaaaa' "$tmp/gh.log"
+}
+
 printf 'test-release-script\n\n'
 
 run_test "publishes both Mac architectures at exact commit after gates" \
@@ -353,4 +372,5 @@ run_test "rejects missing release notes" \
 run_test "rejects failed native preparation before publication" test_rejects_failed_native_preparation_before_publication
 run_test "rejects missing or invalid acceptance identity before builds" test_rejects_missing_or_invalid_acceptance_identity_before_builds
 run_test "rejects stale missing or unresolved acceptance before publication" test_rejects_stale_missing_or_unresolved_acceptance_before_publication
+run_test "release_requires_host_contract_before_publish" test_release_requires_host_contract_before_publish
 summarize_and_exit

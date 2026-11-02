@@ -123,7 +123,8 @@ for target in "${RELEASE_TARGETS[@]}"; do
   RELEASE_ASSETS+=("$staged_binary" "$STAGING/$checksum_name")
 done
 
-printf 'Running exact release gates ...\n'
+# tester verify also requires the candidate's reviewed release-host contract.
+printf 'Running exact release gates and host proof verification ...\n'
 cargo fmt --all --manifest-path "$REPO_ROOT/Cargo.toml" -- --check
 cargo check --tests --features test-support --manifest-path "$REPO_ROOT/Cargo.toml"
 (
