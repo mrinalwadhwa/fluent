@@ -1111,3 +1111,11 @@ sequence through that same reader before Dashboard dispatch resumes. Do not
 replace this with a second competing reader or operator recovery bytes. See
 [the patch provenance](../../vendor/crossterm/FLUENT-PATCH.md) and the
 [handoff regression pattern](testing/patterns/dashboard-partial-input-handoff.md).
+
+## Verify releases after the Writer workspace retires
+
+Release verification may validate retained host proof using its exact clean
+candidate checkout after landing retires the Writer workspace. Ordinary
+recovery still requires the original managed workspace because it authorizes
+further execution. Keep this exception confined to the release verifier; see
+[[release-verification-uses-exact-clean-checkout]] for its validation boundary.
