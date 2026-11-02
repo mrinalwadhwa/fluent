@@ -110,13 +110,39 @@ wait_for_dashboard_capture() {
 }
 
 capture_dashboard_default() {
-  PROJECT_PATH="$1"
-  KEYS="${2:-}"
-  OUTPUT_FILE="$(mktemp -t fluent-work-dashboard-output-XXXXXX)"
+  local PROJECT_PATH="$1"
+  local KEYS="${2:-}"
+  local OUTPUT_FILE="$(mktemp -t fluent-work-dashboard-output-XXXXXX)"
+  local CAPTURE_STATUS="$(mktemp -t fluent-work-dashboard-status-XXXXXX)"
 
   (
-    sleep 1
-    if [ -n "$KEYS" ]; then
+    # Reconstruct the rendered screen, including cell updates, rather than
+    # assuming that the asynchronous first snapshot finishes within a second.
+    if python3 - "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" "$OUTPUT_FILE" <<'PY'
+import pathlib
+import runpy
+import sys
+import time
+
+Screen = runpy.run_path(sys.argv[1])["Screen"]
+capture = pathlib.Path(sys.argv[2])
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    screen = Screen(120, 30)
+    screen.feed(capture.read_bytes())
+    text = screen.text()
+    if (all(word in text for word in ("Fluent work", "Tasks", "q quit"))
+            and "Loading local Work" not in text):
+        sys.exit(0)
+    time.sleep(0.05)
+sys.exit("dashboard did not complete its initial local read within 20 seconds")
+PY
+    then
+      printf '0' > "$CAPTURE_STATUS"
+    else
+      printf '1' > "$CAPTURE_STATUS"
+    fi
+    if [ -n "$KEYS" ] && [ "$(cat "$CAPTURE_STATUS")" = 0 ]; then
       printf '%b' "$KEYS"
       sleep 1
     fi
@@ -124,10 +150,12 @@ capture_dashboard_default() {
   ) | HOME="$TEST_DIR" FLUENT_DASH_BIN="$FLUENT_BIN" \
       FLUENT_DASH_PROJECT="$PROJECT_PATH" \
       TERM=xterm \
-      script -q "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
+      script -qF "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
 
   cat "$OUTPUT_FILE"
-  rm -f "$OUTPUT_FILE"
+  local capture_result="$(cat "$CAPTURE_STATUS")"
+  rm -f "$OUTPUT_FILE" "$CAPTURE_STATUS"
+  return "${capture_result:-1}"
 }
 
 capture_dashboard_after_poll_mutation() {
@@ -325,7 +353,7 @@ test_dashboard_lists_work_items() {
   create_planned_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "All1" || RESULT=1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
@@ -342,7 +370,7 @@ test_dashboard_refreshes_work_items_on_poll() {
   "$FLUENT_BIN" work-item create work-polled --title "Polled Work" > /dev/null
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "All2" || RESULT=1
   assert_contains "$OUTPUT" "Planned" || RESULT=1
   assert_contains "$OUTPUT" "PolledWork" || RESULT=1
@@ -355,7 +383,7 @@ test_dashboard_surfaces_actionable_work() {
   create_merge_ready_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-action" || RESULT=1
   assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
@@ -364,13 +392,44 @@ test_dashboard_surfaces_actionable_work() {
   return $RESULT
 }
 
+test_dashboard_waits_for_initial_read() {
+  setup_test_project
+  trap cleanup_test_project RETURN
+  create_planned_work_item
+
+  # Hold the real first snapshot beyond the former one-second capture delay.
+  local gate="$TEST_DIR/project/.fluent/work/items/read-gate.json"
+  mkfifo "$gate"
+  (
+    exec 3>"$gate"
+    sleep 1.5
+    printf '{ invalid json\n' >&3
+  ) &
+  local gate_writer=$!
+  trap '
+    if [ -n "${gate_writer:-}" ]; then
+      kill "$gate_writer" 2>/dev/null || true
+      wait "$gate_writer" 2>/dev/null || true
+    fi
+    cleanup_test_project
+  ' RETURN
+  local capture_result=0
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || capture_result=$?
+  [ "$capture_result" = 0 ] || return "$capture_result"
+  wait "$gate_writer" || true
+  gate_writer=""
+
+  assert_contains "$OUTPUT" "work-visible" &&
+    assert_contains "$OUTPUT" "VisibleWork"
+}
+
 test_dashboard_surfaces_needs_user_work() {
   setup_test_project
   trap cleanup_test_project RETURN
   create_needs_user_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Needsyou1" || RESULT=1
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "NeedsUserWork" || RESULT=1
@@ -386,7 +445,7 @@ test_dashboard_reports_work_read_errors() {
   printf '{ invalid json\n' > .fluent/work/items/broken-work.json
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "e" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "e" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "All1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "failedtoparse" || RESULT=1
@@ -398,7 +457,7 @@ test_dashboard_shows_empty_work_view() {
   trap cleanup_test_project RETURN
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)"
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "All0" || RESULT=1
   assert_contains "$OUTPUT" "NoWorkItemsinthisview" || RESULT=1
   return $RESULT
@@ -430,6 +489,14 @@ test_dashboard_overflow_error_journey() {
   python3 "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" "$FLUENT_BIN" "$TEST_DIR/project" errors
 }
 
+# Select the capture regressions during focused verification.
+if [ "${1:-}" = "--verification-capture" ]; then
+  run_test "dashboard waits for initial read" test_dashboard_waits_for_initial_read
+  run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
+  summarize_and_exit
+  exit 0
+fi
+
 # Select only the two public interaction journeys during focused verification.
 if [ "${1:-}" = "--verification-journeys" ]; then
   run_test "dashboard help journey" test_dashboard_help_journey
@@ -451,6 +518,7 @@ run_test "status reports invalid Work without hiding valid state" test_status_re
 run_test "dashboard lists Work Items" test_dashboard_lists_work_items
 run_test "dashboard refreshes Work Items on poll" test_dashboard_refreshes_work_items_on_poll
 run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
+run_test "dashboard waits for initial read" test_dashboard_waits_for_initial_read
 run_test "dashboard surfaces needs-user Work" test_dashboard_surfaces_needs_user_work
 run_test "dashboard reports Work read errors" test_dashboard_reports_work_read_errors
 run_test "dashboard shows empty Work view" test_dashboard_shows_empty_work_view
