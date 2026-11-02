@@ -4,6 +4,38 @@ use crate::{git, recovery_contracts, verification_assessment};
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 
+// Pin release requirements independently of candidate-controlled declarations.
+const REQUIRED_HOST_CHECKS: [(&str, &str); 7] = [
+    (
+        "bash tests/host/check-native-codex-first-turn.sh",
+        "shell-harness",
+    ),
+    (
+        "bash tests/host/check-native-codex-display-backpressure.sh",
+        "shell-harness",
+    ),
+    (
+        "bash tests/host/check-ssh-agent-terminal.sh",
+        "shell-harness",
+    ),
+    (
+        "bash tests/host/check-node-worker-upgrade.sh",
+        "shell-harness",
+    ),
+    (
+        "bash tests/host/check-completion-repair-admission.sh",
+        "shell-harness",
+    ),
+    (
+        "bash tests/host/check-dashboard-terminal.sh",
+        "cargo-nextest",
+    ),
+    (
+        "bash tests/host/check-ssh-fullscreen-backpressure.sh",
+        "shell-harness",
+    ),
+];
+
 /// Read acceptance without running checks, providers, or lifecycle mutations.
 pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result<()> {
     ensure!(
@@ -197,7 +229,7 @@ pub fn verify(root: &Path, work: &str, attempt_id: &str, commit: &str) -> Result
     Ok(())
 }
 
-/// Use the candidate's contract, so older releases keep their original gates.
+/// Require the full host contract, preserving the committed legacy Tester gates.
 fn verify_host_contract(
     root: &Path,
     attempt: &crate::work_model::Attempt,
@@ -213,6 +245,34 @@ fn verify_host_contract(
         "inspect release host contract",
     )?;
     if entry.is_empty() {
+        // Older releases collected host proof through their canonical Tester.
+        // Absence alone must never exempt a new candidate from host acceptance.
+        let tester_path = ".fluent/tester.yaml";
+        let tester_entry = git::run_stdout(
+            root,
+            &["ls-tree", commit, "--", tester_path],
+            "inspect legacy release Tester",
+        )?;
+        ensure!(
+            tester_entry.starts_with("100644 blob ") || tester_entry.starts_with("100755 blob "),
+            "missing release host contract requires a regular committed legacy Tester"
+        );
+        let bytes = git::run_stdout(
+            root,
+            &["show", &format!("{commit}:{tester_path}")],
+            "read legacy release Tester",
+        )?;
+        let tester: crate::tester::TesterConfig =
+            serde_yaml::from_str(&bytes).context("parse legacy release Tester")?;
+        ensure!(
+            REQUIRED_HOST_CHECKS.iter().all(|(command, _)| {
+                tester
+                    .commands
+                    .iter()
+                    .any(|check| check.command == *command)
+            }),
+            "missing release host contract: committed Tester must contain every required host command"
+        );
         return Ok(());
     }
     ensure!(
@@ -227,8 +287,21 @@ fn verify_host_contract(
     let config: crate::tester::TesterConfig =
         serde_yaml::from_str(&bytes).context("parse release host contract")?;
     ensure!(
-        !config.commands.is_empty(),
-        "release host contract has no checks"
+        config.commands.len() == REQUIRED_HOST_CHECKS.len()
+            && REQUIRED_HOST_CHECKS.iter().all(|(command, harness)| {
+                config
+                    .commands
+                    .iter()
+                    .filter(|check| {
+                        check.command == *command
+                            && check.test_harness == *harness
+                            && check.reject_process_leaks
+                            && check.applicability.is_default()
+                    })
+                    .count()
+                    == 1
+            }),
+        "release host contract must contain every required host command with its required harness and process settlement"
     );
     let (writer, source, mut matrix) =
         recovery_contracts::owned_host_completion_matrix_at(root, attempt, Some(root))?

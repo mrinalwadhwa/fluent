@@ -3598,10 +3598,14 @@ The Writer leaves these rows pending; neither file presence nor an authorization
 environment variable supplies accepted proof.
 
 Release verification reads the host contract from the candidate commit and
-requires each named command's successful evidence and accepted targeted review,
-bound to the same Work Item, Attempt, and candidate. Missing, altered, stale,
-failed, or unreviewed proof blocks publication even when the ordinary suites
-pass. Candidates committed before this separate contract retain their original
+compares it against the complete command list pinned in release acceptance.
+Deleting the manifest, omitting a command, or changing its harness or process
+settlement requirement blocks verification. A missing manifest is compatible
+only when the committed Tester itself contains every required host command.
+The verifier requires each named command's successful evidence and accepted
+targeted review, bound to the same Work Item, Attempt, and candidate. Missing,
+altered, stale, failed, or unreviewed proof blocks publication even when the
+ordinary suites pass. Candidates committed before this separate contract retain their original
 Tester requirements; the v0.7.0 release record and its nine-command
 configuration remain historical evidence.
 

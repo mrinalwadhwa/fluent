@@ -26,6 +26,15 @@ contract before creating a GitHub release and SHALL preserve historical proof
 and its source commit.
 Test: tests/behaviors/operations/test-release-script.sh (release_requires_host_contract_before_publish)
 
+### B4
+
+WHEN a release candidate uses the two-command ordinary Tester, THE SYSTEM SHALL
+require a release-host manifest containing all seven mandatory host commands.
+Removing the manifest or any command SHALL block verification. A historical
+candidate whose committed Tester contains all seven commands SHALL remain
+verifiable without a separate manifest.
+Test: tests/binary.rs (release_verify_rejects_missing_or_truncated_host_contract)
+
 ## Native Codex startup
 
 ### B1

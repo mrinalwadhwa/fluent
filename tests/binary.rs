@@ -77391,13 +77391,16 @@ fn release_acceptance_fixture(
         tmp,
         host,
         no_expertise,
-        ReleaseHostFixture::Absent,
+        ReleaseHostFixture::Legacy,
     )
 }
 
 #[derive(PartialEq)]
 enum ReleaseHostFixture {
     Absent,
+    Legacy,
+    Truncated(usize),
+    Altered,
     MissingRows,
     ReviewedRows,
 }
@@ -77416,7 +77419,7 @@ fn release_acceptance_fixture_with_host_contract(
     } else {
         vec![passing.as_str(), "true"]
     };
-    let definitions = commands
+    let mut definitions = commands
         .iter()
         .map(|command| {
             serde_json::json!({
@@ -77424,15 +77427,57 @@ fn release_acceptance_fixture_with_host_contract(
             })
         })
         .collect::<Vec<_>>();
+    if release_host == ReleaseHostFixture::Legacy {
+        // Synthetic legacy suites retain the exact host command names without
+        // executing any real provider or SSH checks.
+        let config: serde_json::Value =
+            serde_yaml::from_str(include_str!("../.fluent/release-host.yaml")).unwrap();
+        for entry in config["commands"].as_array().unwrap() {
+            let command = entry["command"].as_str().unwrap();
+            let script = project.join(command.strip_prefix("bash ").unwrap());
+            fs::create_dir_all(script.parent().unwrap()).unwrap();
+            fs::write(
+                &script,
+                format!(
+                    "printf 'ok {}\\n'\n",
+                    script.file_stem().unwrap().to_str().unwrap()
+                ),
+            )
+            .unwrap();
+            definitions.push(serde_json::json!({
+                "command": command, "test_harness": "shell-harness"
+            }));
+        }
+        git::run(
+            &project,
+            &["add", "tests/host"],
+            "stage synthetic legacy scripts",
+        )
+        .unwrap();
+    }
     fs::write(
         project.join(".fluent/tester.yaml"),
         serde_json::to_vec(&serde_json::json!({"commands": definitions})).unwrap(),
     )
     .unwrap();
-    if release_host != ReleaseHostFixture::Absent {
+    if !matches!(
+        release_host,
+        ReleaseHostFixture::Absent | ReleaseHostFixture::Legacy
+    ) {
+        let mut manifest: serde_json::Value =
+            serde_yaml::from_str(include_str!("../.fluent/release-host.yaml")).unwrap();
+        match release_host {
+            ReleaseHostFixture::Truncated(index) => {
+                manifest["commands"].as_array_mut().unwrap().remove(index);
+            }
+            ReleaseHostFixture::Altered => {
+                manifest["commands"][0]["command"] = serde_json::json!("true")
+            }
+            _ => {}
+        }
         fs::write(
             project.join(".fluent/release-host.yaml"),
-            include_str!("../.fluent/release-host.yaml"),
+            serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
         git::run(
@@ -77489,7 +77534,12 @@ fn release_acceptance_fixture_with_host_contract(
             version: fluent::work_model::WRITER_COMPLETION_CONTRACT_VERSION,
             requirements: vec![],
         });
-    if release_host == ReleaseHostFixture::ReviewedRows {
+    if matches!(
+        release_host,
+        ReleaseHostFixture::ReviewedRows
+            | ReleaseHostFixture::Truncated(_)
+            | ReleaseHostFixture::Altered
+    ) {
         let config: serde_yaml::Value =
             serde_yaml::from_str(include_str!("../.fluent/release-host.yaml")).unwrap();
         item.attempts[0]
@@ -77530,7 +77580,12 @@ fn release_acceptance_fixture_with_host_contract(
             .env("PATH", mock_path(&bin));
         command
     };
-    if release_host == ReleaseHostFixture::ReviewedRows {
+    if matches!(
+        release_host,
+        ReleaseHostFixture::ReviewedRows
+            | ReleaseHostFixture::Truncated(_)
+            | ReleaseHostFixture::Altered
+    ) {
         run()
             .assert()
             .success()
@@ -77652,6 +77707,22 @@ fn assert_release_verification(project: &Path, candidate: &str, passes: bool) {
         runs,
         "verification must not execute configured commands"
     );
+}
+
+#[test]
+fn release_verify_rejects_missing_or_truncated_host_contract() {
+    for contract in std::iter::once(ReleaseHostFixture::Absent)
+        .chain((0..7).map(ReleaseHostFixture::Truncated))
+        .chain(std::iter::once(ReleaseHostFixture::Altered))
+    {
+        let tmp = TempDir::new().unwrap();
+        let (project, _, candidate, _) =
+            release_acceptance_fixture_with_host_contract(&tmp, false, false, contract);
+        assert_release_verification(&project, &candidate, false);
+    }
+    let tmp = TempDir::new().unwrap();
+    let (project, _, candidate, _) = release_acceptance_fixture(&tmp, false, false);
+    assert_release_verification(&project, &candidate, true);
 }
 
 #[test]
