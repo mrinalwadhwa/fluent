@@ -16,7 +16,12 @@ fn assert_visible_control(app: &App) -> Result<()> {
     );
     let identity = &app.terminal.as_ref().unwrap().identity;
     let content = layout::terminal_content(app.size, identity);
-    let header: String = (4..content.y)
+    let header_start =
+        layout::project_areas(ratatui::layout::Rect::new(0, 0, app.size.0, app.size.1))
+            .detail
+            .y
+            + 1;
+    let header: String = (header_start..content.y)
         .flat_map(|y| (content.x..content.right()).map(move |x| buffer[(x, y)].symbol()))
         .collect();
     let compact = |text: &str| {

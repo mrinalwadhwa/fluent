@@ -84,8 +84,11 @@ Test: src/dashboard/tests.rs (dashboard_controls_leave_work_state_unchanged)
 WHEN the project dashboard renders at 100 columns or wider, THE SYSTEM SHALL
 show two compact header lines with counted All, Needs you, Running, Ready,
 Waiting, and History views, one horizontal rule, and one continuous divider
-between the project list and details or terminal, without pane boxes.
+between the project list and details or terminal, without pane boxes. Leave one
+blank column on each side of the divider and one blank row below the header
+rule. Keep navigation and quit controls visible at the minimum supported size.
 Test: src/dashboard/tests.rs (project_layout_uses_header_rule_and_one_pane_divider)
+Test: src/dashboard/tests.rs (dashboard_gutters_preserve_content_and_controls)
 
 ### B2
 

@@ -26,6 +26,15 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
         Constraint::Length(1),
     ])
     .split(area);
+    let body = if area.width >= 100 {
+        Rect {
+            y: rows[1].y + 1,
+            height: rows[1].height.saturating_sub(1),
+            ..rows[1]
+        }
+    } else {
+        rows[1]
+    };
     let (list, divider, detail) = if area.width >= 100 {
         // Give terminal output more room than the static prototype's 73% list.
         let panes = Layout::horizontal([
@@ -33,14 +42,25 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
             Constraint::Length(1),
             Constraint::Min(1),
         ])
-        .split(rows[1]);
-        (panes[0], panes[1], panes[2])
+        .split(body);
+        (
+            Rect {
+                width: panes[0].width.saturating_sub(1),
+                ..panes[0]
+            },
+            panes[1],
+            Rect {
+                x: panes[2].x + 1,
+                width: panes[2].width.saturating_sub(1),
+                ..panes[2]
+            },
+        )
     } else {
-        (rows[1], Rect::default(), rows[1])
+        (body, Rect::default(), body)
     };
     ProjectAreas {
         header: rows[0],
-        body: rows[1],
+        body,
         footer: rows[2],
         list,
         divider,

@@ -1343,7 +1343,11 @@ fn wrapped_terminal_header_preserves_viewport_geometry() {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(area.x, area.y)].symbol(), "n");
         assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "Z");
-        let header: String = (4..area.y)
+        let header_start = layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height))
+            .detail
+            .y
+            + 1;
+        let header: String = (header_start..area.y)
             .flat_map(|y| (area.x..area.right()).map(move |x| buffer[(x, y)].symbol()))
             .collect();
         let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
@@ -2013,7 +2017,7 @@ fn project_layout_keeps_selected_content_visible() {
                     layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height))
                         .divider
                         .x;
-                for y in 3..height - 1 {
+                for y in 4..height - 1 {
                     assert_eq!(terminal.backend().buffer()[(boundary, y)].symbol(), "│");
                 }
             }
@@ -2035,7 +2039,7 @@ fn project_layout_keeps_selected_content_visible() {
     terminal
         .draw(|frame| render::draw(frame, &compact))
         .unwrap();
-    for y in 3..17 {
+    for y in 4..17 {
         assert_eq!(terminal.backend().buffer()[(65, y)].symbol(), "│");
     }
 }
@@ -2133,16 +2137,16 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
                 "{rendered}"
             );
             assert!(lines[2].chars().all(|c| c == '─'), "{rendered}");
-            for line in &lines[3..height as usize - 1] {
+            for line in &lines[4..height as usize - 1] {
                 assert_eq!(line.matches('│').count(), 1, "{rendered}");
                 assert!(!line.contains(['┌', '┐', '└', '┘', '─']), "{rendered}");
             }
-            let divider = lines[3].chars().position(|c| c == '│').unwrap();
+            let divider = lines[4].chars().position(|c| c == '│').unwrap();
             assert!(divider >= width as usize * 3 / 5);
-            for y in 3..height - 1 {
+            for y in 4..height - 1 {
                 assert_eq!(buffer[(divider as u16, y)].symbol(), "│");
             }
-            assert!(lines[3].contains("Tasks") && lines[3].contains("Status"));
+            assert!(lines[4].contains("Tasks") && lines[4].contains("Status"));
         }
     }
 }
@@ -2167,22 +2171,22 @@ fn project_rows_preserve_exact_status_and_selection_cues() {
     let buffer = terminal.backend().buffer();
     let rendered = buffer_text(buffer);
     let lines = rendered.lines().collect::<Vec<_>>();
-    assert!(lines[4].contains("STALE"), "{rendered}");
+    assert!(lines[5].contains("STALE"), "{rendered}");
     assert!(
-        lines[5].contains('漢')
-            && lines[5].contains('字')
-            && lines[5].contains("e\u{301}")
-            && lines[5].contains("Running"),
+        lines[6].contains('漢')
+            && lines[6].contains('字')
+            && lines[6].contains("e\u{301}")
+            && lines[6].contains("Running"),
         "{rendered}"
     );
-    assert!(lines[6].contains("Ready to land"), "{rendered}");
-    assert!(lines[7].contains("Planned"), "{rendered}");
-    assert_eq!(buffer[(0, 5)].symbol(), ">");
-    assert_ne!(buffer[(0, 5)].bg, buffer[(0, 6)].bg);
-    let status_x = lines[3].find("Status").unwrap() as u16;
-    assert_eq!(buffer[(status_x, 5)].symbol(), "R");
+    assert!(lines[7].contains("Ready to land"), "{rendered}");
+    assert!(lines[8].contains("Planned"), "{rendered}");
+    assert_eq!(buffer[(0, 6)].symbol(), ">");
+    assert_ne!(buffer[(0, 6)].bg, buffer[(0, 7)].bg);
+    let status_x = lines[4].find("Status").unwrap() as u16;
     assert_eq!(buffer[(status_x, 6)].symbol(), "R");
-    assert!(lines[3].contains("Updated"));
+    assert_eq!(buffer[(status_x, 7)].symbol(), "R");
+    assert!(lines[4].contains("Updated"));
 }
 
 #[test]
@@ -3037,4 +3041,45 @@ fn source_diagnostics_remain_scoped_when_remote_paths_match() {
     apply_remote_results(&mut app, vec![second]);
     assert_eq!(app.snapshot.errors.len(), 1);
     assert!(app.snapshot.errors[0].contains("ssh:first"));
+}
+
+#[test]
+fn dashboard_gutters_preserve_content_and_controls() {
+    use ratatui::layout::Rect;
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    for (width, height) in [(60, 15), (99, 18), (100, 24), (140, 28)] {
+        app.resize(width, height);
+        let areas = layout::project_areas(Rect::new(0, 0, width, height));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer_text(buffer);
+        assert!(rendered.contains("work"), "{rendered}");
+        assert!(rendered.contains("q quit"), "{rendered}");
+        assert!(rendered.contains("→ details"), "{rendered}");
+        if width >= 100 {
+            assert_eq!(areas.body.y, areas.header.bottom() + 1);
+            for x in 0..width {
+                assert_eq!(buffer[(x, areas.header.bottom())].symbol(), " ");
+            }
+            assert_eq!(areas.list.right() + 1, areas.divider.x);
+            assert_eq!(areas.divider.right() + 1, areas.detail.x);
+            for y in areas.body.y..areas.body.bottom() {
+                assert_eq!(buffer[(areas.divider.x - 1, y)].symbol(), " ");
+                assert_eq!(buffer[(areas.divider.right(), y)].symbol(), " ");
+                assert_eq!(buffer[(areas.divider.x, y)].symbol(), "│");
+            }
+            assert!(areas.detail.right() <= width);
+        }
+        app.set_terminal(terminal_display());
+        app.pane = app::Pane::Detail;
+        let content = layout::terminal_content(app.size, &app.terminal.as_ref().unwrap().identity);
+        assert_eq!(
+            layout::terminal_size(app.size, &app.terminal.as_ref().unwrap().identity),
+            (content.width, content.height)
+        );
+        assert!(content.x >= areas.detail.x && content.right() <= areas.detail.right());
+        app.terminal = None;
+        app.pane = app::Pane::List;
+    }
 }
