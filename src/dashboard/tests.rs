@@ -2306,9 +2306,9 @@ fn project_rows_show_recorded_update_times() {
 }
 
 #[test]
-fn project_details_prioritize_action_without_redundant_row_copy() {
+fn details_put_title_reason_and_action_before_identifiers() {
     let mut status = row("WI-42", "needs-user");
-    status.title = "Do not repeat this selected title".into();
+    status.title = "Full selected title".into();
     status.recovery_blocker = Some("Host proof is missing".into());
     status.next_action = Some("fluent work-item show WI-42".into());
     let mut source = project_source("/one", vec![status]);
@@ -2341,10 +2341,19 @@ fn project_details_prioritize_action_without_redundant_row_copy() {
             app.selected_key.as_ref().unwrap(),
         );
         let joined = values.join("\n");
-        assert!(
-            !joined.contains("Do not repeat this selected title"),
-            "{joined}"
-        );
+        assert!(joined.contains("Full selected title"), "{joined}");
+        assert!(joined.find("Next action:").unwrap() < joined.find("Work Item:").unwrap());
+        if worker {
+            assert!(
+                joined.starts_with("Worker: writer\nState: executing"),
+                "{joined}"
+            );
+        } else {
+            assert!(
+                joined.starts_with("Full selected title\nReason: Host proof is missing"),
+                "{joined}"
+            );
+        }
         assert!(!joined.contains("Status: Needs you"), "{joined}");
         assert!(joined.contains("Work Item: WI-42"));
         assert!(joined.contains("Next action: fluent work-item show WI-42"));
@@ -2369,7 +2378,7 @@ fn project_details_prioritize_action_without_redundant_row_copy() {
             .map(|line| line.split('│').nth(1).unwrap_or(""))
             .collect::<String>();
         assert!(detail.contains("Next action:"), "{rendered}");
-        assert!(!detail.contains("Do not repeat"), "{rendered}");
+        assert!(detail.contains("Full selected title"), "{rendered}");
     }
 }
 
@@ -3081,5 +3090,62 @@ fn dashboard_gutters_preserve_content_and_controls() {
         assert!(content.x >= areas.detail.x && content.right() <= areas.detail.right());
         app.terminal = None;
         app.pane = app::Pane::List;
+    }
+}
+
+#[test]
+fn project_details_wrap_full_context_to_the_last_line() {
+    for (width, height) in [(60, 15), (99, 18), (100, 24), (140, 28)] {
+        let mut status = row("work", "needs-user");
+        status.title = "Full title 漢字 e\u{301} ".repeat(10) + "TITLE-END";
+        status.recovery_blocker = Some("Blocker 漢字 ".repeat(20) + "BLOCKER-END");
+        status.next_action = Some("fluent work-item show ".repeat(30) + "COMMAND-END");
+        let mut source = project_source("/one", vec![status]);
+        source.work[0].workers.push(worker_row("/one", "writer"));
+        for worker in [false, true] {
+            let mut app = project_app(vec![source.clone()]);
+            app.resize(width, height);
+            if worker {
+                app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+                app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            }
+            app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+            let areas = layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height));
+            let mut seen = String::new();
+            for _ in 0..200 {
+                let rendered = text(&app, width, height);
+                for line in rendered
+                    .lines()
+                    .skip(areas.detail.y as usize)
+                    .take(areas.detail.height as usize)
+                {
+                    let detail = if width >= 100 {
+                        line.split('│').nth(1).unwrap()
+                    } else {
+                        line
+                    };
+                    seen.push_str(
+                        &detail
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .collect::<String>(),
+                    );
+                }
+                app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            }
+            for expected in ["TITLE-END", "COMMAND-END", "Source:"] {
+                assert!(
+                    seen.contains(expected),
+                    "{width}, {worker}: missing {expected}"
+                );
+            }
+            if worker {
+                assert!(seen.contains("headlessexecution"));
+                assert!(seen.contains("Invocation:generation-writer"));
+            } else {
+                assert!(seen.contains("BLOCKER-END"));
+            }
+            assert_eq!(app.detail_scroll, app.scroll_bounds().detail_max_scroll);
+        }
     }
 }

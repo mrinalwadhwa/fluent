@@ -323,32 +323,43 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
             project::Category::History => "No operator action".into(),
             _ => "unavailable".into(),
         });
-    let mut values = vec![
+    let worker = project::find_worker(sources, key);
+    let mut values = if let Some(worker) = worker {
+        vec![
+            format!("Worker: {}", worker.role),
+            format!("State: {}", worker.state),
+            format!("Next action: {next_action}"),
+            work.status.title.clone(),
+        ]
+    } else {
+        vec![
+            work.status.title.clone(),
+            work.status
+                .recovery_blocker
+                .as_ref()
+                .map(|reason| format!("Reason: {reason}"))
+                .unwrap_or_else(|| {
+                    format!(
+                        "State: {}",
+                        work.phase.as_deref().unwrap_or(&work.status.action)
+                    )
+                }),
+            format!("Next action: {next_action}"),
+        ]
+    };
+    values.extend([
         format!("Work Item: {}", work.status.id),
         format!(
             "Attempt: {}",
             key.attempt_id.as_deref().unwrap_or(&work.status.attempt)
         ),
-    ];
-    if key.task_id.is_none() {
-        if let Some(reason) = &work.status.recovery_blocker {
-            values.push(format!("Reason: {reason}"));
-        } else {
-            values.push(format!(
-                "State: {}",
-                work.phase.as_deref().unwrap_or(&work.status.action)
-            ));
-        }
-    }
-    values.push(format!("Next action: {next_action}"));
-    if let Some(worker) = project::find_worker(sources, key) {
+    ]);
+    if let Some(worker) = worker {
         values.extend([
-            format!("Worker: {}", worker.role),
             format!(
                 "Task: {}",
                 worker.key.task_id.as_deref().unwrap_or("unavailable")
             ),
-            format!("State: {}", worker.state),
             format!(
                 "Invocation: {}",
                 worker

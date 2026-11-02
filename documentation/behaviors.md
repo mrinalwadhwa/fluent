@@ -101,11 +101,13 @@ Test: src/dashboard/tests.rs (project_rows_show_recorded_update_times)
 
 ### B3
 
-WHEN a Work Item or worker is selected, THE SYSTEM SHALL prioritize identity,
-reason or state, and canonical next action without repeating the selected title
-and category; worker Task, invocation, and terminal availability SHALL remain
-available in details.
-Test: src/dashboard/tests.rs (project_details_prioritize_action_without_redundant_row_copy)
+WHEN a Work Item is selected, THE SYSTEM SHALL show its full title, condition
+or blocker, and canonical next action before identifiers. WHEN a worker is
+selected, THE SYSTEM SHALL show its role and state before its parent Work's
+next action, with the full title, Task, invocation, and terminal availability
+still available below. Wrapped details SHALL remain scrollable to the last line.
+Test: src/dashboard/tests.rs (details_put_title_reason_and_action_before_identifiers)
+Test: src/dashboard/tests.rs (project_details_wrap_full_context_to_the_last_line)
 
 ### B4
 
