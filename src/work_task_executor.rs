@@ -1366,7 +1366,11 @@ fn run_write_task_with_coder(
         reservation.coder,
         transcript.clone(),
     );
-    if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
+    if let Err(error) = ensure_source_product_unchanged(
+        config.project_root,
+        &source_before,
+        sandbox_profile.is_some(),
+    ) {
         mark_task_failed_attempt_needs_user(
             config.store,
             config.project_root,
@@ -1424,7 +1428,11 @@ fn run_write_task_with_coder(
             reservation.coder,
             transcript.clone(),
         );
-        if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
+        if let Err(error) = ensure_source_product_unchanged(
+            config.project_root,
+            &source_before,
+            sandbox_profile.is_some(),
+        ) {
             mark_task_failed_attempt_needs_user(
                 config.store,
                 config.project_root,
@@ -1499,7 +1507,11 @@ fn run_write_task_with_coder(
             reservation.coder,
             transcript.clone(),
         );
-        if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
+        if let Err(error) = ensure_source_product_unchanged(
+            config.project_root,
+            &source_before,
+            sandbox_profile.is_some(),
+        ) {
             mark_task_failed_attempt_needs_user(
                 config.store,
                 config.project_root,
@@ -11165,12 +11177,18 @@ pub(crate) fn writer_handoff_result(
 #[derive(Debug, PartialEq, Eq)]
 struct SourceProductSnapshot {
     head: String,
+    branch: String,
     status: Vec<u8>,
     content_hashes: BTreeMap<PathBuf, String>,
 }
 
 fn source_product_snapshot(source: &Path) -> Result<SourceProductSnapshot> {
     let head = head_commit(source)?;
+    let branch = git::run_stdout(
+        source,
+        &["rev-parse", "--symbolic-full-name", "HEAD"],
+        "resolve source checkout branch",
+    )?;
     let output = git_status_output(
         source,
         &[
@@ -11253,13 +11271,44 @@ fn source_product_snapshot(source: &Path) -> Result<SourceProductSnapshot> {
     }
     Ok(SourceProductSnapshot {
         head,
+        branch,
         status: output.stdout,
         content_hashes,
     })
 }
 
-fn ensure_source_product_unchanged(source: &Path, before: &SourceProductSnapshot) -> Result<()> {
+fn ensure_source_product_unchanged(
+    source: &Path,
+    before: &SourceProductSnapshot,
+    source_writes_denied: bool,
+) -> Result<()> {
     let after = source_product_snapshot(source)?;
+    if &after == before {
+        return Ok(());
+    }
+    // The applied Writer profile denies source writes. A landing may advance
+    // that checkout independently; keep the candidate and its base unchanged
+    // so the later integration checks still decide whether it can merge.
+    if source_writes_denied
+        && before.branch != "HEAD"
+        && after.branch == before.branch
+        && after.head != before.head
+        && before.status.is_empty()
+        && after.status.is_empty()
+    {
+        let ancestry = git::run_raw(
+            source,
+            &["merge-base", "--is-ancestor", &before.head, &after.head],
+        )?;
+        match ancestry.status.code() {
+            Some(0) => return Ok(()),
+            Some(1) => {}
+            _ => bail!(
+                "cannot verify source checkout ancestry: {}",
+                String::from_utf8_lossy(&ancestry.stderr)
+            ),
+        }
+    }
     let changed_paths = before
         .content_hashes
         .keys()
@@ -25707,7 +25756,7 @@ while time.monotonic() < deadline:
         .unwrap();
         let before = source_product_snapshot(&source).unwrap();
         fs::write(source.join("tracked.txt"), "after\n").unwrap();
-        let error = ensure_source_product_unchanged(&source, &before).unwrap_err();
+        let error = ensure_source_product_unchanged(&source, &before, false).unwrap_err();
         assert!(
             error.to_string().contains("preserve it for inspection"),
             "{error:#}"
@@ -25722,7 +25771,7 @@ while time.monotonic() < deadline:
             dirty_before.status,
             source_product_snapshot(&source).unwrap().status
         );
-        assert!(ensure_source_product_unchanged(&source, &dirty_before).is_err());
+        assert!(ensure_source_product_unchanged(&source, &dirty_before, false).is_err());
         fs::write(source.join("new.txt"), "untracked before\n").unwrap();
         let untracked_before = source_product_snapshot(&source).unwrap();
         fs::write(source.join("new.txt"), "untracked after\n").unwrap();
@@ -25730,7 +25779,28 @@ while time.monotonic() < deadline:
             untracked_before.status,
             source_product_snapshot(&source).unwrap().status
         );
-        assert!(ensure_source_product_unchanged(&source, &untracked_before).is_err());
+        assert!(ensure_source_product_unchanged(&source, &untracked_before, false).is_err());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SourceDrift {
+        Dirty,
+        Advance,
+    }
+
+    impl SourceDrift {
+        fn apply(self, source: &Path) {
+            fs::write(source.join("tracked.txt"), "source drift\n").unwrap();
+            if matches!(self, Self::Advance) {
+                crate::git::run(source, &["add", "tracked.txt"], "stage landing").unwrap();
+                crate::git::run(
+                    source,
+                    &["commit", "-q", "-m", "Update source"],
+                    "land source",
+                )
+                .unwrap();
+            }
+        }
     }
 
     struct HandoffCoder {
@@ -25738,7 +25808,7 @@ while time.monotonic() < deadline:
         sessions: Arc<Mutex<Vec<String>>>,
         first_no_output: bool,
         second_commit: bool,
-        source_drift: Option<PathBuf>,
+        source_drift: Option<(PathBuf, SourceDrift)>,
     }
 
     impl crate::coder::Coder for HandoffCoder {
@@ -25780,8 +25850,8 @@ while time.monotonic() < deadline:
                     )
                     .unwrap();
                 }
-                if let Some(source) = &self.source_drift {
-                    fs::write(source.join("tracked.txt"), "source drift\n").unwrap();
+                if let Some((source, drift)) = &self.source_drift {
+                    drift.apply(source);
                 }
             }
             if number == 1 && !self.first_no_output {
@@ -25890,6 +25960,86 @@ while time.monotonic() < deadline:
     }
 
     #[test]
+    fn writer_source_checkout_clean_fast_forward_does_not_pause() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join(".fluent/expertise")).unwrap();
+        fs::write(source.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        crate::git::run(&source, &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(&source, &["config", "user.email", "test@test"], "set email").unwrap();
+        crate::git::run(&source, &["config", "user.name", "test"], "set name").unwrap();
+        fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        crate::git::run(&source, &["add", "."], "add fixture").unwrap();
+        crate::git::run(
+            &source,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+        let base = head_commit(&source).unwrap();
+        let mut item = WorkItem {
+            id: "work-1".into(),
+            title: "Source landing".into(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let store = WorkModelStore::new(&source);
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(&source));
+        let launches = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&launches);
+        let drift_source = source.clone();
+        let make_coder = move |sandbox| {
+            assert!(matches!(sandbox, CoderSandbox::SeatbeltProfile(_)));
+            Box::new(HandoffCoder {
+                launches: Arc::clone(&recorded),
+                sessions: Arc::new(Mutex::new(Vec::new())),
+                first_no_output: true,
+                second_commit: true,
+                source_drift: Some((drift_source.clone(), SourceDrift::Advance)),
+            }) as Box<dyn crate::coder::Coder>
+        };
+        let result = run_write_task_with_coder(
+            WorkTaskRunConfig {
+                project_root: &source,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: "attempt-1-write-1",
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: false,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(launches.lock().unwrap().len(), 2);
+        assert_ne!(head_commit(&source).unwrap(), base);
+        let stored = store.read_work_item("work-1").unwrap();
+        let task = &stored.attempts[0].tasks[0];
+        assert_eq!(task.status, TaskStatus::Complete);
+        let output = task.output.as_ref().unwrap();
+        assert_eq!(output.base_commit.as_deref(), Some(base.as_str()));
+        let candidate = source.join(&output.workspace_path);
+        assert_eq!(head_commit(&candidate).unwrap(), output.commit);
+        assert_eq!(git_stdout(&candidate, &["rev-parse", "HEAD^"]), base);
+        assert_eq!(
+            fs::read_to_string(candidate.join("tracked.txt")).unwrap(),
+            "baseline\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                host_write_baseline_path(&store, "work-1", "attempt-1", "attempt-1-write-1")
+                    .unwrap()
+            )
+            .unwrap()
+            .trim(),
+            base,
+        );
+    }
+
+    #[test]
     fn writer_source_checkout_drift_needs_user() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
@@ -25926,7 +26076,7 @@ while time.monotonic() < deadline:
                 sessions: Arc::clone(&recorded_sessions),
                 first_no_output: true,
                 second_commit: false,
-                source_drift: Some(drift_source.clone()),
+                source_drift: Some((drift_source.clone(), SourceDrift::Dirty)),
             }) as Box<dyn crate::coder::Coder>
         };
         let error = run_write_task_with_coder(

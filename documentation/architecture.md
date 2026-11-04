@@ -194,7 +194,14 @@ or derives instructions from Work Item planning context into optional
 `fluent task run` creates or reuses that writable workspace as a
 sibling git worktree beside the source checkout, runs the coder there,
 and normally completes the Task only after the workspace is clean and contains
-a new commit produced after Fluent bound the workspace for that Task run. A
+a new commit produced after Fluent bound the workspace for that Task run. The
+source checkout may advance to a clean descendant commit on the same branch
+while the Writer runs under its source-write-denying sandbox. The completion
+guard accepts that landing without rebasing the candidate or changing its
+recorded base; later integration checks remain authoritative. Source product
+edits, branch switches, and rewrites still pause the Writer and preserve the
+source checkout for inspection. Runs without that sandbox keep the strict
+source snapshot guard, including for clean advances. A
 follow-up Writer may instead preserve the previous completed Writer commit. It
 must leave the workspace clean at that exact commit and write a fresh
 `no-change.json` in its Task artifact area with schema version 1, a reason, and
