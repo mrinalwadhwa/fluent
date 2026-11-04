@@ -26429,6 +26429,88 @@ fn tester_permissions_host_fixture_retains_dirty_candidate_diagnostics() {
 }
 
 #[test]
+fn tester_permissions_host_fixture_extractor_distinguishes_readiness() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    // Include shell-sensitive characters to exercise the generated probe path.
+    let fixture = tmp.path().join("fixture with 'quotes'");
+    fs::create_dir_all(fixture.join(".fluent")).unwrap();
+    let script = include_str!("fixtures/verify-tester-process-table-permissions-host.sh");
+    let generator = script
+        .split_once("python3 - \"$fixture\" \"$fixture_pid\" <<'PY'\n")
+        .unwrap()
+        .1
+        .split_once("\nPY\n")
+        .unwrap()
+        .0;
+    let output = Command::new("python3")
+        .args(["-c", generator])
+        .arg(&fixture)
+        .arg("123")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probe_log = fixture.join("probe.log");
+    fs::write(
+        fixture.join("probe"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROBE_LOG\"\nexit \"$PROBE_EXIT\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(fixture.join("probe"), fs::Permissions::from_mode(0o755)).unwrap();
+    let extractor = fixture.join(".fluent/extract-tester-results");
+    fs::set_permissions(&extractor, fs::Permissions::from_mode(0o755)).unwrap();
+    let artifact = tmp.path().join("artifact");
+    fs::create_dir(&artifact).unwrap();
+    let extract = |probe_exit: &str| {
+        Command::new(&extractor)
+            .arg(&artifact)
+            .env("PROBE_LOG", &probe_log)
+            .env("PROBE_EXIT", probe_exit)
+            .output()
+            .unwrap()
+    };
+
+    // Readiness runs without a sandbox; it must not query the process table.
+    fs::write(artifact.join("commands.json"), "[ ]\n").unwrap();
+    let readiness = extract("5");
+    assert!(
+        readiness.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readiness.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&readiness.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    assert!(
+        !probe_log.exists(),
+        "readiness must not run the denial probe"
+    );
+
+    // Executed artifacts still require the probe to observe denied access.
+    fs::write(artifact.join("commands.json"), r#"[{"exit_code":0}]"#).unwrap();
+    let denied = extract("0");
+    assert!(denied.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&denied.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    assert_eq!(fs::read_to_string(&probe_log).unwrap(), "denied\n");
+    let allowed = extract("5");
+    assert_eq!(allowed.status.code(), Some(5));
+    assert!(
+        allowed.stdout.is_empty(),
+        "failed denial must not emit passing results"
+    );
+    assert_eq!(fs::read_to_string(&probe_log).unwrap(), "denied\ndenied\n");
+}
+
+#[test]
 fn tester_permissions_profile_watcher_selects_process_table_profile() {
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join("authority");

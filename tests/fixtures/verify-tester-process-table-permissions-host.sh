@@ -189,8 +189,18 @@ config = {'commands': [
     {'command': f'{probe} denied', 'test_harness': 'shell-harness'},
 ]}
 (root / '.fluent/tester.yaml').write_text(json.dumps(config) + '\n')
+# Readiness has no executed commands and runs outside the sandbox. Assert the
+# extractor's process-table denial only when it extracts executed commands.
 (root / '.fluent/extract-tester-results').write_text(
-    '#!/bin/sh\n' + probe + ' denied || exit $?\nprintf "[]\\n"\n')
+    '#!/usr/bin/env python3\n'
+    'import json, subprocess, sys\n'
+    'from pathlib import Path\n'
+    'commands = json.loads((Path(sys.argv[1]) / "commands.json").read_text())\n'
+    'if commands:\n'
+    f'    result = subprocess.run([{str(root / "probe")!r}, "denied"])\n'
+    '    if result.returncode != 0:\n'
+    '        sys.exit(result.returncode)\n'
+    'print("[]")\n')
 PY
 chmod 755 "$fixture/.fluent/extract-tester-results"
 git -C "$fixture" add .fluent/tester.yaml .fluent/extract-tester-results probe.c assert-denied-file-update.sh
