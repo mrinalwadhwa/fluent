@@ -620,33 +620,152 @@ fn read_verified_receipt_at(
     Ok(receipt)
 }
 
-/// Credit a permission-bearing command only when the protected host receipt,
-/// inspectable copy, current policy, approval history, and settled logs agree.
-pub(crate) fn validate_applied_receipt(
-    receipt_id: &str,
-    artifact_copy: &[u8],
+pub(crate) fn validate_manifest_permissions(
     candidate_commit: &str,
-    command_index: usize,
-    config_digest: &str,
-    extractor_digest: &str,
-    result: &tester::CommandResult,
-    stdout: &[u8],
-    stderr: &[u8],
+    manifest: &crate::tester::CanonicalRunManifest,
+    results: &crate::tester::TesterResults,
+    read: impl FnMut(&str) -> Result<Vec<u8>>,
 ) -> Result<()> {
-    validate_applied_receipt_at(
-        &store_root()?,
-        receipt_id,
-        artifact_copy,
+    validate_manifest_permissions_with_authority(
         candidate_commit,
-        command_index,
-        config_digest,
-        extractor_digest,
-        result,
-        stdout,
-        stderr,
+        manifest,
+        results,
+        read,
+        store_root,
     )
 }
 
+fn validate_manifest_permissions_with_authority(
+    candidate_commit: &str,
+    manifest: &tester::CanonicalRunManifest,
+    results: &tester::TesterResults,
+    mut read: impl FnMut(&str) -> Result<Vec<u8>>,
+    authority: impl Fn() -> Result<PathBuf>,
+) -> Result<()> {
+    let requests_permission = manifest
+        .commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    if !requests_permission {
+        anyhow::ensure!(
+            manifest.schema_version == 1
+                && manifest.original_command_indexes.is_empty()
+                && manifest.permission_receipts.is_empty()
+                && results.commands.iter().all(|command| {
+                    command.permission_receipt.is_none() && command.permission_receipt_id.is_none()
+                }),
+            "default Tester evidence has unexpected permission provenance"
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        manifest.schema_version == 2
+            && manifest.original_command_indexes.len() == manifest.commands.len()
+            && manifest.permission_receipts.len() == manifest.commands.len()
+            && results.commands.len() == manifest.commands.len()
+            && results.candidate_commit.as_deref() == Some(candidate_commit),
+        "permission-bearing Tester manifest lacks complete version 2 provenance"
+    );
+    for (index, (definition, result)) in manifest.commands.iter().zip(&results.commands).enumerate()
+    {
+        anyhow::ensure!(
+            definition.command == result.command && definition.test_harness == result.test_harness,
+            "permission-bearing Tester command identity differs from its settled result"
+        );
+        let original_index = manifest.original_command_indexes[index];
+        anyhow::ensure!(
+            !manifest.full_run || original_index == index,
+            "canonical Tester changed a configured command index"
+        );
+        if definition.permissions.is_empty() {
+            anyhow::ensure!(
+                manifest.permission_receipts[index].is_none()
+                    && result.permission_receipt.is_none()
+                    && result.permission_receipt_id.is_none(),
+                "unrequested command carries a permission receipt"
+            );
+            continue;
+        }
+        let receipt_id = manifest.permission_receipts[index]
+            .as_deref()
+            .context("permission-bearing command is missing a host receipt")?;
+        anyhow::ensure!(
+            result.permission_receipt_id.as_deref() == Some(receipt_id)
+                && result.permission_receipt.as_deref()
+                    == Some(format!("commands/{index}-permission-receipt.json").as_str()),
+            "permission receipt identity differs from the command result"
+        );
+        let copy = read(&format!("commands/{index}-permission-receipt.json"))?;
+        let stdout = read(&format!("commands/{index}-stdout.log"))?;
+        let stderr = read(&format!("commands/{index}-stderr.log"))?;
+        validate_applied_receipt_at(
+            &authority()?,
+            receipt_id,
+            &copy,
+            candidate_commit,
+            original_index,
+            &manifest.config_digest,
+            &manifest.extractor_digest,
+            result,
+            &stdout,
+            &stderr,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate a selected recheck against the original configured identities and
+/// its own protected execution receipts.
+pub(crate) fn validate_recheck_permissions(
+    candidate_commit: &str,
+    source: &tester::CanonicalRunManifest,
+    execution: &tester::CanonicalRunManifest,
+    indexes: &[usize],
+    results: &tester::TesterResults,
+    read: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<()> {
+    ensure!(
+        execution.config_digest == source.config_digest
+            && execution.extractor_digest == source.extractor_digest
+            && execution.original_command_indexes == indexes
+            && execution.commands.len() == indexes.len()
+            && execution
+                .commands
+                .iter()
+                .zip(indexes)
+                .all(|(command, index)| source.commands.get(*index) == Some(command)),
+        "recheck permission identity differs from the configured command"
+    );
+    validate_manifest_permissions(candidate_commit, execution, results, read)
+}
+
+/// Require a full capability run matching the independently resolved configuration.
+pub(crate) fn validate_run_permissions(
+    candidate_commit: &str,
+    config_digest: &str,
+    extractor_digest: &str,
+    commands: &[tester::TesterCommand],
+    results: &tester::TesterResults,
+    mut read: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<()> {
+    let manifest: tester::CanonicalRunManifest =
+        serde_json::from_slice(&read("canonical-run.json")?)?;
+    ensure!(
+        manifest.full_run
+            && manifest.commands == commands
+            && manifest.config_digest == config_digest
+            && manifest.extractor_digest == extractor_digest
+            && manifest
+                .commands
+                .iter()
+                .any(|command| !command.permissions.is_empty()),
+        "capability evidence differs from its required configuration"
+    );
+    validate_manifest_permissions(candidate_commit, &manifest, results, read)
+}
+
+/// Credit a permission-bearing command only when the protected host receipt,
+/// inspectable copy, current policy, approval history, and settled logs agree.
 fn validate_applied_receipt_at(
     root: &Path,
     receipt_id: &str,
@@ -1105,6 +1224,89 @@ mod receipt_tests {
             )
             .is_err()
         );
+        // A valid failing execution does not attest to any replacement pass.
+        let mut failing_result = result.clone();
+        failing_result.exit_code = 1;
+        failing_result.permission_receipt_id = Some(id.into());
+        failing_result.permission_receipt = Some("commands/0-permission-receipt.json".into());
+        let mut failing_receipt: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        failing_receipt["exit_code"] = serde_json::json!(1);
+        let failing_bytes = serde_json::to_vec(&failing_receipt).unwrap();
+        fs::write(&path, &failing_bytes).unwrap();
+        let mut manifest: tester::CanonicalRunManifest = serde_json::from_value(serde_json::json!({
+            "schema_version":2,"config_digest":"sha256:config","extractor_digest":"sha256:extractor",
+            "commands":[{"command":"true","test_harness":"shell-harness","permissions":["process-table-read"]}],
+            "full_run":true,"original_command_indexes":[0],"permission_receipts":[id]
+        })).unwrap();
+        let mut results: tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit":"candidate","commands":[failing_result],"tests":[],
+            "summary":{"total":0,"pass":0,"fail":0,"skipped":0},"error":null
+        }))
+        .unwrap();
+        let verify = |manifest: &tester::CanonicalRunManifest,
+                      results: &tester::TesterResults,
+                      copy: &[u8]| {
+            validate_manifest_permissions_with_authority(
+                "candidate",
+                manifest,
+                results,
+                |name| {
+                    Ok(match name {
+                        "commands/0-permission-receipt.json" => copy.to_vec(),
+                        "commands/0-stdout.log" => b"ok".to_vec(),
+                        "commands/0-stderr.log" => vec![],
+                        _ => panic!("unexpected artifact {name}"),
+                    })
+                },
+                || Ok(root.clone()),
+            )
+        };
+        verify(&manifest, &results, &failing_bytes).expect("valid original failing receipt");
+        let mut replacement: tester::CanonicalRunManifest =
+            serde_json::from_value(serde_json::to_value(&manifest).unwrap()).unwrap();
+        replacement.permission_receipts[0] = None;
+        assert!(
+            validate_recheck_permissions(
+                "candidate",
+                &manifest,
+                &replacement,
+                &[0],
+                &results,
+                |_| panic!("a missing receipt must fail before reading artifacts")
+            )
+            .is_err()
+        );
+        replacement.original_command_indexes[0] = 1;
+        assert!(
+            validate_recheck_permissions(
+                "candidate",
+                &manifest,
+                &replacement,
+                &[0],
+                &results,
+                |_| panic!("a changed command index must fail before reading artifacts")
+            )
+            .is_err()
+        );
+        results.commands[0].exit_code = 0;
+        assert!(
+            verify(&manifest, &results, &failing_bytes).is_err(),
+            "original receipt credited a replacement pass"
+        );
+        results.commands[0].exit_code = 1;
+        manifest.permission_receipts[0] = None;
+        assert!(verify(&manifest, &results, &failing_bytes).is_err());
+        manifest.permission_receipts[0] = Some(id.into());
+        assert!(verify(&manifest, &results, b"forged").is_err());
+        let mut synthetic = failing_receipt;
+        synthetic["execution_mode"] = serde_json::json!("synthetic");
+        let synthetic = serde_json::to_vec(&synthetic).unwrap();
+        fs::write(&path, &synthetic).unwrap();
+        assert!(verify(&manifest, &results, &synthetic).is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(verify(&manifest, &results, &failing_bytes).is_err());
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         write_records(
             &root,
             &request_digest,

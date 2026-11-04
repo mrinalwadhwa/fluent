@@ -4121,8 +4121,12 @@ launch under a host lease. It stores permission-bearing profiles and receipts
 outside worker-writable roots, while adjacent commands and extraction use
 baseline profiles. A protected receipt binds the actual profile and settled
 command output to the approval; capability-bearing canonical evidence requires
-that provenance. Legacy evidence remains readable for commands that request no
-capability. A revocation blocks future launches without rewriting settled
+that provenance. Rechecks must supply their own protected receipts for the
+original configured command indexes. Version-one host evidence documents
+cannot prove permission-bearing replacements. Baseline publication, promotion,
+reuse, and failure classification validate the same protected execution proof;
+matching cache keys and artifact hashes alone do not establish authority.
+Legacy evidence remains readable for commands that request no capability. A revocation blocks future launches without rewriting settled
 history. The host process-table query grants metadata for all host processes,
 so the operator sees that exposure before approval.
 
