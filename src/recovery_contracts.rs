@@ -5751,6 +5751,15 @@ mod tests {
                 "neutral recovery contracts must not depend on {caller}"
             );
         }
+        // Verification may consume the accepted Plan host-script proof from
+        // recovery contracts. Keep this exception limited to that read-only
+        // proof API; all other recovery dependencies remain forbidden here.
+        let verification_source = include_str!("verification_assessment.rs")
+            .replace(
+                "crate::recovery_contracts::accepted_plan_host_script_proofs",
+                "",
+            )
+            .replace("crate::recovery_contracts::AcceptedPlanHostScriptProof", "");
         for caller in [
             "candidate_gate",
             "host_evidence",
@@ -5760,7 +5769,7 @@ mod tests {
             "recovery_contracts",
         ] {
             assert!(
-                !include_str!("verification_assessment.rs").contains(&format!("crate::{caller}::")),
+                !verification_source.contains(&format!("crate::{caller}::")),
                 "verification assessment must stay below {caller}"
             );
         }
