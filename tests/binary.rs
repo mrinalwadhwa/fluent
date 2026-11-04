@@ -26429,6 +26429,122 @@ fn tester_permissions_host_fixture_retains_dirty_candidate_diagnostics() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn tester_permissions_host_fixture_retains_sysctl_failure_diagnostics() {
+    let tmp = TempDir::new().unwrap();
+    let script = include_str!("fixtures/verify-tester-process-table-permissions-host.sh");
+    let probe = script
+        .split_once("cat > \"$fixture/probe.c\" <<'C'\n")
+        .unwrap()
+        .1
+        .split_once("\nC\n")
+        .unwrap()
+        .0;
+    // Replace only the syscall. No host process table is read by this check.
+    let source = format!(
+        "#define sysctl fixture_sysctl\n{probe}\n{}",
+        r#"
+int fixture_sysctl(int *mib, u_int length, void *old, size_t *bytes,
+                   void *new_value, size_t new_length) {
+    if (length != 4 || mib[0] != CTL_KERN || mib[1] != KERN_PROC ||
+        mib[2] != KERN_PROC_ALL || mib[3] != 0 ||
+        new_value != NULL || new_length != 0) abort();
+    if (old == NULL && strcmp(getenv("FAIL_PHASE"), "data") == 0) {
+        *bytes = sizeof(struct kinfo_proc);
+        return 0;
+    }
+    errno = atoi(getenv("FAIL_ERRNO"));
+    return -1;
+}
+"#
+    );
+    let source_path = tmp.path().join("probe.c");
+    let binary = tmp.path().join("probe");
+    fs::write(&source_path, source).unwrap();
+    let build = Command::new("/usr/bin/clang")
+        .args(["-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&binary)
+        .arg(&source_path)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    for (phase, errno) in [
+        ("size", libc::EPERM),
+        ("data", libc::EACCES),
+        ("data", libc::ENOMEM),
+    ] {
+        for mode in ["allowed", "denied"] {
+            let output = Command::new(&binary)
+                .arg(mode)
+                .env("FAIL_PHASE", phase)
+                .env("FAIL_ERRNO", errno.to_string())
+                .output()
+                .unwrap();
+            let expected = if mode == "allowed" {
+                6
+            } else if errno == libc::ENOMEM {
+                5
+            } else {
+                0
+            };
+            assert_eq!(output.status.code(), Some(expected));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(&format!("phase={phase}")), "{stderr}");
+            assert!(stderr.contains(&format!("errno={errno}")), "{stderr}");
+            assert!(stderr.contains("mib=[1,14,0,0] length=4"), "{stderr}");
+            let error = std::io::Error::from_raw_os_error(errno).to_string();
+            assert!(
+                stderr.contains(error.split(" (os error").next().unwrap()),
+                "{stderr}"
+            );
+            assert!(output.stdout.is_empty(), "do not dump process metadata");
+        }
+    }
+
+    // Standalone Tester artifacts are temporary. Execute the generated command
+    // with the failing syscall double to prove diagnostics survive that run.
+    fs::create_dir(tmp.path().join(".fluent")).unwrap();
+    let generator = script
+        .split_once("python3 - \"$fixture\" \"$fixture_pid\" <<'PY'\n")
+        .unwrap()
+        .1
+        .split_once("\nPY\n")
+        .unwrap()
+        .0;
+    let generated = Command::new("python3")
+        .args(["-c", generator])
+        .arg(tmp.path())
+        .arg("123")
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(tmp.path().join(".fluent/tester.yaml")).unwrap()).unwrap();
+    let command = config["commands"][0]["command"].as_str().unwrap();
+    let failed = Command::new("bash")
+        .args(["-c", command])
+        .env("FAIL_PHASE", "data")
+        .env("FAIL_ERRNO", libc::EACCES.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(6));
+    let retained = fs::read_to_string(tmp.path().join("process-table-query.stderr")).unwrap();
+    assert!(retained.contains("phase=data"), "{retained}");
+    assert!(
+        retained.contains(&format!("errno={}", libc::EACCES)),
+        "{retained}"
+    );
+}
+
+#[test]
 fn tester_permissions_host_fixture_extractor_distinguishes_readiness() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -26516,7 +26632,7 @@ fn tester_permissions_profile_watcher_selects_process_table_profile() {
     let store = tmp.path().join("authority");
     fs::create_dir(&store).unwrap();
     fs::write(store.join("baseline"), b"(version 1)\n(deny default)\n").unwrap();
-    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all\"))\n";
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))\n";
     fs::write(store.join("unrelated-profile"), profile).unwrap();
     let selected = store.join("selected");
     let path_file = tmp.path().join("profile-path.txt");
@@ -26566,7 +26682,7 @@ fn tester_permissions_host_receipt_matches_captured_profile() {
     let evidence = tmp.path().join("evidence");
     fs::create_dir(&authority).unwrap();
     fs::create_dir(&evidence).unwrap();
-    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all\"))\n";
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))\n";
     fs::write(evidence.join("selected-profile.sb"), b"other profile").unwrap();
     let receipt = serde_json::json!({
         "candidate_commit": "fixture-candidate",
@@ -26757,7 +26873,7 @@ fn tester_permissions_record_applied_authority_in_evidence() {
     let profile = fs::read(&profile_copy).unwrap();
     assert!(
         String::from_utf8_lossy(&profile)
-            .contains("(allow sysctl-read (sysctl-name \"kern.proc.all\"))")
+            .contains("(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))")
     );
     assert_eq!(
         receipt["profile_digest"],
@@ -26813,7 +26929,7 @@ fn tester_permissions_do_not_leak_to_other_execution_scopes() {
     .unwrap();
     for profile in [&baseline, &writer, &reviewer, &learner] {
         let rules = fs::read_to_string(&profile.path).unwrap();
-        assert!(!rules.contains("(allow sysctl-read (sysctl-name \"kern.proc.all\"))"));
+        assert!(!rules.contains("(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))"));
         assert!(rules.contains("(deny file-read-data (subpath \""));
         assert!(rules.contains(".config/fluent/tester-permissions"));
         let deny = rules.find(".config/fluent/tester-permissions").unwrap();

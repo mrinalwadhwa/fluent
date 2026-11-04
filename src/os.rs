@@ -1178,6 +1178,48 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn process_table_rule_matches_four_element_mib_name() {
+        // Ask only for the MIB's name; do not enumerate host processes. XNU
+        // preserves the fourth numeric component when it renders this name.
+        let mut mib = [
+            0,
+            1,
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_ALL,
+            0,
+        ];
+        let mut name = [0u8; 128];
+        let mut length = name.len();
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                name.as_mut_ptr().cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "MIB name lookup: {}",
+            std::io::Error::last_os_error()
+        );
+        let name = std::ffi::CStr::from_bytes_with_nul(&name[..length])
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            crate::tester_permissions::PROCESS_TABLE_RULE,
+            format!("(allow sysctl-read (sysctl-name {name:?}))"),
+            "the exact rule must match the consumer's four-element MIB"
+        );
+    }
+
+    #[test]
     fn process_table_profile_adds_only_the_declared_read_rule() {
         use std::os::unix::fs::PermissionsExt;
 

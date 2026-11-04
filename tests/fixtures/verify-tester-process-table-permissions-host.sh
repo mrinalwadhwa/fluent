@@ -44,6 +44,9 @@ cleanup() {
         printf 'candidate HEAD or tracked source changed during host check\n' >&2
         status=1
     fi
+    if [[ -s "$fixture/process-table-query.stderr" ]]; then
+        cat "$fixture/process-table-query.stderr" >&2
+    fi
     printf 'Host evidence: %s\n' "$evidence_dir" >&2
     exit "$status"
 }
@@ -83,17 +86,25 @@ cat > "$fixture/probe.c" <<'C'
 #include <sys/types.h>
 #include <unistd.h>
 
+static int query_failure(const char *phase, const int mib[4]) {
+    int saved = errno;
+    fprintf(stderr, "process-table sysctl phase=%s mib=[%d,%d,%d,%d] length=4 errno=%d (%s)\n",
+            phase, mib[0], mib[1], mib[2], mib[3], saved, strerror(saved));
+    errno = saved;
+    return -1;
+}
+
 static int query(struct kinfo_proc **entries, size_t *count) {
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
     size_t bytes = 0;
-    if (sysctl(mib, 4, NULL, &bytes, NULL, 0) != 0) return -1;
+    if (sysctl(mib, 4, NULL, &bytes, NULL, 0) != 0) return query_failure("size", mib);
     struct kinfo_proc *table = malloc(bytes);
     if (table == NULL) return -2;
     if (sysctl(mib, 4, table, &bytes, NULL, 0) != 0) {
         int saved = errno;
         free(table);
         errno = saved;
-        return -1;
+        return query_failure("data", mib);
     }
     *entries = table;
     *count = bytes / sizeof(*table);
@@ -160,6 +171,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 pid = sys.argv[2]
 probe = shlex.quote(str(root / 'probe'))
+query_diagnostics = shlex.quote(str(root / 'process-table-query.stderr'))
 fluent = shlex.quote(str(root / 'fluent'))
 write_probe = shlex.quote(str(root / 'assert-denied-file-update.sh'))
 approval_alias = shlex.quote(str(root / 'protected-target-alias'))
@@ -168,7 +180,9 @@ alternate_home = shlex.quote(str(root / 'alternate-home'))
 operator_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
 authority = shlex.quote(str(operator_home / '.config/fluent/tester-permissions'))
 unrelated = shlex.quote(str(operator_home / '.fluent-process-table-unrelated-write'))
-allowed = (f'{probe} allowed && {probe} control-denied {pid}'
+# Standalone Tester deletes its temporary command logs. Retain syscall errors
+# inside the fixture evidence as well, including when the first assertion fails.
+allowed = (f'{probe} allowed 2>> {query_diagnostics} && {probe} control-denied {pid}'
            f' && ! touch {authority}/forged-by-tester && ! touch {unrelated}'
            f' && {write_probe} "$FLUENT_FIXTURE_PROTECTED_TARGET"'
            f' && HOME={alternate_home} {write_probe} "$FLUENT_FIXTURE_PROTECTED_TARGET"'

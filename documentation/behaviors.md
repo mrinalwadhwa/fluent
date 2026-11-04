@@ -6599,7 +6599,7 @@ Test: tests/binary.rs (tester_permissions_reject_unapproved_or_stale_launch)
 ### B4
 
 WHILE an approved command runs, THE SYSTEM SHALL apply the read-only
-`kern.proc.all` rule only to its process tree and retain protected provenance
+`kern.proc.all.0` rule only to its process tree and retain protected provenance
 for the applied profile and settled result. Other commands, the extractor, and
 other worker roles SHALL retain their default profile.
 Test: tests/binary.rs (tester_permissions_record_applied_authority_in_evidence, tester_permissions_do_not_leak_to_other_execution_scopes)

@@ -23,6 +23,6 @@ not prove that the worker could not change the live file.
 
 `verify-tester-process-table-permissions-host.sh` starts
 `watch-tester-process-table-profile.py` before its approved Tester command.
-The watcher selects the profile containing the `kern.proc.all` rule. The
+The watcher selects the profile containing the `kern.proc.all.0` rule. The
 command reads the published path and checks that `touch` cannot update that
 existing profile while its Seatbelt profile is active.

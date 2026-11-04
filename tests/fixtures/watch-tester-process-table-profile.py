@@ -7,7 +7,7 @@ import sys
 import time
 
 store, path_file, evidence, ready = map(Path, sys.argv[1:])
-rule = b'(allow sysctl-read (sysctl-name "kern.proc.all"))'
+rule = b'(allow sysctl-read (sysctl-name "kern.proc.all.0"))'
 existing = {path.name for path in store.iterdir()}
 ready_temporary = ready.with_name(f"{ready.name}.{os.getpid()}.tmp")
 ready_temporary.write_text("ready\n")

@@ -188,8 +188,9 @@ paused Attempt separately. Use `fluent tester permissions revoke <approval-id>`
 to stop later launches; an already running command settles under its applied
 profile. A new commit, rebase, checkout, Tester configuration, extractor, or
 permission policy needs a fresh inspection and approval. Only the named
-command and its descendants receive the read-only `kern.proc.all` query; other
-commands and worker roles retain their default sandbox. This query exposes
+command and its descendants receive the read-only `kern.proc.all.0` query
+(the four-element MIB); other commands and worker roles retain their default
+sandbox. This query exposes
 host-wide process metadata, including IDs, ancestry, names, user and group IDs,
 terminal data, and runtime fields. It does not grant process arguments,
 environment contents, memory, or control. It requires a capability-aware Fluent

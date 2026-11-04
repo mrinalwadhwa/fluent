@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use crate::git;
 use crate::tester::{self, TesterPermission};
 
-pub(crate) const PROCESS_TABLE_RULE: &str = "(allow sysctl-read (sysctl-name \"kern.proc.all\"))";
+// XNU includes the trailing zero in the consumer's four-element MIB name.
+// Match that exact query; a prefix would also admit other numeric suffixes.
+pub(crate) const PROCESS_TABLE_RULE: &str = "(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))";
 
 #[derive(Serialize)]
 struct RequestIdentity<'a> {
@@ -181,7 +183,7 @@ pub fn show_request(
             "user and group IDs",
             "terminal and runtime metadata",
         ],
-        permission_scope: "read-only kern.proc.all for this configured command and its descendants",
+        permission_scope: "read-only kern.proc.all.0 (four-element MIB) for this configured command and its descendants",
         approval_state,
     })
 }
