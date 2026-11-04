@@ -6577,39 +6577,86 @@ Test: src/work_task_executor.rs (writer_prompt_assigns_focused_checks_and_report
 
 ### B1
 
-WHEN an operator inspects a configured `process-table-read` request, THE SYSTEM
-SHALL display its exact candidate and command identity, metadata exposure,
-scope, request digest, and current approval without launching work.
+WHEN an operator inspects a configured `process-table-read` request,
+THE SYSTEM SHALL display its exact candidate and command identity, metadata
+exposure, scope, request digest, and current approval without changing approval
+or execution state.
 Test: tests/binary.rs (tester_permissions_show_current_request_without_mutation)
 
 ### B2
 
-WHEN an operator approves that exact request, THE SYSTEM SHALL record
-host-owned approval without running a Tester; revocation SHALL block later
-launches while retaining prior execution evidence.
-Test: tests/binary.rs (tester_permissions_approve_exact_request_without_launch, tester_permissions_revoke_blocks_future_launches)
+WHEN an operator explicitly approves the displayed current request,
+THE SYSTEM SHALL record host-owned approval for that exact request without
+launching work.
+Test: tests/binary.rs (tester_permissions_approve_exact_request_without_launch)
 
 ### B3
 
 IF a requested command lacks current approval for its candidate, command,
-configuration, extractor, or policy, THE SYSTEM SHALL refuse its launch as an
-unmet prerequisite.
+configuration, extractor, or permission policy,
+THEN THE SYSTEM SHALL refuse its launch with the unmet prerequisite identified.
 Test: tests/binary.rs (tester_permissions_reject_unapproved_or_stale_launch)
 
 ### B4
 
-WHILE an approved command runs, THE SYSTEM SHALL apply the read-only
-`kern.proc.all.0` rule only to its process tree and retain protected provenance
-for the applied profile and settled result. Other commands, the extractor, and
-other worker roles SHALL retain their default profile.
-Test: tests/binary.rs (tester_permissions_record_applied_authority_in_evidence, tester_permissions_do_not_leak_to_other_execution_scopes)
-Test: tests/fixtures/verify-tester-process-table-permissions-host.sh
+WHEN an operator revokes an approval,
+THE SYSTEM SHALL make that approval ineligible for subsequent command launches.
+Test: tests/binary.rs (tester_permissions_revoke_blocks_future_launches)
 
 ### B5
 
-IF permission evidence lacks matching host provenance, THE SYSTEM SHALL refuse
-to credit it, including when it comes from an older unannotated Tester result.
+WHILE a matching approved command runs under Fluent's macOS sandbox,
+THE SYSTEM SHALL permit its read-only process-table query to observe the current
+process and its complete parent chain to launchd, including root-owned
+intermediaries.
+Test: tests/fixtures/verify-tester-process-table-permissions-host.sh
+
+### B6
+
+WHEN Fluent applies a process-table approval,
+THE SYSTEM SHALL confine the additional permission to that command and its
+descendants for the approved read-only query.
+Test: tests/binary.rs (tester_permissions_do_not_leak_to_other_execution_scopes)
+Test: tests/fixtures/verify-tester-process-table-permissions-host.sh
+Example: Other commands, the extractor, Writers, Reviewers, and Learners retain
+their default permissions. The grant adds no process-control, memory, argument,
+environment, credential, or filesystem access.
+
+### B7
+
+WHILE Fluent workers and Tester descendants run,
+THE SYSTEM SHALL prevent them from changing the host authority, effective
+profiles, or authoritative permission evidence used to admit or credit commands.
+Test: tests/binary.rs (tester_permissions_reject_worker_authority_tampering)
+Test: tests/fixtures/verify-tester-process-table-permissions-host.sh
+
+### B8
+
+WHEN an approved command execution settles,
+THE SYSTEM SHALL retain permission evidence bound to its candidate, command,
+approval, effective sandbox policy, and execution result.
+Test: tests/binary.rs (tester_permissions_record_applied_authority_in_evidence)
+
+### B9
+
+IF evidence for a permission-requesting command lacks valid host provenance or
+does not match its required permission identity,
+THEN THE SYSTEM SHALL refuse to credit that evidence as satisfying the check.
 Test: tests/binary.rs (tester_permissions_reject_unproven_or_mismatched_evidence)
+
+### B10
+
+WHEN a canonical Tester entry point selects configured commands for execution,
+THE SYSTEM SHALL retain each selected command's original configuration identity
+for permission admission and evidence.
+Test: tests/binary.rs (tester_permissions_enforce_one_contract_across_routes)
+
+### B11
+
+WHEN Fluent reads existing Tester configurations and supported evidence that do
+not request this permission,
+THE SYSTEM SHALL preserve their existing sandbox and compatibility semantics.
+Test: tests/binary.rs (tester_permissions_preserve_legacy_default_contract)
 
 ## Tester Task
 
