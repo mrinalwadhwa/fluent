@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# Keep update notices out of command-output and JSON assertions.
+export FLUENT_NO_UPDATE_CHECK=1
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 FLUENT_BIN="${FLUENT_BIN_OVERRIDE:-${PROJECT_DIR}/target/debug/fluent}"

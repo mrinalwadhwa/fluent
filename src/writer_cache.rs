@@ -677,6 +677,8 @@ mod tests {
         run(Command::new("cargo")
             .args(["generate-lockfile"])
             .env("CARGO_HOME", &seed_home)
+            // Fetch only the fixture's file URL before testing offline reuse.
+            .env("CARGO_NET_OFFLINE", "false")
             .current_dir(&app));
 
         let cache = preflight_writer_dependency_cache(tmp.path(), "work-1", "attempt-1").unwrap();
