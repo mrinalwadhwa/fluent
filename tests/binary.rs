@@ -15867,7 +15867,7 @@ fn fluent_release_tester_uses_host_owned_process_settlement() {
     // Preserve the complete shell/Rust setup as well as each host occurrence.
     // A command edit deliberately changes its public occurrence identity.
     for (entry, expected) in commands[..2].iter().zip([
-        "c5ff545cd5f7400a74feefb726feaa7fe911a5df3a7f2a301fb6f47d98851475",
+        "6f093209a79293e1e2cf369106a7be03efe46ffbbb012a90b7f5c618a49c23b5",
         "06940ab534436dee253abe426d0caed094a82f919225afa125f03aeada1a0cea",
     ]) {
         assert_eq!(
