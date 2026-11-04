@@ -63779,7 +63779,9 @@ fn cancel_tester_at_settled_command_boundary(next_command: bool) {
             .last()
             .unwrap()
             .status,
-        TaskStatus::Executing
+        TaskStatus::Executing,
+        "Tester runner diagnostics: {}",
+        fs::read_to_string(&diagnostics).unwrap_or_default()
     );
     assert!(fluent::lease::is_leased(&fluent::lease::task_lock_path(
         &project, &id, &task_id
