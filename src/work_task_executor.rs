@@ -11335,7 +11335,8 @@ fn ensure_source_product_unchanged(
 }
 
 // Git status can hide product edits behind assume-unchanged or skip-worktree.
-// Before accepting a landing, bind changed bytes to the newly committed tree.
+// Before accepting a landing, compare changed bytes with Git's expected
+// checkout representation, including attributes, line endings, and filters.
 fn source_product_changes_match_head(
     source: &Path,
     before: &SourceProductSnapshot,
@@ -11411,7 +11412,11 @@ fn source_product_changes_match_head(
         let expected = if *kind == "commit" {
             "directory".to_string()
         } else {
-            let blob = git::run_raw(source, &["cat-file", "blob", object])?;
+            let blob = if *mode == "120000" {
+                git::run_raw(source, &["cat-file", "blob", object])?
+            } else {
+                git::read_checkout_blob(source, object, path)?
+            };
             anyhow::ensure!(
                 blob.status.success(),
                 "cannot read source product blob: {}",
@@ -25886,6 +25891,8 @@ while time.monotonic() < deadline:
         Dirty,
         Advance,
         AdvanceTree,
+        AdvanceCrlf,
+        AdvanceCrlfHidden,
         Branch,
         Rewrite,
         AdvanceDirty,
@@ -25900,7 +25907,12 @@ while time.monotonic() < deadline:
                     .unwrap();
                 return;
             }
-            fs::write(source.join("tracked.txt"), "source drift\n").unwrap();
+            let landed_bytes = if matches!(self, Self::AdvanceCrlf | Self::AdvanceCrlfHidden) {
+                "source drift\r\n"
+            } else {
+                "source drift\n"
+            };
+            fs::write(source.join("tracked.txt"), landed_bytes).unwrap();
             if matches!(self, Self::AdvanceTree) {
                 fs::remove_file(source.join("tracked.txt")).unwrap();
                 fs::write(source.join("added.txt"), "landed file\n").unwrap();
@@ -25922,6 +25934,32 @@ while time.monotonic() < deadline:
                     args.push("--amend");
                 }
                 crate::git::run(source, &args, "land source").unwrap();
+                if matches!(self, Self::AdvanceCrlf | Self::AdvanceCrlfHidden) {
+                    assert_eq!(
+                        fs::read(source.join("tracked.txt")).unwrap(),
+                        b"source drift\r\n"
+                    );
+                    let blob = crate::git::run_raw(source, &["show", "HEAD:tracked.txt"]).unwrap();
+                    assert!(blob.status.success());
+                    assert_eq!(blob.stdout, b"source drift\n");
+                    if matches!(self, Self::AdvanceCrlfHidden) {
+                        crate::git::run(
+                            source,
+                            &["update-index", "--assume-unchanged", "tracked.txt"],
+                            "hide converted source edit",
+                        )
+                        .unwrap();
+                        fs::write(source.join("tracked.txt"), b"uncommitted after landing\r\n")
+                            .unwrap();
+                    }
+                    let status = crate::git::run_stdout(
+                        source,
+                        &["status", "--porcelain", "--", "tracked.txt"],
+                        "check converted checkout",
+                    )
+                    .unwrap();
+                    assert!(status.is_empty(), "{self:?}: {status:?}");
+                }
                 if matches!(
                     self,
                     Self::AdvanceDirty | Self::AdvanceHidden | Self::AdvanceHiddenRestore
@@ -26130,6 +26168,12 @@ while time.monotonic() < deadline:
     }
 
     #[test]
+    fn writer_source_checkout_crlf_fast_forward_does_not_pause() {
+        check_writer_source_drift(SourceDrift::AdvanceCrlf, false, true, false);
+        check_writer_source_drift(SourceDrift::AdvanceCrlfHidden, false, false, false);
+    }
+
+    #[test]
     fn writer_source_checkout_unsandboxed_advance_needs_user() {
         check_writer_source_drift(SourceDrift::Advance, true, false, false);
     }
@@ -26147,7 +26191,16 @@ while time.monotonic() < deadline:
         crate::git::run(&source, &["init", "-q", "-b", "main"], "init fixture").unwrap();
         crate::git::run(&source, &["config", "user.email", "test@test"], "set email").unwrap();
         crate::git::run(&source, &["config", "user.name", "test"], "set name").unwrap();
-        fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        let baseline_bytes = if matches!(
+            drift,
+            SourceDrift::AdvanceCrlf | SourceDrift::AdvanceCrlfHidden
+        ) {
+            fs::write(source.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+            "baseline\r\n"
+        } else {
+            "baseline\n"
+        };
+        fs::write(source.join("tracked.txt"), baseline_bytes).unwrap();
         crate::git::run(&source, &["add", "."], "add fixture").unwrap();
         crate::git::run(
             &source,
@@ -26210,6 +26263,7 @@ while time.monotonic() < deadline:
                 Some(crate::work_model::PauseKind::WriterCompletion)
             );
             let expected_bytes = match drift {
+                SourceDrift::AdvanceCrlfHidden => "uncommitted after landing\r\n",
                 SourceDrift::Branch | SourceDrift::AdvanceHiddenRestore => "baseline\n",
                 SourceDrift::AdvanceDirty | SourceDrift::AdvanceHidden => {
                     "uncommitted after landing\n"
@@ -26241,7 +26295,7 @@ while time.monotonic() < deadline:
         assert_eq!(git_stdout(&candidate, &["rev-parse", "HEAD^"]), base);
         assert_eq!(
             fs::read_to_string(candidate.join("tracked.txt")).unwrap(),
-            "baseline\n"
+            baseline_bytes
         );
         assert_eq!(
             fs::read_to_string(

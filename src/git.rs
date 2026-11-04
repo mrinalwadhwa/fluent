@@ -278,6 +278,16 @@ pub fn run_raw(cwd: &Path, args: &[&str]) -> Result<Output> {
     Ok(output)
 }
 
+/// Read a blob as Git would write it to the given checkout path.
+/// Retain the path's original bytes when selecting attributes and filters.
+pub fn read_checkout_blob(cwd: &Path, object: &str, path: &Path) -> Result<Output> {
+    run_with_lock_retry(|| {
+        let mut command = build_command(cwd, &["cat-file", "--filters"]);
+        command.arg("--path").arg(path).arg(object);
+        command
+    })
+}
+
 /// The effective ignore rule Git reports for one path.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct IgnoreMatch {
