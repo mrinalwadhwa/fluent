@@ -5,5 +5,8 @@
 
 set -euo pipefail
 
+# Keep the canonical smoke test independent of inherited update suppression.
+unset FLUENT_NO_UPDATE_CHECK
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 exec bash "$SCRIPT_DIR/test-first-run-smoke-harness.sh"
