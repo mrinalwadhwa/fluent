@@ -4693,6 +4693,15 @@ mod tests {
             WriterCompletionState::Complete
         );
         assert!(host_matrix.path.ends_with("writer-completion.json"));
+        let accepted_proofs = crate::recovery_contracts::accepted_plan_host_script_proofs(
+            project.path(),
+            attempt,
+            crate::check_applicability::evaluation_time(),
+        );
+        assert_eq!(accepted_proofs.len(), 1);
+        assert_eq!(accepted_proofs[0].command, command);
+        assert_eq!(accepted_proofs[0].working_directory, ".");
+        assert_eq!(accepted_proofs[0].bindings.len(), 2);
         let mut later_history = attempt.clone();
         let mut later_writer = writer.clone();
         later_writer.id = "attempt-1-write-2".into();
@@ -4782,6 +4791,15 @@ mod tests {
             "an unresolved newer result must prevent reuse of an older pass"
         );
         assert!(completed_plan_host_matrix_ref(project.path(), &later_history, writer).is_none());
+        assert!(
+            crate::recovery_contracts::accepted_plan_host_script_proofs(
+                project.path(),
+                &later_history,
+                crate::check_applicability::evaluation_time(),
+            )
+            .is_empty(),
+            "an unresolved newer Plan result must not credit a script reference"
+        );
 
         assert_eq!(
             fs::read(project.path().join(&source.path)).unwrap(),

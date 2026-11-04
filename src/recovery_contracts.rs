@@ -34,7 +34,10 @@ use crate::work_model::{
 mod carried_finding;
 pub(crate) mod claude_session;
 mod plan_evidence;
-pub(crate) use plan_evidence::apply_completed_plan_host_evidence;
+pub(crate) use plan_evidence::{
+    AcceptedPlanHostScriptProof, accepted_plan_host_script_proofs,
+    apply_completed_plan_host_evidence,
+};
 pub(crate) mod context_retry;
 pub(crate) mod review_coverage;
 pub(crate) mod review_evidence;

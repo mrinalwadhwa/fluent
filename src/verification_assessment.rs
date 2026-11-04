@@ -3517,6 +3517,142 @@ fn reference_is_satisfied(
     }
 }
 
+/// A reviewed Plan host run may satisfy a whole-script reference only when it
+/// ran that script as its entire command from the candidate root. An explicit
+/// failed native result for the same script still takes precedence.
+fn credit_accepted_plan_host_scripts(
+    references: &mut [RequirementAssessment],
+    results: &crate::tester::TesterResults,
+    proofs: &[crate::recovery_contracts::AcceptedPlanHostScriptProof],
+) {
+    for row in references {
+        let Some(ReferenceMeaning::WholeScript { path, .. }) = &row.meaning else {
+            continue;
+        };
+        if row.satisfied
+            || row.cause != Some(VerificationCause::MissingEvidence)
+            || !plain_unquoted_shell_path(path)
+            || results.tests.iter().any(|test| test.id == *path)
+        {
+            continue;
+        }
+        let Some(proof) = proofs.iter().find(|proof| {
+            proof.command == format!("bash {path}") && proof.working_directory == "."
+        }) else {
+            continue;
+        };
+        row.satisfied = true;
+        row.cause = None;
+        row.next_action = None;
+        row.owner = work_model::CompletionResponsibility::Host;
+        row.bindings.extend(proof.bindings.clone());
+    }
+}
+
+fn plain_unquoted_shell_path(path: &str) -> bool {
+    path.as_bytes()
+        .first()
+        .is_some_and(|first| first.is_ascii_alphanumeric() || *first == b'_')
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod plan_host_script_reference_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_plan_run_credits_only_its_exact_script_without_masking_native_failure() {
+        let path = "tests/fixtures/host.sh";
+        let missing = || RequirementAssessment {
+            id: "reference:host".into(),
+            source: "behaviors.md#host".into(),
+            meaning: Some(ReferenceMeaning::WholeScript {
+                path: path.into(),
+                description: None,
+            }),
+            check: None,
+            satisfied: false,
+            cause: Some(VerificationCause::MissingEvidence),
+            owner: work_model::CompletionResponsibility::Tester,
+            next_action: Some("collect evidence".into()),
+            bindings: vec![],
+            diagnostics: vec![],
+        };
+        let results = || crate::tester::TesterResults {
+            candidate_commit: Some("candidate".into()),
+            commands: vec![],
+            tests: vec![],
+            summary: crate::tester::Summary {
+                total: 0,
+                pass: 0,
+                fail: 0,
+                skipped: 0,
+            },
+            error: None,
+        };
+        let proof = |command: &str, directory: &str| {
+            crate::recovery_contracts::AcceptedPlanHostScriptProof {
+                command: command.into(),
+                working_directory: directory.into(),
+                bindings: vec![work_model::BoundRecheckArtifact {
+                    path: "host/binding.json".into(),
+                    digest: "sha256:proof".into(),
+                }],
+            }
+        };
+        for (command, directory) in [
+            ("bash tests/fixtures/other.sh", "."),
+            ("bash tests/fixtures/host.sh || true", "."),
+            ("bash tests/fixtures/host.sh", "tests"),
+        ] {
+            let mut rows = vec![missing()];
+            credit_accepted_plan_host_scripts(&mut rows, &results(), &[proof(command, directory)]);
+            assert!(!rows[0].satisfied, "{command} from {directory}");
+        }
+        let mut rows = vec![missing()];
+        credit_accepted_plan_host_scripts(
+            &mut rows,
+            &results(),
+            &[proof("bash tests/fixtures/host.sh", ".")],
+        );
+        assert!(rows[0].satisfied);
+        assert_eq!(rows[0].owner, work_model::CompletionResponsibility::Host);
+        assert_eq!(rows[0].bindings[0].path, "host/binding.json");
+
+        let mut unsafe_path = missing();
+        unsafe_path.meaning = Some(ReferenceMeaning::WholeScript {
+            path: "tests/fixtures/host;true.sh".into(),
+            description: None,
+        });
+        let mut rows = vec![unsafe_path];
+        credit_accepted_plan_host_scripts(
+            &mut rows,
+            &results(),
+            &[proof("bash tests/fixtures/host;true.sh", ".")],
+        );
+        assert!(!rows[0].satisfied);
+
+        let mut failed = results();
+        failed.tests.push(crate::tester::TestResult {
+            identity: None,
+            id: path.into(),
+            test_harness: "shell-harness".into(),
+            status: "fail".into(),
+            duration_ms: None,
+            failure_excerpt: None,
+        });
+        let mut rows = vec![missing()];
+        credit_accepted_plan_host_scripts(
+            &mut rows,
+            &failed,
+            &[proof("bash tests/fixtures/host.sh", ".")],
+        );
+        assert!(!rows[0].satisfied);
+    }
+}
+
 /// Observe a saved Attempt without journal recovery, migration, or publication.
 pub fn assess_current_verification(
     project_root: &Path,
@@ -3608,6 +3744,11 @@ pub fn assess_current_verification_at(
         )?,
         None => vec![],
     };
+    credit_accepted_plan_host_scripts(
+        &mut references,
+        &results,
+        &crate::recovery_contracts::accepted_plan_host_script_proofs(project_root, attempt, now),
+    );
     let mut commands = Vec::new();
     for (index, check) in canonical.checks.iter().enumerate() {
         let mut supporting = bindings.clone();

@@ -2,9 +2,54 @@
 use super::*;
 use crate::plan_command::{plan_command_binding_matches, resolve_plan_row_command};
 use crate::work_model::{
-    PlanHostEvidenceBinding, WriterCompletionMatrix, WriterCompletionRequirementKind,
-    WriterCompletionState, WriterVerificationClaim, WriterVerificationResult,
+    BoundRecheckArtifact, PlanHostEvidenceBinding, WriterCompletionMatrix,
+    WriterCompletionRequirementKind, WriterCompletionState, WriterVerificationClaim,
+    WriterVerificationResult,
 };
+
+/// One accepted, candidate-bound host run of a Plan script. The caller still
+/// decides whether its exact command matches an approved Test reference.
+pub(crate) struct AcceptedPlanHostScriptProof {
+    pub(crate) command: String,
+    pub(crate) working_directory: String,
+    pub(crate) bindings: Vec<BoundRecheckArtifact>,
+}
+
+pub(crate) fn accepted_plan_host_script_proofs(
+    project_root: &Path,
+    attempt: &work_model::Attempt,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<AcceptedPlanHostScriptProof> {
+    let Some(writer) = attempt
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
+    else {
+        return Vec::new();
+    };
+    let Some(source) = writer_completion_matrix_ref(project_root, attempt, writer) else {
+        return Vec::new();
+    };
+    let Ok((_, bytes)) = bound_recovery_artifact(project_root, &source.path) else {
+        return Vec::new();
+    };
+    let Ok(matrix) = serde_json::from_slice::<WriterCompletionMatrix>(&bytes) else {
+        return Vec::new();
+    };
+    accepted_plan_host_evidence(project_root, attempt, writer, &source, &matrix, now)
+        .into_iter()
+        .filter_map(|(artifact, binding)| {
+            let (binding_artifact, _) =
+                bound_recovery_artifact(project_root, &artifact.path).ok()?;
+            Some(AcceptedPlanHostScriptProof {
+                command: binding.command,
+                working_directory: binding.working_directory,
+                bindings: vec![binding_artifact, binding.evidence],
+            })
+        })
+        .collect()
+}
 
 pub(super) fn accepted_plan_host_evidence(
     project_root: &Path,

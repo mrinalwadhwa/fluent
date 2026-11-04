@@ -746,9 +746,15 @@ contradictory qualifiers or recognized identities from another native format
 cannot establish a pass. Unqualified native names and free-form display labels
 remain supported when they do not contradict the structured identity. A named
 shell result must use the exact `path::name`; a whole-script pass cannot satisfy
-it. An explicit command must resolve to a committed canonical entry, and duplicate
-command text requires an index. Configured legacy command references use the same occurrence,
-applicability, and comparison checks. Reviewed legacy proof may satisfy a command
+it. A reviewed Plan-row host run can also satisfy a whole-script reference when
+its entire command is exactly `bash <path>` from the candidate root, `<path>`
+uses plain unquoted shell path characters, and it matches the committed script.
+A native Tester result for that script takes
+precedence, including a failure. The host run cannot satisfy a named test or a
+different shell command. An explicit command must resolve to a committed
+canonical entry, and duplicate command text requires an index. Configured
+legacy command references use the same occurrence, applicability, and
+comparison checks. Reviewed legacy proof may satisfy a command
 outside the canonical configuration only when the current run proves that it is
 not a configured command. See the [planning examples](../skills/fluent.full/references/define-behaviors.md#rules).
 
