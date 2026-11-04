@@ -146,11 +146,10 @@ pub(crate) fn assess_landed_tester_history(
         crate::verification_assessment::bound_recovery_artifact(root, &manifest_path)?;
     let manifest: crate::tester::CanonicalRunManifest = serde_json::from_slice(&manifest_bytes)?;
     anyhow::ensure!(
-        manifest.schema_version == 1
-            && manifest.full_run
-            && manifest.commands.len() == results.commands.len(),
+        manifest.full_run && manifest.commands.len() == results.commands.len(),
         "retained Tester manifest does not describe a complete run"
     );
+    validate_manifest_permissions(root, area, merged_commit, &manifest, &results)?;
     for (name, digest) in [
         (".fluent/tester.yaml", &manifest.config_digest),
         (".fluent/extract-tester-results", &manifest.extractor_digest),
@@ -207,6 +206,15 @@ pub(crate) fn assess_landed_tester_history(
                         .map(|intent| intent.target_before.as_str()),
                 "retained target baseline does not match the landing target"
             );
+            validate_baseline_permission_proof(
+                root,
+                baseline,
+                &baseline_results,
+                manifest
+                    .commands
+                    .iter()
+                    .any(|command| !command.permissions.is_empty()),
+            )?;
             let native_match = crate::tester_evidence::introduced_tester_failures(
                 &root.join(&path),
                 Some(&root.join(baseline)),
@@ -622,9 +630,6 @@ fn assess_canonical_checks_at(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let baseline_results = baseline.as_ref().map(|(_, results)| results);
-    let preexisting_commands =
-        crate::tester_evidence::preexisting_failed_tester_commands(&results, baseline_results);
     let mut preexisting = Vec::new();
     let object_repository =
         committed_object_repository(project_root, workspace_path, &[candidate_commit])?;
@@ -702,9 +707,10 @@ fn assess_canonical_checks_at(
     };
     let manifest: crate::tester::CanonicalRunManifest = serde_json::from_slice(&manifest_bytes)?;
     anyhow::ensure!(
-        manifest.schema_version == 1 && manifest.full_run,
+        manifest.full_run,
         "Tester manifest does not prove a complete canonical run"
     );
+    validate_manifest_permissions(project_root, area, candidate_commit, &manifest, &results)?;
     for (path, bytes, expected) in [
         (
             ".fluent/tester.yaml",
@@ -729,6 +735,23 @@ fn assess_canonical_checks_at(
             );
         }
     }
+    let baseline_results = baseline
+        .as_ref()
+        .map(|(_, results)| results)
+        .filter(|baseline| {
+            validate_baseline_permission_proof(
+                project_root,
+                &baseline_path,
+                baseline,
+                manifest
+                    .commands
+                    .iter()
+                    .any(|command| !command.permissions.is_empty()),
+            )
+            .is_ok()
+        });
+    let preexisting_commands =
+        crate::tester_evidence::preexisting_failed_tester_commands(&results, baseline_results);
     let mut blockers = Vec::new();
     if results.commands.len() != manifest.commands.len() {
         blockers.push("canonical Tester is missing configured command results".into());
@@ -891,13 +914,15 @@ fn assess_canonical_checks_at(
                 .count()
                 == 1;
             let reviewed_replacement = reviewed.iter().find(|result| {
-                unique_command
+                definition.permissions.is_empty()
+                    && unique_command
                     && result.command == check.command
                     && result.applicability == check.applicability
                     && result.comparison_commit == context.base_commit
             });
             let recheck_replacement = rechecked.iter().find(|proof| {
-                proof.source_results == results_ref
+                (definition.permissions.is_empty() || proof.permission_proven)
+                    && proof.source_results == results_ref
                     && proof.command_index == index
                     && proof.command == check.command
                     && proof.comparison_commit == context.base_commit
@@ -1076,6 +1101,27 @@ pub(crate) fn validate_required_check_acceptance_at(
     check: &work_model::RequiredCheck,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    if let work_model::RequiredCheckSource::CanonicalTester {
+        manifest,
+        command_index,
+        ..
+    } = &check.source
+    {
+        let (binding, bytes) = bound_recovery_artifact(project_root, &manifest.path)?;
+        anyhow::ensure!(
+            binding.digest == manifest.digest,
+            "permission source manifest changed"
+        );
+        let source: crate::tester::CanonicalRunManifest = serde_json::from_slice(&bytes)?;
+        let definition = source
+            .commands
+            .get(*command_index)
+            .context("missing permission command")?;
+        anyhow::ensure!(
+            definition.permissions.is_empty(),
+            "replacement evidence document cannot prove requested permissions; use a canonical Tester recheck with protected receipts"
+        );
+    }
     // A newer conflicting result must receive its own review; the older pass
     // cannot silently defeat the operator's subsequently submitted evidence.
     let recovery = attempt
@@ -1339,6 +1385,7 @@ pub(crate) fn reconstruct_legacy_manifest(
         "legacy checker source exceeds the supported bound"
     );
     let config: crate::tester::TesterConfig = serde_yaml::from_slice(config_bytes)?;
+    reject_unproven_tester_permissions(&config.commands)?;
     anyhow::ensure!(
         !config.commands.is_empty()
             && config.commands.len() <= 1024
@@ -1364,7 +1411,297 @@ pub(crate) fn reconstruct_legacy_manifest(
         run_at: None,
         environment: vec![],
         applicability: vec![],
+        original_command_indexes: vec![],
+        permission_receipts: vec![],
     })
+}
+
+fn validate_baseline_permission_proof(
+    root: &Path,
+    path: &str,
+    results: &crate::tester::TesterResults,
+    required: bool,
+) -> Result<()> {
+    let claims_permission = required
+        || results.commands.iter().any(|command| {
+            command.permission_receipt_id.is_some() || command.permission_receipt.is_some()
+        });
+    let Some(commit) = results.candidate_commit.as_deref() else {
+        anyhow::ensure!(!claims_permission, "permission baseline has no candidate");
+        return Ok(());
+    };
+    let config = crate::git::run_raw(root, &["show", &format!("{commit}:.fluent/tester.yaml")])?;
+    if !config.status.success() {
+        anyhow::ensure!(
+            !claims_permission,
+            "permission baseline source is unavailable"
+        );
+        return Ok(());
+    }
+    let config_definition: crate::tester::TesterConfig = serde_yaml::from_slice(&config.stdout)?;
+    if config_definition
+        .commands
+        .iter()
+        .all(|command| command.permissions.is_empty())
+    {
+        anyhow::ensure!(
+            !claims_permission,
+            "baseline does not prove the requested permission policy"
+        );
+        return Ok(());
+    }
+    let extractor = crate::git::run_raw(
+        root,
+        &["show", &format!("{commit}:.fluent/extract-tester-results")],
+    )?;
+    anyhow::ensure!(
+        extractor.status.success(),
+        "baseline extractor is unavailable"
+    );
+    let area = Path::new(path)
+        .parent()
+        .context("baseline has no artifact area")?;
+    crate::tester_permissions::validate_run_permissions(
+        commit,
+        &format!("sha256:{:x}", Sha256::digest(&config.stdout)),
+        &format!("sha256:{:x}", Sha256::digest(&extractor.stdout)),
+        &config_definition.commands,
+        results,
+        |path| {
+            Ok(bound_recovery_artifact(
+                root,
+                area.join(path).to_str().context("invalid baseline path")?,
+            )?
+            .1)
+        },
+    )
+}
+
+fn validate_manifest_permissions(
+    project_root: &Path,
+    area: &str,
+    candidate_commit: &str,
+    manifest: &crate::tester::CanonicalRunManifest,
+    results: &crate::tester::TesterResults,
+) -> Result<()> {
+    crate::tester_permissions::validate_manifest_permissions(
+        candidate_commit,
+        manifest,
+        results,
+        |path| Ok(bound_recovery_artifact(project_root, &format!("{area}/{path}"))?.1),
+    )
+}
+
+fn reject_unproven_tester_permissions(commands: &[crate::tester::TesterCommand]) -> Result<()> {
+    anyhow::ensure!(
+        commands
+            .iter()
+            .all(|command| command.permissions.is_empty()),
+        "legacy Tester evidence cannot prove a requested permission"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tester_permission_tests {
+    use super::*;
+
+    #[test]
+    fn capability_baseline_cannot_hide_provenance_by_omitting_receipt_fields() {
+        let root = tempfile::tempdir().unwrap();
+        crate::git::run(root.path(), &["init", "-q"], "init fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["config", "user.email", "test@example.com"],
+            "set email",
+        )
+        .unwrap();
+        crate::git::run(root.path(), &["config", "user.name", "Test"], "set name").unwrap();
+        fs::create_dir_all(root.path().join(".fluent")).unwrap();
+        fs::write(root.path().join(".fluent/tester.yaml"), "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n").unwrap();
+        fs::write(
+            root.path().join(".fluent/extract-tester-results"),
+            "extractor",
+        )
+        .unwrap();
+        crate::git::run(root.path(), &["add", ".fluent"], "stage fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Add permission request"],
+            "commit fixture",
+        )
+        .unwrap();
+        let candidate =
+            crate::git::run_stdout(root.path(), &["rev-parse", "HEAD"], "read candidate").unwrap();
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit":candidate,"commands":[],"tests":[],
+            "summary":{"total":0,"pass":0,"fail":0,"skipped":0},"error":null
+        }))
+        .unwrap();
+        assert!(
+            validate_baseline_permission_proof(
+                root.path(),
+                ".fluent/work/artifacts/work/attempt-1/baseline/tester-results.json",
+                &results,
+                false
+            )
+            .is_err(),
+            "a default current run must not consume a capability baseline without protected proof"
+        );
+    }
+
+    #[test]
+    fn reviewed_document_cannot_replace_permission_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let area = ".fluent/work/artifacts/work/attempt-1/tester";
+        let write = |name: &str, bytes: &[u8]| {
+            let path = format!("{area}/{name}");
+            fs::create_dir_all(root.path().join(&path).parent().unwrap()).unwrap();
+            fs::write(root.path().join(&path), bytes).unwrap();
+            bound_recovery_artifact(root.path(), &path).unwrap().0
+        };
+        let manifest = write("canonical-run.json", br#"{"schema_version":2,"config_digest":"sha256:config","extractor_digest":"sha256:extractor","commands":[{"command":"false","test_harness":"shell-harness","permissions":["process-table-read"]}],"full_run":true,"original_command_indexes":[0],"permission_receipts":["original-receipt.json"]}"#);
+        let results = write("tester-results.json", b"{}");
+        let check = work_model::RequiredCheck {
+            applicability: Default::default(),
+            id: "check".into(),
+            work_item_id: "work".into(),
+            attempt_id: "attempt-1".into(),
+            candidate_commit: "candidate".into(),
+            command: "false".into(),
+            working_directory: ".".into(),
+            source: work_model::RequiredCheckSource::CanonicalTester {
+                reconstruction: None,
+                task_id: "tester".into(),
+                command_index: 0,
+                results,
+                manifest,
+                logs: vec![],
+                comparison_commit: None,
+            },
+        };
+        let binding = write("check.json", &serde_json::to_vec(&check).unwrap());
+        let document = write("evidence.json", br#"{"schema_version":1,"producer":"host","check":"false","working_directory":".","result":"pass","run_at":"2026-10-11T00:00:00Z","output":"ok"}"#);
+        let attachment = work_model::EvidenceAttachment {
+            snapshot_path: document.path,
+            digest: document.digest,
+        };
+        let review = write("review.md", b"Verdict: pass\n");
+        let mut item = work_model::WorkItem::planned("work", "Permission replacement");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let attempt = &mut item.attempts[0];
+        let mut task = attempt.tasks[0].clone();
+        task.id = "review".into();
+        task.kind = TaskKind::Review;
+        task.role = "tests".into();
+        task.status = TaskStatus::Complete;
+        task.artifact_area.as_mut().unwrap().path = area.into();
+        task.evidence_review_context = Some(work_model::EvidenceReviewContext {
+            recovery_id: "recovery".into(),
+            candidate_commit: "candidate".into(),
+            attachment: attachment.clone(),
+            prior_review_artifact: binding.path.clone(),
+        });
+        attempt.tasks.push(task);
+        attempt.evidence_recoveries.push(EvidenceRecovery {
+            carried_finding: None,
+            required_check: Some(check.clone()),
+            id: "recovery".into(),
+            candidate_commit: "candidate".into(),
+            attachment,
+            targets: vec![work_model::EvidenceReviewTarget {
+                role: "tests".into(),
+                prior_review_artifact: binding.path,
+                review_task_id: Some("review".into()),
+                review_digest: Some(review.digest),
+            }],
+            state: EvidenceRecoveryState::Complete,
+            created_at: "2026-10-11T00:00:00Z".into(),
+            code_change_classification: None,
+        });
+        let error =
+            validate_required_check_acceptance_at(root.path(), attempt, &check, chrono::Utc::now())
+                .expect_err("a reviewed document has no protected replacement execution proof");
+        assert!(error.to_string().contains("permission"), "{error:#}");
+    }
+
+    #[test]
+    fn version_two_manifest_needs_host_receipt_for_requested_command() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest: crate::tester::CanonicalRunManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "permissions":["process-table-read"]}],
+            "full_run": true,
+            "original_command_indexes": [0],
+            "permission_receipts": [null]
+        })).unwrap();
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "exit_code":0,
+                "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"}],
+            "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+        })).unwrap();
+        let error = validate_manifest_permissions(
+            root.path(),
+            "artifacts",
+            "candidate",
+            &manifest,
+            &results,
+        )
+        .expect_err("a requested command without host receipt cannot receive credit");
+        assert!(error.to_string().contains("receipt"), "{error:#}");
+    }
+
+    #[test]
+    fn version_two_manifest_rejects_changed_command_result_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest: crate::tester::CanonicalRunManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "config_digest": "sha256:config",
+            "extractor_digest": "sha256:extractor",
+            "commands": [{"command":"true", "test_harness":"shell-harness", "permissions":["process-table-read"]}],
+            "full_run": true,
+            "original_command_indexes": [0],
+            "permission_receipts": [null]
+        })).unwrap();
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{"command":"false", "test_harness":"shell-harness", "exit_code":0,
+                "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"}],
+            "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+        })).unwrap();
+        let error = validate_manifest_permissions(
+            root.path(),
+            "artifacts",
+            "candidate",
+            &manifest,
+            &results,
+        )
+        .expect_err("a changed result identity cannot claim the configured command's receipt");
+        assert!(error.to_string().contains("command identity"), "{error:#}");
+    }
+
+    #[test]
+    fn legacy_tester_evidence_cannot_prove_a_permission_request() {
+        let config = b"commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n";
+        let results: crate::tester::TesterResults = serde_json::from_value(serde_json::json!({
+            "candidate_commit": "candidate",
+            "commands": [{
+                "command": "true", "test_harness": "shell-harness", "exit_code": 0,
+                "duration_ms": 1, "stdout_log": "commands/0-stdout.log",
+                "stderr_log": "commands/0-stderr.log"
+            }],
+            "tests": [],
+            "summary": {"total": 0, "pass": 0, "fail": 0, "skipped": 0},
+            "error": null
+        }))
+        .unwrap();
+        let error = reconstruct_legacy_manifest(config, b"extractor", &results)
+            .expect_err("legacy output cannot prove applied permission");
+        assert!(error.to_string().contains("permission"));
+    }
 }
 
 pub(crate) struct UnresolvedReviewCheck {
@@ -3759,6 +4096,7 @@ pub(crate) fn accepted_native_observation_tests(
 }
 
 struct AcceptedRecheckResult {
+    permission_proven: bool,
     source_results: work_model::BoundRecheckArtifact,
     command_index: usize,
     command: String,
@@ -3890,6 +4228,40 @@ fn accepted_recheck_result(
         bound_recovery_artifact(project_root, &format!("{area}/tester-results.json")).ok()?;
     let recheck_results: crate::tester::TesterResults =
         serde_json::from_slice(&recheck_bytes).ok()?;
+    // A recheck needs its own execution proof; the original failing receipt
+    // cannot authorize or attest to this later execution.
+    let source_manifest_path = Path::new(&binding.source_results.path)
+        .parent()?
+        .join("canonical-run.json");
+    let source_manifest = bound_recovery_artifact(project_root, source_manifest_path.to_str()?)
+        .ok()
+        .and_then(|(_, bytes)| {
+            serde_json::from_slice::<crate::tester::CanonicalRunManifest>(&bytes).ok()
+        });
+    let permission_proven = if let Some(source) = source_manifest.as_ref().filter(|source| {
+        manifest.failed_command_indexes.iter().any(|index| {
+            source
+                .commands
+                .get(*index)
+                .is_some_and(|command| !command.permissions.is_empty())
+        })
+    }) {
+        let (_, bytes) =
+            bound_recovery_artifact(project_root, &format!("{area}/canonical-run.json")).ok()?;
+        let execution: crate::tester::CanonicalRunManifest = serde_json::from_slice(&bytes).ok()?;
+        crate::tester_permissions::validate_recheck_permissions(
+            &binding.candidate_commit,
+            source,
+            &execution,
+            &manifest.failed_command_indexes,
+            &recheck_results,
+            |path| Ok(bound_recovery_artifact(project_root, &format!("{area}/{path}"))?.1),
+        )
+        .ok()?;
+        true
+    } else {
+        false
+    };
     let position = manifest
         .failed_command_indexes
         .iter()
@@ -3935,6 +4307,7 @@ fn accepted_recheck_result(
         },
     ]);
     Some(AcceptedRecheckResult {
+        permission_proven,
         source_results: binding.source_results,
         command_index: binding.command_index,
         command: binding.command,

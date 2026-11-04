@@ -1039,6 +1039,8 @@ mod reviewed_host_proof_tests {
                     stdout_log: "commands/0-stdout.log".into(),
                     stderr_log: "commands/0-stderr.log".into(),
                     process_settlement: None,
+                    permission_receipt: None,
+                    permission_receipt_id: None,
                 },
                 CommandResult {
                     failure_cause: None,
@@ -1049,6 +1051,8 @@ mod reviewed_host_proof_tests {
                     stdout_log: "commands/1-stdout.log".into(),
                     stderr_log: "commands/1-stderr.log".into(),
                     process_settlement: None,
+                    permission_receipt: None,
+                    permission_receipt_id: None,
                 },
             ],
             tests: failures

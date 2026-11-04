@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::fmt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
@@ -151,6 +152,94 @@ pub fn profile_with_terminal_resources(
         path: temp_file.path().into(),
         _temp_file: temp_file,
     })
+}
+
+/// Render the immutable Tester policy in memory and publish its first file
+/// inside validated host-only storage. Candidate and user overrides cannot
+/// change the policy identity approved by the operator.
+pub(crate) fn render_protected_tester_profile(
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
+    directory: &Path,
+) -> Result<SandboxProfile> {
+    let content = render_profile_content(
+        include_str!("../sandboxes/common.sb").to_owned(),
+        home,
+        writable_roots,
+        readable_roots,
+        denied_write_roots,
+        None,
+        true,
+    )?;
+    private_tester_profile(content.as_bytes(), directory)
+}
+
+/// Give only one approved Tester command the exact process-table read rule.
+/// Keep the baseline profile available for adjacent commands and extraction.
+pub(crate) fn protect_process_table_profile(
+    baseline: &SandboxProfile,
+    directory: &Path,
+) -> Result<SandboxProfile> {
+    let mut content = std::fs::read(&baseline.path)?;
+    content.extend_from_slice(b"\n");
+    content.extend_from_slice(crate::tester_permissions::PROCESS_TABLE_RULE.as_bytes());
+    content.extend_from_slice(b"\n");
+    private_tester_profile(&content, directory)
+}
+
+fn private_tester_profile(content: &[u8], directory: &Path) -> Result<SandboxProfile> {
+    anyhow::ensure!(
+        directory == std::fs::canonicalize(directory)?,
+        "protected profile directory must be canonical"
+    );
+    let metadata = std::fs::symlink_metadata(directory)?;
+    anyhow::ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0,
+        "protected profile directory has unsafe ownership or permissions"
+    );
+    let mut protected = NamedTempFile::new_in(directory)?;
+    use std::io::Write;
+    protected.write_all(content)?;
+    protected.as_file().sync_all()?;
+    let path = protected.path().to_path_buf();
+    Ok(SandboxProfile {
+        _temp_file: protected,
+        path,
+    })
+}
+
+/// Resolve the account home independently of a worker-controlled HOME value.
+pub(crate) fn operator_home() -> Result<PathBuf> {
+    let mut password = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0u8; 16 * 1024];
+    let mut result = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes within the supplied passwd and buffer. Its
+    // returned pointer remains valid while the buffer is alive.
+    let code = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            password.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    anyhow::ensure!(
+        code == 0 && !result.is_null(),
+        "cannot resolve operator home"
+    );
+    // SAFETY: successful getpwuid_r initialized pw_dir in the live buffer.
+    let home = unsafe {
+        std::ffi::CStr::from_ptr((*result).pw_dir)
+            .to_str()
+            .context("operator home is not UTF-8")?
+            .to_owned()
+    };
+    Ok(PathBuf::from(home))
 }
 
 /// Deny existing source product entries after the profile's broad temporary
@@ -1100,6 +1189,39 @@ fn render_profile_for_access(
         common
     };
 
+    let rendered = render_profile_content(
+        combined,
+        home,
+        writable_roots,
+        readable_roots,
+        denied_write_roots,
+        codex_home,
+        deny_codex_source_home,
+    )?;
+
+    let temp_file = NamedTempFile::with_prefix("fluent-sandbox-")?;
+    std::fs::write(temp_file.path(), &rendered)?;
+
+    let path = temp_file.path().to_path_buf();
+    Ok(SandboxProfile {
+        _temp_file: temp_file,
+        path,
+    })
+}
+
+fn render_profile_content(
+    combined: String,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
+    codex_home: Option<&Path>,
+    deny_codex_source_home: bool,
+) -> Result<String> {
+    anyhow::ensure!(
+        !writable_roots.is_empty(),
+        "At least one writable sandbox root is required"
+    );
     let root_rules = render_root_rules(writable_roots, readable_roots);
     let primary_root = writable_roots[0].to_string_lossy();
     let combined = if combined.contains("_SANDBOX_ROOT_RULES_") {
@@ -1114,6 +1236,20 @@ fn render_profile_for_access(
         .iter()
         .map(|root| format!("(deny file-write* (subpath {}))", sbpl_string(root)))
         .collect::<Vec<_>>();
+    let operator_home = operator_home()?;
+    anyhow::ensure!(
+        operator_home == std::fs::canonicalize(&operator_home)?,
+        "operator home must be canonical"
+    );
+    let permission_store = operator_home.join(".config/fluent/tester-permissions");
+    deny_rules.push(format!(
+        "(deny file-read-data (subpath {}))",
+        sbpl_string(&permission_store)
+    ));
+    deny_rules.push(format!(
+        "(deny file-write* (subpath {}))",
+        sbpl_string(&permission_store)
+    ));
     // Autonomous Codex workers use a staged home.  Deny the interactive source
     // explicitly before common.sb's broad home read grants so the profile cannot
     // reach hooks, configuration, sessions, or the original credentials.
@@ -1146,14 +1282,7 @@ fn render_profile_for_access(
         .replace("_HOME_", home)
         .replace("_SANDBOX_ROOT_", &primary_root);
 
-    let temp_file = NamedTempFile::with_prefix("fluent-sandbox-")?;
-    std::fs::write(temp_file.path(), &rendered)?;
-
-    let path = temp_file.path().to_path_buf();
-    Ok(SandboxProfile {
-        _temp_file: temp_file,
-        path,
-    })
+    Ok(rendered)
 }
 
 fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
@@ -1263,6 +1392,184 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn protected_tester_profile_uses_private_canonical_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A hostile source pathname in a shared temporary directory cannot be
+        // copied: this renderer accepts only trusted policy and root inputs.
+        let hostile = root.join("fluent-sandbox-hostile");
+        std::fs::write(&hostile, "(allow default)").unwrap();
+        let protected = render_protected_tester_profile(
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+            &[],
+            &private,
+        )
+        .unwrap();
+        let bytes = std::fs::read_to_string(&protected.path).unwrap();
+        assert!(bytes.contains("(deny default)"));
+        assert!(!bytes.contains("(allow default)"));
+        assert!(protected.path.starts_with(&private));
+        assert_eq!(
+            std::fs::metadata(&protected.path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&private, &alias).unwrap();
+        assert!(
+            render_protected_tester_profile(
+                "/staged/worker-home",
+                &[root.join("workspace")],
+                &[],
+                &[],
+                &alias,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_tester_profile_never_uses_shared_temp_storage() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let private = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = std::env::var_os("TMPDIR");
+        // Make shared temporary publication impossible. The old render-then-copy
+        // path would fail here before it could create a protected profile.
+        unsafe {
+            std::env::set_var("TMPDIR", private.join("unavailable-shared-temp"));
+        }
+        let shared = NamedTempFile::with_prefix("fluent-sandbox-");
+        let protected = render_protected_tester_profile(
+            "/staged/worker-home",
+            &[private.join("workspace")],
+            &[],
+            &[],
+            &private,
+        );
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("TMPDIR", previous);
+            } else {
+                std::env::remove_var("TMPDIR");
+            }
+        }
+        assert!(
+            shared.is_err(),
+            "the adversarial shared destination must be unavailable"
+        );
+        let protected = protected.expect("publish directly into protected storage");
+        assert_eq!(protected.path.parent(), Some(private.as_path()));
+        let content = std::fs::read_to_string(&protected.path).unwrap();
+        assert!(content.contains("(deny default)"));
+        assert!(content.contains("tester-permissions"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn process_table_rule_matches_four_element_mib_name() {
+        // Ask only for the MIB's name; do not enumerate host processes. XNU
+        // preserves the fourth numeric component when it renders this name.
+        let mut mib = [
+            0,
+            1,
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_ALL,
+            0,
+        ];
+        let mut name = [0u8; 128];
+        let mut length = name.len();
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                name.as_mut_ptr().cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "MIB name lookup: {}",
+            std::io::Error::last_os_error()
+        );
+        let name = std::ffi::CStr::from_bytes_with_nul(&name[..length])
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            crate::tester_permissions::PROCESS_TABLE_RULE,
+            format!("(allow sysctl-read (sysctl-name {name:?}))"),
+            "the exact rule must match the consumer's four-element MIB"
+        );
+    }
+
+    #[test]
+    fn process_table_profile_adds_only_the_declared_read_rule() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let baseline = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(&baseline.path).unwrap();
+        assert!(!original.contains("kern.proc.all"));
+        let granted = protect_process_table_profile(&baseline, &private).unwrap();
+        let content = std::fs::read_to_string(&granted.path).unwrap();
+        assert_eq!(
+            content,
+            format!(
+                "{original}\n{}\n",
+                crate::tester_permissions::PROCESS_TABLE_RULE
+            )
+        );
+        assert_eq!(std::fs::read_to_string(&baseline.path).unwrap(), original);
+        assert!(granted.path.starts_with(&private));
+    }
+
+    #[test]
+    fn worker_profiles_cannot_read_or_write_operator_permission_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile = render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[tmp.path().to_path_buf()],
+            &[],
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(profile.path).unwrap();
+        let authority = operator_home()
+            .unwrap()
+            .join(".config/fluent/tester-permissions");
+        let quoted = sbpl_string(&authority);
+        assert!(content.contains(&format!("(deny file-read-data (subpath {quoted}))")));
+        assert!(content.contains(&format!("(deny file-write* (subpath {quoted}))")));
+    }
 
     #[test]
     fn scoped_writer_tools_allow_mapping_and_deny_installed_writes() {

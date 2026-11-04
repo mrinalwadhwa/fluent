@@ -33,6 +33,8 @@ struct BaselineIdentity {
     source_commit: String,
     tester_config_digest: String,
     extractor_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permission_policy_digest: Option<String>,
     fluent_version: String,
     operating_system: String,
     architecture: String,
@@ -169,7 +171,7 @@ fn capture_with(
     let _lease = crate::lease::acquire_blocking(&lock_path)
         .with_context(|| format!("acquire shared baseline lock {}", lock_path.display()))?;
 
-    if let Some(manifest) = validated_manifest(&cache_dir, &identity, &cache_key)? {
+    if let Some(manifest) = validated_manifest(project_root, &cache_dir, &identity, &cache_key)? {
         copy_tree(&cache_dir.join("artifact"), attempt_artifact_dir)?;
         let source = if identity.scheduler_session.is_some() {
             "reused-scheduler-baseline"
@@ -220,6 +222,13 @@ fn capture_with(
         return Ok(CaptureDisposition::AttemptLocal);
     }
 
+    if let Err(error) = validate_permission_proof(project_root, &artifact_dir, &identity, &results)
+    {
+        clear_provenance(attempt_artifact_dir)?;
+        copy_tree(&artifact_dir, attempt_artifact_dir)?;
+        return Err(error);
+    }
+
     let manifest = BaselineManifest {
         identity,
         cache_key: cache_key.clone(),
@@ -253,8 +262,18 @@ fn resolve_identity(
     no_sandbox: bool,
     scheduler_session: Option<&str>,
 ) -> Result<BaselineIdentity> {
+    let config =
+        crate::tester::read_tester_config(&candidate_workspace.join(".fluent/tester.yaml"))?;
+    let requests_permission = config
+        .commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    anyhow::ensure!(
+        !requests_permission || !no_sandbox,
+        "process-table-read requires the macOS sandbox"
+    );
     Ok(BaselineIdentity {
-        schema_version: 2,
+        schema_version: if requests_permission { 3 } else { 2 },
         scheduler_session: scheduler_session.map(str::to_string),
         source_commit: crate::git::run_stdout(
             candidate_workspace,
@@ -263,6 +282,8 @@ fn resolve_identity(
         )?,
         tester_config_digest: digest_file(&candidate_workspace.join(".fluent/tester.yaml"))?,
         extractor_digest: digest_file(&candidate_workspace.join(".fluent/extract-tester-results"))?,
+        permission_policy_digest: requests_permission
+            .then(crate::tester_permissions::permission_policy_digest),
         fluent_version: crate::version::version_tag(),
         operating_system: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
@@ -290,10 +311,13 @@ fn reuse_existing(
     let lock_path = cache_root.join("locks").join(format!("{cache_key}.lock"));
     let _lease = crate::lease::acquire_blocking(&lock_path)
         .with_context(|| format!("acquire shared baseline lock {}", lock_path.display()))?;
-    Ok(
-        validated_manifest(&cache_root.join(&cache_key), identity, &cache_key)?
-            .map(|manifest| (manifest, cache_key)),
-    )
+    Ok(validated_manifest(
+        project_root,
+        &cache_root.join(&cache_key),
+        identity,
+        &cache_key,
+    )?
+    .map(|manifest| (manifest, cache_key)))
 }
 
 /// Bind a completed final Tester artifact to the immutable baseline identity it
@@ -315,6 +339,7 @@ pub(crate) fn record_final_tester_seed(
             identity.source_commit
         );
     }
+    validate_permission_proof(candidate_workspace, artifact_dir, &identity, &results)?;
     let seed = FinalTesterSeed {
         identity,
         artifact_digest: digest_tree_without_seed(artifact_dir)?,
@@ -391,6 +416,7 @@ fn validated_final_tester_seed(
         bail!("final Tester seed evidence is not trustworthy");
     }
 
+    validate_permission_proof(candidate_workspace, artifact_dir, &seed.identity, &results)?;
     Ok(Some(seed))
 }
 
@@ -406,7 +432,7 @@ fn publish_existing_artifact(
     let _lease = crate::lease::acquire_blocking(&lock_path)
         .with_context(|| format!("acquire landed baseline lock {}", lock_path.display()))?;
 
-    if validated_manifest(&cache_dir, &identity, &cache_key)?.is_some() {
+    if validated_manifest(project_root, &cache_dir, &identity, &cache_key)?.is_some() {
         return Ok(LandedSeedDisposition::Reused { cache_key });
     }
 
@@ -418,6 +444,8 @@ fn publish_existing_artifact(
     let staged_artifact = staging.path().join("artifact");
     copy_tree(artifact_dir, &staged_artifact)?;
     let results_bytes = fs::read(staged_artifact.join(RESULTS_FILE))?;
+    let results: TesterResults = serde_json::from_slice(&results_bytes)?;
+    validate_permission_proof(project_root, &staged_artifact, &identity, &results)?;
     let manifest = BaselineManifest {
         identity,
         cache_key: cache_key.clone(),
@@ -485,6 +513,7 @@ fn identity_key(identity: &BaselineIdentity) -> Result<String> {
 }
 
 fn validated_manifest(
+    project_root: &Path,
     cache_dir: &Path,
     identity: &BaselineIdentity,
     cache_key: &str,
@@ -515,7 +544,44 @@ fn validated_manifest(
     if results.error.is_some() || digest_bytes(&results_bytes) != manifest.results_digest {
         bail!("shared baseline results are not trustworthy");
     }
+    validate_permission_proof(project_root, &artifact_dir, identity, &results)?;
     Ok(Some(manifest))
+}
+
+fn validate_permission_proof(
+    project_root: &Path,
+    artifact_dir: &Path,
+    identity: &BaselineIdentity,
+    results: &TesterResults,
+) -> Result<()> {
+    if identity.permission_policy_digest.is_none() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        identity.permission_policy_digest.as_deref()
+            == Some(crate::tester_permissions::permission_policy_digest().as_str()),
+        "baseline permission policy changed"
+    );
+    let config = crate::git::run_raw(
+        project_root,
+        &[
+            "show",
+            &format!("{}:.fluent/tester.yaml", identity.source_commit),
+        ],
+    )?;
+    anyhow::ensure!(
+        config.status.success() && digest_bytes(&config.stdout) == identity.tester_config_digest,
+        "baseline configuration does not match its source"
+    );
+    let config: crate::tester::TesterConfig = serde_yaml::from_slice(&config.stdout)?;
+    crate::tester_permissions::validate_run_permissions(
+        &identity.source_commit,
+        &identity.tester_config_digest,
+        &identity.extractor_digest,
+        &config.commands,
+        results,
+        |path| Ok(fs::read(artifact_dir.join(path))?),
+    )
 }
 
 fn write_provenance(
@@ -685,6 +751,7 @@ mod tests {
             source_commit: commit.to_string(),
             tester_config_digest: "sha256:config".to_string(),
             extractor_digest: "sha256:extractor".to_string(),
+            permission_policy_digest: None,
             fluent_version: "0.1.5 test".to_string(),
             operating_system: "test-os".to_string(),
             architecture: "test-arch".to_string(),
@@ -697,6 +764,69 @@ mod tests {
             scheduler_session: None,
             ..identity("unused", commit)
         }
+    }
+
+    #[test]
+    fn permission_request_adds_policy_to_cache_identity() {
+        let root = tempfile::tempdir().unwrap();
+        initialized_project(root.path());
+        let legacy = resolve_identity(root.path(), false, None).unwrap();
+        let legacy_value = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_value.get("permission-policy-digest").is_none());
+
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: echo ok\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let requested = resolve_identity(root.path(), false, None).unwrap();
+        assert_eq!(legacy.schema_version, 2);
+        assert_eq!(requested.schema_version, 3);
+        let requested_value = serde_json::to_value(&requested).unwrap();
+        assert!(
+            requested_value["permission-policy-digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_ne!(
+            identity_key(&legacy).unwrap(),
+            identity_key(&requested).unwrap()
+        );
+        assert!(resolve_identity(root.path(), true, None).is_err());
+    }
+
+    #[test]
+    fn permission_request_blocks_unsandboxed_baseline_routes_before_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        initialized_project(root.path());
+        fs::write(
+            root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: echo ok\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let resolver = ContentResolver::new(Some(root.path()));
+        let attempt_artifact = root.path().join("attempt-baseline");
+        let landed_artifact = root.path().join("landed-baseline");
+
+        let capture_error =
+            capture(root.path(), root.path(), &attempt_artifact, true, &resolver).unwrap_err();
+        assert!(
+            capture_error
+                .to_string()
+                .contains("process-table-read requires the macOS sandbox")
+        );
+        assert!(!attempt_artifact.exists());
+
+        let landed_error =
+            capture_landed(root.path(), root.path(), &landed_artifact, true, &resolver)
+                .unwrap_err();
+        assert!(
+            landed_error
+                .to_string()
+                .contains("process-table-read requires the macOS sandbox")
+        );
+        assert!(!landed_artifact.exists());
     }
 
     fn write_trustworthy_artifact(path: &Path, marker: &str) -> Result<TesterOutcome> {
@@ -740,6 +870,141 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn capability_baseline_requires_protected_provenance_before_publication_and_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        initialized_project(root.path());
+        fs::write(root.path().join(".fluent/tester.yaml"),
+            "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n").unwrap();
+        crate::git::run(
+            root.path(),
+            &["add", ".fluent/tester.yaml"],
+            "stage request",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-qm", "Request process metadata"],
+            "commit request",
+        )
+        .unwrap();
+        let identity = resolve_identity(root.path(), false, Some("permission-session")).unwrap();
+        let candidate = identity.source_commit.clone();
+        let attempt = root.path().join("attempt");
+        let outcome = capture_with(root.path(), &attempt, identity.clone(), |artifact| {
+            write_bound_artifact(artifact, &candidate);
+            Ok(TesterOutcome::Passed)
+        });
+        assert!(
+            outcome.is_err(),
+            "capability results without receipts were published"
+        );
+
+        // Recompute every mutable hash to isolate the missing authority check.
+        let key = identity_key(&identity).unwrap();
+        let cache = identity_cache_root(root.path(), &identity)
+            .unwrap()
+            .join(&key);
+        let artifact = cache.join("artifact");
+        fs::create_dir_all(&cache).unwrap();
+        for case in [
+            "missing-manifest",
+            "missing-receipt",
+            "forged-copy",
+            "legacy-downgrade",
+            "changed-command",
+        ] {
+            write_bound_artifact(&artifact, &candidate);
+            let result: TesterResults = serde_json::from_value(serde_json::json!({
+                "candidate_commit":candidate,"commands":[{
+                    "command":"true","test_harness":"shell-harness","exit_code":0,"duration_ms":1,
+                    "stdout_log":"commands/0-stdout.log","stderr_log":"commands/0-stderr.log",
+                    "permission_receipt":"commands/0-permission-receipt.json","permission_receipt_id":"forged.json"
+                }],"tests":[],"summary":{"total":0,"pass":0,"fail":0,"skipped":0},"error":null
+            })).unwrap();
+            fs::write(
+                artifact.join(RESULTS_FILE),
+                serde_json::to_vec(&result).unwrap(),
+            )
+            .unwrap();
+            fs::write(artifact.join("commands/0-stderr.log"), "").unwrap();
+            fs::write(
+                artifact.join("commands/0-permission-receipt.json"),
+                "forged",
+            )
+            .unwrap();
+            if case != "missing-manifest" {
+                let mut manifest = serde_json::json!({
+                    "schema_version":2,"config_digest":identity.tester_config_digest,
+                    "extractor_digest":identity.extractor_digest,"full_run":true,
+                    "commands":[{"command":"true","test_harness":"shell-harness","permissions":["process-table-read"]}],
+                    "original_command_indexes":[0],"permission_receipts":["forged.json"]
+                });
+                match case {
+                    "missing-receipt" => {
+                        manifest["permission_receipts"][0] = serde_json::Value::Null
+                    }
+                    "legacy-downgrade" => {
+                        manifest["schema_version"] = serde_json::json!(1);
+                        manifest["commands"][0]["permissions"] = serde_json::json!([]);
+                    }
+                    "changed-command" => {
+                        manifest["commands"][0]["command"] = serde_json::json!("false")
+                    }
+                    _ => {}
+                }
+                fs::write(
+                    artifact.join("canonical-run.json"),
+                    serde_json::to_vec(&manifest).unwrap(),
+                )
+                .unwrap();
+            }
+            let manifest = BaselineManifest {
+                identity: identity.clone(),
+                cache_key: key.clone(),
+                artifact_digest: digest_tree(&artifact).unwrap(),
+                results_digest: digest_file(&artifact.join(RESULTS_FILE)).unwrap(),
+            };
+            fs::write(
+                cache.join(MANIFEST_FILE),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                validated_manifest(root.path(), &cache, &identity, &key).is_err(),
+                "{case}"
+            );
+            let final_identity = resolve_identity(root.path(), false, None).unwrap();
+            let seed = FinalTesterSeed {
+                identity: final_identity,
+                artifact_digest: digest_tree_without_seed(&artifact).unwrap(),
+                results_digest: digest_file(&artifact.join(RESULTS_FILE)).unwrap(),
+            };
+            fs::write(
+                artifact.join(FINAL_TESTER_SEED_FILE),
+                serde_json::to_vec(&seed).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                reusable_final_tester(root.path(), &artifact, &candidate, false).is_err(),
+                "{case}"
+            );
+            assert!(
+                promote_final_tester(root.path(), root.path(), &artifact, &candidate, false)
+                    .is_err(),
+                "{case}"
+            );
+            assert!(
+                record_final_tester_seed(root.path(), &artifact, false).is_err(),
+                "{case}"
+            );
+            assert!(
+                publish_existing_artifact(root.path(), &artifact, identity.clone()).is_err(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -925,6 +1190,9 @@ mod tests {
         changed.extractor_digest = "sha256:other-extractor".to_string();
         identities.push(changed);
         let mut changed = original.clone();
+        changed.permission_policy_digest = Some("sha256:other-policy".to_string());
+        identities.push(changed);
+        let mut changed = original.clone();
         changed.fluent_version = "0.1.6 test".to_string();
         identities.push(changed);
         let mut changed = original.clone();
@@ -938,7 +1206,8 @@ mod tests {
         identities.push(changed);
 
         for (index, identity) in identities.into_iter().enumerate() {
-            capture_with(
+            let requests_permission = identity.permission_policy_digest.is_some();
+            let outcome = capture_with(
                 root.path(),
                 &root.path().join(format!("attempt-{index}")),
                 identity,
@@ -946,10 +1215,17 @@ mod tests {
                     runs.fetch_add(1, Ordering::SeqCst);
                     write_trustworthy_artifact(path, &index.to_string())
                 },
-            )
-            .unwrap();
+            );
+            if requests_permission {
+                assert!(
+                    outcome.is_err(),
+                    "unproven capability identity must not publish"
+                );
+            } else {
+                outcome.unwrap();
+            }
         }
-        assert_eq!(runs.load(Ordering::SeqCst), 10);
+        assert_eq!(runs.load(Ordering::SeqCst), 11);
     }
 
     #[test]

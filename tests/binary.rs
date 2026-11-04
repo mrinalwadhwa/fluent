@@ -16248,6 +16248,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
         ("ownership", "FLUENT_OWNERSHIP_OLD_BIN"),
         ("launch-handoff", "FLUENT_LAUNCH_HANDOFF_OLD_BIN"),
         ("verification", "FLUENT_VERIFICATION_OLD_BIN"),
+        ("tester-permission", "FLUENT_TESTER_PERMISSION_OLD_BIN"),
         ("usage-limit", "FLUENT_USAGE_LIMIT_OLD_BIN"),
         (
             "writer-assignment-main",
@@ -16305,6 +16306,8 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
         ("ownership", 37, true),
         ("verification", 37, false),
         ("verification", 37, true),
+        ("tester-permission", 37, false),
+        ("tester-permission", 37, true),
         ("round-cap-approach-revision-stable", 37, false),
         ("round-cap-approach-revision-stable", 37, true),
         ("round-cap-approach-revision-assignment", 37, false),
@@ -16379,7 +16382,7 @@ fn fluent_release_tester_historical_reader_setup_fails_closed() {
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$FLUENT_TEST_CARGO_CALLS"
-printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_RELEASED_060_BIN-unset}" "${FLUENT_CLAUDE_SESSION_OLD_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" "${FLUENT_NO_CHANGE_COMPLETION_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
+printf '%s\n' "${FLUENT_RELEASED_050_BIN-unset}" "${FLUENT_RELEASED_060_BIN-unset}" "${FLUENT_CLAUDE_SESSION_OLD_BIN-unset}" "${FLUENT_OWNERSHIP_OLD_BIN-unset}" "${FLUENT_LAUNCH_HANDOFF_OLD_BIN-unset}" "${FLUENT_VERIFICATION_OLD_BIN-unset}" "${FLUENT_TESTER_PERMISSION_OLD_BIN-unset}" "${FLUENT_USAGE_LIMIT_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_MAIN_OLD_BIN-unset}" "${FLUENT_WRITER_ASSIGNMENT_PAUSED_OLD_BIN-unset}" "${FLUENT_CARRIED_FINDING_OLD_BIN-unset}" "${FLUENT_COMBINED_BASE_OLD_BIN-unset}" "${FLUENT_COMBINED_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_COMBINED_EVIDENCE_OLD_BIN-unset}" "${FLUENT_OUTPUT_FREE_CONTEXT_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN-unset}" "${FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN-unset}" "${FLUENT_INSTALLATION_MAIN_OLD_BIN-unset}" "${FLUENT_INSTALLATION_OUTPUT_FREE_OLD_BIN-unset}" "${FLUENT_INSTALLATION_ACCEPTED_PROOF_OLD_BIN-unset}" "${FLUENT_LANDING_RECOVERY_OLD_BIN-unset}" "${FLUENT_NO_CHANGE_COMPLETION_OLD_BIN-unset}" >> "$FLUENT_TEST_READER_PATHS"
 case "$1" in
     build) mkdir -p target/debug; touch target/debug/fluent ;;
     nextest) exit 0 ;;
@@ -16399,6 +16402,7 @@ esac
             .env_remove("FLUENT_OWNERSHIP_OLD_BIN")
             .env_remove("FLUENT_LAUNCH_HANDOFF_OLD_BIN")
             .env_remove("FLUENT_VERIFICATION_OLD_BIN")
+            .env_remove("FLUENT_TESTER_PERMISSION_OLD_BIN")
             .env_remove("FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN")
             .env_remove("FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN")
             .env_remove("FLUENT_USAGE_LIMIT_OLD_BIN")
@@ -29780,6 +29784,1885 @@ fn tester_check_uses_production_tester_boundary() {
         "run_with_sandbox_profile sandboxed=false\n",
         "tester check must enter the production runner that owns command execution and normalization"
     );
+}
+
+#[test]
+fn tester_permissions_readiness_cannot_self_approve() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let extractor = project.join(".fluent/extract-tester-results");
+    fs::write(project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n").unwrap();
+    fs::write(&extractor, r#"#!/bin/sh
+candidate=$(git rev-parse HEAD)
+request=$("$SELF_APPROVAL_CLI" tester permissions show --candidate "$candidate" --command-index 0 | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_digest"])')
+"$SELF_APPROVAL_CLI" tester permissions approve --candidate "$candidate" --command-index 0 --capability process-table-read --request-digest "$request" >/dev/null
+echo '[]'
+"#).unwrap();
+    fs::set_permissions(&extractor, fs::Permissions::from_mode(0o755)).unwrap();
+    git::run(&project, &["add", ".fluent"], "stage extractor").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add readiness extractor"],
+        "commit extractor",
+    )
+    .unwrap();
+    let launcher = tmp.path().join("launcher");
+    let trace = tmp.path().join("profile.sb");
+    // Route-only seam: stop candidate code at the sandbox boundary and capture
+    // the policy. Real OS denials remain the separate host acceptance check.
+    fs::write(
+        &launcher,
+        "#!/bin/sh\ncp \"$2\" \"$READINESS_PROFILE\"\nexit 19\n",
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .env("READINESS_PROFILE", &trace)
+        .env("SELF_APPROVAL_CLI", assert_cmd::cargo::cargo_bin("fluent"))
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        trace.exists(),
+        "readiness must reach the sandbox before running extractor code"
+    );
+    let policy = fs::read_to_string(trace).unwrap();
+    assert!(policy.contains("(deny file-write* (subpath"));
+    assert!(policy.contains("tester-permissions"));
+    assert!(!policy.contains("kern.proc.all.0"));
+    if authority.exists() {
+        assert!(
+            !fs::read_dir(authority).unwrap().any(|e| e
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|x| x == "json")),
+            "extractor must not create approval"
+        );
+    }
+}
+
+#[test]
+fn tester_permissions_preserve_legacy_default_contract() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let result = tmp.path().join("legacy-command-ran");
+    for permissions in ["", "    permissions: []\n"] {
+        fs::write(
+            project.join(".fluent/tester.yaml"),
+            format!(
+                "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n{permissions}",
+                result.display()
+            ),
+        )
+        .unwrap();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["tester", "check", "--no-sandbox"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Tester passed"));
+        assert!(result.exists(), "legacy command should still launch");
+        fs::remove_file(&result).unwrap();
+    }
+}
+
+#[test]
+fn tester_permissions_show_current_request_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let args = [
+        "tester",
+        "permissions",
+        "show",
+        "--candidate",
+        candidate.as_str(),
+        "--command-index",
+        "0",
+    ];
+    let before = git::run_stdout(
+        &project,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "read status",
+    )
+    .unwrap();
+    let first = fluent_cmd()
+        .current_dir(&project)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = fluent_cmd()
+        .current_dir(&project)
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(first.stdout, second.stdout);
+    let shown: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(shown["candidate_commit"], candidate);
+    assert_eq!(shown["command_index"], 0);
+    assert_eq!(shown["command"], "true");
+    assert_eq!(shown["capability"], "process-table-read");
+    assert_eq!(shown["approval_state"], "absent");
+    assert!(shown["metadata_exposure"].as_array().unwrap().len() > 2);
+    assert!(
+        shown["request_digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(
+        before,
+        git::run_stdout(
+            &project,
+            &["status", "--porcelain", "--untracked-files=all"],
+            "read status"
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn tester_permissions_reject_symlinked_request_inputs() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let config = project.join(".fluent/tester.yaml");
+    fs::write(
+        &config,
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+
+    for (index, path) in [config, project.join(".fluent/extract-tester-results")]
+        .into_iter()
+        .enumerate()
+    {
+        let outside = tmp.path().join(format!("outside-{index}"));
+        fs::write(&outside, fs::read(&path).unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        let relative = path.strip_prefix(&project).unwrap().to_str().unwrap();
+        git::run(&project, &["add", relative], "stage alias").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Alias Tester input"],
+            "commit alias",
+        )
+        .unwrap();
+        let candidate =
+            git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+        fluent_cmd()
+            .current_dir(&project)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .assert()
+            .failure();
+        fs::remove_file(&path).unwrap();
+        fs::copy(&outside, &path).unwrap();
+        git::run(&project, &["add", relative], "stage restored input").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Restore Tester input"],
+            "commit restored input",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn tester_permissions_approve_exact_request_without_launch() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let request = show();
+    let digest = request["request_digest"].as_str().unwrap();
+    assert_eq!(request["approval_state"], "absent");
+    let approve = |digest: &str| {
+        fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "approve",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+                "--capability",
+                "process-table-read",
+                "--request-digest",
+                digest,
+            ])
+            .output()
+            .unwrap()
+    };
+    let first = approve(digest);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let repeated = approve(digest);
+    assert!(repeated.status.success());
+    assert_eq!(
+        first.stdout, repeated.stdout,
+        "same approval must be idempotent"
+    );
+    let approved: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert!(
+        approved["approval_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(show()["approval_state"], "approved");
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("lack per-command profiles"));
+    assert!(!approve("sha256:wrong").status.success());
+    let alias = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("authority-alias");
+    std::os::unix::fs::symlink(&authority, &alias).unwrap();
+    let alias_attempt = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &alias)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            digest,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !alias_attempt.status.success(),
+        "authority alias must fail closed"
+    );
+    assert!(!sentinel.exists(), "approval must not launch the command");
+}
+
+#[test]
+fn tester_permissions_revoke_blocks_future_launches() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: touch '{}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let request = show();
+    let digest = request["request_digest"].as_str().unwrap();
+    let approve = || {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "approve",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                "0",
+                "--capability",
+                "process-table-read",
+                "--request-digest",
+                digest,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let approval = approve();
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    assert_eq!(show()["approval_state"], "approved");
+    let launcher = tmp.path().join("sandbox-launcher");
+    fs::write(&launcher, "#!/bin/sh\nshift 2\nexec \"$@\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .args(["tester", "check"])
+        .assert()
+        .success();
+    assert!(sentinel.exists());
+    fs::remove_file(&sentinel).unwrap();
+    assert!(fs::read_dir(&authority).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("receipt-")
+    }));
+
+    let later_tmp = TempDir::new().unwrap();
+    let later_project = setup_git_project(&later_tmp);
+    fs::write(
+        later_project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(
+        &later_project,
+        &["add", ".fluent/tester.yaml"],
+        "stage later request",
+    )
+    .unwrap();
+    git::run(
+        &later_project,
+        &["commit", "-m", "Request process metadata"],
+        "commit later request",
+    )
+    .unwrap();
+    let later_candidate = git::run_stdout(
+        &later_project,
+        &["rev-parse", "HEAD"],
+        "read later candidate",
+    )
+    .unwrap();
+    let later_show = fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &later_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(later_show.status.success());
+    let later_request: serde_json::Value = serde_json::from_slice(&later_show.stdout).unwrap();
+    let later_approve = fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &later_candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            later_request["request_digest"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(later_approve.status.success());
+    let later_approval: serde_json::Value = serde_json::from_slice(&later_approve.stdout).unwrap();
+    fluent_cmd()
+        .current_dir(&later_project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "revoke",
+            later_approval["approval_id"].as_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args(["tester", "permissions", "revoke", approval_id])
+        .assert()
+        .success();
+    assert_eq!(show()["approval_state"], "revoked");
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .args(["tester", "check"])
+        .assert()
+        .failure();
+    assert!(!sentinel.exists());
+    let renewed = approve();
+    assert_ne!(renewed["approval_id"], approval_id);
+    assert_eq!(show()["approval_state"], "approved");
+}
+
+#[test]
+fn tester_permissions_enforce_one_contract_across_routes() {
+    use fluent::work_model::{TaskKind, TaskOutput, TaskStatus, WorkItem};
+
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let sentinel = tmp.path().join("permission-command-launched");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: 'true'\n    test_harness: shell-harness\n  - command: 'touch {}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process-table-read requires the macOS sandbox",
+        ));
+    assert!(!sentinel.exists());
+
+    let candidate = git_head(&project);
+    let store = WorkModelStore::new(&project);
+    let prepare_final_tester = |work: &str, branch: &str| {
+        let mut item = WorkItem::planned(work, "Verify Tester permission routes");
+        item.add_initial_attempt("attempt-1").unwrap();
+        let writer = &mut item.attempts[0].tasks[0];
+        let workspace = writer.workspace_access.writes[0].clone();
+        git::run(
+            &project,
+            &["worktree", "add", "-b", branch, &workspace.path, &candidate],
+            "create route candidate",
+        )
+        .unwrap();
+        writer.status = TaskStatus::Complete;
+        writer.output = Some(TaskOutput {
+            workspace_id: workspace.id,
+            workspace_path: workspace.path,
+            source_branch: branch.into(),
+            base_commit: Some(candidate.clone()),
+            commit: candidate.clone(),
+            no_change: None,
+            learner_canonicalization: None,
+        });
+        let writer_area = project.join(&writer.artifact_area.as_ref().unwrap().path);
+        fs::create_dir_all(&writer_area).unwrap();
+        fs::write(writer_area.join("transcript.jsonl"), "{}\n").unwrap();
+        item.add_next_review_tasks("attempt-1", fluent::review::REVIEWERS)
+            .unwrap();
+        for review in item.attempts[0]
+            .tasks
+            .iter_mut()
+            .filter(|task| task.kind == TaskKind::Review)
+        {
+            review.status = TaskStatus::Complete;
+            let path = project
+                .join(&review.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "Verdict: pass\n\n## Findings\n").unwrap();
+        }
+        let tester = item.add_final_tester_task("attempt-1").unwrap();
+        store.create_work_item(&item).unwrap();
+        tester
+    };
+    let work = "process-table-direct-route";
+    let tester = prepare_final_tester(work, "direct-route-candidate");
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["task", "run", work, "attempt-1", &tester, "--no-sandbox"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process-table-read requires the macOS sandbox",
+        ));
+    assert!(!sentinel.exists());
+    let archived = store.read_work_item(work).unwrap();
+    assert_eq!(
+        archived.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == tester)
+            .unwrap()
+            .status,
+        TaskStatus::NeedsUser
+    );
+
+    let scheduled_work = "process-table-scheduled-route";
+    let scheduled_tester = prepare_final_tester(scheduled_work, "scheduled-route-candidate");
+    fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "attempt",
+            "run",
+            scheduled_work,
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "process-table-read requires the macOS sandbox",
+        ));
+    assert!(!sentinel.exists());
+    let scheduled = store.read_work_item(scheduled_work).unwrap();
+    assert_eq!(
+        scheduled.attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == scheduled_tester)
+            .unwrap()
+            .status,
+        TaskStatus::NeedsUser
+    );
+
+    let source: fluent::tester::TesterResults = serde_json::from_value(serde_json::json!({
+        "candidate_commit": null,
+        "commands": [
+            {"command":"true", "test_harness":"shell-harness", "exit_code":0,
+             "duration_ms":1, "stdout_log":"commands/0-stdout.log", "stderr_log":"commands/0-stderr.log"},
+            {"command":format!("touch {}", sentinel.display()), "test_harness":"shell-harness", "exit_code":1,
+             "duration_ms":1, "stdout_log":"commands/1-stdout.log", "stderr_log":"commands/1-stderr.log"}
+        ],
+        "tests":[], "summary":{"total":0,"pass":0,"fail":0,"skipped":0}, "error":null
+    })).unwrap();
+    let (recheck, indexes) = fluent::tester::plan_failed_commands(&project, &source).unwrap();
+    assert_eq!(indexes, vec![1]);
+    let error = fluent::tester::prepare_sandbox_profile(
+        &project,
+        tmp.path(),
+        true,
+        &fluent::content::ContentResolver::new(None),
+        &recheck,
+    )
+    .err()
+    .expect("recheck must preserve the selected command's permission request");
+    assert!(
+        error
+            .to_string()
+            .contains("process-table-read requires the macOS sandbox")
+    );
+    assert!(!sentinel.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn tester_permissions_host_fixture_retains_dirty_candidate_diagnostics() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let evidence = tmp.path().join("host-evidence");
+    fs::write(project.join(".fluent/tester.yaml"), "commands: []\n").unwrap();
+    let head = git::run_stdout(&project, &["rev-parse", "HEAD"], "read fixture HEAD").unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/verify-tester-process-table-permissions-host.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .current_dir(&project)
+        .env("FLUENT_HOST_EVIDENCE_DIR", &evidence)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("candidate has tracked changes"));
+    assert_eq!(
+        fs::read_to_string(evidence.join("initial-head.txt"))
+            .unwrap()
+            .trim(),
+        head
+    );
+    assert!(
+        fs::read_to_string(evidence.join("initial-status.txt"))
+            .unwrap()
+            .contains(".fluent/tester.yaml")
+    );
+    assert!(!evidence.join("build.log").exists());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn tester_permissions_host_fixture_retains_sysctl_failure_diagnostics() {
+    let tmp = TempDir::new().unwrap();
+    let script = include_str!("fixtures/verify-tester-process-table-permissions-host.sh");
+    let probe = script
+        .split_once("cat > \"$fixture/probe.c\" <<'C'\n")
+        .unwrap()
+        .1
+        .split_once("\nC\n")
+        .unwrap()
+        .0;
+    // Replace only the syscall. No host process table is read by this check.
+    let source = format!(
+        "#define sysctl fixture_sysctl\n{probe}\n{}",
+        r#"
+int fixture_sysctl(int *mib, u_int length, void *old, size_t *bytes,
+                   void *new_value, size_t new_length) {
+    if (length != 4 || mib[0] != CTL_KERN || mib[1] != KERN_PROC ||
+        mib[2] != KERN_PROC_ALL || mib[3] != 0 ||
+        new_value != NULL || new_length != 0) abort();
+    if (old == NULL && strcmp(getenv("FAIL_PHASE"), "data") == 0) {
+        *bytes = sizeof(struct kinfo_proc);
+        return 0;
+    }
+    errno = atoi(getenv("FAIL_ERRNO"));
+    return -1;
+}
+"#
+    );
+    let source_path = tmp.path().join("probe.c");
+    let binary = tmp.path().join("probe");
+    fs::write(&source_path, source).unwrap();
+    let build = Command::new("/usr/bin/clang")
+        .args(["-Wall", "-Wextra", "-Werror", "-o"])
+        .arg(&binary)
+        .arg(&source_path)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    for (phase, errno) in [
+        ("size", libc::EPERM),
+        ("data", libc::EACCES),
+        ("data", libc::ENOMEM),
+    ] {
+        for mode in ["allowed", "denied"] {
+            let output = Command::new(&binary)
+                .arg(mode)
+                .env("FAIL_PHASE", phase)
+                .env("FAIL_ERRNO", errno.to_string())
+                .output()
+                .unwrap();
+            let expected = if mode == "allowed" {
+                6
+            } else if errno == libc::ENOMEM {
+                5
+            } else {
+                0
+            };
+            assert_eq!(output.status.code(), Some(expected));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(&format!("phase={phase}")), "{stderr}");
+            assert!(stderr.contains(&format!("errno={errno}")), "{stderr}");
+            assert!(stderr.contains("mib=[1,14,0,0] length=4"), "{stderr}");
+            let error = std::io::Error::from_raw_os_error(errno).to_string();
+            assert!(
+                stderr.contains(error.split(" (os error").next().unwrap()),
+                "{stderr}"
+            );
+            assert!(output.stdout.is_empty(), "do not dump process metadata");
+        }
+    }
+
+    // Standalone Tester artifacts are temporary. Execute the generated command
+    // with the failing syscall double to prove diagnostics survive that run.
+    fs::create_dir(tmp.path().join(".fluent")).unwrap();
+    let generator = script
+        .split_once("python3 - \"$fixture\" \"$fixture_pid\" <<'PY'\n")
+        .unwrap()
+        .1
+        .split_once("\nPY\n")
+        .unwrap()
+        .0;
+    let generated = Command::new("python3")
+        .args(["-c", generator])
+        .arg(tmp.path())
+        .arg("123")
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(tmp.path().join(".fluent/tester.yaml")).unwrap()).unwrap();
+    let command = config["commands"][0]["command"].as_str().unwrap();
+    let failed = Command::new("bash")
+        .args(["-c", command])
+        .env("FAIL_PHASE", "data")
+        .env("FAIL_ERRNO", libc::EACCES.to_string())
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(6));
+    let retained = fs::read_to_string(tmp.path().join("process-table-query.stderr")).unwrap();
+    assert!(retained.contains("phase=data"), "{retained}");
+    assert!(
+        retained.contains(&format!("errno={}", libc::EACCES)),
+        "{retained}"
+    );
+}
+
+#[test]
+fn tester_permissions_host_fixture_extractor_distinguishes_readiness() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    // Include shell-sensitive characters to exercise the generated probe path.
+    let fixture = tmp.path().join("fixture with 'quotes'");
+    fs::create_dir_all(fixture.join(".fluent")).unwrap();
+    let script = include_str!("fixtures/verify-tester-process-table-permissions-host.sh");
+    let generator = script
+        .split_once("python3 - \"$fixture\" \"$fixture_pid\" <<'PY'\n")
+        .unwrap()
+        .1
+        .split_once("\nPY\n")
+        .unwrap()
+        .0;
+    let output = Command::new("python3")
+        .args(["-c", generator])
+        .arg(&fixture)
+        .arg("123")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let probe_log = fixture.join("probe.log");
+    fs::write(
+        fixture.join("probe"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROBE_LOG\"\nexit \"$PROBE_EXIT\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(fixture.join("probe"), fs::Permissions::from_mode(0o755)).unwrap();
+    let extractor = fixture.join(".fluent/extract-tester-results");
+    fs::set_permissions(&extractor, fs::Permissions::from_mode(0o755)).unwrap();
+    let artifact = tmp.path().join("artifact");
+    fs::create_dir(&artifact).unwrap();
+    let extract = |probe_exit: &str| {
+        Command::new(&extractor)
+            .arg(&artifact)
+            .env("PROBE_LOG", &probe_log)
+            .env("PROBE_EXIT", probe_exit)
+            .output()
+            .unwrap()
+    };
+
+    // Empty readiness artifacts must not run command-result denial probes.
+    fs::write(artifact.join("commands.json"), "[ ]\n").unwrap();
+    let readiness = extract("5");
+    assert!(
+        readiness.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readiness.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&readiness.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    assert!(
+        !probe_log.exists(),
+        "readiness must not run the denial probe"
+    );
+
+    // Executed artifacts still require the probe to observe denied access.
+    fs::write(artifact.join("commands.json"), r#"[{"exit_code":0}]"#).unwrap();
+    let denied = extract("0");
+    assert!(denied.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&denied.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    assert_eq!(fs::read_to_string(&probe_log).unwrap(), "denied\n");
+    let allowed = extract("5");
+    assert_eq!(allowed.status.code(), Some(5));
+    assert!(
+        allowed.stdout.is_empty(),
+        "failed denial must not emit passing results"
+    );
+    assert_eq!(fs::read_to_string(&probe_log).unwrap(), "denied\ndenied\n");
+    for commands in [
+        r#"[{"exit_code":1},{"exit_code":0}]"#,
+        r#"[{"exit_code":0},{"exit_code":17}]"#,
+    ] {
+        fs::write(artifact.join("commands.json"), commands).unwrap();
+        let failed = extract("0");
+        assert!(
+            !failed.status.success(),
+            "failed command must fail host extraction: {commands}"
+        );
+        assert!(failed.stdout.is_empty());
+    }
+}
+
+#[test]
+fn tester_permissions_profile_watcher_selects_process_table_profile() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join("authority");
+    fs::create_dir(&store).unwrap();
+    fs::write(store.join("baseline"), b"(version 1)\n(deny default)\n").unwrap();
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))\n";
+    fs::write(store.join("unrelated-profile"), profile).unwrap();
+    let selected = store.join("selected");
+    let path_file = tmp.path().join("profile-path.txt");
+    let evidence = tmp.path().join("selected-profile.sb");
+    let ready = tmp.path().join("watcher-ready");
+    let watcher = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/watch-tester-process-table-profile.py");
+    let mut child = Command::new("python3")
+        .args([
+            watcher.as_os_str(),
+            store.as_os_str(),
+            path_file.as_os_str(),
+            evidence.as_os_str(),
+            ready.as_os_str(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !ready.exists() {
+        let _ = child.kill();
+        panic!("profile watcher did not establish its starting snapshot");
+    }
+    fs::write(&selected, profile).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(path_file).unwrap().trim(),
+        selected.to_str().unwrap()
+    );
+    assert_eq!(fs::read(evidence).unwrap(), profile);
+}
+
+#[test]
+fn tester_permissions_host_receipt_matches_captured_profile() {
+    let tmp = TempDir::new().unwrap();
+    let authority = tmp.path().join("authority");
+    let evidence = tmp.path().join("evidence");
+    fs::create_dir(&authority).unwrap();
+    fs::create_dir(&evidence).unwrap();
+    let profile = b"(version 1)\n(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))\n";
+    fs::write(evidence.join("selected-profile.sb"), b"other profile").unwrap();
+    let receipt = serde_json::json!({
+        "candidate_commit": "fixture-candidate",
+        "approval_id": "fixture-approval",
+        "request_digest": "fixture-request",
+        "execution_mode": "macos-seatbelt",
+        "host_platform": "macos",
+        "command_index": 0,
+        "exit_code": 0,
+        "profile_digest": format!("sha256:{:x}", Sha256::digest(profile)),
+        "admitted_at": "2026-10-11T00:00:00Z",
+        "settled_at": "2026-10-11T00:00:01Z"
+    });
+    write_json_path(&authority.join("receipt-fixture.json"), &receipt);
+    let verifier = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/verify-tester-process-table-receipt.py");
+    let check = || {
+        Command::new("python3")
+            .args([
+                verifier.as_os_str(),
+                evidence.as_os_str(),
+                authority.as_os_str(),
+                std::ffi::OsStr::new("fixture-candidate"),
+                std::ffi::OsStr::new("fixture-approval"),
+                std::ffi::OsStr::new("fixture-request"),
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !check().status.success(),
+        "unrelated profile must not match receipt"
+    );
+    fs::write(evidence.join("selected-profile.sb"), profile).unwrap();
+    let matched = check();
+    assert!(
+        matched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matched.stderr)
+    );
+    assert_eq!(
+        fs::read(evidence.join("protected-receipt.json")).unwrap(),
+        fs::read(authority.join("receipt-fixture.json")).unwrap()
+    );
+}
+
+#[test]
+fn tester_permissions_denied_update_probe_requires_an_existing_denied_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let probe =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-denied-file-update.sh");
+    let target = tmp.path().join("target");
+    let call = |path: &Path, touch_program: Option<&Path>| {
+        let mut command = Command::new("/bin/sh");
+        command.arg(&probe).arg(path);
+        if let Some(touch_program) = touch_program {
+            command.arg(touch_program);
+        }
+        command.output().unwrap()
+    };
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_touch = fake_bin.join("touch");
+    fs::write(&fake_touch, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&fake_touch, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!call(&target, Some(&fake_touch)).status.success());
+    fs::write(&target, "fixture").unwrap();
+    assert!(!call(&target, None).status.success());
+    assert!(call(&target, Some(&fake_touch)).status.success());
+    let alias = tmp.path().join("target-alias");
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+    assert!(!call(&alias, None).status.success());
+    assert!(call(&alias, Some(&fake_touch)).status.success());
+}
+
+#[test]
+#[serial]
+fn tester_permissions_late_revocation_preserves_completed_commands() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let project = fs::canonicalize(setup_git_project(&tmp)).unwrap();
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let artifact = tmp.path().join("artifact");
+    fs::create_dir(&artifact).unwrap();
+    let second = tmp.path().join("second-launched");
+    fs::write(project.join(".fluent/tester.yaml"), format!(
+        "commands:\n  - command: 'echo first-completed'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n  - command: 'touch {}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n", second.display())).unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage commands").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add two commands"],
+        "commit commands",
+    )
+    .unwrap();
+    let candidate = git_head(&project);
+    let mut approvals = Vec::new();
+    for index in ["0", "1"] {
+        let shown = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                index,
+            ])
+            .output()
+            .unwrap();
+        assert!(shown.status.success());
+        let request: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+        let approved = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "approve",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                index,
+                "--capability",
+                "process-table-read",
+                "--request-digest",
+                request["request_digest"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(approved.status.success());
+        approvals.push(serde_json::from_slice::<serde_json::Value>(&approved.stdout).unwrap());
+    }
+    let launcher = tmp.path().join("launcher");
+    // Simulate the host revoking the next grant as the first child settles.
+    fs::write(
+        &launcher,
+        r#"#!/bin/sh
+shift 2
+"$@"
+code=$?
+"$REVOCATION_CLI" tester permissions revoke "$NEXT_APPROVAL" >/dev/null
+exit "$code"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    unsafe {
+        std::env::set_var("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority);
+        std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
+        std::env::set_var("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher);
+        std::env::set_var("REVOCATION_CLI", assert_cmd::cargo::cargo_bin("fluent"));
+        std::env::set_var(
+            "NEXT_APPROVAL",
+            approvals[1]["approval_id"].as_str().unwrap(),
+        );
+    }
+    let outcome = fluent::tester::run(
+        &project,
+        &artifact,
+        false,
+        &fluent::content::ContentResolver::new(Some(&project)),
+    );
+    unsafe {
+        for key in [
+            "FLUENT_TEST_TESTER_PERMISSION_STORE",
+            "FLUENT_TEST_HOST_SANDBOX_PREFLIGHT",
+            "FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC",
+            "REVOCATION_CLI",
+            "NEXT_APPROVAL",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+    assert!(matches!(
+        outcome.unwrap(),
+        fluent::tester::TesterOutcome::HarnessError
+    ));
+    assert!(!second.exists());
+    let commands: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifact.join("commands.json")).unwrap()).unwrap();
+    assert_eq!(commands.as_array().unwrap().len(), 1);
+    assert_eq!(commands[0]["exit_code"], 0);
+    assert!(
+        fs::read_to_string(artifact.join("commands/0-stdout.log"))
+            .unwrap()
+            .contains("first-completed")
+    );
+    let results: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifact.join("tester-results.json")).unwrap()).unwrap();
+    assert_eq!(results["commands"], commands);
+    assert_eq!(results["error"]["kind"], "command_launch_admission");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(artifact.join("canonical-run.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["permission_receipts"][0],
+        commands[0]["permission_receipt_id"]
+    );
+    assert!(manifest["permission_receipts"][0].is_string());
+    assert!(manifest["permission_receipts"][1].is_null());
+}
+
+#[test]
+fn tester_permissions_record_applied_authority_in_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'printf applied-authority'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let shown = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let request: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let request_digest = request["request_digest"].as_str().unwrap();
+    let approved = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            request_digest,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let approval: serde_json::Value = serde_json::from_slice(&approved.stdout).unwrap();
+    // An ignored policy override introduced after approval must not change any
+    // capability-bearing execution input while tracked source stays clean.
+    fs::create_dir_all(project.join(".fluent/sandbox")).unwrap();
+    fs::write(
+        project.join(".fluent/sandbox/common.sb"),
+        "(version 1)\n(deny default)\n(allow default) ; UNTRUSTED_OVERRIDE\n",
+    )
+    .unwrap();
+    let launcher = tmp.path().join("sandbox-launcher");
+    let profile_copy = tmp.path().join("applied-profile.sb");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\nif [ \"$3\" = sh ]; then cp \"$2\" \"${PROFILE_COPY:?}\"; fi\nshift 2\nexec \"$@\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass")
+        .env("FLUENT_TEST_FOCUSED_EVIDENCE_SANDBOX_EXEC", &launcher)
+        .env("PROFILE_COPY", &profile_copy)
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !fs::read_to_string(&profile_copy)
+            .unwrap()
+            .contains("UNTRUSTED_OVERRIDE"),
+        "approved execution must use the bundled policy identity"
+    );
+    let receipts: Vec<_> = fs::read_dir(&authority)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_name()?
+                .to_str()?
+                .starts_with("receipt-")
+                .then_some(path)
+        })
+        .collect();
+    assert_eq!(receipts.len(), 1);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipts[0]).unwrap()).unwrap();
+    assert_eq!(receipt["candidate_commit"], candidate);
+    assert_eq!(receipt["command_index"], 0);
+    assert_eq!(receipt["approval_id"], approval["approval_id"]);
+    assert_eq!(receipt["request_digest"], request_digest);
+    assert_eq!(receipt["config_digest"], request["config_digest"]);
+    assert_eq!(receipt["extractor_digest"], request["extractor_digest"]);
+    assert_eq!(receipt["policy_digest"], request["policy_digest"]);
+    assert_eq!(receipt["execution_mode"], "synthetic");
+    assert_eq!(receipt["exit_code"], 0);
+    let profile = fs::read(&profile_copy).unwrap();
+    assert!(
+        String::from_utf8_lossy(&profile)
+            .contains("(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))")
+    );
+    assert_eq!(
+        receipt["profile_digest"],
+        format!("sha256:{:x}", Sha256::digest(profile))
+    );
+    assert_eq!(
+        receipt["stdout_digest"],
+        format!("sha256:{:x}", Sha256::digest(b"applied-authority"))
+    );
+    assert_eq!(
+        receipt["stderr_digest"],
+        format!("sha256:{:x}", Sha256::digest(b""))
+    );
+}
+
+#[test]
+fn tester_permissions_do_not_leak_to_other_execution_scopes() {
+    let tmp = TempDir::new().unwrap();
+    let resolver = fluent::content::ContentResolver::new(None);
+    let staged_home = tmp.path().join("worker-home");
+    let writable = [tmp.path().join("workspace")];
+    let baseline = fluent::os::render_profile_common_only(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+    )
+    .unwrap();
+    let writer = fluent::os::render_profile_for_access_for_coder(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        fluent::coder::CoderKind::Codex,
+    )
+    .unwrap();
+    let reviewer = fluent::os::render_profile_for_access_for_coder(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        fluent::coder::CoderKind::Claude,
+    )
+    .unwrap();
+    let learner = fluent::os::render_profile_for_access_for_coder_with_denied_writes(
+        &resolver,
+        staged_home.to_str().unwrap(),
+        &writable,
+        &[],
+        &[tmp.path().join("writer-workspace")],
+        fluent::coder::CoderKind::Claude,
+    )
+    .unwrap();
+    for profile in [&baseline, &writer, &reviewer, &learner] {
+        let rules = fs::read_to_string(&profile.path).unwrap();
+        assert!(!rules.contains("(allow sysctl-read (sysctl-name \"kern.proc.all.0\"))"));
+        assert!(rules.contains("(deny file-read-data (subpath \""));
+        assert!(rules.contains(".config/fluent/tester-permissions"));
+        let deny = rules.find(".config/fluent/tester-permissions").unwrap();
+        let writable_grant = rules.find("(allow file-write* (subpath").unwrap();
+        assert!(
+            deny < writable_grant,
+            "host authority denial must precede broad grants"
+        );
+    }
+}
+
+#[test]
+fn tester_permissions_reject_worker_authority_tampering() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let request: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    let approve = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            request["request_digest"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        approve.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approve.stderr)
+    );
+    let approved: serde_json::Value = serde_json::from_slice(&approve.stdout).unwrap();
+    let foreign_lock = tmp.path().join("foreign.lock");
+    fs::write(&foreign_lock, b"foreign").unwrap();
+    fs::remove_file(authority.join("approval.lock")).unwrap();
+    std::os::unix::fs::symlink(&foreign_lock, authority.join("approval.lock")).unwrap();
+
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "revoke",
+            approved["approval_id"].as_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&foreign_lock).unwrap(), b"foreign");
+
+    use std::os::unix::fs::PermissionsExt;
+    fs::remove_file(authority.join("approval.lock")).unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    let inspection = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !inspection.status.success(),
+        "a writable authority parent must invalidate inspection"
+    );
+
+    let record = authority.join(format!(
+        "{}.json",
+        request["request_digest"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("sha256:")
+            .unwrap()
+    ));
+    let alias = project.join("approval-alias.json");
+    fs::hard_link(&record, &alias).unwrap();
+    let inspection = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !inspection.status.success(),
+        "a worker-writable hard link must invalidate approval inspection"
+    );
+}
+
+#[test]
+fn tester_permissions_reject_unapproved_or_stale_launch() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    let write_request = |command: &str| {
+        fs::write(
+            project.join(".fluent/tester.yaml"),
+            format!(
+                "commands:\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n"
+            ),
+        )
+        .unwrap();
+        git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+        git::run(
+            &project,
+            &["commit", "-m", "Update Tester command"],
+            "commit request",
+        )
+        .unwrap();
+        git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap()
+    };
+    let original = write_request(&format!("touch {}", sentinel.display()));
+    let check = || {
+        fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+            .args(["tester", "check"])
+            .output()
+            .unwrap()
+    };
+    let unapproved = check();
+    assert!(
+        !unapproved.status.success(),
+        "unapproved request must not launch"
+    );
+    assert!(String::from_utf8_lossy(&unapproved.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let shown = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let request: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let digest = request["request_digest"].as_str().unwrap();
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            digest,
+        ])
+        .assert()
+        .success();
+    let changed_policy = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env(
+            "FLUENT_TEST_TESTER_PERMISSION_POLICY_REVISION",
+            "fixture-v2",
+        )
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(changed_policy.status.success());
+    let changed_policy: serde_json::Value = serde_json::from_slice(&changed_policy.stdout).unwrap();
+    assert_ne!(changed_policy["policy_digest"], request["policy_digest"]);
+    assert_ne!(changed_policy["request_digest"], request["request_digest"]);
+    assert_eq!(changed_policy["approval_state"], "absent");
+    let policy_launch = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env(
+            "FLUENT_TEST_TESTER_PERMISSION_POLICY_REVISION",
+            "fixture-v2",
+        )
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!policy_launch.status.success());
+    assert!(String::from_utf8_lossy(&policy_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let original_command = format!("touch {}", sentinel.display());
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: '{original_command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n  - command: 'true'\n    test_harness: shell-harness\n"
+        ),
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["add", ".fluent/tester.yaml"],
+        "stage adjacent command",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Add adjacent Tester command"],
+        "commit adjacent command",
+    )
+    .unwrap();
+    let config_candidate = git::run_stdout(
+        &project,
+        &["rev-parse", "HEAD"],
+        "read changed configuration",
+    )
+    .unwrap();
+    let config_show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &config_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(config_show.status.success());
+    let config_request: serde_json::Value = serde_json::from_slice(&config_show.stdout).unwrap();
+    assert_eq!(config_request["command"], request["command"]);
+    assert_ne!(config_request["config_digest"], request["config_digest"]);
+    assert_eq!(config_request["approval_state"], "absent");
+    let config_launch = check();
+    assert!(!config_launch.status.success());
+    assert!(String::from_utf8_lossy(&config_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    write_request(&original_command);
+    let other_checkout = tmp.path().join("other-checkout");
+    git::run(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            other_checkout.to_str().unwrap(),
+            &original,
+        ],
+        "create identical candidate checkout",
+    )
+    .unwrap();
+    let other_show = fluent_cmd()
+        .current_dir(&other_checkout)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(other_show.status.success());
+    let other_request: serde_json::Value = serde_json::from_slice(&other_show.stdout).unwrap();
+    assert_ne!(other_request["request_digest"], request["request_digest"]);
+    assert_eq!(other_request["approval_state"], "absent");
+    let other_launch = fluent_cmd()
+        .current_dir(&other_checkout)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!other_launch.status.success());
+    assert!(String::from_utf8_lossy(&other_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let extractor = project.join(".fluent/extract-tester-results");
+    let mut extractor_bytes = fs::read(&extractor).unwrap();
+    extractor_bytes.extend_from_slice(b"\n# changed extractor\n");
+    fs::write(&extractor, extractor_bytes).unwrap();
+    git::run(
+        &project,
+        &["add", ".fluent/extract-tester-results"],
+        "stage changed extractor",
+    )
+    .unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Update Tester extractor"],
+        "commit changed extractor",
+    )
+    .unwrap();
+    let extractor_candidate =
+        git::run_stdout(&project, &["rev-parse", "HEAD"], "read extractor candidate").unwrap();
+    let extractor_show = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &extractor_candidate,
+            "--command-index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(extractor_show.status.success());
+    let extractor_request: serde_json::Value =
+        serde_json::from_slice(&extractor_show.stdout).unwrap();
+    assert_eq!(extractor_request["config_digest"], request["config_digest"]);
+    assert_ne!(
+        extractor_request["extractor_digest"],
+        request["extractor_digest"]
+    );
+    assert_eq!(extractor_request["approval_state"], "absent");
+    let extractor_launch = check();
+    assert!(!extractor_launch.status.success());
+    assert!(String::from_utf8_lossy(&extractor_launch.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    let changed = write_request(&format!("touch {} && true", sentinel.display()));
+    assert_ne!(original, changed);
+    let stale = check();
+    assert!(
+        !stale.status.success(),
+        "old approval must not launch changed command"
+    );
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("unmet prerequisite"));
+    assert!(!sentinel.exists());
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "show",
+            "--candidate",
+            &original,
+            "--command-index",
+            "0",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn tester_permissions_identical_command_indexes_do_not_share_approval() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let authority = fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("operator-authority");
+    let sentinel = tmp.path().join("command-launched");
+    let command = format!("touch {}", sentinel.display());
+    fs::write(
+        project.join(".fluent/tester.yaml"),
+        format!(
+            "commands:\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n  - command: '{command}'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n"
+        ),
+    )
+    .unwrap();
+    git::run(&project, &["add", ".fluent/tester.yaml"], "stage request").unwrap();
+    git::run(
+        &project,
+        &["commit", "-m", "Request process metadata"],
+        "commit request",
+    )
+    .unwrap();
+    let candidate = git::run_stdout(&project, &["rev-parse", "HEAD"], "read candidate").unwrap();
+    let show = |index: &str| {
+        let output = fluent_cmd()
+            .current_dir(&project)
+            .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+            .args([
+                "tester",
+                "permissions",
+                "show",
+                "--candidate",
+                &candidate,
+                "--command-index",
+                index,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let first = show("0");
+    let second = show("1");
+    assert_eq!(first["command"], second["command"]);
+    assert_ne!(first["request_digest"], second["request_digest"]);
+    fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .args([
+            "tester",
+            "permissions",
+            "approve",
+            "--candidate",
+            &candidate,
+            "--command-index",
+            "0",
+            "--capability",
+            "process-table-read",
+            "--request-digest",
+            first["request_digest"].as_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(show("1")["approval_state"], "absent");
+    let denied = fluent_cmd()
+        .current_dir(&project)
+        .env("FLUENT_TEST_TESTER_PERMISSION_STORE", &authority)
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args(["tester", "check"])
+        .output()
+        .unwrap();
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("command 1"));
+    assert!(!sentinel.exists());
 }
 
 #[test]
@@ -62327,6 +64210,83 @@ fn canonical_evidence_fixture_with_sources(
     assert_eq!(value["commands"].as_array().unwrap().len(), commands.len());
     assert_eq!(value["candidate_commit"], candidate);
     (project, candidate, result)
+}
+
+#[test]
+fn tester_permissions_reject_unproven_or_mismatched_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let work = "unproven-permission-evidence";
+    let (project, _, results) = canonical_evidence_fixture(&tmp, work, &["true"]);
+    let manifest_path = results.with_file_name("canonical-run.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["commands"][0]["permissions"] = serde_json::json!(["process-table-read"]);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let item = WorkModelStore::new(&project).read_work_item(work).unwrap();
+    let error =
+        fluent::verification_assessment::assess_current_verification(&project, &item.attempts[0])
+            .expect_err("version 1 evidence cannot prove a requested permission");
+    assert!(error.to_string().contains("permission"), "{error:#}");
+
+    manifest["schema_version"] = serde_json::json!(2);
+    manifest["original_command_indexes"] = serde_json::json!([0]);
+    manifest["permission_receipts"] = serde_json::json!([null]);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut result: serde_json::Value =
+        serde_json::from_slice(&fs::read(&results).unwrap()).unwrap();
+    result["commands"][0]["command"] = serde_json::json!("false");
+    fs::write(&results, serde_json::to_vec(&result).unwrap()).unwrap();
+    let error =
+        fluent::verification_assessment::assess_current_verification(&project, &item.attempts[0])
+            .expect_err("a changed settled command cannot claim the requested permission");
+    assert!(error.to_string().contains("command identity"), "{error:#}");
+}
+
+#[test]
+fn tester_permissions_old_reader_refuses_version_two_evidence() {
+    let binary = PathBuf::from(std::env::var_os("FLUENT_TESTER_PERMISSION_OLD_BIN").expect(
+        "build tests/fixtures/build-tester-permission-old-reader.sh before this selection",
+    ));
+    let reader_root = binary.parent().unwrap().parent().unwrap().parent().unwrap();
+    let identity = read_json_path(&reader_root.join("identity.json"));
+    assert_eq!(
+        identity["source_commit"],
+        "330bdba6281a394580da0a0194b3cd8d0fcb8295"
+    );
+    assert_eq!(
+        identity["binary_sha256"],
+        format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()))
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let work = "permission-old-reader";
+    let (project, _, results) = canonical_evidence_fixture(&tmp, work, &["true"]);
+    let manifest_path = results.with_file_name("canonical-run.json");
+    let mut manifest = read_json_path(&manifest_path);
+    manifest["schema_version"] = serde_json::json!(2);
+    manifest["commands"][0]["permissions"] = serde_json::json!(["process-table-read"]);
+    manifest["original_command_indexes"] = serde_json::json!([0]);
+    manifest["permission_receipts"] = serde_json::json!([null]);
+    write_json_path(&manifest_path, &manifest);
+    let work_root = project.join(".fluent/work");
+    let before = snapshot_tree(&work_root);
+    let output = Command::new(&binary)
+        .current_dir(&project)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .args(["attempt", "run", work, "attempt-1", "--no-sandbox"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "older reader accepted version 2 permission evidence"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Tester manifest"),
+        "older reader must reject the manifest before another failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(snapshot_tree(&work_root), before);
 }
 
 #[test]

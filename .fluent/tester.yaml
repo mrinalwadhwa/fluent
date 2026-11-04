@@ -16,6 +16,8 @@ commands:
       export FLUENT_LAUNCH_HANDOFF_OLD_BIN
       FLUENT_VERIFICATION_OLD_BIN="$(bash tests/fixtures/build-verification-old-reader.sh)"
       export FLUENT_VERIFICATION_OLD_BIN
+      FLUENT_TESTER_PERMISSION_OLD_BIN="$(bash tests/fixtures/build-tester-permission-old-reader.sh)"
+      export FLUENT_TESTER_PERMISSION_OLD_BIN
       FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN="$(bash tests/fixtures/build-round-cap-approach-revision-stable-old-reader.sh)"
       export FLUENT_ROUND_CAP_APPROACH_STABLE_OLD_BIN
       FLUENT_ROUND_CAP_APPROACH_ASSIGNMENT_OLD_BIN="$(bash tests/fixtures/build-round-cap-approach-revision-assignment-old-reader.sh)"

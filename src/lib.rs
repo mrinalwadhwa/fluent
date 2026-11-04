@@ -87,6 +87,7 @@ pub(crate) mod test_lock_probe;
 pub mod tester;
 pub(crate) mod tester_evidence;
 pub mod tester_harness_recovery;
+pub mod tester_permissions;
 pub mod update;
 pub mod usage;
 mod usage_limit_contracts;

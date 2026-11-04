@@ -1130,6 +1130,11 @@ pub enum TesterCommands {
         #[arg(long)]
         candidate: String,
     },
+    /// Inspect requests for elevated Tester permissions
+    Permissions {
+        #[command(subcommand)]
+        command: TesterPermissionCommands,
+    },
     /// Validate Tester readiness and run declared test commands
     Check {
         /// Disable sandbox
@@ -1150,6 +1155,33 @@ pub enum TesterCommands {
         /// Disable sandbox
         #[arg(long)]
         no_sandbox: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TesterPermissionCommands {
+    /// Show the current request for one configured command
+    Show {
+        #[arg(long)]
+        candidate: String,
+        #[arg(long)]
+        command_index: usize,
+    },
+    /// Approve the exact displayed request without starting Tester
+    Approve {
+        #[arg(long)]
+        candidate: String,
+        #[arg(long)]
+        command_index: usize,
+        #[arg(long)]
+        capability: String,
+        #[arg(long)]
+        request_digest: String,
+    },
+    /// Withdraw an approval from future Tester launches
+    Revoke {
+        /// Approval ID returned by `approve`
+        approval_id: String,
     },
 }
 

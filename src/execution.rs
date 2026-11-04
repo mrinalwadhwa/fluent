@@ -819,10 +819,22 @@ pub(crate) fn settle_failed_launch(child: std::process::Child, transcript: &Path
 /// Capture a deterministic Task command under the same cancellation identity.
 /// Keep ordinary Tester leak detection authoritative after a natural exit.
 pub(crate) fn output(command: &mut Command, transcript: &Path) -> Result<std::process::Output> {
+    output_with_launch_guard(command, transcript, || Ok(()))
+}
+
+/// Keep a host authorization guard alive through process creation, then allow
+/// revocation while the already launched command runs to normal settlement.
+pub(crate) fn output_with_launch_guard<G>(
+    command: &mut Command,
+    transcript: &Path,
+    admit: impl FnOnce() -> Result<G>,
+) -> Result<std::process::Output> {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    let guard = admit()?;
     let child = spawn(command, transcript)?;
+    drop(guard);
     let result = child.wait_with_output();
     let path = record_path_for_transcript(&owned_transcript(transcript));
     if result.is_err() {
@@ -1275,6 +1287,54 @@ mod tests {
         let settled = std::fs::read(&reservation.path).unwrap();
         reservation.settle_unused().unwrap();
         assert_eq!(std::fs::read(&reservation.path).unwrap(), settled);
+    }
+
+    #[test]
+    fn launch_guard_rejects_before_spawn_and_survives_fork() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        let marker = dir.path().join("launched");
+        let mut rejected = Command::new("/bin/sh");
+        rejected
+            .arg("-c")
+            .arg(format!("touch {}", marker.display()));
+        assert!(
+            output_with_launch_guard(&mut rejected, &transcript, || -> Result<()> {
+                anyhow::bail!("approval revoked")
+            })
+            .is_err()
+        );
+        assert!(!marker.exists());
+
+        let live = Arc::new(AtomicBool::new(false));
+        let child_view = live.clone();
+        let mut admitted = Command::new("/usr/bin/true");
+        unsafe {
+            admitted.pre_exec(move || {
+                if child_view.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::EPERM))
+                }
+            });
+        }
+        let output = output_with_launch_guard(&mut admitted, &transcript, || {
+            live.store(true, Ordering::SeqCst);
+            Ok(Guard(live.clone()))
+        })
+        .unwrap();
+        assert!(output.status.success());
+        assert!(!live.load(Ordering::SeqCst));
     }
 
     #[test]

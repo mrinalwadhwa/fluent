@@ -4507,6 +4507,40 @@ invokes `.fluent/extract-tester-results` to normalize per-test
 output, and assembles `tester-results.json` — the canonical artifact
 all reviewers consume.
 
+An optional `permissions: [process-table-read]` on one configured command is a
+request, not authority. `tester_permissions.rs` binds an operator approval to
+the canonical checkout, Git common directory, full commit, committed
+configuration and extractor, original command index and text, host platform,
+and versioned policy. The public `fluent tester permissions show`, `approve`,
+and `revoke` commands inspect and change host-owned approval records without
+launching work. The shared Tester boundary checks current approval again at
+launch under a host lease. It stores permission-bearing profiles and receipts
+outside worker-writable roots, while adjacent commands and extraction use
+baseline profiles. A protected receipt binds the actual profile and settled
+command output to the approval; capability-bearing canonical evidence requires
+that provenance. Rechecks must supply their own protected receipts for the
+original configured command indexes. Version-one host evidence documents
+cannot prove permission-bearing replacements. Baseline publication, promotion,
+reuse, and failure classification validate the same protected execution proof;
+matching cache keys and artifact hashes alone do not establish authority.
+Legacy evidence remains readable for commands that request no capability. A revocation blocks future launches without rewriting settled
+history. The host process-table query grants metadata for all host processes,
+so the operator sees that exposure before approval.
+
+Before candidate-owned readiness extraction runs, the host prepares a baseline
+profile that denies approval authority and grants no process-table capability.
+Readiness and capability-bearing runs render the bundled common policy in
+memory and publish the first profile file directly in validated protected
+storage. Project and user sandbox overrides do not affect those profiles. The
+versioned approval, cache, and receipt policy identity includes that bundled
+template and the exact `kern.proc.all.0` rule. Other Tester runs retain their
+existing override behavior.
+
+If a later launch fails admission, the shared command loop publishes completed
+command records, output paths, and their manifest receipt references before
+returning a harness error. Unlaunched commands retain empty receipt slots;
+completed diagnostics cannot turn the failed run into passing evidence.
+
 Three files form the Tester contract:
 
 - `.fluent/tester.yaml` — project's declaration of the test commands

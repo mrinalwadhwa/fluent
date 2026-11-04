@@ -56,6 +56,10 @@ pub struct CommandResult {
     pub stdout_log: String,
     pub stderr_log: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_receipt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_settlement: Option<ProcessSettlementEvidence>,
 }
 
@@ -166,6 +170,35 @@ pub(crate) struct TesterCommand {
     pub(crate) test_harness: String,
     #[serde(default)]
     pub(crate) reject_process_leaks: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_tester_permissions"
+    )]
+    pub(crate) permissions: Vec<TesterPermission>,
+}
+
+/// A request in project configuration never grants host authority by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TesterPermission {
+    ProcessTableRead,
+}
+
+fn deserialize_tester_permissions<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<TesterPermission>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let permissions = Vec::<TesterPermission>::deserialize(deserializer)?;
+    let mut seen = std::collections::HashSet::new();
+    for permission in &permissions {
+        if !seen.insert(*permission) {
+            return Err(serde::de::Error::custom("duplicate Tester permission"));
+        }
+    }
+    Ok(permissions)
 }
 
 /// Capture the complete configured command list before a canonical execution.
@@ -182,6 +215,10 @@ pub(crate) struct CanonicalRunManifest {
     pub extractor_digest: String,
     pub commands: Vec<TesterCommand>,
     pub full_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub original_command_indexes: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_receipts: Vec<Option<String>>,
 }
 
 /// Read-only Tester configuration used to defer filesystem setup until a Task
@@ -189,19 +226,25 @@ pub(crate) struct CanonicalRunManifest {
 #[derive(Debug, Clone)]
 pub struct TesterPlan {
     commands: Vec<TesterCommand>,
+    original_indexes: Vec<usize>,
 }
 
 /// Read Tester configuration without creating an artifact or settlement path.
 pub fn plan(candidate_workspace: &Path) -> Result<TesterPlan> {
     let config = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
+    let original_indexes = (0..config.commands.len()).collect();
     Ok(TesterPlan {
         commands: config.commands,
+        original_indexes,
     })
 }
 
 /// The sandbox profile and host-owned settlement paths prepared for one Tester run.
 pub struct TesterSandbox {
     profile: Option<os::SandboxProfile>,
+    command_profiles: Vec<Option<os::SandboxProfile>>,
+    candidate_commit: Option<String>,
+    original_indexes: Vec<usize>,
     settlement_directories: Vec<Option<PathBuf>>,
     commands: Vec<TesterCommand>,
     launch_env: Vec<(String, String)>,
@@ -211,6 +254,7 @@ pub struct TesterSandbox {
 pub struct TesterSettlement {
     settlement_directories: Vec<Option<PathBuf>>,
     commands: Vec<TesterCommand>,
+    original_indexes: Vec<usize>,
 }
 
 impl TesterSandbox {
@@ -259,7 +303,13 @@ pub fn plan_failed_commands(
         commands.push(configured.clone());
     }
 
-    Ok((TesterPlan { commands }, failed_indexes))
+    Ok((
+        TesterPlan {
+            commands,
+            original_indexes: failed_indexes.clone(),
+        },
+        failed_indexes,
+    ))
 }
 
 /// Build a recheck plan from a prior failed-command recheck result.
@@ -286,6 +336,7 @@ pub(crate) fn plan_chained_failed_commands(
 
     let mut used = std::collections::BTreeSet::new();
     let mut commands = Vec::with_capacity(failed_indexes.len());
+    let mut original_indexes = Vec::with_capacity(failed_indexes.len());
     for index in &failed_indexes {
         let source = &source_results.commands[*index];
         let matches = current
@@ -304,10 +355,17 @@ pub(crate) fn plan_chained_failed_commands(
             );
         };
         used.insert(*configured_index);
+        original_indexes.push(*configured_index);
         commands.push((*configured).clone());
     }
 
-    Ok((TesterPlan { commands }, failed_indexes))
+    Ok((
+        TesterPlan {
+            commands,
+            original_indexes,
+        },
+        failed_indexes,
+    ))
 }
 
 /// Return whether a path uses the host-owned Tester command-log spelling.
@@ -415,10 +473,10 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    // Structural diagnostics deliberately precede the fallible read-only plan:
-    // malformed configuration must not suppress independent extractor/readiness
-    // failures that an operator can repair in the same pass.
-    let problems = structural_problems(candidate_workspace, artifact.path(), None);
+    // Collect independent configuration and extractor diagnostics, but never
+    // execute candidate-owned readiness code with the host's authority.
+    let readiness = prepare_readiness_profile(candidate_workspace, artifact.path(), no_sandbox)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), readiness.as_ref());
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -449,7 +507,8 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), None);
+    let readiness = prepare_readiness_profile(candidate_workspace, artifact.path(), no_sandbox)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), readiness.as_ref());
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -558,6 +617,7 @@ fn prepare_settlement_directories_with(
     Ok(TesterSettlement {
         settlement_directories,
         commands: plan.commands.clone(),
+        original_indexes: plan.original_indexes.clone(),
     })
 }
 
@@ -637,13 +697,35 @@ fn render_sandbox_profile_with_cache_inner(
     let TesterSettlement {
         settlement_directories,
         commands,
+        original_indexes,
     } = settlement;
+    let has_permission_request = commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
+    check_requested_permissions(
+        candidate_workspace,
+        no_sandbox,
+        &commands,
+        &original_indexes,
+    )?;
+    let candidate_commit = if has_permission_request {
+        Some(crate::git::run_stdout(
+            candidate_workspace,
+            &["rev-parse", "HEAD"],
+            "resolve Tester candidate",
+        )?)
+    } else {
+        None
+    };
     let launch_env = dependency_cache
         .map(|cache| cache.launch_env())
         .unwrap_or_default();
     if no_sandbox {
         return Ok(TesterSandbox {
             profile: None,
+            command_profiles: Vec::new(),
+            candidate_commit,
+            original_indexes,
             settlement_directories,
             commands,
             launch_env,
@@ -661,6 +743,9 @@ fn render_sandbox_profile_with_cache_inner(
     {
         return Ok(TesterSandbox {
             profile: None,
+            command_profiles: Vec::new(),
+            candidate_commit,
+            original_indexes,
             settlement_directories,
             commands,
             launch_env,
@@ -729,29 +814,61 @@ fn render_sandbox_profile_with_cache_inner(
             }
         }
     }
-    match os::render_profile_common_only_with_denied_access(
-        resolver,
-        &home,
-        &writable_roots,
-        &readable_roots,
-        &[],
-        std::slice::from_ref(&common_git_dir),
-    ) {
-        Ok(profile) => {
-            if let Some(cache) = &historical_cache {
-                let mut content = fs::read_to_string(&profile.path)?;
-                content.push_str(&format!(
-                    "\n(allow file-map-executable (subpath {}))\n",
-                    os::sbpl_string(cache)
-                ));
-                fs::write(&profile.path, content)?;
-            }
-            os::admit_installed_tools(&profile, &node_tools, &candidate_abs)?;
+    let rendered = if has_permission_request {
+        let mut forbidden_roots = writable_roots.clone();
+        forbidden_roots.push(common_git_dir.clone());
+        let protected = crate::tester_permissions::protected_profile_directory(&forbidden_roots)?;
+        os::render_protected_tester_profile(
+            &home,
+            &writable_roots,
+            &readable_roots,
+            std::slice::from_ref(&common_git_dir),
+            &protected,
+        )
+        .and_then(|baseline| {
+            add_historical_and_installed_tool_access(
+                &baseline,
+                historical_cache.as_deref(),
+                &node_tools,
+                &candidate_abs,
+            )?;
+            let selected = render_command_profiles(&commands, &baseline, &protected)?;
+            Ok((baseline, selected))
+        })
+    } else {
+        os::render_profile_common_only_with_denied_access(
+            resolver,
+            &home,
+            &writable_roots,
+            &readable_roots,
+            &[],
+            std::slice::from_ref(&common_git_dir),
+        )
+        .and_then(|profile| {
+            add_historical_and_installed_tool_access(
+                &profile,
+                historical_cache.as_deref(),
+                &node_tools,
+                &candidate_abs,
+            )?;
+            Ok((profile, Vec::new()))
+        })
+    };
+    match rendered {
+        Ok((profile, command_profiles)) => {
             if !probe_real_profile {
                 os::preflight_profile(&profile)?;
             }
+            for selected in command_profiles.iter().flatten() {
+                if !probe_real_profile {
+                    os::preflight_profile(selected)?;
+                }
+            }
             Ok(TesterSandbox {
                 profile: Some(profile),
+                command_profiles,
+                candidate_commit,
+                original_indexes,
                 settlement_directories,
                 commands,
                 launch_env,
@@ -759,6 +876,84 @@ fn render_sandbox_profile_with_cache_inner(
         }
         Err(err) => Err(err),
     }
+}
+
+fn add_historical_and_installed_tool_access(
+    profile: &os::SandboxProfile,
+    historical_cache: Option<&Path>,
+    node_tools: &crate::installed_tools::NodeToolAccess,
+    candidate_abs: &Path,
+) -> Result<()> {
+    if let Some(cache) = historical_cache {
+        let mut content = fs::read_to_string(&profile.path)?;
+        content.push_str(&format!(
+            "\n(allow file-map-executable (subpath {}))\n",
+            os::sbpl_string(cache)
+        ));
+        fs::write(&profile.path, content)?;
+    }
+    os::admit_installed_tools(profile, node_tools, candidate_abs)
+}
+
+fn render_command_profiles(
+    commands: &[TesterCommand],
+    baseline: &os::SandboxProfile,
+    protected_directory: &Path,
+) -> Result<Vec<Option<os::SandboxProfile>>> {
+    commands
+        .iter()
+        .map(|command| {
+            if command
+                .permissions
+                .contains(&TesterPermission::ProcessTableRead)
+            {
+                os::protect_process_table_profile(baseline, protected_directory).map(Some)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect()
+}
+
+fn check_requested_permissions(
+    candidate_workspace: &Path,
+    no_sandbox: bool,
+    commands: &[TesterCommand],
+    original_indexes: &[usize],
+) -> Result<()> {
+    anyhow::ensure!(
+        commands.len() == original_indexes.len(),
+        "Tester command identity mapping is incomplete"
+    );
+    if commands
+        .iter()
+        .all(|command| command.permissions.is_empty())
+    {
+        return Ok(());
+    }
+    anyhow::ensure!(!no_sandbox, "process-table-read requires the macOS sandbox");
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        "process-table-read requires macOS"
+    );
+    let candidate = crate::git::run_stdout(
+        candidate_workspace,
+        &["rev-parse", "HEAD"],
+        "resolve Tester candidate",
+    )?;
+    for (command, original_index) in commands.iter().zip(original_indexes) {
+        if command
+            .permissions
+            .contains(&TesterPermission::ProcessTableRead)
+        {
+            crate::tester_permissions::check_current_approval(
+                candidate_workspace,
+                &candidate,
+                *original_index,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn run_with_sandbox_profile(
@@ -770,6 +965,11 @@ pub fn run_with_sandbox_profile(
         candidate_workspace,
         artifact_dir,
         sandbox.profile(),
+        Some(&sandbox.command_profiles),
+        sandbox
+            .candidate_commit
+            .as_deref()
+            .map(|candidate| (candidate, sandbox.original_indexes.as_slice())),
         &sandbox.commands,
         Some(&sandbox.settlement_directories),
         &sandbox.launch_env,
@@ -781,12 +981,32 @@ fn run_with_prepared_sandbox_profile_and_collector(
     candidate_workspace: &Path,
     artifact_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    command_profiles: Option<&[Option<os::SandboxProfile>]>,
+    admission: Option<(&str, &[usize])>,
     commands: &[TesterCommand],
     settlement_directories: Option<&[Option<PathBuf>]>,
     launch_env: &[(String, String)],
     collector: &dyn ProcessInventoryCollector,
 ) -> Result<TesterOutcome> {
     record_test_boundary(sandbox_profile.is_some());
+    if commands
+        .iter()
+        .any(|command| !command.permissions.is_empty())
+    {
+        anyhow::ensure!(
+            command_profiles.is_some_and(|selected| {
+                selected.len() == commands.len()
+                    && commands.iter().zip(selected).all(|(command, profile)| {
+                        command.permissions.is_empty() || profile.is_some()
+                    })
+            }),
+            "permission-bearing Tester commands lack per-command profiles"
+        );
+        anyhow::ensure!(
+            admission.is_some_and(|(_, indexes)| indexes.len() == commands.len()),
+            "permission-bearing Tester commands lack pinned admission identity"
+        );
+    }
     let extractor_path = candidate_workspace.join(EXTRACTOR_PATH);
     if !extractor_path.is_file() || !is_executable(&extractor_path) {
         return persist_harness_error(
@@ -800,6 +1020,9 @@ fn run_with_prepared_sandbox_profile_and_collector(
 
     use sha2::{Digest, Sha256};
     let configured = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
+    let has_permission_request = commands
+        .iter()
+        .any(|command| !command.permissions.is_empty());
     let manifest = CanonicalRunManifest {
         run_at: Some(crate::work_model::now_iso8601()),
         environment: commands
@@ -829,7 +1052,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 )
             })
             .collect::<Result<Vec<_>>>()?,
-        schema_version: 1,
+        schema_version: if has_permission_request { 2 } else { 1 },
         config_digest: format!(
             "sha256:{:x}",
             Sha256::digest(fs::read(candidate_workspace.join(TESTER_YAML_PATH))?)
@@ -837,10 +1060,23 @@ fn run_with_prepared_sandbox_profile_and_collector(
         extractor_digest: format!("sha256:{:x}", Sha256::digest(fs::read(&extractor_path)?)),
         full_run: configured.commands == commands,
         commands: commands.to_vec(),
+        original_command_indexes: if has_permission_request {
+            admission
+                .context("permission-bearing run lacks pinned command indexes")?
+                .1
+                .to_vec()
+        } else {
+            Vec::new()
+        },
+        permission_receipts: if has_permission_request {
+            vec![None; commands.len()]
+        } else {
+            Vec::new()
+        },
     };
-    fs::write(
-        artifact_dir.join("canonical-run.json"),
-        serde_json::to_vec_pretty(&manifest)?,
+    crate::tester_permissions::write_command_artifact(
+        &artifact_dir.join("canonical-run.json"),
+        &serde_json::to_vec_pretty(&manifest)?,
     )?;
 
     let commands_dir = artifact_dir.join("commands");
@@ -864,12 +1100,16 @@ fn run_with_prepared_sandbox_profile_and_collector(
         {
             let stdout_log = format!("commands/{index}-stdout.log");
             let stderr_log = format!("commands/{index}-stderr.log");
-            fs::write(artifact_dir.join(&stdout_log), b"")?;
-            fs::write(
-                artifact_dir.join(&stderr_log),
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join(&stdout_log),
+                b"",
+            )?;
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join(&stderr_log),
                 format!(
                     "Required {fact}={required}, observed {observed}; prerequisite prevented execution.\n"
-                ),
+                )
+                .as_bytes(),
             )?;
             command_results.push(CommandResult {
                 failure_cause: Some(CommandFailureCause::UnmetPrerequisite {
@@ -883,6 +1123,8 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 duration_ms: 0,
                 stdout_log,
                 stderr_log,
+                permission_receipt: None,
+                permission_receipt_id: None,
                 process_settlement: None,
             });
             continue;
@@ -902,6 +1144,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
             match settlement_result {
                 Ok(settlement) => Some(settlement),
                 Err(error) => {
+                    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
                     return persist_harness_error(
                         artifact_dir,
                         "process_settlement_infrastructure",
@@ -914,18 +1157,39 @@ fn run_with_prepared_sandbox_profile_and_collector(
         } else {
             None
         };
-        let mut result = run_command(
+        let execution = run_command(
             candidate_workspace,
             &cmd.command,
             &cmd.test_harness,
             index,
             &commands_dir,
-            sandbox_profile,
+            command_profiles
+                .and_then(|selected| selected.get(index))
+                .and_then(Option::as_ref)
+                .or(sandbox_profile),
+            if cmd.permissions.is_empty() {
+                None
+            } else {
+                admission.map(|(candidate, indexes)| (candidate, indexes[index]))
+            },
             launch_env,
             settlement
                 .as_ref()
                 .map(|settlement| settlement.directory.as_path()),
-        )?;
+        );
+        let mut result = match execution {
+            Ok(result) => result,
+            Err(error) => {
+                publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
+                return persist_harness_error(
+                    artifact_dir,
+                    "command_launch_admission",
+                    format!("Unable to launch Tester command {index}"),
+                    format!("{error:#}"),
+                    command_results,
+                );
+            }
+        };
         if let Some(settlement) = settlement {
             match settlement.new_processes(collector) {
                 Ok(leaks) => {
@@ -954,6 +1218,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 }
                 Err(error) => {
                     command_results.push(result);
+                    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
                     return persist_harness_error(
                         artifact_dir,
                         "process_settlement_infrastructure",
@@ -971,8 +1236,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
         command_results.push(result);
     }
 
-    let commands_json = serde_json::to_string_pretty(&command_results)?;
-    fs::write(artifact_dir.join("commands.json"), &commands_json)?;
+    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
 
     if let Some(result) = command_results.iter().find(|result| {
         fs::read_to_string(artifact_dir.join(&result.stderr_log))
@@ -1064,6 +1328,8 @@ fn run_with_sandbox_profile_and_collector(
         candidate_workspace,
         artifact_dir,
         sandbox_profile,
+        None,
+        None,
         &plan.commands,
         settlement_directories.or_else(|| {
             prepared
@@ -1089,6 +1355,35 @@ fn record_test_boundary(sandboxed: bool) {
 #[cfg(not(feature = "test-support"))]
 fn record_test_boundary(_: bool) {}
 
+/// Publish completed outcomes even if a later command cannot be admitted.
+/// Leave receipt slots for commands that did not launch empty.
+fn publish_command_records(
+    artifact_dir: &Path,
+    commands: &[CommandResult],
+    manifest: Option<&CanonicalRunManifest>,
+) -> Result<()> {
+    if let Some(manifest) = manifest {
+        let mut manifest = manifest.clone();
+        if manifest.schema_version == 2 {
+            manifest.permission_receipts = (0..manifest.commands.len())
+                .map(|index| {
+                    commands
+                        .get(index)
+                        .and_then(|result| result.permission_receipt_id.clone())
+                })
+                .collect();
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join("canonical-run.json"),
+                &serde_json::to_vec_pretty(&manifest)?,
+            )?;
+        }
+    }
+    crate::tester_permissions::write_command_artifact(
+        &artifact_dir.join("commands.json"),
+        &serde_json::to_vec_pretty(commands)?,
+    )
+}
+
 pub(crate) fn persist_harness_error(
     artifact_dir: &Path,
     kind: &str,
@@ -1096,6 +1391,7 @@ pub(crate) fn persist_harness_error(
     details: String,
     commands: Vec<CommandResult>,
 ) -> Result<TesterOutcome> {
+    publish_command_records(artifact_dir, &commands, None)?;
     write_results(
         artifact_dir,
         &TesterResults {
@@ -1118,6 +1414,49 @@ pub(crate) fn persist_harness_error(
     Ok(TesterOutcome::HarnessError)
 }
 
+/// Confine candidate-owned empty-artifact extraction before reading approvals
+/// or preparing capability profiles. This baseline always uses bundled policy.
+fn prepare_readiness_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+) -> Result<Option<os::SandboxProfile>> {
+    if no_sandbox {
+        if let Ok(config) = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH)) {
+            anyhow::ensure!(
+                config
+                    .commands
+                    .iter()
+                    .all(|command| command.permissions.is_empty()),
+                "process-table-read requires the macOS sandbox"
+            );
+        }
+        return Ok(None);
+    }
+    #[cfg(feature = "test-support")]
+    if std::env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT").as_deref() == Ok("pass") {
+        return Ok(None);
+    }
+    let candidate = fs::canonicalize(candidate_workspace)?;
+    let artifact = fs::canonicalize(artifact_dir)?;
+    let home = os::operator_home()?;
+    let roots = tester_writable_roots(&candidate, &artifact, &home);
+    let common = tester_git_metadata_root(&candidate)?;
+    let mut forbidden = roots.clone();
+    forbidden.push(common.clone());
+    let protected =
+        crate::tester_permissions::prepare_readiness_profile_directory(&candidate, &forbidden)?;
+    let profile = os::render_protected_tester_profile(
+        &home.to_string_lossy(),
+        &roots,
+        std::slice::from_ref(&common),
+        std::slice::from_ref(&common),
+        &protected,
+    )?;
+    os::preflight_profile(&profile)?;
+    Ok(Some(profile))
+}
+
 fn structural_problems(
     candidate_workspace: &Path,
     artifact_dir: &Path,
@@ -1133,7 +1472,10 @@ fn structural_problems(
     } else if !is_executable(&extractor) {
         problems.push(format!("{EXTRACTOR_PATH}: not executable"));
     } else {
-        if let Err(error) = fs::write(artifact_dir.join("commands.json"), "[]") {
+        if let Err(error) = crate::tester_permissions::write_command_artifact(
+            &artifact_dir.join("commands.json"),
+            b"[]",
+        ) {
             problems.push(format!("readiness artifact: {error}"));
         } else if let Err(error) =
             extract_and_normalize(candidate_workspace, &extractor, artifact_dir, profile, &[])
@@ -1190,7 +1532,7 @@ fn extract_and_normalize(
     Ok((tests, summary))
 }
 
-fn read_tester_config(path: &Path) -> Result<TesterConfig> {
+pub(crate) fn read_tester_config(path: &Path) -> Result<TesterConfig> {
     let content =
         fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let config: TesterConfig =
@@ -1208,6 +1550,7 @@ fn run_command(
     index: usize,
     commands_dir: &Path,
     sandbox_profile: Option<&os::SandboxProfile>,
+    admission: Option<(&str, usize)>,
     launch_env: &[(String, String)],
     settlement_directory: Option<&Path>,
 ) -> Result<CommandResult> {
@@ -1237,14 +1580,44 @@ fn run_command(
         .parent()
         .context("Tester command has no artifact area")?
         .join("transcript.jsonl");
-    let output = crate::execution::output(&mut process, &transcript)
-        .with_context(|| format!("spawning Tester command: {command}"))?;
+    let mut applied_authority = None;
+    let output = crate::execution::output_with_launch_guard(&mut process, &transcript, || {
+        admission
+            .map(|(candidate, original_index)| {
+                let admitted = crate::tester_permissions::begin_launch_admission(
+                    working_dir,
+                    candidate,
+                    original_index,
+                )?;
+                applied_authority = Some(admitted.authority.clone());
+                Ok(admitted)
+            })
+            .transpose()
+    })
+    .with_context(|| format!("spawning Tester command: {command}"))?;
     let duration = start.elapsed();
 
-    fs::write(&stdout_path, &output.stdout)?;
-    fs::write(&stderr_path, &output.stderr)?;
+    crate::tester_permissions::write_command_artifact(&stdout_path, &output.stdout)?;
+    crate::tester_permissions::write_command_artifact(&stderr_path, &output.stderr)?;
 
     let exit_code = output.status.code().unwrap_or(-1);
+
+    let (permission_receipt, permission_receipt_id) = if let Some(authority) = applied_authority {
+        let profile =
+            sandbox_profile.context("permission-bearing command lacks a sandbox profile")?;
+        let name = format!("commands/{index}-permission-receipt.json");
+        let receipt_id = crate::tester_permissions::record_applied_authority(
+            &authority,
+            &profile.path,
+            exit_code,
+            &output.stdout,
+            &output.stderr,
+            &commands_dir.join(format!("{index}-permission-receipt.json")),
+        )?;
+        (Some(name), Some(receipt_id))
+    } else {
+        (None, None)
+    };
 
     let stdout_log = format!("commands/{index}-stdout.log");
     let stderr_log = format!("commands/{index}-stderr.log");
@@ -1257,6 +1630,8 @@ fn run_command(
         duration_ms: duration.as_millis() as u64,
         stdout_log,
         stderr_log,
+        permission_receipt,
+        permission_receipt_id,
         process_settlement: None,
     })
 }
@@ -1409,7 +1784,7 @@ pub fn is_nested_swiftpm_harness_error(artifact_dir: &Path) -> bool {
 fn write_results(artifact_dir: &Path, results: &TesterResults) -> Result<()> {
     let json = serde_json::to_string_pretty(results)?;
     let path = artifact_dir.join("tester-results.json");
-    crate::atomic_write::atomic_write(&path, json.as_bytes())?;
+    crate::tester_permissions::write_command_artifact(&path, json.as_bytes())?;
     eprintln!("  Wrote {}", path.display());
     Ok(())
 }
@@ -1455,6 +1830,115 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_logs_do_not_follow_worker_created_aliases() {
+        let workspace = TempDir::new().unwrap();
+        let commands = workspace.path().join("commands");
+        fs::create_dir(&commands).unwrap();
+        let target = workspace.path().join("host-target");
+        fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink(&target, commands.join("0-stdout.log")).unwrap();
+        let result = run_command(
+            workspace.path(),
+            "printf output",
+            "shell-harness",
+            0,
+            &commands,
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn requested_profile_is_selected_only_for_its_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let private = root.join("profiles");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let baseline = os::render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.join("workspace")],
+            &[],
+        )
+        .unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n- command: 'true'\n  test_harness: shell-harness\n",
+        )
+        .unwrap();
+        let profiles = render_command_profiles(&commands, &baseline, &private).unwrap();
+        assert_eq!(profiles.len(), 3);
+        assert!(profiles[0].is_none());
+        assert!(profiles[2].is_none());
+        let requested = fs::read_to_string(&profiles[1].as_ref().unwrap().path).unwrap();
+        assert!(requested.contains(crate::tester_permissions::PROCESS_TABLE_RULE));
+        assert!(
+            !fs::read_to_string(&baseline.path)
+                .unwrap()
+                .contains("kern.proc.all")
+        );
+    }
+
+    #[test]
+    fn requested_command_cannot_fall_back_to_baseline_profile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let error = run_with_prepared_sandbox_profile_and_collector(
+            tmp.path(),
+            tmp.path(),
+            None,
+            None,
+            None,
+            &commands,
+            None,
+            &[],
+            &HostProcessInventoryCollector,
+        )
+        .expect_err("a requested command needs its own profile");
+        assert!(error.to_string().contains("per-command profiles"));
+    }
+
+    #[test]
+    fn requested_command_requires_pinned_admission_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let profile = os::render_profile_common_only(
+            &ContentResolver::new(None),
+            "/staged/worker-home",
+            &[root.clone()],
+            &[],
+        )
+        .unwrap();
+        let commands: Vec<TesterCommand> = serde_yaml::from_str(
+            "- command: 'true'\n  test_harness: shell-harness\n  permissions: [process-table-read]\n",
+        )
+        .unwrap();
+        let selected = [Some(profile)];
+        let error = run_with_prepared_sandbox_profile_and_collector(
+            &root,
+            &root,
+            None,
+            Some(&selected),
+            None,
+            &commands,
+            None,
+            &[],
+            &HostProcessInventoryCollector,
+        )
+        .expect_err("a requested command needs its pinned request identity");
+        assert!(error.to_string().contains("admission identity"));
+    }
 
     #[test]
     fn tester_results_bind_once_to_the_exact_candidate_commit() {
@@ -1590,6 +2074,70 @@ mod tests {
             .find(|(name, _)| *name == crate::baseline_cache::BASELINE_SESSION_ENV)
             .map(|(_, value)| value);
         assert_eq!(inherited, Some(None));
+    }
+
+    #[test]
+    fn tester_process_table_requests_reject_unknown_and_duplicate_capabilities() {
+        for permissions in ["[process-table-read, process-table-read]", "[file-write]"] {
+            let yaml = format!(
+                "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: {permissions}\n"
+            );
+            assert!(serde_yaml::from_str::<TesterConfig>(&yaml).is_err());
+        }
+        let yaml = "commands:\n  - command: 'true'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n";
+        let config: TesterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.commands[0].permissions.len(), 1);
+    }
+
+    #[test]
+    fn tester_legacy_command_serialization_omits_permissions() {
+        let yaml = "commands:\n  - command: 'true'\n    test_harness: shell-harness\n";
+        let config: TesterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.commands[0].permissions.is_empty());
+        let serialized = serde_json::to_string(&config.commands[0]).unwrap();
+        assert!(!serialized.contains("permissions"));
+    }
+
+    #[test]
+    fn tester_process_table_request_fails_closed_before_launch() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'touch launched'\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        );
+        let result = run(workspace.path(), artifact_dir.path(), true, &resolver());
+        assert!(result.is_err(), "an unapproved command must not launch");
+        assert!(!workspace.path().join("launched").exists());
+    }
+
+    #[test]
+    fn tester_requested_permission_cannot_bypass_render_boundary() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: true\n    test_harness: shell-harness\n    permissions: [process-table-read]\n",
+        );
+        let plan = plan(workspace.path()).unwrap();
+        let settlement = prepare_settlement_directories(artifact_dir.path(), &plan).unwrap();
+
+        let error = render_sandbox_profile(
+            workspace.path(),
+            artifact_dir.path(),
+            true,
+            &resolver(),
+            settlement,
+        )
+        .err()
+        .expect("direct profile rendering must reject a permission request");
+
+        assert!(
+            error.to_string().contains("requires the macOS sandbox"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1950,6 +2498,11 @@ mod tests {
             workspace.path(),
             artifact_dir.path(),
             sandbox.profile(),
+            Some(&sandbox.command_profiles),
+            sandbox
+                .candidate_commit
+                .as_deref()
+                .map(|candidate| (candidate, sandbox.original_indexes.as_slice())),
             &sandbox.commands,
             Some(&sandbox.settlement_directories),
             &[],
@@ -1991,6 +2544,7 @@ mod tests {
 
         assert_eq!(indexes, vec![1, 2]);
         assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.original_indexes, vec![1, 2]);
         assert_eq!(plan.commands[0].command, "second");
         assert_eq!(plan.commands[1].command, "third");
     }
@@ -2022,6 +2576,34 @@ mod tests {
         assert!(error.to_string().contains("no longer matches"));
     }
 
+    #[test]
+    fn chained_failed_command_plan_keeps_original_configuration_index() {
+        let workspace = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: first\n    test_harness: shell\n  - command: second\n    test_harness: shell\n",
+        );
+        let source = TesterResults {
+            candidate_commit: Some("candidate".to_string()),
+            commands: vec![command_result("second", "shell", 1)],
+            tests: Vec::new(),
+            summary: Summary {
+                total: 0,
+                pass: 0,
+                fail: 0,
+                skipped: 0,
+            },
+            error: None,
+        };
+
+        let (plan, local_indexes) =
+            plan_chained_failed_commands(workspace.path(), &source).unwrap();
+
+        assert_eq!(local_indexes, vec![0]);
+        assert_eq!(plan.original_indexes, vec![1]);
+    }
+
     fn command_result(command: &str, harness: &str, exit_code: i32) -> CommandResult {
         CommandResult {
             failure_cause: None,
@@ -2031,6 +2613,8 @@ mod tests {
             duration_ms: 1,
             stdout_log: "stdout.log".to_string(),
             stderr_log: "stderr.log".to_string(),
+            permission_receipt: None,
+            permission_receipt_id: None,
             process_settlement: None,
         }
     }

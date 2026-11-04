@@ -14,7 +14,7 @@ use fluent::cli::{
     AttemptCommands, AttemptEvidenceCommands, Cli, Commands, FargateCommands, KeepAwakeCommands,
     MergeCandidateCommands, ObservationCommands, QueueCommands, ReviewCommands, SchedulerCommands,
     SkillsCommands, SlackCommands, TaskCommands, TerminalCommands, TesterCommands,
-    WorkItemCommands,
+    TesterPermissionCommands, WorkItemCommands,
 };
 use fluent::coder::CoderKind;
 use fluent::content::ContentResolver;
@@ -2044,6 +2044,38 @@ fn cmd_tester(project_root: &Path, command: TesterCommands, global_no_sandbox: b
             )?;
             println!("Release acceptance verified for {work_item_id} {attempt_id} at {candidate}");
         }
+        TesterCommands::Permissions { command } => match command {
+            TesterPermissionCommands::Show {
+                candidate,
+                command_index,
+            } => {
+                let request = fluent::tester_permissions::show_request(
+                    project_root,
+                    &candidate,
+                    command_index,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&request)?);
+            }
+            TesterPermissionCommands::Approve {
+                candidate,
+                command_index,
+                capability,
+                request_digest,
+            } => {
+                let approval = fluent::tester_permissions::approve_request(
+                    project_root,
+                    &candidate,
+                    command_index,
+                    &capability,
+                    &request_digest,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&approval)?);
+            }
+            TesterPermissionCommands::Revoke { approval_id } => {
+                let revoked = fluent::tester_permissions::revoke_approval(&approval_id)?;
+                println!("{}", serde_json::to_string_pretty(&revoked)?);
+            }
+        },
         TesterCommands::Check { no_sandbox } => {
             match fluent::tester::check(project_root, no_sandbox || global_no_sandbox, &resolver)? {
                 fluent::tester::TesterOutcome::Passed => println!("Tester passed"),
