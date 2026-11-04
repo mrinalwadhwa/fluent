@@ -203,8 +203,8 @@ config = {'commands': [
     {'command': f'{probe} denied', 'test_harness': 'shell-harness'},
 ]}
 (root / '.fluent/tester.yaml').write_text(json.dumps(config) + '\n')
-# Readiness has no executed commands and runs outside the sandbox. Assert the
-# extractor's process-table denial only when it extracts executed commands.
+# Readiness has no executed commands. For either executed run, require every
+# command to pass as well as the extractor's own process-table denial.
 (root / '.fluent/extract-tester-results').write_text(
     '#!/usr/bin/env python3\n'
     'import json, subprocess, sys\n'
@@ -214,6 +214,8 @@ config = {'commands': [
     f'    result = subprocess.run([{str(root / "probe")!r}, "denied"])\n'
     '    if result.returncode != 0:\n'
     '        sys.exit(result.returncode)\n'
+    '    if any(command.get("exit_code") != 0 for command in commands):\n'
+    '        sys.exit(1)\n'
     'print("[]")\n')
 PY
 chmod 755 "$fixture/.fluent/extract-tester-results"

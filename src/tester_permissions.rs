@@ -56,7 +56,7 @@ fn digest(bytes: impl AsRef<[u8]>) -> String {
 /// path or a particular approval generation.
 pub(crate) fn permission_policy_digest() -> String {
     let policy = [
-        b"tester-process-table-policy-v1\n".as_slice(),
+        b"tester-process-table-policy-v2-bundled-protected\n".as_slice(),
         PROCESS_TABLE_RULE.as_bytes(),
         include_bytes!("../sandboxes/common.sb").as_slice(),
     ]
@@ -241,6 +241,16 @@ pub(crate) fn protected_profile_directory(writable_roots: &[PathBuf]) -> Result<
         );
     }
     Ok(root)
+}
+
+/// Prepare baseline extraction storage without creating an approval record.
+pub(crate) fn prepare_readiness_profile_directory(
+    checkout: &Path,
+    writable_roots: &[PathBuf],
+) -> Result<PathBuf> {
+    let root = store_root()?;
+    prepare_store_directory(&root, checkout)?;
+    protected_profile_directory(writable_roots)
 }
 
 fn validate_store_parent(root: &Path) -> Result<()> {

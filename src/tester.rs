@@ -473,10 +473,10 @@ pub fn check(
     resolver: &ContentResolver,
 ) -> Result<TesterOutcome> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    // Structural diagnostics deliberately precede the fallible read-only plan:
-    // malformed configuration must not suppress independent extractor/readiness
-    // failures that an operator can repair in the same pass.
-    let problems = structural_problems(candidate_workspace, artifact.path(), None);
+    // Collect independent configuration and extractor diagnostics, but never
+    // execute candidate-owned readiness code with the host's authority.
+    let readiness = prepare_readiness_profile(candidate_workspace, artifact.path(), no_sandbox)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), readiness.as_ref());
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -507,7 +507,8 @@ pub fn check_structural(
     resolver: &ContentResolver,
 ) -> Result<()> {
     let artifact = tempfile::tempdir().context("creating Tester readiness artifact")?;
-    let problems = structural_problems(candidate_workspace, artifact.path(), None);
+    let readiness = prepare_readiness_profile(candidate_workspace, artifact.path(), no_sandbox)?;
+    let problems = structural_problems(candidate_workspace, artifact.path(), readiness.as_ref());
     if !problems.is_empty() {
         anyhow::bail!(
             "Tester is not structurally ready:\n{}",
@@ -723,26 +724,34 @@ pub(crate) fn render_sandbox_profile_with_cache(
     }
     writable_roots.extend(settlement_directories.iter().flatten().cloned());
     let common_git_dir = tester_git_metadata_root(&candidate_abs)?;
-    match os::render_profile_common_only_with_denied_access(
-        resolver,
-        &home,
-        &writable_roots,
-        std::slice::from_ref(&common_git_dir),
-        &[],
-        std::slice::from_ref(&common_git_dir),
-    ) {
-        Ok(profile) => {
-            let (profile, command_profiles) = if has_permission_request {
-                let mut forbidden_roots = writable_roots.clone();
-                forbidden_roots.push(common_git_dir.clone());
-                let protected =
-                    crate::tester_permissions::protected_profile_directory(&forbidden_roots)?;
-                let baseline = os::protect_tester_profile(profile, &protected)?;
-                let selected = render_command_profiles(&commands, &baseline, &protected)?;
-                (baseline, selected)
-            } else {
-                (profile, Vec::new())
-            };
+    let rendered = if has_permission_request {
+        let mut forbidden_roots = writable_roots.clone();
+        forbidden_roots.push(common_git_dir.clone());
+        let protected = crate::tester_permissions::protected_profile_directory(&forbidden_roots)?;
+        os::render_protected_tester_profile(
+            &home,
+            &writable_roots,
+            std::slice::from_ref(&common_git_dir),
+            std::slice::from_ref(&common_git_dir),
+            &protected,
+        )
+        .and_then(|baseline| {
+            let selected = render_command_profiles(&commands, &baseline, &protected)?;
+            Ok((baseline, selected))
+        })
+    } else {
+        os::render_profile_common_only_with_denied_access(
+            resolver,
+            &home,
+            &writable_roots,
+            std::slice::from_ref(&common_git_dir),
+            &[],
+            std::slice::from_ref(&common_git_dir),
+        )
+        .map(|profile| (profile, Vec::new()))
+    };
+    match rendered {
+        Ok((profile, command_profiles)) => {
             os::preflight_profile(&profile)?;
             for selected in command_profiles.iter().flatten() {
                 os::preflight_profile(selected)?;
@@ -889,7 +898,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
     let has_permission_request = commands
         .iter()
         .any(|command| !command.permissions.is_empty());
-    let mut manifest = CanonicalRunManifest {
+    let manifest = CanonicalRunManifest {
         run_at: Some(crate::work_model::now_iso8601()),
         environment: commands
             .iter()
@@ -1010,6 +1019,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
             match settlement_result {
                 Ok(settlement) => Some(settlement),
                 Err(error) => {
+                    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
                     return persist_harness_error(
                         artifact_dir,
                         "process_settlement_infrastructure",
@@ -1022,7 +1032,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
         } else {
             None
         };
-        let mut result = run_command(
+        let execution = run_command(
             candidate_workspace,
             &cmd.command,
             &cmd.test_harness,
@@ -1041,7 +1051,20 @@ fn run_with_prepared_sandbox_profile_and_collector(
             settlement
                 .as_ref()
                 .map(|settlement| settlement.directory.as_path()),
-        )?;
+        );
+        let mut result = match execution {
+            Ok(result) => result,
+            Err(error) => {
+                publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
+                return persist_harness_error(
+                    artifact_dir,
+                    "command_launch_admission",
+                    format!("Unable to launch Tester command {index}"),
+                    format!("{error:#}"),
+                    command_results,
+                );
+            }
+        };
         if let Some(settlement) = settlement {
             match settlement.new_processes(collector) {
                 Ok(leaks) => {
@@ -1070,6 +1093,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
                 }
                 Err(error) => {
                     command_results.push(result);
+                    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
                     return persist_harness_error(
                         artifact_dir,
                         "process_settlement_infrastructure",
@@ -1087,21 +1111,7 @@ fn run_with_prepared_sandbox_profile_and_collector(
         command_results.push(result);
     }
 
-    if has_permission_request {
-        manifest.permission_receipts = command_results
-            .iter()
-            .map(|result| result.permission_receipt_id.clone())
-            .collect();
-        crate::tester_permissions::write_command_artifact(
-            &artifact_dir.join("canonical-run.json"),
-            &serde_json::to_vec_pretty(&manifest)?,
-        )?;
-    }
-    let commands_json = serde_json::to_string_pretty(&command_results)?;
-    crate::tester_permissions::write_command_artifact(
-        &artifact_dir.join("commands.json"),
-        commands_json.as_bytes(),
-    )?;
+    publish_command_records(artifact_dir, &command_results, Some(&manifest))?;
 
     if let Some(result) = command_results.iter().find(|result| {
         fs::read_to_string(artifact_dir.join(&result.stderr_log))
@@ -1220,6 +1230,35 @@ fn record_test_boundary(sandboxed: bool) {
 #[cfg(not(feature = "test-support"))]
 fn record_test_boundary(_: bool) {}
 
+/// Publish completed outcomes even if a later command cannot be admitted.
+/// Leave receipt slots for commands that did not launch empty.
+fn publish_command_records(
+    artifact_dir: &Path,
+    commands: &[CommandResult],
+    manifest: Option<&CanonicalRunManifest>,
+) -> Result<()> {
+    if let Some(manifest) = manifest {
+        let mut manifest = manifest.clone();
+        if manifest.schema_version == 2 {
+            manifest.permission_receipts = (0..manifest.commands.len())
+                .map(|index| {
+                    commands
+                        .get(index)
+                        .and_then(|result| result.permission_receipt_id.clone())
+                })
+                .collect();
+            crate::tester_permissions::write_command_artifact(
+                &artifact_dir.join("canonical-run.json"),
+                &serde_json::to_vec_pretty(&manifest)?,
+            )?;
+        }
+    }
+    crate::tester_permissions::write_command_artifact(
+        &artifact_dir.join("commands.json"),
+        &serde_json::to_vec_pretty(commands)?,
+    )
+}
+
 pub(crate) fn persist_harness_error(
     artifact_dir: &Path,
     kind: &str,
@@ -1227,6 +1266,7 @@ pub(crate) fn persist_harness_error(
     details: String,
     commands: Vec<CommandResult>,
 ) -> Result<TesterOutcome> {
+    publish_command_records(artifact_dir, &commands, None)?;
     write_results(
         artifact_dir,
         &TesterResults {
@@ -1247,6 +1287,49 @@ pub(crate) fn persist_harness_error(
         },
     )?;
     Ok(TesterOutcome::HarnessError)
+}
+
+/// Confine candidate-owned empty-artifact extraction before reading approvals
+/// or preparing capability profiles. This baseline always uses bundled policy.
+fn prepare_readiness_profile(
+    candidate_workspace: &Path,
+    artifact_dir: &Path,
+    no_sandbox: bool,
+) -> Result<Option<os::SandboxProfile>> {
+    if no_sandbox {
+        if let Ok(config) = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH)) {
+            anyhow::ensure!(
+                config
+                    .commands
+                    .iter()
+                    .all(|command| command.permissions.is_empty()),
+                "process-table-read requires the macOS sandbox"
+            );
+        }
+        return Ok(None);
+    }
+    #[cfg(feature = "test-support")]
+    if std::env::var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT").as_deref() == Ok("pass") {
+        return Ok(None);
+    }
+    let candidate = fs::canonicalize(candidate_workspace)?;
+    let artifact = fs::canonicalize(artifact_dir)?;
+    let home = os::operator_home()?;
+    let roots = tester_writable_roots(&candidate, &artifact, &home);
+    let common = tester_git_metadata_root(&candidate)?;
+    let mut forbidden = roots.clone();
+    forbidden.push(common.clone());
+    let protected =
+        crate::tester_permissions::prepare_readiness_profile_directory(&candidate, &forbidden)?;
+    let profile = os::render_protected_tester_profile(
+        &home.to_string_lossy(),
+        &roots,
+        std::slice::from_ref(&common),
+        std::slice::from_ref(&common),
+        &protected,
+    )?;
+    os::preflight_profile(&profile)?;
+    Ok(Some(profile))
 }
 
 fn structural_problems(

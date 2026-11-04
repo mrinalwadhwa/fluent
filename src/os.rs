@@ -21,13 +21,26 @@ pub struct SandboxProfile {
     pub path: PathBuf,
 }
 
-/// Move a prepared Tester profile into host-only storage before any child can
-/// receive its path. The original shared temporary file is removed on drop.
-pub(crate) fn protect_tester_profile(
-    profile: SandboxProfile,
+/// Render the immutable Tester policy in memory and publish its first file
+/// inside validated host-only storage. Candidate and user overrides cannot
+/// change the policy identity approved by the operator.
+pub(crate) fn render_protected_tester_profile(
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
     directory: &Path,
 ) -> Result<SandboxProfile> {
-    private_tester_profile(&std::fs::read(&profile.path)?, directory)
+    let content = render_profile_content(
+        include_str!("../sandboxes/common.sb").to_owned(),
+        home,
+        writable_roots,
+        readable_roots,
+        denied_write_roots,
+        None,
+        true,
+    )?;
+    private_tester_profile(content.as_bytes(), directory)
 }
 
 /// Give only one approved Tester command the exact process-table read rule.
@@ -956,6 +969,39 @@ fn render_profile_for_access(
         common
     };
 
+    let rendered = render_profile_content(
+        combined,
+        home,
+        writable_roots,
+        readable_roots,
+        denied_write_roots,
+        codex_home,
+        deny_codex_source_home,
+    )?;
+
+    let temp_file = NamedTempFile::with_prefix("fluent-sandbox-")?;
+    std::fs::write(temp_file.path(), &rendered)?;
+
+    let path = temp_file.path().to_path_buf();
+    Ok(SandboxProfile {
+        _temp_file: temp_file,
+        path,
+    })
+}
+
+fn render_profile_content(
+    combined: String,
+    home: &str,
+    writable_roots: &[PathBuf],
+    readable_roots: &[PathBuf],
+    denied_write_roots: &[PathBuf],
+    codex_home: Option<&Path>,
+    deny_codex_source_home: bool,
+) -> Result<String> {
+    anyhow::ensure!(
+        !writable_roots.is_empty(),
+        "At least one writable sandbox root is required"
+    );
     let root_rules = render_root_rules(writable_roots, readable_roots);
     let primary_root = writable_roots[0].to_string_lossy();
     let combined = if combined.contains("_SANDBOX_ROOT_RULES_") {
@@ -1016,14 +1062,7 @@ fn render_profile_for_access(
         .replace("_HOME_", home)
         .replace("_SANDBOX_ROOT_", &primary_root);
 
-    let temp_file = NamedTempFile::with_prefix("fluent-sandbox-")?;
-    std::fs::write(temp_file.path(), &rendered)?;
-
-    let path = temp_file.path().to_path_buf();
-    Ok(SandboxProfile {
-        _temp_file: temp_file,
-        path,
-    })
+    Ok(rendered)
 }
 
 fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
@@ -1143,19 +1182,22 @@ mod tests {
         let private = root.join("profiles");
         std::fs::create_dir(&private).unwrap();
         std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let profile = render_profile_common_only(
-            &ContentResolver::new(None),
+        // A hostile source pathname in a shared temporary directory cannot be
+        // copied: this renderer accepts only trusted policy and root inputs.
+        let hostile = root.join("fluent-sandbox-hostile");
+        std::fs::write(&hostile, "(allow default)").unwrap();
+        let protected = render_protected_tester_profile(
             "/staged/worker-home",
             &[root.join("workspace")],
             &[],
+            &[],
+            &private,
         )
         .unwrap();
-        let original = profile.path.clone();
-        let original_bytes = std::fs::read(&original).unwrap();
-        let protected = protect_tester_profile(profile, &private).unwrap();
+        let bytes = std::fs::read_to_string(&protected.path).unwrap();
+        assert!(bytes.contains("(deny default)"));
+        assert!(!bytes.contains("(allow default)"));
         assert!(protected.path.starts_with(&private));
-        assert_eq!(std::fs::read(&protected.path).unwrap(), original_bytes);
-        assert!(!original.exists());
         assert_eq!(
             std::fs::metadata(&protected.path)
                 .unwrap()
@@ -1167,14 +1209,54 @@ mod tests {
 
         let alias = root.join("alias");
         std::os::unix::fs::symlink(&private, &alias).unwrap();
-        let profile = render_profile_common_only(
-            &ContentResolver::new(None),
+        assert!(
+            render_protected_tester_profile(
+                "/staged/worker-home",
+                &[root.join("workspace")],
+                &[],
+                &[],
+                &alias,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_tester_profile_never_uses_shared_temp_storage() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let private = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = std::env::var_os("TMPDIR");
+        // Make shared temporary publication impossible. The old render-then-copy
+        // path would fail here before it could create a protected profile.
+        unsafe {
+            std::env::set_var("TMPDIR", private.join("unavailable-shared-temp"));
+        }
+        let shared = NamedTempFile::with_prefix("fluent-sandbox-");
+        let protected = render_protected_tester_profile(
             "/staged/worker-home",
-            &[root.join("workspace")],
+            &[private.join("workspace")],
             &[],
-        )
-        .unwrap();
-        assert!(protect_tester_profile(profile, &alias).is_err());
+            &[],
+            &private,
+        );
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("TMPDIR", previous);
+            } else {
+                std::env::remove_var("TMPDIR");
+            }
+        }
+        assert!(
+            shared.is_err(),
+            "the adversarial shared destination must be unavailable"
+        );
+        let protected = protected.expect("publish directly into protected storage");
+        assert_eq!(protected.path.parent(), Some(private.as_path()));
+        let content = std::fs::read_to_string(&protected.path).unwrap();
+        assert!(content.contains("(deny default)"));
+        assert!(content.contains("tester-permissions"));
     }
 
     #[test]
