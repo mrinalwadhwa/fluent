@@ -11286,6 +11286,12 @@ fn ensure_source_product_unchanged(
     if &after == before {
         return Ok(());
     }
+    let changed_paths = before
+        .content_hashes
+        .keys()
+        .chain(after.content_hashes.keys())
+        .filter(|path| before.content_hashes.get(*path) != after.content_hashes.get(*path))
+        .collect::<BTreeSet<_>>();
     // The applied Writer profile denies source writes. A landing may advance
     // that checkout independently; keep the candidate and its base unchanged
     // so the later integration checks still decide whether it can merge.
@@ -11301,7 +11307,11 @@ fn ensure_source_product_unchanged(
             &["merge-base", "--is-ancestor", &before.head, &after.head],
         )?;
         match ancestry.status.code() {
-            Some(0) => return Ok(()),
+            Some(0) => {
+                if source_product_changes_match_head(source, before, &after, &changed_paths)? {
+                    return Ok(());
+                }
+            }
             Some(1) => {}
             _ => bail!(
                 "cannot verify source checkout ancestry: {}",
@@ -11309,23 +11319,112 @@ fn ensure_source_product_unchanged(
             ),
         }
     }
-    let changed_paths = before
-        .content_hashes
-        .keys()
-        .chain(after.content_hashes.keys())
-        .filter(|path| before.content_hashes.get(*path) != after.content_hashes.get(*path))
-        .collect::<BTreeSet<_>>();
     anyhow::ensure!(
         &after == before,
-        "Writer changed source checkout {}; preserve it for inspection and stop this Task (before HEAD {}, after HEAD {}; before status {:?}, after status {:?}; changed product paths {:?})",
+        "Writer changed source checkout {}; preserve it for inspection and stop this Task (before HEAD {}, after HEAD {}; before branch {}, after branch {}; before status {:?}, after status {:?}; changed product paths {:?})",
         source.display(),
         before.head,
         after.head,
+        before.branch,
+        after.branch,
         String::from_utf8_lossy(&before.status),
         String::from_utf8_lossy(&after.status),
         changed_paths,
     );
     Ok(())
+}
+
+// Git status can hide product edits behind assume-unchanged or skip-worktree.
+// Before accepting a landing, bind changed bytes to the newly committed tree.
+fn source_product_changes_match_head(
+    source: &Path,
+    before: &SourceProductSnapshot,
+    after: &SourceProductSnapshot,
+    changed_paths: &BTreeSet<&PathBuf>,
+) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+
+    // Include landed paths even if a hidden edit restored their original bytes.
+    let delta = git::run_raw(
+        source,
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--no-renames",
+            "--name-only",
+            "-r",
+            "-z",
+            &before.head,
+            &after.head,
+            "--",
+            ".",
+            ":(exclude).fluent/work",
+        ],
+    )?;
+    anyhow::ensure!(
+        delta.status.success(),
+        "cannot inspect source product delta: {}",
+        String::from_utf8_lossy(&delta.stderr)
+    );
+    let mut paths = changed_paths
+        .iter()
+        .map(|path| (*path).clone())
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        delta
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()))),
+    );
+    let tree = git::run_raw(source, &["ls-tree", "-r", "-z", &after.head])?;
+    anyhow::ensure!(
+        tree.status.success(),
+        "cannot read source product tree: {}",
+        String::from_utf8_lossy(&tree.stderr)
+    );
+    let mut entries = BTreeMap::new();
+    for record in tree
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("source tree entry has no path")?;
+        let header = std::str::from_utf8(&record[..tab])?;
+        let mut fields = header.split(' ');
+        let mode = fields.next().context("source tree entry has no mode")?;
+        let kind = fields.next().context("source tree entry has no type")?;
+        let object = fields.next().context("source tree entry has no object")?;
+        entries.insert(&record[tab + 1..], (mode, kind, object));
+    }
+    for path in &paths {
+        let actual = after.content_hashes.get(path);
+        let Some((mode, kind, object)) = entries.get(path.as_os_str().as_encoded_bytes()) else {
+            if actual.is_some() {
+                return Ok(false);
+            }
+            continue;
+        };
+        let expected = if *kind == "commit" {
+            "directory".to_string()
+        } else {
+            let blob = git::run_raw(source, &["cat-file", "blob", object])?;
+            anyhow::ensure!(
+                blob.status.success(),
+                "cannot read source product blob: {}",
+                String::from_utf8_lossy(&blob.stderr)
+            );
+            let kind = if *mode == "120000" { "symlink" } else { "file" };
+            format!("{kind}:{:x}", Sha256::digest(&blob.stdout))
+        };
+        if actual != Some(&expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
@@ -25786,19 +25885,62 @@ while time.monotonic() < deadline:
     enum SourceDrift {
         Dirty,
         Advance,
+        AdvanceTree,
+        Branch,
+        Rewrite,
+        AdvanceDirty,
+        AdvanceHidden,
+        AdvanceHiddenRestore,
     }
 
     impl SourceDrift {
         fn apply(self, source: &Path) {
+            if matches!(self, Self::Branch) {
+                crate::git::run(source, &["checkout", "-q", "-b", "other"], "switch source")
+                    .unwrap();
+                return;
+            }
             fs::write(source.join("tracked.txt"), "source drift\n").unwrap();
-            if matches!(self, Self::Advance) {
-                crate::git::run(source, &["add", "tracked.txt"], "stage landing").unwrap();
+            if matches!(self, Self::AdvanceTree) {
+                fs::remove_file(source.join("tracked.txt")).unwrap();
+                fs::write(source.join("added.txt"), "landed file\n").unwrap();
+                std::os::unix::fs::symlink("added.txt", source.join("link.txt")).unwrap();
                 crate::git::run(
                     source,
-                    &["commit", "-q", "-m", "Update source"],
-                    "land source",
+                    &["add", "tracked.txt", "added.txt", "link.txt"],
+                    "stage tree landing",
                 )
                 .unwrap();
+                crate::git::run(source, &["commit", "-q", "-m", "Update tree"], "land tree")
+                    .unwrap();
+                return;
+            }
+            if !matches!(self, Self::Dirty) {
+                crate::git::run(source, &["add", "tracked.txt"], "stage landing").unwrap();
+                let mut args = vec!["commit", "-q", "-m", "Update source"];
+                if matches!(self, Self::Rewrite) {
+                    args.push("--amend");
+                }
+                crate::git::run(source, &args, "land source").unwrap();
+                if matches!(
+                    self,
+                    Self::AdvanceDirty | Self::AdvanceHidden | Self::AdvanceHiddenRestore
+                ) {
+                    if matches!(self, Self::AdvanceHidden | Self::AdvanceHiddenRestore) {
+                        crate::git::run(
+                            source,
+                            &["update-index", "--assume-unchanged", "tracked.txt"],
+                            "hide source status",
+                        )
+                        .unwrap();
+                    }
+                    let bytes = if matches!(self, Self::AdvanceHiddenRestore) {
+                        "baseline\n"
+                    } else {
+                        "uncommitted after landing\n"
+                    };
+                    fs::write(source.join("tracked.txt"), bytes).unwrap();
+                }
             }
         }
     }
@@ -25807,6 +25949,7 @@ while time.monotonic() < deadline:
         launches: Arc<Mutex<Vec<String>>>,
         sessions: Arc<Mutex<Vec<String>>>,
         first_no_output: bool,
+        retry_first: bool,
         second_commit: bool,
         source_drift: Option<(PathBuf, SourceDrift)>,
     }
@@ -25868,7 +26011,11 @@ while time.monotonic() < deadline:
                 .unwrap();
             }
             crate::coder::CoderRunCompletion {
-                terminal: Ok(0),
+                terminal: if number == 1 && self.retry_first {
+                    Err(anyhow::anyhow!("transient Writer failure"))
+                } else {
+                    Ok(0)
+                },
                 report: Default::default(),
             }
         }
@@ -25919,6 +26066,7 @@ while time.monotonic() < deadline:
                     launches: Arc::clone(&recorded),
                     sessions: Arc::clone(&recorded_sessions),
                     first_no_output,
+                    retry_first: false,
                     second_commit,
                     source_drift: None,
                 }) as Box<dyn crate::coder::Coder>
@@ -25961,6 +26109,37 @@ while time.monotonic() < deadline:
 
     #[test]
     fn writer_source_checkout_clean_fast_forward_does_not_pause() {
+        for retry_first in [false, true] {
+            check_writer_source_drift(SourceDrift::Advance, false, true, retry_first);
+        }
+        check_writer_source_drift(SourceDrift::AdvanceTree, false, true, false);
+    }
+
+    #[test]
+    fn writer_source_checkout_unsafe_drift_needs_user() {
+        for drift in [
+            SourceDrift::Dirty,
+            SourceDrift::Branch,
+            SourceDrift::Rewrite,
+            SourceDrift::AdvanceDirty,
+            SourceDrift::AdvanceHidden,
+            SourceDrift::AdvanceHiddenRestore,
+        ] {
+            check_writer_source_drift(drift, false, false, false);
+        }
+    }
+
+    #[test]
+    fn writer_source_checkout_unsandboxed_advance_needs_user() {
+        check_writer_source_drift(SourceDrift::Advance, true, false, false);
+    }
+
+    fn check_writer_source_drift(
+        drift: SourceDrift,
+        no_sandbox: bool,
+        expect_complete: bool,
+        retry_first: bool,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         fs::create_dir_all(source.join(".fluent/expertise")).unwrap();
@@ -25990,13 +26169,17 @@ while time.monotonic() < deadline:
         let recorded = Arc::clone(&launches);
         let drift_source = source.clone();
         let make_coder = move |sandbox| {
-            assert!(matches!(sandbox, CoderSandbox::SeatbeltProfile(_)));
+            assert_eq!(
+                matches!(sandbox, CoderSandbox::SeatbeltProfile(_)),
+                !no_sandbox
+            );
             Box::new(HandoffCoder {
                 launches: Arc::clone(&recorded),
                 sessions: Arc::new(Mutex::new(Vec::new())),
                 first_no_output: true,
+                retry_first,
                 second_commit: true,
-                source_drift: Some((drift_source.clone(), SourceDrift::Advance)),
+                source_drift: Some((drift_source.clone(), drift)),
             }) as Box<dyn crate::coder::Coder>
         };
         let result = run_write_task_with_coder(
@@ -26008,12 +26191,44 @@ while time.monotonic() < deadline:
                 task_id: "attempt-1-write-1",
                 resolver: &resolver,
                 extra_args: &[],
-                no_sandbox: false,
+                no_sandbox,
                 store_lock: None,
             },
             Some(&make_coder),
         );
-        assert!(result.is_ok(), "{result:?}");
+        if !expect_complete {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("preserve it for inspection"),
+                "{drift:?}: {error:#}"
+            );
+            assert_eq!(launches.lock().unwrap().len(), 1);
+            let stored = store.read_work_item("work-1").unwrap();
+            assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::NeedsUser);
+            assert_eq!(
+                stored.attempts[0].pause_kind,
+                Some(crate::work_model::PauseKind::WriterCompletion)
+            );
+            let expected_bytes = match drift {
+                SourceDrift::Branch | SourceDrift::AdvanceHiddenRestore => "baseline\n",
+                SourceDrift::AdvanceDirty | SourceDrift::AdvanceHidden => {
+                    "uncommitted after landing\n"
+                }
+                _ => "source drift\n",
+            };
+            assert_eq!(
+                fs::read_to_string(source.join("tracked.txt")).unwrap(),
+                expected_bytes
+            );
+            if matches!(drift, SourceDrift::Branch) {
+                assert_eq!(current_branch(&source).unwrap(), "other");
+                assert_eq!(head_commit(&source).unwrap(), base);
+            } else if !matches!(drift, SourceDrift::Dirty) {
+                assert_ne!(head_commit(&source).unwrap(), base);
+            }
+            return;
+        }
+        assert!(result.is_ok(), "{drift:?}: {result:?}");
         assert_eq!(launches.lock().unwrap().len(), 2);
         assert_ne!(head_commit(&source).unwrap(), base);
         let stored = store.read_work_item("work-1").unwrap();
@@ -26075,6 +26290,7 @@ while time.monotonic() < deadline:
                 launches: Arc::clone(&recorded),
                 sessions: Arc::clone(&recorded_sessions),
                 first_no_output: true,
+                retry_first: false,
                 second_commit: false,
                 source_drift: Some((drift_source.clone(), SourceDrift::Dirty)),
             }) as Box<dyn crate::coder::Coder>
