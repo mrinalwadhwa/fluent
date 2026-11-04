@@ -4,6 +4,19 @@ Architectural and design decisions that are intentional and should not be flagge
 
 ---
 
+## Validate source advances against checkout bytes
+
+Accept an independent clean source advance only under the applied Writer
+sandbox, preserving the candidate and its original base for later integration.
+Git status alone cannot detect edits hidden by index flags, so validate both
+changed snapshot paths and landed paths against the resulting checkout.
+Regular files need Git's checkout conversions; symlink targets need raw blob
+bytes. See the [confinement rule](learnings/source-advance-requires-writer-confinement.md)
+and [checkout validation rule](learnings/source-validation-uses-checkout-bytes.md)
+for the production-route regression tests.
+
+---
+
 ## Reserve managed build output through Task settlement
 
 Every Task launch takes a shared lease at
