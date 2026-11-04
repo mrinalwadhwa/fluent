@@ -64270,6 +64270,18 @@ fn tester_permissions_old_reader_refuses_version_two_evidence() {
     manifest["permission_receipts"] = serde_json::json!([null]);
     write_json_path(&manifest_path, &manifest);
     let work_root = project.join(".fluent/work");
+    // The old reader predates current Work Item storage. Give it the schema it
+    // understood so this check reaches the Tester manifest under test.
+    let item_path = work_root.join(format!("items/{work}.json"));
+    let mut item = read_json_path(&item_path);
+    item["schema_version"] = serde_json::json!(12);
+    item["model_writer_version"]["schema_version"] = serde_json::json!(10);
+    item["model_writer_version"]["version"] = serde_json::json!("0.6.0");
+    write_json_path(&item_path, &item);
+    let attempt_path = work_root.join(format!("attempts/{work}/attempt-1.json"));
+    let mut attempt = read_json_path(&attempt_path);
+    attempt["schema_version"] = serde_json::json!(12);
+    write_json_path(&attempt_path, &attempt);
     let before = snapshot_tree(&work_root);
     let output = Command::new(&binary)
         .current_dir(&project)
