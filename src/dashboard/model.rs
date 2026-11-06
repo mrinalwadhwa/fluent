@@ -181,6 +181,7 @@ impl App {
                 &self.expanded,
                 self.selected_key.as_ref(),
                 self.size,
+                self.pane == Pane::Detail && self.show_details,
             )
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)

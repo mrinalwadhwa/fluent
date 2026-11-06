@@ -41,10 +41,10 @@ The `f`/`F` filter aliases and `a` History/All shortcut remain available when
 navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
 
 Use Up/Down to select a Work Item and Enter to expand or collapse its workers.
-Right focuses the selected Work Item or worker details. Press `t` explicitly to
+Right opens labeled Work Item or worker details across the full body. Press `t` explicitly to
 open the selected worker terminal in Observe or reconnect its existing view. Moving selection releases the previous
 attachment and waits for an explicit open command before attaching elsewhere.
-At 60–99 columns, Right opens details and Left/Esc returns to the list. Tab and
+Left/Esc returns to the list at every supported width. Tab and
 Shift+Tab keep switching views in either pane while navigation owns focus. Observe clients use tmux's
 `read-only,ignore-size` flags and preserve the worker's dimensions even when
 no controller is attached. Only Control resizes the worker; releasing Control

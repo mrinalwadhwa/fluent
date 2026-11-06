@@ -16,6 +16,7 @@ pub struct ProjectAreas {
     pub list: ratatui::layout::Rect,
     pub divider: ratatui::layout::Rect,
     pub detail: ratatui::layout::Rect,
+    pub focused_detail: ratatui::layout::Rect,
 }
 
 pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
@@ -65,6 +66,11 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
         list,
         divider,
         detail,
+        focused_detail: Rect {
+            y: body.y + 1,
+            height: body.height.saturating_sub(1),
+            ..body
+        },
     }
 }
 
@@ -86,6 +92,7 @@ pub fn project_scroll_bounds(
     expanded: &BTreeSet<RowKey>,
     selected_key: Option<&RowKey>,
     size: (u16, u16),
+    focused_details: bool,
 ) -> ScrollBounds {
     if size.0 < 60 || size.1 < 15 {
         return ScrollBounds::default();
@@ -105,7 +112,12 @@ pub fn project_scroll_bounds(
         .map(|work| work.workers.len())
         .sum::<usize>();
     let lines = groups + work + workers + usize::from(work == 0);
-    let detail_width = areas.detail.width.max(1) as usize;
+    let detail = if focused_details {
+        areas.focused_detail
+    } else {
+        areas.detail
+    };
+    let detail_width = detail.width.max(1) as usize;
     let details = selected_key
         .map(|key| project_detail_values(sources, key))
         .unwrap_or_default();
@@ -116,7 +128,7 @@ pub fn project_scroll_bounds(
             .saturating_sub(inner_height as usize)
             .min(u16::MAX as usize) as u16,
         detail_max_scroll: detail_lines
-            .saturating_sub(areas.detail.height as usize)
+            .saturating_sub(detail.height as usize)
             .min(u16::MAX as usize) as u16,
     }
 }

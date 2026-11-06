@@ -139,6 +139,24 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         help(frame, areas.body, app);
     } else if app.errors {
         errors(frame, areas.body, app);
+    } else if app.pane == Pane::Detail && app.show_details {
+        let title = if app
+            .selected_key
+            .as_ref()
+            .is_some_and(|key| key.task_id.is_some())
+        {
+            "Worker details"
+        } else {
+            "Work Item details"
+        };
+        frame.render_widget(
+            Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
+            Rect {
+                height: 1,
+                ..areas.body
+            },
+        );
+        project_detail(frame, areas.focused_detail, app);
     } else if area.width >= 100 {
         frame.render_widget(
             Paragraph::new(vec![Line::from("│"); areas.divider.height as usize]),

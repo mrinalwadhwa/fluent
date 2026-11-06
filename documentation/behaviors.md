@@ -105,7 +105,7 @@ Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_e
 
 ### B1
 
-WHEN the project dashboard renders at 100 columns or wider, THE SYSTEM SHALL
+WHEN the project dashboard renders its list at 100 columns or wider, THE SYSTEM SHALL
 show two compact header lines with counted Current, Needs you, Running, Ready,
 Waiting, History, and All views, one horizontal rule, and one continuous divider
 between the project list and details or terminal, without pane boxes. Leave one
@@ -146,9 +146,14 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 
 WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL expand or collapse its
 workers. WHEN Right is pressed on a Work Item or worker, THE SYSTEM SHALL focus
-its details. WHEN t is pressed on a worker, open only that worker's available
+a labeled details view that occupies the full body at every supported width.
+Left or Esc SHALL return to the list with the same selection and list scroll.
+Details SHALL scroll within their visible width and height.
+WHEN t is pressed on a worker, open only that worker's available
 session in Observe or show why it is unavailable, without starting or retargeting
 Work. Help and footer controls SHALL describe these explicit bindings.
+Test: src/dashboard/tests.rs (right_arrow_opens_full_details_on_wide_dashboard)
+Test: src/dashboard/tests.rs (focused_details_return_preserves_selection_and_terminal_shortcut)
 Test: src/dashboard/tests.rs (worker_arrow_opens_details_and_t_opens_terminal)
 Test: src/dashboard/tests.rs (worker_details_hide_retained_terminal_until_explicit_open)
 Test: src/dashboard/tests.rs (terminal_shortcut_observes_without_retargeting_on_selection)

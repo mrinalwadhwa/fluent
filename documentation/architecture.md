@@ -2304,10 +2304,14 @@ respectively own projection, interaction state, and pure Ratatui rendering.
 `dashboard/layout.rs` computes shared wrapping and scroll bounds and project
 detail text without depending on interaction state or rendering.
 The terminal renderer consumes the same unboxed geometry for viewport size and
-mouse routing. Tab/Shift+Tab cycle views, Enter toggles workers, Right inspects
-details or an available selected session, and Left/Esc returns to the list.
-Moving selection drops the old terminal attachment; opening another invocation
-requires an explicit Right or `t`. The `e` control
+mouse routing. List navigation retains a side-by-side preview at 100 columns or
+wider. Right opens a labeled Work Item or worker details view across the full
+body at every supported width. Shared layout geometry reserves a label row and
+computes wrapping and scroll limits from the remaining full-width area. Terminal
+viewport sizing and mouse routing retain their separate split-pane geometry.
+Tab/Shift+Tab cycle views, Enter toggles workers, and Left/Esc returns to the list
+with the same selection and scroll. Moving selection drops the old terminal
+attachment; opening another invocation requires an explicit `t`. The `e` control
 opens a scrollable view of all Work read errors, including errors that overflow
 the list. `e` or Esc returns to the preserved selection. Help wraps navigation
 instructions and closes with `?` or Esc. Both controls leave Work files unchanged.

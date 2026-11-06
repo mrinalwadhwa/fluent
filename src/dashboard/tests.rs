@@ -2048,9 +2048,8 @@ fn project_layout_keeps_selected_content_visible() {
     terminal
         .draw(|frame| render::draw(frame, &compact))
         .unwrap();
-    for y in 4..17 {
-        assert_eq!(terminal.backend().buffer()[(65, y)].symbol(), "│");
-    }
+    assert!(!buffer_text(terminal.backend().buffer()).contains('│'));
+    assert!(buffer_text(terminal.backend().buffer()).contains("Work Item details"));
 }
 
 #[test]
@@ -3143,16 +3142,11 @@ fn project_details_wrap_full_context_to_the_last_line() {
                 let rendered = text(&app, width, height);
                 for line in rendered
                     .lines()
-                    .skip(areas.detail.y as usize)
-                    .take(areas.detail.height as usize)
+                    .skip(areas.focused_detail.y as usize)
+                    .take(areas.focused_detail.height as usize)
                 {
-                    let detail = if width >= 100 {
-                        line.split('│').nth(1).unwrap()
-                    } else {
-                        line
-                    };
                     seen.push_str(
-                        &detail
+                        &line
                             .chars()
                             .filter(|c| !c.is_whitespace())
                             .collect::<String>(),
@@ -3584,4 +3578,93 @@ fn project_source_read_warnings_preserve_work() {
     assert!(text(&app, 160, 30).contains("STALE"));
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
     assert!(text(&app, 160, 30).contains("offline: full source diagnostic"));
+}
+
+#[test]
+fn right_arrow_opens_full_details_on_wide_dashboard() {
+    for width in [60, 80, 100, 160] {
+        for worker in [false, true] {
+            let mut source = project_source("/one", vec![row("work", "executing")]);
+            source.work[0].workers.push(worker_row("/one", "writer"));
+            let mut app = project_app(vec![source]);
+            app.resize(width, 24);
+            if worker {
+                app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+                app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            }
+            let before = text(&app, width, 24);
+            if width >= 100 {
+                assert!(before.contains('│'));
+            }
+            app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+            let opened = text(&app, width, 24);
+            assert!(
+                opened.contains(if worker {
+                    "Worker details"
+                } else {
+                    "Work Item details"
+                }),
+                "{opened}"
+            );
+            assert!(!opened.contains('│'), "{opened}");
+            assert!(!opened.contains("Updated UTC"));
+            assert!(opened.contains("Work Item: work"));
+        }
+    }
+}
+
+#[test]
+fn focused_details_return_preserves_selection_and_terminal_shortcut() {
+    for width in [60, 100, 160] {
+        let mut source = project_source(
+            "/one",
+            (0..25)
+                .map(|i| row(&format!("item-{i}"), "planned"))
+                .collect(),
+        );
+        source.work[24].status.id = "work".into();
+        source.work[24].key = project::RowKey::work("/one", "work");
+        source.work[24].status.next_action = Some("long next action ".repeat(100) + "ACTION-END");
+        source.work[24].workers.push(worker_row("/one", "writer"));
+        let mut app = project_app(vec![source]);
+        app.resize(width, 18);
+        for _ in 0..24 {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        let selected = app.selected_key.clone();
+        let offset = app.list_scroll;
+        let terminal_area = layout::terminal_content(app.size, "identity");
+        for back in [KeyCode::Left, KeyCode::Esc] {
+            assert_eq!(
+                app.handle_key(KeyCode::Right, KeyModifiers::NONE),
+                Effect::None
+            );
+            assert_eq!(
+                layout::terminal_content(app.size, "identity"),
+                terminal_area
+            );
+            for _ in 0..300 {
+                app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+            }
+            assert_eq!(app.detail_scroll, app.scroll_bounds().detail_max_scroll);
+            let values =
+                layout::project_detail_values(&app.snapshot.sources, selected.as_ref().unwrap());
+            let body = layout::project_areas(ratatui::layout::Rect::new(0, 0, width, 18)).body;
+            let expected = layout::project_detail_lines(&values, body.width)
+                .len()
+                .saturating_sub(body.height as usize - 1);
+            assert_eq!(app.detail_scroll as usize, expected);
+            assert!(text(&app, width, 18).contains("headless execution"));
+            assert_eq!(
+                app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
+                Effect::OpenTerminal
+            );
+            app.handle_key(back, KeyModifiers::NONE);
+            assert_eq!(app.selected_key, selected);
+            assert_eq!(app.list_scroll, offset);
+            assert!(text(&app, width, 18).contains("Updated UTC"));
+        }
+    }
 }
