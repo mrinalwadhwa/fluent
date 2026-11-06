@@ -48,6 +48,7 @@
 - [dashboard-pty-assertions-reconstruct-frames](dashboard-pty-assertions-reconstruct-frames.md) — Reconstruct dashboard PTY frames and wait for rendered readiness before sending keys or asserting Work content
 - [dashboard-rendered-overflow-tests](dashboard-rendered-overflow-tests.md) — Dashboard overflow and responsive-layout tests must render constrained TestBackend frames and assert visible content and pane bounds
 - [dashboard-responsiveness-tests-gate-real-reads](dashboard-responsiveness-tests-gate-real-reads.md) — Hold a confirmed snapshot read open while testing dashboard navigation, rendered views, and exit through a PTY
+- [dashboard-source-health-keeps-polling-quiet](dashboard-source-health-keeps-polling-quiet.md) — Keep healthy source headers stable during polling and show read activity only for explicit checks or source warnings
 - [dashboard-source-projection-keeps-typed-state](dashboard-source-projection-keeps-typed-state.md) — Keep dashboard source loading and worker lookup typed; format operator detail lines in a separate presentation boundary
 - [declared-behavior-tests-must-exist-before-land](declared-behavior-tests-must-exist-before-land.md) — Every Test: reference in behaviors.md must resolve to a real passing test before landing; a green suite does not substitute for a missing production-boundary regression
 - [deduplicate-commit-diagnostic-identities](deduplicate-commit-diagnostic-identities.md) — Resolve abbreviated Git IDs against unique full commits when several gate findings describe one commit
