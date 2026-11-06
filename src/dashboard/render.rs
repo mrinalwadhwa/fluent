@@ -105,9 +105,9 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             title.push_str(&format!(" · {}", display.state));
         }
     }
-    if app.local_read.pending {
+    if app.local_read.pending && app.checking_sources {
         title.push_str(if app.local_read.last_success.is_some() {
-            " · Refreshing local Work"
+            " · Checking local Work"
         } else {
             " · Loading local Work"
         });
@@ -166,19 +166,18 @@ fn read_health_label(health: &super::model::ReadHealth) -> String {
     let observed = health
         .last_success
         .map(|time| format!("Last read UTC {}", time.format("%m-%d %H:%M:%S")));
-    let state = if health.pending {
-        if health.last_success.is_some() {
-            "Refreshing"
-        } else {
-            "Loading"
-        }
-    } else if health.error.is_some() {
+    let state = if health.error.is_some() {
         "Read failed"
+    } else if health.pending
+        && health.last_success.is_some_and(|time| {
+            chrono::Utc::now().signed_duration_since(time) >= chrono::Duration::seconds(10)
+        })
+    {
+        "STALE · Checking"
     } else {
-        ""
+        return String::new();
     };
     match (state, observed) {
-        ("", Some(observed)) => observed,
         (state, Some(observed)) => format!("{state} · {observed}"),
         (state, None) => state.to_owned(),
     }
@@ -251,32 +250,30 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy())
             .unwrap_or_default();
-        // Keep staleness at the front so a long source name cannot hide it.
+        let collision = app.snapshot.sources.iter().any(|other| {
+            other.id != source.id && other.project == source.project && other.host == source.host
+        });
+        let health = app.source_reads.get(&source.id);
+        let warning = health.map(read_health_label).unwrap_or_default();
+        // Keep warnings first so a long source name cannot hide them.
         lines.push(Line::styled(
             format!(
-                "{}{}{} · {parent}/{} · {}",
-                app.source_reads
-                    .get(&source.id)
-                    .map(|health| {
-                        let label = read_health_label(health);
-                        if label.is_empty() {
-                            label
-                        } else {
-                            format!("{label} · ")
-                        }
-                    })
-                    .unwrap_or_default(),
-                if source.stale.is_some()
-                    && app
-                        .source_reads
-                        .get(&source.id)
-                        .is_none_or(|health| health.error.is_some())
-                {
+                "{}{}{}{parent}/{} · {}",
+                if source.stale.is_some() {
                     "STALE · "
                 } else {
                     ""
                 },
-                source.short_id(),
+                if warning.is_empty() {
+                    String::new()
+                } else {
+                    format!("{warning} · ")
+                },
+                if collision {
+                    format!("{} · ", source.short_id())
+                } else {
+                    String::new()
+                },
                 source.project,
                 source.host
             ),

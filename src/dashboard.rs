@@ -54,6 +54,7 @@ fn loading_project_app() -> App {
         project_view: true,
     });
     app.local_read.pending = true;
+    app.checking_sources = true;
     app
 }
 
@@ -432,6 +433,9 @@ impl LocalRefresh {
     fn request(&mut self, app: &mut App, manual: bool) {
         if self.pending.is_some() {
             self.manual_pending |= manual;
+            app.checking_sources |= manual;
+            // Recheck overdue snapshots on poll ticks even while a read is blocked.
+            app.dirty = true;
             return;
         }
         let root = self.root.clone();
@@ -447,6 +451,7 @@ impl LocalRefresh {
         self.start(app, move || {
             refresh_projects(&root, &explicit, &home, &previous)
         });
+        app.checking_sources |= manual;
     }
 
     fn start(
@@ -499,7 +504,7 @@ impl LocalRefresh {
             Err(_) => app.local_read_failed("Local snapshot reader stopped".into()),
         }
         if std::mem::take(&mut self.manual_pending) {
-            self.request(app, false);
+            self.request(app, true);
         }
         true
     }

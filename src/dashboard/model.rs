@@ -38,6 +38,7 @@ impl ReadHealth {
 
 pub struct App {
     pub local_read: ReadHealth,
+    pub checking_sources: bool,
     pub source_reads: BTreeMap<String, ReadHealth>,
     pub configuration_errors: Vec<String>,
     pub snapshot: DashboardSnapshot,

@@ -2977,12 +2977,12 @@ fn refresh_health_distinguishes_loading_success_and_error() {
     let updated = app.snapshot.sources[0].work[0].updated_at.clone();
     assert!(updated.is_some());
     assert!(app.source_reads[&id].error.is_none());
-    assert!(text(&app, 160, 30).contains("Last read UTC"));
+    assert!(!text(&app, 160, 30).contains("Last read UTC"));
     assert!(text(&app, 160, 30).contains("Updated UTC"));
     // Equal source values still record a new successful read and request a draw.
     app.take_dirty();
     local.request(&mut app, false);
-    assert!(text(&app, 160, 30).contains("Refreshing"));
+    assert!(!text(&app, 160, 30).contains("Refreshing"));
     assert_eq!(app.source_reads[&id].last_success, Some(observed));
     finish_local_refresh(&mut local, &mut app);
     assert!(app.source_reads[&id].last_success.unwrap() > observed);
@@ -3506,4 +3506,82 @@ fn worker_details_hide_retained_terminal_until_explicit_open() {
         );
         assert!(app.terminal_visible());
     }
+}
+
+#[test]
+fn project_source_headers_stay_quiet_during_polling() {
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    app.record_source_read(&app.snapshot.sources[0].clone());
+    app.local_read.complete(None);
+    let before = text(&app, 160, 30);
+    app.begin_local_read();
+    let during = text(&app, 160, 30);
+    assert_eq!(before, during);
+    assert!(!during.contains("Last read UTC"));
+    assert!(!during.contains(&app.snapshot.sources[0].short_id()));
+    let mut other = project_source("/two", vec![]);
+    other.path = app.snapshot.sources[0].path.clone();
+    app.snapshot.sources.push(other);
+    let collided = text(&app, 160, 30);
+    for source in &app.snapshot.sources {
+        assert!(collided.contains(&source.short_id()));
+    }
+}
+
+#[test]
+fn project_read_progress_is_global_and_contextual() {
+    let mut app = loading_project_app();
+    assert_eq!(text(&app, 160, 30).matches("Loading local Work").count(), 1);
+    let root = tempfile::tempdir().unwrap();
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    local.request(&mut app, false);
+    finish_local_refresh(&mut local, &mut app);
+    local.request(&mut app, false);
+    assert!(!text(&app, 160, 30).contains("Refreshing"));
+    local.request(&mut app, true); // Coalesce a manual request during a routine read.
+    assert_eq!(
+        text(&app, 160, 30).matches("Checking local Work").count(),
+        1
+    );
+    finish_local_refresh(&mut local, &mut app);
+    assert!(text(&app, 160, 30).contains("Checking local Work"));
+    finish_local_refresh(&mut local, &mut app);
+    assert!(!text(&app, 160, 30).contains("Checking local Work"));
+    local.request(&mut app, true);
+    assert_eq!(
+        text(&app, 160, 30).matches("Checking local Work").count(),
+        1
+    );
+    finish_local_refresh(&mut local, &mut app);
+}
+
+#[test]
+fn project_source_read_warnings_preserve_work() {
+    let mut app = project_app(vec![project_source(
+        "/one",
+        vec![row("retained", "executing")],
+    )]);
+    app.record_source_read(&app.snapshot.sources[0].clone());
+    app.local_read.complete(None);
+    app.begin_local_read();
+    app.source_reads.get_mut("/one").unwrap().last_success =
+        Some(chrono::Utc::now() - chrono::Duration::seconds(30));
+    for width in [80, 160] {
+        let rendered = text(&app, width, 30);
+        assert!(rendered.contains("STALE"));
+        assert!(rendered.contains("Last read UTC"));
+        assert!(rendered.contains("retained"));
+    }
+    app.source_reads
+        .get_mut("/one")
+        .unwrap()
+        .complete(Some("full diagnostic"));
+    assert!(text(&app, 160, 30).contains("Read failed"));
+    assert!(text(&app, 160, 30).contains("retained"));
+    app.source_reads.clear();
+    app.snapshot.sources[0].stale = Some("offline: full source diagnostic".into());
+    app.snapshot.errors = project_diagnostics(&app.snapshot.sources);
+    assert!(text(&app, 160, 30).contains("STALE"));
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    assert!(text(&app, 160, 30).contains("offline: full source diagnostic"));
 }

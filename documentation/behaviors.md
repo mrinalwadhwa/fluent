@@ -77,6 +77,30 @@ inspection, help, copy, or refresh input, THE SYSTEM SHALL not modify stored Wor
 state.
 Test: src/dashboard/tests.rs (dashboard_controls_leave_work_state_unchanged)
 
+## Dashboard source headers
+
+### B1
+
+WHEN a healthy source is polled, THE SYSTEM SHALL keep its identity stable and
+hide routine read activity, timestamps, and hashes. Equal project names on the
+same host SHALL include a source disambiguator.
+Test: src/dashboard/tests.rs (project_source_headers_stay_quiet_during_polling)
+
+### B2
+
+WHEN the dashboard first loads or the operator refreshes, THE SYSTEM SHALL show
+one global loading or checking indicator. Routine polling SHALL hide it.
+Test: src/dashboard/tests.rs (project_read_progress_is_global_and_contextual)
+
+### B3
+
+IF a source fails, becomes stale, or its pending read retains a snapshot older
+than ten seconds, THEN THE SYSTEM SHALL mark that source, preserve its last good
+Work Items, and keep its last successful observation or full diagnostic available.
+Source read times SHALL remain separate from Work update times.
+Test: src/dashboard/tests.rs (project_source_read_warnings_preserve_work)
+Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_error)
+
 ## Project dashboard layout and navigation
 
 ### B1

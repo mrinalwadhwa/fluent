@@ -22,6 +22,7 @@ impl App {
         let mut app = Self {
             snapshot,
             local_read: Default::default(),
+            checking_sources: false,
             source_reads: Default::default(),
             configuration_errors: Vec::new(),
             all_work: false,
@@ -55,6 +56,8 @@ impl App {
     }
 
     pub fn begin_local_read(&mut self) {
+        self.checking_sources =
+            self.local_read.last_success.is_none() && self.local_read.error.is_none();
         self.local_read.pending = true;
         for source in &self.snapshot.sources {
             if !source.id.starts_with("ssh:") {

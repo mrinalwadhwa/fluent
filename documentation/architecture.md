@@ -2286,14 +2286,17 @@ SSH completions update only the completed source; pending peers gain no receipt
 time. SSH receipt times describe local observation, never remote lifecycle events.
 These fields remain outside stored Work and the SSH wire schema.
 
-`dashboard/render.rs` displays source health using `Loading` before an initial
-result, `Refreshing` during a read after a success, `Read failed` after an error,
-and `Last read UTC MM-DD HH:MM:SS` after a success. Refreshing and failed sources
-continue to show their last successful read time. The `Updated UTC` column
-continues to show recorded Work or Task transitions; unavailable remote lifecycle
-times remain unavailable. Source headers remain visible even when a source has
-no Work Items in the selected view, and `e` shows full source diagnostics. The
-header shows pending local discovery and reader failures before sources exist.
+`dashboard/render.rs` keeps healthy source headers stable during routine reads.
+Headers show project and host identity; equal project names on the same host add
+source hashes to distinguish them. Initial loading and manual checking appear
+once in the dashboard header. Routine polling hides that indicator. Failed or
+stale sources stay marked, and a pending read marks a snapshot stale once its
+last successful observation is ten seconds old. Warnings retain the last read
+UTC time when available; `e` shows full source diagnostics. The `Updated UTC`
+column continues to show recorded Work or Task transitions; unavailable remote
+lifecycle times remain unavailable. Source headers remain visible even when a
+source has no Work Items in the selected view. Read health stays in memory and
+never changes Work update times.
 
 `dashboard.rs` owns terminal setup and coordinates local and remote results;
 `dashboard/snapshot.rs`, `dashboard/app.rs`, and `dashboard/render.rs`
