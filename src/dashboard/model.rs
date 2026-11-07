@@ -64,6 +64,8 @@ pub struct App {
     pub selected_key: Option<RowKey>,
     pub selected_worker: Option<RowKey>,
     pub page: ProjectPage,
+    pub action_menu: Option<super::actions::ActionMenu>,
+    pub action_message: Option<String>,
     pub filter: Filter,
     pub(super) selected_index: usize,
     pub pane: Pane,
@@ -214,6 +216,18 @@ impl App {
                 "? help",
             ];
         }
+        if let Some(menu) = &self.action_menu {
+            return if menu.current().remote() {
+                vec![
+                    "Esc Back",
+                    "c Copy command",
+                    "↑/↓ select",
+                    "PgUp/PgDn scroll",
+                ]
+            } else {
+                vec!["Esc Back", "Enter Choose", "c Copy command", "↑/↓ select"]
+            };
+        }
         self.project_navigation_controls()
     }
 
@@ -248,6 +262,17 @@ impl App {
                 "t terminal",
             ]
         };
+        if self.pane == Pane::Detail
+            && self.show_details
+            && self.page == ProjectPage::Overview
+            && self
+                .selected_key
+                .as_ref()
+                .and_then(|key| project::find_work(&self.snapshot.sources, key))
+                .is_some_and(|(source, work)| !super::actions::offered(source, work).is_empty())
+        {
+            controls.insert(2, "a Actions");
+        }
         if !self.snapshot.errors.is_empty()
             || self.source_warning_count() > 0
             || self.stale_error.is_some()
@@ -272,6 +297,9 @@ impl App {
     }
 
     pub fn detail_values(&self) -> Vec<String> {
+        if let Some(menu) = &self.action_menu {
+            return menu.values();
+        }
         let Some(key) = self.selected_key.as_ref() else {
             return vec!["No Work Item selected".into()];
         };

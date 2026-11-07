@@ -1,3 +1,4 @@
+mod actions;
 mod app;
 mod layout;
 mod model;
@@ -167,6 +168,16 @@ fn run_project_loop(
                             local.request(app, true);
                             refresh_remote(app, remote);
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
+                        }
+                        if effect == Effect::CopyAction {
+                            if let Some(menu) = &app.action_menu {
+                                app.action_message =
+                                    Some(match actions::copy_command(menu.current()) {
+                                        Ok(()) => "Command and source context copied".into(),
+                                        Err(error) => format!("Copy failed: {error:#}"),
+                                    });
+                                app.dirty = true;
+                            }
                         }
                         if let Effect::ToggleMouse(enabled) = effect {
                             session.set_mouse_enabled(enabled)?;

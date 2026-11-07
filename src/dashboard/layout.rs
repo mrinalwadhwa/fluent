@@ -375,37 +375,6 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
         ]
     };
     if worker.is_none() {
-        let canonical = crate::guidance::next_action_for_action(
-            "merge-ready",
-            &work.status.id,
-            &work.status.merge_candidate,
-        )
-        .map(|action| {
-            action
-                .trim()
-                .trim_start_matches("→ Next:")
-                .trim()
-                .to_owned()
-        });
-        if work.status.action == "merge-ready"
-            && canonical.as_deref() == Some(next_action.as_str())
-            && work.status.merge_candidate != "-"
-        {
-            values.pop();
-            values.extend([
-                "Next action:".into(),
-                "1. Review candidate".into(),
-                format!(
-                    "  fluent merge-candidate show {} {}",
-                    work.status.id, work.status.merge_candidate
-                ),
-                "2. Land candidate".into(),
-                format!(
-                    "  fluent merge-candidate land {} {}",
-                    work.status.id, work.status.merge_candidate
-                ),
-            ]);
-        }
         values.push(format!("Workers ({})", work.workers.len()));
     }
     values.extend([
@@ -458,7 +427,26 @@ pub fn project_overview_values(
             work.phase.as_deref().unwrap_or(work.category.label())
         );
     }
-    if let Some(next) = values
+    let actions = super::actions::offered(project::find_work(sources, key).unwrap().0, work);
+    if !actions.is_empty() {
+        let end = values
+            .iter()
+            .position(|value| value.starts_with("Workers ("))
+            .unwrap_or(3);
+        let mut card = vec![String::new(), "Next action · a Actions".into()];
+        for action in actions {
+            card.push(format!(
+                "  {}: {}",
+                action.kind.label(),
+                action.command_text()
+            ));
+        }
+        card.push(String::new());
+        values.splice(2..end, card);
+        if let Some(guidance) = &work.status.next_action {
+            values.push(format!("Guidance: {guidance}"));
+        }
+    } else if let Some(next) = values
         .get(2)
         .and_then(|value| value.strip_prefix("Next action: "))
         .map(str::to_owned)

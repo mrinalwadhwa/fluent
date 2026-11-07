@@ -11,6 +11,8 @@ pub enum Effect {
     Refresh,
     ToggleMouse(bool),
     OpenTerminal,
+    CopyAction,
+    PrepareAction,
     ControlTerminal,
     FullscreenTerminal,
     ObserveTerminal,
@@ -31,6 +33,8 @@ impl App {
             selected_key: None,
             selected_worker: None,
             page: ProjectPage::List,
+            action_menu: None,
+            action_message: None,
             filter: Filter::Current,
             selected_index: 0,
             pane: Pane::List,
@@ -294,6 +298,34 @@ impl App {
         self.dirty = true;
     }
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Effect {
+        if let Some(menu) = &mut self.action_menu {
+            match key {
+                KeyCode::Esc | KeyCode::Left => {
+                    self.action_menu = None;
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Up => {
+                    menu.selected = menu.selected.saturating_sub(1);
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Down => {
+                    menu.selected = (menu.selected + 1).min(menu.actions.len() - 1);
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Char('c') => return Effect::CopyAction,
+                KeyCode::Enter if !menu.current().remote() => return Effect::PrepareAction,
+                KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
+                KeyCode::PageDown => {
+                    self.detail_scroll = self
+                        .detail_scroll
+                        .saturating_add(5)
+                        .min(self.scroll_bounds().detail_max_scroll)
+                }
+                _ => {}
+            }
+            self.dirty = true;
+            return Effect::None;
+        }
         if self.terminal.is_some() && !self.help && !self.errors {
             match key {
                 KeyCode::Char('i' | ']') if self.terminal_fits() => {
@@ -395,7 +427,29 @@ impl App {
                 self.clamp_scrolls();
                 self.dirty = true;
             }
-            KeyCode::Char('a') if self.project_mode() => {}
+            KeyCode::Char('a') if self.project_mode() => {
+                if self.pane == Pane::Detail
+                    && self.show_details
+                    && self.page == ProjectPage::Overview
+                {
+                    if let Some((source, work)) = self
+                        .selected_key
+                        .as_ref()
+                        .and_then(|key| project::find_work(&self.snapshot.sources, key))
+                    {
+                        let actions = super::actions::offered(source, work);
+                        if !actions.is_empty() {
+                            self.action_menu = Some(super::actions::ActionMenu {
+                                actions,
+                                selected: 0,
+                            });
+                            self.action_message = None;
+                            self.detail_scroll = 0;
+                            self.dirty = true;
+                        }
+                    }
+                }
+            }
             KeyCode::Char('a') => {
                 self.all_work = !self.all_work;
                 self.reconcile_selection(self.selected.clone());

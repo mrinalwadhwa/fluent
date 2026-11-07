@@ -1177,6 +1177,8 @@ fn project_source(id: &str, rows: Vec<WorkItemStatus>) -> project::SourceSnapsho
                 category: project::Category::from_published_action(&status.action, false),
                 status,
                 phase: None,
+                attempt_id: Some("attempt-1".into()),
+                candidate_commit: Some("commit-7".into()),
                 updated_at: None,
                 workers: Vec::new(),
             })
@@ -3915,7 +3917,7 @@ fn project_preview_and_full_details_have_distinct_hierarchy() {
     app.handle_key(KeyCode::Right, KeyModifiers::NONE);
     let full = app.detail_values().join("\n");
     assert!(full.starts_with("Full title with more context\nState:"));
-    assert!(full.find("Next action:").unwrap() < full.find("Workers (").unwrap());
+    assert!(full.find("Next action").unwrap() < full.find("Workers (").unwrap());
     assert!(full.find("Workers (").unwrap() < full.find("Work Item:").unwrap());
     assert!(full.contains("Merge Candidate: candidate-7"));
 }
@@ -3927,16 +3929,19 @@ fn project_actions_keep_commands_readable_and_exact() {
     let app = project_app(vec![project_source("/one", vec![status.clone()])]);
     let values = app.detail_values();
     assert!(values.contains(&format!(
-        "  fluent merge-candidate show {} {}",
+        "  Candidate show: fluent merge-candidate show {} {}",
         status.id, status.merge_candidate
     )));
     assert!(values.contains(&format!(
-        "  fluent merge-candidate land {} {}",
+        "  Candidate land: fluent merge-candidate land {} {}",
         status.id, status.merge_candidate
     )));
-    assert!(values.contains(&"1. Review candidate".into()));
-    assert!(values.contains(&"2. Land candidate".into()));
-    for command in values.iter().filter(|value| value.starts_with("  fluent")) {
+    assert!(values.iter().any(|value| value.contains("Candidate show:")));
+    assert!(values.iter().any(|value| value.contains("Candidate land:")));
+    for command in values
+        .iter()
+        .filter(|value| value.starts_with("  Candidate"))
+    {
         let lines = layout::project_detail_lines(std::slice::from_ref(command), 60);
         assert_eq!(
             lines
@@ -3983,13 +3988,13 @@ fn project_actions_keep_commands_readable_and_exact() {
             .iter()
             .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 2)
     );
-    // Recovery guidance remains authoritative, even for a merge-ready row.
+    // Free-form guidance stays readable and never supplies command arguments.
     let mut custom = status;
     custom.next_action = Some("Inspect host evidence before any landing command".into());
     let app = project_app(vec![project_source("/one", vec![custom])]);
     let full = app.detail_values().join("\n");
     assert!(full.contains("Inspect host evidence before any landing command"));
-    assert!(!full.contains("2. Land candidate"));
+    assert!(full.contains("Candidate land: fluent merge-candidate land"));
 }
 
 #[test]
@@ -4257,4 +4262,81 @@ fn worker_row(source: &str, task: &str) -> project::Worker {
         terminal: None,
         unavailable_reason: "headless execution".into(),
     }
+}
+
+#[test]
+fn project_actions_are_typed_local_and_copy_only_remote() {
+    use super::actions::{ActionKind, offered};
+    for state in [
+        "task-ready",
+        "learner-not-ready",
+        "merge-ready",
+        "needs-user",
+        "executing",
+    ] {
+        let mut status = row("work", state);
+        status.attempt = "attempt-1".into();
+        status.merge_candidate = "candidate-7".into();
+        status.next_action = Some("touch /tmp/never-run-dashboard-guidance".into());
+        for id in ["/local", "ssh:remote"] {
+            let source = project_source(id, vec![status.clone()]);
+            let actions = offered(&source, &source.work[0]);
+            let kinds = actions.iter().map(|action| action.kind).collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                match state {
+                    "task-ready" | "learner-not-ready" => vec![ActionKind::AttemptRun],
+                    "merge-ready" => vec![ActionKind::CandidateShow, ActionKind::CandidateLand],
+                    _ => vec![],
+                }
+            );
+            for action in &actions {
+                assert_eq!(action.remote(), id.starts_with("ssh:"));
+                assert!(!action.command_text().contains("touch"));
+                assert_eq!(action.args()[2], "work");
+                assert_eq!(
+                    action.args()[3],
+                    if state == "merge-ready" {
+                        "candidate-7"
+                    } else {
+                        "attempt-1"
+                    }
+                );
+                assert!(action.copy_text().contains(id));
+            }
+            let mut app = project_app(vec![source]);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+            if !actions.is_empty() {
+                let rendered = text(&app, 160, 30);
+                assert!(rendered.contains(actions[0].kind.label()), "{rendered}");
+                assert!(rendered.contains(&actions[0].command_text()));
+                assert!(rendered.contains(id));
+                if id.starts_with("ssh:") {
+                    assert!(rendered.contains("Copy only"));
+                    assert_eq!(
+                        app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+                        Effect::None
+                    );
+                    assert_eq!(
+                        app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE),
+                        Effect::CopyAction
+                    );
+                }
+            } else {
+                assert!(text(&app, 160, 30).contains("touch /tmp/never-run-dashboard-guidance"));
+            }
+        }
+    }
+    let mut source = project_source("/local", vec![row("work", "merge-ready")]);
+    source.work[0].status.merge_candidate = "-".into();
+    assert!(
+        offered(&source, &source.work[0]).is_empty(),
+        "missing candidate is not an action"
+    );
+    source.work[0].status.merge_candidate = "--help".into();
+    assert!(
+        offered(&source, &source.work[0]).is_empty(),
+        "identifiers cannot inject flags"
+    );
 }

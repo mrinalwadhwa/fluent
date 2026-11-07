@@ -486,6 +486,13 @@ Press `t` to observe the exact selected worker's terminal. The footer shows
 contextual controls; `?` lists secondary controls, including `r` to refresh and
 `c` to toggle text selection with the mouse.
 
+Press `a` in a Work Item overview to inspect supported Fluent actions. Ready
+Attempts offer Attempt run; merge-ready Work offers Candidate show and Candidate
+land. Each action shows its command and source checkout. Other guidance remains
+readable text. SSH sources offer Copy command (`c`), including host and checkout
+context, and never execute commands remotely. If clipboard access fails, the
+command stays visible for text selection.
+
 The top line shows counted views and Fluent. Source-read health appears above
 the shortcuts at the bottom, with healthy, failed, and overdue counts.
 Initial or requested reads animate after a short delay; routine polling stays

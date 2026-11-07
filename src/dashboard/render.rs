@@ -277,7 +277,10 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    let values = app.detail_values();
+    let mut values = app.detail_values();
+    if let Some(message) = &app.action_message {
+        values.insert(0, message.clone());
+    }
     let lines = layout::project_detail_lines(&values, area.width)
         .into_iter()
         .map(|value| {

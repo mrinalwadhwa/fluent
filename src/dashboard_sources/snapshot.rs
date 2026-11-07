@@ -167,6 +167,13 @@ pub fn decode_snapshot(source: &SshSource, bytes: &[u8]) -> Result<SourceSnapsho
                 snapshot.queued_work_item_ids.contains(&row.id),
             ),
             phase: row.phase,
+            // Preserve the version-1 wire contract; worker keys already carry
+            // exact Attempt identity. Sources without workers copy the CLI default.
+            attempt_id: row
+                .workers
+                .first()
+                .and_then(|worker| worker.key.attempt_id.clone()),
+            candidate_commit: None,
             updated_at: None,
             workers: row.workers,
             status: WorkItemStatus {

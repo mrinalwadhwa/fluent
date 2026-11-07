@@ -97,6 +97,8 @@ pub struct ProjectWork {
     pub status: work_status::WorkItemStatus,
     pub category: Category,
     pub phase: Option<String>,
+    pub attempt_id: Option<String>,
+    pub candidate_commit: Option<String>,
     pub updated_at: Option<String>,
     pub workers: Vec<Worker>,
 }
@@ -291,6 +293,12 @@ impl SourceSnapshot {
                     .unwrap_or_default();
                 ProjectWork {
                     key: RowKey::work(&id, &item.id),
+                    attempt_id: attempt.map(|attempt| attempt.id.clone()),
+                    candidate_commit: item
+                        .merge_candidates
+                        .iter()
+                        .find(|candidate| candidate.id == status.merge_candidate)
+                        .map(|candidate| candidate.candidate_commit.clone()),
                     status,
                     category,
                     phase,
