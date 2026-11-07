@@ -4359,7 +4359,10 @@ fn project_actions_are_typed_local_and_copy_only_remote() {
 }
 
 fn action_fixture() -> (tempfile::TempDir, App) {
-    let root = tempfile::tempdir().unwrap();
+    action_fixture_in(tempfile::tempdir().unwrap())
+}
+
+fn action_fixture_in(root: tempfile::TempDir) -> (tempfile::TempDir, App) {
     crate::git::run(
         root.path(),
         &["init", "-b", "main"],
@@ -4380,7 +4383,13 @@ fn action_fixture() -> (tempfile::TempDir, App) {
 
 #[test]
 fn project_action_confirmation_rejects_stale_or_declined_command() {
-    let (root, mut app) = action_fixture();
+    // A canonical Tester scratch path can exceed the viewport width. Make this
+    // case independent of the ambient TMPDIR so every run exercises wrapping.
+    let root = tempfile::Builder::new()
+        .prefix(&"long-checkout-".repeat(14))
+        .tempdir()
+        .unwrap();
+    let (root, mut app) = action_fixture_in(root);
     assert_eq!(
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Effect::PrepareAction
@@ -4400,7 +4409,26 @@ fn project_action_confirmation_rejects_stale_or_declined_command() {
             "missing {expected}: {confirmation}"
         );
     }
-    assert!(confirmation.contains(root.path().canonicalize().unwrap().to_str().unwrap()));
+    let checkout = root.path().canonicalize().unwrap();
+    assert_eq!(
+        app.pending_action.as_ref().unwrap().action.checkout,
+        checkout
+    );
+    // Ignore layout whitespace introduced by wrapping and padded terminal rows,
+    // while requiring the complete checkout text in its original order.
+    assert!(
+        confirmation
+            .split_whitespace()
+            .collect::<String>()
+            .contains(
+                &checkout
+                    .to_str()
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<String>()
+            ),
+        "checkout missing from confirmation: {confirmation}"
+    );
     assert_eq!(
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
         Effect::None
