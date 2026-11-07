@@ -491,7 +491,17 @@ Attempts offer Attempt run; merge-ready Work offers Candidate show and Candidate
 land. Each action shows its command and source checkout. Other guidance remains
 readable text. SSH sources offer Copy command (`c`), including host and checkout
 context, and never execute commands remotely. If clipboard access fails, the
-command stays visible for text selection.
+command stays visible for text selection. Local Attempt run and Candidate land
+require a fresh state check and a confirmation screen naming the command,
+checkout, Work Item, and effect. Press `y` to confirm or `n`/Esc to cancel; Enter
+does not confirm. Fluent checks the source, Work, and candidate again before
+launch. Candidate show is read-only and does not require confirmation.
+
+The dashboard pauses while a local command runs with live output in the foreground.
+Ctrl-C interrupts that command. After exit, failure, or interruption, the dashboard
+returns, reports the process result, and refreshes the source. A successful command
+result does not itself mean that the Work Item completed or the candidate landed;
+those states come from the refreshed source.
 
 The top line shows counted views and Fluent. Source-read health appears above
 the shortcuts at the bottom, with healthy, failed, and overdue counts.
@@ -506,4 +516,4 @@ Select a native agent worker and press `t` to observe its terminal. Wide dashboa
 
 Configure existing remote macOS projects in `~/.config/fluent/dashboard-sources.json` to include them through OpenSSH. The same terminal controls reach the remote runtime; disconnect drops queued input, and reconnect revalidates the original invocation in Observe mode. See [SSH agent sources](docs/ssh-agent-sources.md) for configuration, prerequisites, and the separately authorized host acceptance journey.
 
-The dashboard's source snapshot contract is version 1. A local source identity is its canonical checkout path; a configured remote source uses `ssh:<name>`. In both cases, a Work row adds the Work Item ID, and a worker record adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records and does not scan transcripts or change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.
+The dashboard's source snapshot contract is version 1. A local source identity is its canonical checkout path; a configured remote source uses `ssh:<name>`. In both cases, a Work row adds the Work Item ID, and a worker record adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records without scanning transcripts. Only explicitly confirmed, supported local actions can change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.

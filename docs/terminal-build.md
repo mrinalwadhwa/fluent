@@ -49,6 +49,14 @@ in Observe or reconnect the same retained invocation. Left/Esc returns one level
 retaining the Work Item and exact worker selection. Tab/Shift+Tab switches views
 on the project list.
 
+Press `a` in the overview for supported local actions or SSH commands to copy.
+Attempt run and Candidate land require `y` on the confirmation screen; `n` or
+Esc cancels. Fluent freshly validates the checkout, Work Item, and candidate
+before launch. The foreground command owns the terminal until it exits or is
+interrupted with Ctrl-C. The dashboard restores its modes and mouse preference,
+reports the process result, and requests a new source snapshot. Candidate show
+runs read-only. SSH commands remain copy-only; no remote command runs here.
+
 Changing selection retains the previous terminal attachment and its Control
 lease. Inspecting details can hide that terminal and releases native input
 focus. An explicit `t` replaces the retained attachment only after the selected

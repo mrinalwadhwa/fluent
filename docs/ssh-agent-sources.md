@@ -27,7 +27,10 @@ Establish access with `ssh my-mac` outside the dashboard first and verify the
 host key through your usual trusted channel. Snapshot requests use batch
 authentication and strict host-key checks. Remote hosts must already have a
 compatible Fluent binary on their noninteractive SSH PATH and tmux installed.
-The dashboard does not provision machines, install software, dispatch Attempts,
+SSH sources remain read-only. Their action menu shows commands and source context
+for copying; run copied commands in that checkout outside the dashboard. Local
+source actions use separate confirmation and validation. The dashboard does not
+provision machines, install software, dispatch remote Attempts,
 or copy provider credentials. It disables agent forwarding and other SSH
 forwardings for these connections. Providers and execution ownership stay on
 the remote host.

@@ -116,12 +116,12 @@ def journey(binary, project, mode):
         raise AssertionError(f"Expected {required}, absent {absent}\n{screen.text()}")
 
     try:
-        wait_for("Tasks", "Visible Work")
+        wait_for("Work Items", "Visible Work")
         if mode == "help":
             os.write(master, b"?")
-            wait_for("Help", "↑/↓ select", "→ details", "Enter workers", "Tab/⇧Tab view", "?/Esc close help", absent=("Visible Work", "i Control", "f full-screen"))
+            wait_for("Help", "↑/↓ select", "Open Work Item", "Tab/⇧Tab view", "?/Esc close help", absent=("Visible Work", "i Control", "f full-screen"))
             os.write(master, b"\x1b")
-            wait_for("Tasks", "Visible Work", absent=("?/Esc close help",))
+            wait_for("Work Items", "Visible Work", absent=("?/Esc close help",))
         elif mode == "refresh":
             wait_for("> Visible Work", "Second Work")
             # Opening the writer proves that a real snapshot read has reached
@@ -146,16 +146,18 @@ def journey(binary, project, mode):
         else:
             assert "broken-29" not in screen.text()
             os.write(master, b"e")
-            wait_for("Work Item read errors", "e/Esc back", "broken-00")
+            wait_for("Read issues", "e/Esc back", "broken-00")
             for _ in range(100):
                 os.write(master, b"\x1b[6~")
             wait_for("broken-29")
             os.write(master, b"\x1b")
-            wait_for("Tasks", "Visible Work", absent=("e/Esc back",))
+            wait_for("Work Items", "Visible Work", absent=("e/Esc back",))
             os.write(master, b"\x1b[C")
-            wait_for("Work Item: work-visible", "←/Esc list")
+            wait_for("Work Item overview", "Workers (1)", "> author", "Esc Back")
+            os.write(master, b"\x1b[6~")
+            wait_for("Work Item: work-visible", "Esc Back")
             os.write(master, b"\x1b")
-            wait_for("Tasks", "Visible Work", absent=("←/Esc list",))
+            wait_for("Work Items", "Visible Work", absent=("Esc Back",))
         os.write(master, b"q")
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:

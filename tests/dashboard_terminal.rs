@@ -549,6 +549,9 @@ fn terminal_control_input_pty_child() {
         .key(key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
     dashboard
+        .key(key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    dashboard
         .key(key(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     dashboard.key(read_pty_input("navigation")).unwrap();
@@ -1379,4 +1382,47 @@ fn display_projection_bounds_frames_and_reports_lost_sync() {
     let mut reconnected = Screen::new(80, 24).unwrap();
     reconnected.write(b"\x1b[2J\x1b[Hrepainted");
     assert!(reconnected.snapshot().unwrap().text().contains("repainted"));
+}
+
+#[test]
+fn dashboard_action_process_restores_terminal_after_each_result() {
+    let output = std::process::Command::new("python3")
+        .arg("tests/fixtures/dashboard-terminal-handoff.py")
+        .arg(std::env::current_exe().unwrap())
+        .arg("action")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn action_command_pty_child() {
+    if std::env::var_os("FLUENT_HANDOFF_PTY_CHILD").is_none() {
+        return;
+    }
+    let mut terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
+    terminal.set_mouse_enabled(false).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for (mode, expected) in [
+        ("success", "succeeded"),
+        ("failure", "failed (exit 7)"),
+        ("interrupt", "interrupted"),
+        ("spawn-error", "run Fluent command"),
+    ] {
+        let result =
+            fluent::dashboard::test_support::run_action_fixture(&mut terminal, root.path(), mode);
+        let actual = result.unwrap_or_else(|error| error.to_string());
+        assert!(actual.contains(expected), "{mode}: {actual}");
+        assert!(terminal.is_active());
+        assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+        assert!(!terminal.mouse_enabled());
+        assert_eq!(terminal.size().unwrap(), (100, 30));
+    }
+    drop(terminal);
+    assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
 }

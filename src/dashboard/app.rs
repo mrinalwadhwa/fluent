@@ -13,6 +13,7 @@ pub enum Effect {
     OpenTerminal,
     CopyAction,
     PrepareAction,
+    RunAction,
     ControlTerminal,
     FullscreenTerminal,
     ObserveTerminal,
@@ -35,6 +36,8 @@ impl App {
             page: ProjectPage::List,
             action_menu: None,
             action_message: None,
+            pending_action: None,
+            confirmed_action: None,
             filter: Filter::Current,
             selected_index: 0,
             pane: Pane::List,
@@ -298,6 +301,30 @@ impl App {
         self.dirty = true;
     }
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Effect {
+        if self.pending_action.is_some() {
+            match key {
+                KeyCode::Char('y') => {
+                    self.confirmed_action = self.pending_action.take();
+                    self.dirty = true;
+                    return Effect::RunAction;
+                }
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Left => {
+                    self.pending_action = None;
+                    self.action_message = Some("Canceled; no command was launched".into());
+                    self.detail_scroll = 0;
+                }
+                KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
+                KeyCode::PageDown => {
+                    self.detail_scroll = self
+                        .detail_scroll
+                        .saturating_add(5)
+                        .min(self.scroll_bounds().detail_max_scroll)
+                }
+                _ => {}
+            }
+            self.dirty = true;
+            return Effect::None;
+        }
         if let Some(menu) = &mut self.action_menu {
             match key {
                 KeyCode::Esc | KeyCode::Left => {
@@ -546,6 +573,27 @@ impl App {
             _ => {}
         }
         Effect::None
+    }
+
+    pub fn complete_copy(&mut self, result: anyhow::Result<()>) -> Effect {
+        self.dirty = true;
+        match result {
+            Ok(()) => {
+                self.action_message = Some("Command and source context copied".into());
+                Effect::None
+            }
+            Err(error) => {
+                self.action_message = Some(format!(
+                    "Copy failed: {error:#}; mouse text selection enabled"
+                ));
+                self.copy_mode = true;
+                Effect::ToggleMouse(false)
+            }
+        }
+    }
+
+    pub fn take_confirmed_action(&mut self) -> Option<super::actions::PreparedAction> {
+        self.confirmed_action.take()
     }
 
     fn keep_selection_visible(&mut self) {

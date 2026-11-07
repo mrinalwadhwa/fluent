@@ -121,7 +121,7 @@ pub fn offered(source: &SourceSnapshot, work: &ProjectWork) -> Vec<OfferedAction
             host: source.host.clone(),
             work_item_id: work.status.id.clone(),
             attempt_id: work.attempt_id.clone(),
-            candidate_id: (kind != ActionKind::AttemptRun)
+            candidate_id: identifier(&work.status.merge_candidate)
                 .then(|| work.status.merge_candidate.clone()),
             candidate_commit: work.candidate_commit.clone(),
             expected_action: work.status.action.clone(),
@@ -186,4 +186,208 @@ pub fn copy_command(action: &OfferedAction) -> Result<()> {
         "clipboard exited with {status}; command remains visible for text selection"
     );
     Ok(())
+}
+
+/// Bind confirmation to the checked checkout and exact persisted Work record.
+#[derive(Clone, Debug)]
+pub struct PreparedAction {
+    pub action: OfferedAction,
+    source_identity: (u64, u64),
+    item: crate::work_model::WorkItem,
+}
+impl PreparedAction {
+    pub fn prepare(action: OfferedAction) -> Result<Self> {
+        let (source_identity, item) = read_current(&action)?;
+        Ok(Self {
+            action,
+            source_identity,
+            item,
+        })
+    }
+    pub fn values(&self) -> Vec<String> {
+        vec![
+            "Confirm local action".into(),
+            String::new(),
+            self.action.command_text(),
+            format!("Source checkout: {}", self.action.context()),
+            format!("Work Item: {}", self.action.work_item_id),
+            format!("Effect: {}", self.action.kind.effect()),
+            "The dashboard pauses while the command runs in the foreground.".into(),
+            "Press y to confirm this command, or n/Esc to cancel.".into(),
+        ]
+    }
+    pub fn validate(&self) -> Result<LocalCommand> {
+        let (identity, item) = read_current(&self.action)?;
+        ensure!(
+            identity == self.source_identity,
+            "Source checkout changed; select the action again"
+        );
+        ensure!(
+            item == self.item,
+            "Work Item or Merge Candidate changed; select the action again"
+        );
+        Ok(LocalCommand {
+            executable: std::env::current_exe().context("locate current Fluent executable")?,
+            args: self.action.args(),
+            checkout: self.action.checkout.clone(),
+        })
+    }
+}
+
+fn read_current(action: &OfferedAction) -> Result<((u64, u64), crate::work_model::WorkItem)> {
+    use std::os::unix::fs::MetadataExt;
+    ensure!(!action.remote(), "SSH sources are copy only");
+    let canonical = action
+        .checkout
+        .canonicalize()
+        .context("read source checkout")?;
+    ensure!(
+        canonical == action.checkout && canonical.to_str() == Some(action.source_id.as_str()),
+        "Source checkout changed; refresh and select the action again"
+    );
+    let top = crate::git::run_stdout(
+        &canonical,
+        &["rev-parse", "--show-toplevel"],
+        "validate source checkout",
+    )?;
+    ensure!(
+        PathBuf::from(top.trim()).canonicalize()? == canonical,
+        "Source is no longer the selected checkout"
+    );
+    let metadata = std::fs::metadata(&canonical)?;
+    let item = crate::work_model::WorkModelStore::new(&canonical)
+        .read_work_item_snapshot(&action.work_item_id)
+        .context("freshly read selected Work Item")?;
+    let status = crate::work_status::summarize_work_item(&item, Some(&canonical));
+    ensure!(
+        status.compatibility_warnings.is_empty(),
+        "Work Item requires a compatible Fluent version"
+    );
+    ensure!(
+        status.action == action.expected_action,
+        "Work Item action changed; refresh and select it again"
+    );
+    let attempt_id = crate::work_status::display_attempt(&item, Some(&canonical))
+        .map(|attempt| attempt.id.clone());
+    ensure!(
+        attempt_id == action.attempt_id && attempt_id.is_some(),
+        "Attempt identity changed; refresh and select it again"
+    );
+    let candidate = item
+        .merge_candidates
+        .iter()
+        .find(|candidate| candidate.id == status.merge_candidate);
+    ensure!(
+        candidate.map(|candidate| &candidate.candidate_commit) == action.candidate_commit.as_ref(),
+        "Merge Candidate commit changed; refresh and select it again"
+    );
+    ensure!(
+        candidate.map(|candidate| &candidate.id) == action.candidate_id.as_ref(),
+        "Merge Candidate identity changed; refresh and select it again"
+    );
+    if action.kind != ActionKind::AttemptRun {
+        ensure!(candidate.is_some(), "Merge Candidate disappeared");
+    }
+    // Reapply the allowlist at the command boundary, independent of UI controls.
+    ensure!(
+        matches!(
+            (action.kind, status.action.as_str()),
+            (ActionKind::AttemptRun, "task-ready" | "learner-not-ready")
+                | (
+                    ActionKind::CandidateShow | ActionKind::CandidateLand,
+                    "merge-ready"
+                )
+        ),
+        "Action is no longer supported"
+    );
+    ensure!(
+        identifier(&action.work_item_id)
+            && action.attempt_id.as_deref().is_none_or(identifier)
+            && action.candidate_id.as_deref().is_none_or(identifier),
+        "Invalid command identity"
+    );
+    Ok(((metadata.dev(), metadata.ino()), item))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalCommand {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub checkout: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Succeeded,
+    Failed(i32),
+    Interrupted,
+}
+impl std::fmt::Display for CommandOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Succeeded => f.write_str("succeeded"),
+            Self::Failed(code) => write!(f, "failed (exit {code})"),
+            Self::Interrupted => f.write_str("interrupted"),
+        }
+    }
+}
+impl LocalCommand {
+    pub fn run(&self) -> Result<CommandOutcome> {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        // The child shares the foreground process group. Ignore terminal interrupts
+        // only in the dashboard; reset them in the child before exec so Ctrl-C
+        // interrupts the command and still lets us restore the dashboard.
+        let _interrupts = IgnoreInterrupts::new()?;
+        let mut command = Command::new(&self.executable);
+        command
+            .args(&self.args)
+            .current_dir(&self.checkout)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let status = command.status().context("run Fluent command")?;
+        Ok(if status.success() {
+            CommandOutcome::Succeeded
+        } else if status.signal().is_some() || matches!(status.code(), Some(130 | 143)) {
+            CommandOutcome::Interrupted
+        } else {
+            CommandOutcome::Failed(status.code().unwrap_or(1))
+        })
+    }
+}
+
+struct IgnoreInterrupts(Vec<(i32, libc::sigaction)>);
+impl IgnoreInterrupts {
+    fn new() -> Result<Self> {
+        let mut guard = Self(Vec::new());
+        for signal in [libc::SIGINT, libc::SIGQUIT] {
+            unsafe {
+                let mut previous = std::mem::zeroed();
+                let mut ignored: libc::sigaction = std::mem::zeroed();
+                ignored.sa_sigaction = libc::SIG_IGN;
+                libc::sigemptyset(&mut ignored.sa_mask);
+                if libc::sigaction(signal, &ignored, &mut previous) != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                guard.0.push((signal, previous));
+            }
+        }
+        Ok(guard)
+    }
+}
+impl Drop for IgnoreInterrupts {
+    fn drop(&mut self) {
+        for (signal, previous) in &self.0 {
+            unsafe {
+                libc::sigaction(*signal, previous, std::ptr::null_mut());
+            }
+        }
+    }
 }

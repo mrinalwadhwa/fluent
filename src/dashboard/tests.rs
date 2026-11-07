@@ -2802,6 +2802,9 @@ impl DashboardSession for StartupSession {
     fn fullscreen(&mut self, _: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
         unreachable!()
     }
+    fn run_action(&mut self, _: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
+        unreachable!()
+    }
     fn is_active(&self) -> bool {
         true
     }
@@ -4339,4 +4342,387 @@ fn project_actions_are_typed_local_and_copy_only_remote() {
         offered(&source, &source.work[0]).is_empty(),
         "identifiers cannot inject flags"
     );
+}
+
+fn action_fixture() -> (tempfile::TempDir, App) {
+    let root = tempfile::tempdir().unwrap();
+    crate::git::run(
+        root.path(),
+        &["init", "-b", "main"],
+        "initialize action checkout",
+    )
+    .unwrap();
+    let mut item = crate::work_model::WorkItem::planned("work", "Run this Attempt");
+    item.add_initial_attempt("attempt-1").unwrap();
+    crate::work_model::WorkModelStore::new(root.path())
+        .create_work_item(&item)
+        .unwrap();
+    let mut app = project_app(vec![project::SourceSnapshot::load(root.path()).unwrap()]);
+    app.resize(160, 30);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    (root, app)
+}
+
+#[test]
+fn project_action_confirmation_rejects_stale_or_declined_command() {
+    let (root, mut app) = action_fixture();
+    assert_eq!(
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Effect::PrepareAction
+    );
+    prepare_dashboard_action(&mut app);
+    let confirmation = text(&app, 160, 30);
+    for expected in [
+        "Confirm local action",
+        "fluent attempt run work attempt-1",
+        "Work Item: work",
+        "foreground",
+        "y Confirm",
+        "n Cancel",
+    ] {
+        assert!(
+            confirmation.contains(expected),
+            "missing {expected}: {confirmation}"
+        );
+    }
+    assert!(confirmation.contains(root.path().canonicalize().unwrap().to_str().unwrap()));
+    assert_eq!(
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+        Effect::None
+    );
+    assert!(app.take_confirmed_action().is_none());
+    app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE);
+    assert!(app.take_confirmed_action().is_none());
+    assert!(text(&app, 160, 30).contains("Canceled"));
+    prepare_dashboard_action(&mut app);
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let mut changed = store.read_work_item_snapshot("work").unwrap();
+    changed.title = "Changed since confirmation".into();
+    store.write_work_item(&changed).unwrap();
+    assert_eq!(
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE),
+        Effect::RunAction
+    );
+    let action = app.take_confirmed_action().unwrap();
+    assert!(
+        action
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("changed")
+    );
+    assert!(app.take_confirmed_action().is_none());
+    assert_eq!(
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE),
+        Effect::None
+    );
+    let (_, mut stale) = action_fixture();
+    stale.snapshot.sources[0].stale = Some("offline".into());
+    prepare_dashboard_action(&mut stale);
+    assert!(stale.pending_action.is_none());
+    assert!(text(&stale, 160, 30).contains("stale"));
+    let (_, mut missing) = action_fixture();
+    missing.snapshot.sources.clear();
+    prepare_dashboard_action(&mut missing);
+    assert!(missing.pending_action.is_none());
+}
+
+struct ActionSession {
+    calls: Vec<actions::LocalCommand>,
+    outcome: Option<Result<actions::CommandOutcome>>,
+}
+impl DashboardSession for ActionSession {
+    fn size(&self) -> Result<(u16, u16)> {
+        Ok((160, 30))
+    }
+    fn draw(&mut self, _: &App) -> Result<()> {
+        Ok(())
+    }
+    fn next_event(&mut self, _: Duration) -> Result<Option<CEvent>> {
+        unreachable!()
+    }
+    fn fullscreen(&mut self, _: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
+        unreachable!()
+    }
+    fn is_active(&self) -> bool {
+        true
+    }
+    fn set_mouse_enabled(&mut self, _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
+        self.calls.push(command.clone());
+        self.outcome.take().unwrap()
+    }
+}
+
+#[test]
+fn project_action_handoff_returns_and_reports_exact_result() {
+    for (outcome, message) in [
+        (Ok(actions::CommandOutcome::Succeeded), "succeeded"),
+        (Ok(actions::CommandOutcome::Failed(7)), "failed (exit 7)"),
+        (Ok(actions::CommandOutcome::Interrupted), "interrupted"),
+        (Err(anyhow::anyhow!("spawn failed")), "spawn failed"),
+    ] {
+        let (root, mut app) = action_fixture();
+        let before = app.snapshot.sources[0].work[0].status.clone();
+        prepare_dashboard_action(&mut app);
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        let mut session = ActionSession {
+            calls: vec![],
+            outcome: Some(outcome),
+        };
+        let mut local = LocalRefresh::new(root.path(), &[], root.path());
+        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+        assert_eq!(session.calls.len(), 1);
+        assert_eq!(
+            session.calls[0].executable,
+            std::env::current_exe().unwrap()
+        );
+        assert_eq!(
+            session.calls[0].args,
+            ["attempt", "run", "work", "attempt-1"]
+        );
+        assert_eq!(
+            session.calls[0].checkout,
+            root.path().canonicalize().unwrap()
+        );
+        assert!(app.action_message.as_ref().unwrap().contains(message));
+        assert!(
+            local.pending.is_some(),
+            "return must request a fresh source read"
+        );
+        assert_eq!(
+            app.snapshot.sources[0].work[0].status, before,
+            "never optimistically change Work state"
+        );
+        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+        assert_eq!(session.calls.len(), 1, "confirmation is consumed once");
+        finish_local_refresh(&mut local, &mut app);
+        assert!(text(&app, 160, 30).contains(message));
+        assert!(app.action_menu.is_none());
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(text(&app, 160, 30).contains("Open Work Item"));
+    }
+}
+
+#[test]
+fn project_action_rechecks_selection_and_source_before_launch() {
+    for change in ["selection", "source", "eligibility", "remote"] {
+        let (root, mut app) = action_fixture();
+        prepare_dashboard_action(&mut app);
+        assert!(app.pending_action.is_some());
+        match change {
+            "selection" => app.selected_key = None,
+            "source" => app.snapshot.sources[0].path = root.path().join("different"),
+            "remote" => app.pending_action.as_mut().unwrap().action.source_id = "ssh:remote".into(),
+            _ => {
+                let store = crate::work_model::WorkModelStore::new(root.path());
+                let mut changed = store.read_work_item_snapshot("work").unwrap();
+                changed.authorization = crate::work_model::ExecutionAuthorization::Proposed;
+                store.write_work_item(&changed).unwrap();
+            }
+        }
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        let mut session = ActionSession {
+            calls: vec![],
+            outcome: None,
+        };
+        let mut local = LocalRefresh::new(root.path(), &[], root.path());
+        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+        assert!(session.calls.is_empty(), "launched after {change} changed");
+        assert!(
+            app.action_message
+                .as_ref()
+                .unwrap()
+                .contains("did not complete")
+        );
+        finish_local_refresh(&mut local, &mut app);
+    }
+    let (root, mut app) = action_fixture();
+    prepare_dashboard_action(&mut app);
+    let prepared = app.pending_action.take().unwrap();
+    let moved = root.path().with_extension("replaced-checkout");
+    std::fs::rename(root.path(), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, root.path()).unwrap();
+    assert!(
+        prepared
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Source checkout changed")
+    );
+    std::fs::remove_file(root.path()).unwrap();
+    std::fs::rename(moved, root.path()).unwrap();
+}
+
+#[test]
+fn project_action_rechecks_merge_candidate_identity_and_commit() {
+    use crate::work_model::{AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus};
+    let (root, _) = action_fixture();
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let mut item = store.read_work_item_snapshot("work").unwrap();
+    let task = &mut item.attempts[0].tasks[0];
+    task.status = TaskStatus::Complete;
+    task.output = Some(TaskOutput {
+        workspace_id: "candidate".into(),
+        workspace_path: "../work-9-work-attempt-1".into(),
+        source_branch: "candidate".into(),
+        base_commit: None,
+        commit: "abc123".into(),
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    item.attempts[0].status = AttemptStatus::Complete;
+    item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+    item.create_or_get_merge_candidate("attempt-1").unwrap();
+    store.write_work_item(&item).unwrap();
+    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    let offered = actions::offered(&source, &source.work[0]).remove(0);
+    assert_eq!(offered.expected_action, "learner-not-ready");
+    let prepared = actions::PreparedAction::prepare(offered.clone()).unwrap();
+    assert!(prepared.validate().is_ok());
+    for field in ["id", "commit"] {
+        let mut changed = store.read_work_item_snapshot("work").unwrap();
+        if field == "id" {
+            changed.merge_candidates[0].id = "another-candidate".into();
+        } else {
+            changed.merge_candidates[0].candidate_commit = "def456".into();
+            changed.attempts[0].tasks[0].output.as_mut().unwrap().commit = "def456".into();
+        }
+        store.write_work_item(&changed).unwrap();
+        assert!(
+            prepared.validate().is_err(),
+            "must reject changed {field} after confirmation"
+        );
+        assert!(
+            actions::PreparedAction::prepare(offered.clone()).is_err(),
+            "must reject changed {field} before confirmation"
+        );
+        let mut restored = store.read_work_item_snapshot("work").unwrap();
+        restored.merge_candidates = item.merge_candidates.clone();
+        restored.attempts = item.attempts.clone();
+        store.write_work_item(&restored).unwrap();
+    }
+}
+
+#[test]
+fn project_overview_keeps_workers_visible_with_long_actions_at_minimum_size() {
+    let mut source = project_source("/a/long/source/checkout", vec![row("work", "merge-ready")]);
+    source.work[0].status.title =
+        "A complete descriptive title that spans several lines at the minimum terminal size".into();
+    source.work[0].status.merge_candidate = "attempt-1-merge-candidate-with-a-long-id".into();
+    source.work[0].workers = vec![
+        worker_row(&source.id, "writer"),
+        worker_row(&source.id, "tester"),
+    ];
+    let mut app = project_app(vec![source]);
+    app.resize(60, 15);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let rendered = text(&app, 60, 15);
+    assert!(rendered.contains("Next action"), "{rendered}");
+    assert!(rendered.contains("Workers (2)"), "{rendered}");
+    assert!(rendered.contains("> writer"), "{rendered}");
+    let mut seen = String::new();
+    for _ in 0..10 {
+        seen.push_str(&text(&app, 60, 15));
+        app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+    }
+    assert!(seen.contains("fluent merge-candidate land"));
+    assert!(seen.contains("/a/long/source/checkout"));
+}
+
+#[test]
+fn project_action_event_loop_consumes_confirmation_once() {
+    struct Session {
+        runner: ActionSession,
+        keys: std::collections::VecDeque<KeyCode>,
+        frames: Vec<String>,
+    }
+    impl DashboardSession for Session {
+        fn size(&self) -> Result<(u16, u16)> {
+            Ok((160, 30))
+        }
+        fn draw(&mut self, app: &App) -> Result<()> {
+            self.frames.push(text(app, 160, 30));
+            Ok(())
+        }
+        fn next_event(&mut self, _: Duration) -> Result<Option<CEvent>> {
+            Ok(Some(CEvent::Key(
+                self.keys.pop_front().expect("quit was not handled").into(),
+            )))
+        }
+        fn fullscreen(&mut self, _: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
+            unreachable!()
+        }
+        fn is_active(&self) -> bool {
+            true
+        }
+        fn set_mouse_enabled(&mut self, _: bool) -> Result<()> {
+            Ok(())
+        }
+        fn run_action(
+            &mut self,
+            command: &actions::LocalCommand,
+        ) -> Result<actions::CommandOutcome> {
+            self.runner.run_action(command)
+        }
+    }
+    let (root, mut app) = action_fixture();
+    let mut session = Session {
+        runner: ActionSession {
+            calls: vec![],
+            outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
+        },
+        keys: [
+            KeyCode::Enter,
+            KeyCode::Char('y'),
+            KeyCode::Char('y'),
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+        ]
+        .into(),
+        frames: vec![],
+    };
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    let mut remote = crate::dashboard_sources::RemoteSources::new(vec![], Default::default());
+    run_project_loop(&mut session, &mut app, &mut local, &mut remote).unwrap();
+    assert_eq!(session.runner.calls.len(), 1);
+    assert!(
+        session
+            .frames
+            .iter()
+            .any(|frame| frame.contains("Confirm local action"))
+    );
+    assert!(
+        session
+            .frames
+            .iter()
+            .any(|frame| frame.contains("Attempt run succeeded"))
+    );
+    assert!(session.frames.last().unwrap().contains("Open Work Item"));
+    assert_eq!(app.page, model::ProjectPage::List);
+    if local.pending.is_some() {
+        finish_local_refresh(&mut local, &mut app);
+    }
+}
+
+#[test]
+fn project_action_copy_failure_keeps_command_selectable() {
+    let (_, mut app) = action_fixture();
+    let command = app.action_menu.as_ref().unwrap().current().command_text();
+    assert_eq!(
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE),
+        Effect::CopyAction
+    );
+    assert_eq!(
+        app.complete_copy(Err(anyhow::anyhow!("clipboard unavailable"))),
+        Effect::ToggleMouse(false)
+    );
+    assert!(app.copy_mode);
+    let rendered = text(&app, 160, 30);
+    assert!(rendered.contains("clipboard unavailable"));
+    assert!(rendered.contains(&command));
+    assert!(app.pending_action.is_none());
 }

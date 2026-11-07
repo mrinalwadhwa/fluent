@@ -47,6 +47,8 @@ if pid == 0:
         command = shlex.join([sys.argv[1], "--exact", "terminal_sessions::setup_cleanup_tests::nested_fullscreen_cancellation_child", "--nocapture"])
         os.execlp("tmux", "tmux", "-S", nested.name + "/outer", "-f", "/dev/null", "new-session", command)
     test = "fullscreen_attachment_pty_child" if attachment_mode else "fullscreen_pty_child"
+    if mode == "action":
+        test = "action_command_pty_child"
     if input_mode:
         variable, test = (
             ("FLUENT_INPUT_PTY_CHILD", "terminal_input_pty_child")
@@ -81,6 +83,9 @@ try:
             output.extend(chunk)
             if len(phases) == 1 and chunk:
                 phases.append({"phase": "first-output", "elapsed": time.monotonic() - started})
+            if mode == "action" and "interrupt" not in sent and b"ACTION_INTERRUPT_READY" in output:
+                assert os.write(master, b"\x03") == 1
+                sent.add("interrupt")
             if input_mode:
                 for step, data in input_bytes.items():
                     if step not in sent and f"INPUT_READY_{step}".encode() in output:
@@ -124,6 +129,12 @@ try:
         assert resized, "the full-screen client never attached"
         assert detached, "the full-screen client never requested native detach"
         print(f"ok: full-screen {attachment_mode} resize and detach")
+    elif mode == "action":
+        assert b"ACTION_LIVE_OUTPUT" in output, output
+        assert sent == {"interrupt"}, output
+        for sequence in (b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[?2004h", b"\x1b[?2004l"):
+            assert output.count(sequence) == 5, output
+        print("ok: action output, interrupt, exit, spawn failure, and terminal restoration")
     else:
         assert output.count(b"\x1b[?1049h") == 4, output
         assert output.count(b"\x1b[?1049l") == 4, output

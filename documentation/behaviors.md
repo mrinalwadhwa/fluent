@@ -74,7 +74,8 @@ Test: src/dashboard/tests.rs (failed_poll_keeps_snapshot_and_marks_it_stale)
 
 WHEN the dashboard receives navigation, filtering, selection, detail or terminal
 inspection, help, copy, or refresh input, THE SYSTEM SHALL not modify stored Work
-state.
+state. Only supported, explicitly confirmed local dashboard actions may change
+Work; SSH actions remain copy-only.
 Test: src/dashboard/tests.rs (dashboard_controls_leave_work_state_unchanged)
 
 ## Dashboard source headers
@@ -90,8 +91,8 @@ Test: src/dashboard/tests.rs (project_header_uses_one_read_status_and_right_bran
 ### B2
 
 WHEN the dashboard first loads or the operator refreshes, THE SYSTEM SHALL show
-one delayed, fixed-width checking indicator on the left of the top header line,
-with Fluent at its right edge. Routine polling SHALL hide the indicator.
+one delayed, fixed-width read indicator above the shortcuts, including while
+sources have warnings. Routine polling SHALL hide the indicator.
 Test: src/dashboard/tests.rs (project_read_progress_is_global_and_contextual)
 Test: src/dashboard/tests.rs (project_read_indicator_appears_only_for_visible_reads)
 
@@ -99,8 +100,9 @@ Test: src/dashboard/tests.rs (project_read_indicator_appears_only_for_visible_re
 
 IF a source fails, becomes stale, or its pending read retains a snapshot older
 than ten seconds, THEN THE SYSTEM SHALL mark that source, preserve its last good
-Work Items, and keep its last successful observation and full diagnostic in errors.
-The header SHALL count affected sources once; source rows SHALL use a compact `!` marker.
+Work Items, and keep its last successful observation and full diagnostic in Read issues.
+The health row SHALL count failed and overdue sources, including groups hidden
+from the selected view; visible source rows SHALL use a compact `!` marker.
 Source read times SHALL remain separate from Work update times.
 Test: src/dashboard/tests.rs (project_source_read_warnings_preserve_work)
 Test: src/dashboard/tests.rs (project_source_warnings_use_one_global_status)
@@ -110,12 +112,11 @@ Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_e
 
 ### B1
 
-WHEN the project dashboard renders its list at 100 columns or wider, THE SYSTEM SHALL
-show two compact header lines with counted Current, Needs you, Running, Ready,
-Waiting, and History views, one horizontal rule, and one continuous divider
-between the project list and details or terminal, without pane boxes. Leave one
-blank column on each side of the divider and one blank row below the header
-rule. Keep navigation and quit controls visible at the minimum supported size.
+WHEN the project list renders, THE SYSTEM SHALL show counted views and Fluent on
+one top line and use the full body width. Only a visible terminal SHALL introduce
+a list/terminal divider at wide widths. Detail pages SHALL replace counted views
+with a breadcrumb. Health SHALL appear immediately above contextual shortcuts.
+Keep navigation and quit controls useful at 60 columns by 15 rows.
 Test: src/dashboard/tests.rs (project_layout_uses_header_rule_and_one_pane_divider)
 Test: src/dashboard/tests.rs (dashboard_gutters_preserve_content_and_controls)
 
@@ -123,27 +124,28 @@ Test: src/dashboard/tests.rs (dashboard_gutters_preserve_content_and_controls)
 
 WHEN project work renders, THE SYSTEM SHALL use compact aligned rows with exact
 categories, recorded update times when available, a highlighted selection marker,
-and stale identification beside the source group. Ready SHALL include Ready and
+and stale identification beside each nonempty source group. Empty groups SHALL
+be omitted from drawing and scrolling; an empty view SHALL explain that no Work
+Items match. Ready SHALL include Ready and
 Ready to land; Waiting SHALL include Queued and Planned.
 Test: src/dashboard/tests.rs (project_rows_preserve_exact_status_and_selection_cues)
 Test: src/dashboard/tests.rs (project_rows_show_recorded_update_times)
 
 ### B3
 
-WHEN a Work Item is selected in the wide list, THE SYSTEM SHALL show a concise
-preview of its condition and short next step. Focused details SHALL show the full
-title, condition, next action, worker summary, and identifiers in that order.
-Known merge-ready guidance SHALL show separate review and landing steps with
-exact commands derived from the Work Item and Merge Candidate IDs. Other guidance
-SHALL remain complete and wrap at word boundaries with hanging continuation.
-Wrapped details SHALL remain scrollable to the last line.
+WHEN a Work Item overview opens, THE SYSTEM SHALL show the full title, condition,
+a distinct next-action card, and a visible worker table before technical
+identifiers. The table SHALL identify workers and states at narrow widths and
+include elapsed time and terminal availability at wide widths. Selection SHALL
+use a visible marker as well as color. Complete guidance and metadata SHALL remain
+readable through scrolling.
 Test: src/dashboard/tests.rs (project_preview_and_full_details_have_distinct_hierarchy)
 Test: src/dashboard/tests.rs (project_actions_keep_commands_readable_and_exact)
 Test: src/dashboard/tests.rs (project_details_wrap_full_context_to_the_last_line)
 
 ### B4
 
-WHEN navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHALL
+WHEN list navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHALL
 cycle counted views forward or backward and preserve a selection that remains
 visible. Start in Current, which excludes only History, and initially favor Needs
 you, then Running, then Ready or Ready to land, then other unfinished Work.
@@ -153,15 +155,14 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 
 ### B5
 
-WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL open details at Workers.
-WHEN Right is pressed, THE SYSTEM SHALL open details at the summary. The list
-SHALL contain one selectable row per Work Item and no worker rows. In details,
-Enter SHALL switch summary/worker focus, Up/Down SHALL select workers while
-Workers has focus, and PageUp/PageDown SHALL scroll. Left or Esc SHALL return to
-the same Work Item and list position. A removed worker SHALL clear only worker
-selection; refresh SHALL preserve a still-present worker's exact identity.
-WHEN t is pressed on a selected worker, open only that worker's available session
-in Observe or explain its unavailability, without starting or retargeting Work.
+WHEN Enter or Right is pressed on a Work Item, THE SYSTEM SHALL open its overview.
+Up/Down SHALL select a visible worker; Enter SHALL open that worker's page.
+Esc or Left SHALL return one level, preserving Work and exact worker selection
+across return and refresh. A removed worker SHALL clear only worker selection.
+Worker pages SHALL show role, state, terminal availability, provider, and elapsed
+information separately from technical identifiers. Pressing t SHALL open only
+that worker's available session in Observe or explain its unavailability,
+without starting or retargeting Work or a retained terminal attachment.
 Test: src/dashboard/tests.rs (project_list_keeps_one_row_per_work_item)
 Test: src/dashboard/tests.rs (project_details_open_summary_or_workers_and_return_to_selection)
 Test: src/dashboard/tests.rs (detail_worker_selection_preserves_exact_terminal_target)
@@ -174,15 +175,16 @@ Test: src/dashboard/tests.rs (terminal_shortcut_observes_without_retargeting_on_
 ### B6
 
 WHEN the project dashboard has room for one pane, THE SYSTEM SHALL show the list
-first, use Right to inspect details, and use Left/Esc to return while retaining
-Tab/Shift+Tab for views when navigation owns input.
+first and use the same Enter/Right and Esc/Left hierarchy as wide terminals.
+Tab/Shift+Tab SHALL change views only at the list level.
 Test: src/dashboard/tests.rs (narrow_view_keeps_filter_and_return_keys_distinct)
 
 ### B7
 
 WHEN input focus changes, THE SYSTEM SHALL advertise primary controls for the
-list, summary, Workers, errors, or terminal context and put secondary shortcuts in
-help. Advertise errors only when present, and describe `c` as text selection. WHEN an
+list, overview, worker page, Read issues, action confirmation, or terminal context and put secondary shortcuts in
+help. Label diagnostics Read issues, and describe `c` as text selection outside
+the action menu, where it copies the command. WHEN an
 agent terminal is displayed, keep its Observe, Control, or navigation-with-Control
 state visible. Keep quit and navigation return controls visible at minimum size;
 focused terminal Control SHALL advertise Ctrl-] to return to navigation. Advertise
@@ -199,6 +201,33 @@ focus and retain the existing Control lease rules; enlarging the pane SHALL not
 restore focus automatically.
 Test: src/dashboard/tests.rs (hidden_terminal_releases_input_focus)
 Test: src/dashboard/tests.rs (hidden_terminal_rejects_native_input)
+
+## Dashboard actions
+
+### B1
+
+WHEN an overview offers actions, THE SYSTEM SHALL derive only typed Attempt run,
+Candidate show, and Candidate land commands from eligible Work state. Other
+guidance SHALL remain text. Commands SHALL include source context; SSH sources
+SHALL offer copying without remote execution.
+Test: src/dashboard/tests.rs (project_actions_are_typed_local_and_copy_only_remote)
+
+### B2
+
+WHEN a state-changing local action is chosen, THE SYSTEM SHALL show its command,
+checkout, Work Item, and effect for explicit confirmation, then freshly validate
+source, Work, action, and Merge Candidate identity before launch. Declined or
+changed actions SHALL launch no command and explain why.
+Test: src/dashboard/tests.rs (project_action_confirmation_rejects_stale_or_declined_command)
+
+### B3
+
+WHEN a confirmed action starts, THE SYSTEM SHALL show foreground output and
+restore a usable dashboard after success, failure, or interruption. It SHALL
+refresh the source, report the process result without predicting Work state,
+and consume each confirmation at most once.
+Test: src/dashboard/tests.rs (project_action_handoff_returns_and_reports_exact_result)
+
 
 ## Scheduled public verification
 

@@ -111,7 +111,10 @@ impl DashboardTerminal {
         });
         match restored {
             Ok(terminal) => *self = terminal,
-            Err(error) => return Err(error.context("restore dashboard terminal")),
+            Err(error) => {
+                self.active = false;
+                return Err(error.context("restore dashboard terminal"));
+            }
         }
         match result {
             Ok(result) => result,

@@ -131,8 +131,8 @@ while time.monotonic() < deadline:
     screen = Screen(120, 30)
     screen.feed(capture.read_bytes())
     text = screen.text()
-    if (all(word in text for word in ("Fluent", "Tasks", "q quit", "local"))
-            and "Checking" not in text):
+    if (all(word in text for word in ("Fluent", "Work Items", "q quit", "Source reads: 1 healthy"))
+            and "Reading sources" not in text):
         sys.exit(0)
     time.sleep(0.05)
 sys.exit("dashboard did not complete its initial local read within 20 seconds")
@@ -359,7 +359,7 @@ test_dashboard_lists_work_items() {
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-visible[planned]" || RESULT=1
-  assert_contains "$OUTPUT" "Nextaction:fluentattemptrunwork-visible" || RESULT=1
+  assert_contains "$OUTPUT" "Attemptrun:fluentattemptrunwork-visible" || RESULT=1
   return $RESULT
 }
 
@@ -380,10 +380,10 @@ test_dashboard_refreshes_work_items_on_poll() {
 test_dashboard_surfaces_actionable_work() {
   setup_test_project
   trap cleanup_test_project RETURN
-  create_merge_ready_work_item
+  create_merge_ready_work_item || return 1
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[C" | clean_dashboard_output)" || return 1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[Ca" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-action" || RESULT=1
   assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
@@ -419,8 +419,9 @@ test_dashboard_waits_for_initial_read() {
   wait "$gate_writer" || true
   gate_writer=""
 
-  assert_contains "$OUTPUT" "work-visible" &&
-    assert_contains "$OUTPUT" "VisibleWork"
+  assert_contains "$OUTPUT" "Current1" &&
+    assert_contains "$OUTPUT" "VisibleWork" &&
+    assert_contains "$OUTPUT" "Readingsources"
 }
 
 test_dashboard_surfaces_needs_user_work() {
@@ -434,7 +435,7 @@ test_dashboard_surfaces_needs_user_work() {
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "NeedsUserWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-needs-user" || RESULT=1
-  assert_contains "$OUTPUT" "State:needs-user" || RESULT=1
+  assert_contains "$OUTPUT" "State:Needsyou" || RESULT=1
   return $RESULT
 }
 
@@ -447,7 +448,7 @@ test_dashboard_reports_work_read_errors() {
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[Ce" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Current1" || RESULT=1
-  assert_contains "$OUTPUT" "work-visible" || RESULT=1
+  assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
   assert_contains "$OUTPUT" "failedtoparse" || RESULT=1
   return $RESULT
 }
@@ -490,6 +491,16 @@ test_dashboard_overflow_error_journey() {
 }
 
 # Select the capture regressions during focused verification.
+if [ "${1:-}" = "--verification-layout" ]; then
+  run_test "dashboard lists Work Items" test_dashboard_lists_work_items
+  run_test "dashboard waits for initial read" test_dashboard_waits_for_initial_read
+  run_test "dashboard reports Work read errors" test_dashboard_reports_work_read_errors
+  run_test "dashboard shows empty Work view" test_dashboard_shows_empty_work_view
+  run_test "dashboard navigates during local refresh" test_dashboard_navigates_during_local_refresh
+  summarize_and_exit
+  exit 0
+fi
+
 if [ "${1:-}" = "--verification-capture" ]; then
   run_test "dashboard waits for initial read" test_dashboard_waits_for_initial_read
   run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work

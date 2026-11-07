@@ -66,6 +66,8 @@ pub struct App {
     pub page: ProjectPage,
     pub action_menu: Option<super::actions::ActionMenu>,
     pub action_message: Option<String>,
+    pub pending_action: Option<super::actions::PreparedAction>,
+    pub confirmed_action: Option<super::actions::PreparedAction>,
     pub filter: Filter,
     pub(super) selected_index: usize,
     pub pane: Pane,
@@ -216,6 +218,9 @@ impl App {
                 "? help",
             ];
         }
+        if self.pending_action.is_some() {
+            return vec!["y Confirm", "n Cancel", "Esc Back", "PgUp/PgDn scroll"];
+        }
         if let Some(menu) = &self.action_menu {
             return if menu.current().remote() {
                 vec![
@@ -297,6 +302,17 @@ impl App {
     }
 
     pub fn detail_values(&self) -> Vec<String> {
+        let mut values = self.page_values();
+        if let Some(message) = &self.action_message {
+            values.insert(0, message.clone());
+        }
+        values
+    }
+
+    fn page_values(&self) -> Vec<String> {
+        if let Some(action) = &self.pending_action {
+            return action.values();
+        }
         if let Some(menu) = &self.action_menu {
             return menu.values();
         }

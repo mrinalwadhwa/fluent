@@ -2238,29 +2238,43 @@ but later status and show commands emit no next action for that row, avoiding an
 inspection self-loop and allowing other actionable Work to surface. The boundary
 returns valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
-`fluent dashboard` projects those rows into a read-only operator console grouped
-by project. Counted Current, Needs you, Running, Ready, Waiting, and History
-views filter Work Items. Current opens first and excludes only History. Initial
-selection favors Needs you, then Running, then Ready or Ready to land. Ready
-includes Ready to land, and Waiting includes Queued and Planned. Rows retain their
-exact categories. The compact header has one rule,
-and a single divider separates the list from details at 100 columns or wider.
-The split uses 65% of the width for the list, with a blank column on both sides
-of the divider and a blank row below the header rule. Rendering, scrolling,
-terminal dimensions, and mouse translation consume `layout::project_areas`.
-The wide preview shows a short condition and next step. Focused details order the
-full title, condition, next action, worker summary, and identifiers. Known
-merge-ready guidance uses separate review and landing commands derived from the
-authoritative IDs; explicit recovery guidance remains authoritative. The shared
-detail projection wraps at words with hanging continuation for drawing and scroll
-bounds, splitting only tokens wider than the available line.
-`model::InputOwner` and the shared control projection identify List, Details,
-or native terminal input; the footer keeps only whole controls that fit. Right
-focuses the summary; Enter opens Workers. Within details Enter switches focus,
-Up/Down selects workers, and PageUp/PageDown scrolls. `model::App` stores the
-selected worker separately from the Work Item row and reconciles its complete
-key on refresh. `t` explicitly opens that worker in Observe. Browsing worker
-selection never retargets a retained attachment.
+`fluent dashboard` groups Work by project. Counted Current, Needs you, Running,
+Ready, Waiting, and History views filter Work Items. Current opens first and
+excludes only History. Initial selection favors Needs you, then Running, then
+Ready or Ready to land. Ready includes Ready to land; Waiting includes Queued
+and Planned. Source groups with no matching Work Items take no list space.
+The list uses the full body width. At 100 columns or wider, an explicitly opened
+terminal shares the body with the list, separated by one divider and gutters.
+Rendering, scrolling, terminal dimensions, and mouse translation consume
+`layout::project_areas`.
+
+`model::ProjectPage` separates the list, Work Item overview, and worker page.
+Enter or Right opens the next level; Left/Esc returns one level. The overview
+shows condition, a next-action card, and a visible worker table before secondary
+identifiers. Up/Down selects a worker there; PageUp/PageDown scrolls details.
+Worker pages show role, state, terminal availability, provider, and elapsed
+information before technical identifiers. The detail projection wraps at words
+with hanging continuation and supplies both drawing and scroll bounds.
+`model::InputOwner` distinguishes navigation from native terminal input. The
+footer shows whole contextual controls that fit. Counted views change only on
+the list. `model::App` reconciles selected workers by their complete key, separate
+from the Work Item and retained terminal. `t` opens that exact worker in Observe;
+browsing never retargets the retained attachment.
+
+`dashboard/actions.rs` derives typed Attempt run, Candidate show, and Candidate
+land commands from published state and typed identities. It never parses
+`guidance.rs` text into commands. The action menu freezes the offered identities.
+State-changing local actions require an explicit `y` confirmation after a fresh
+read. Immediately before launch, the coordinator checks the current selection,
+canonical checkout, filesystem identity, persisted Work record, action, and
+Merge Candidate identity and commit. It consumes each confirmation once and
+runs the current executable with argument vectors and a canonical working
+directory, without a shell. The existing terminal handoff restores modes around
+foreground output. The child receives terminal interrupts while the dashboard
+survives to restore its UI. After any result, pre-command local reads are discarded
+and a new read supplies Work state; the process result never predicts that state.
+SSH sources only expose command text and host/checkout context to copy.
+
 Inspecting details can hide a retained terminal attachment without retargeting
 its invocation or changing its Control lease. The existing hidden-terminal rule
 releases native input focus. `terminal_view::Display::focused` carries ephemeral
@@ -2296,14 +2310,14 @@ These fields remain outside stored Work and the SSH wire schema.
 `dashboard/render.rs` keeps healthy source headers stable during routine reads.
 Headers show project and host identity; equal project names on the same host add
 source hashes to distinguish them. Initial loading and manual checking appear
-after 500 milliseconds in the top header, with fixed-width frames every 250
-milliseconds and Fluent at the right edge. Routine polling hides that indicator. Failed or
+after 500 milliseconds above the shortcuts, with fixed-width frames every 250
+milliseconds. The top line holds counted views or a detail breadcrumb and Fluent. Routine polling hides that indicator. Failed or
 stale sources stay marked, and a pending read marks a snapshot stale once its
-last successful observation is ten seconds old. The header counts affected sources once and each affected source gets a compact
-`!` marker. `e` shows full source diagnostics and last read UTC times. The `Updated UTC`
+last successful observation is ten seconds old. The health row counts failed and overdue reads, including hidden source groups,
+and visible affected sources get a compact `!` marker. Read activity can coexist
+with warnings. `e` (Read issues) shows full diagnostics and last read UTC times. The `Updated UTC`
 column continues to show recorded Work or Task transitions; unavailable remote
-lifecycle times remain unavailable. Source headers remain visible even when a
-source has no Work Items in the selected view. Read health stays in memory and
+lifecycle times remain unavailable. Source headers appear only when the selected view contains matching Work Items. Read health stays in memory and
 never changes Work update times.
 
 `dashboard.rs` owns terminal setup and coordinates local and remote results;
@@ -2312,20 +2326,12 @@ respectively own projection, interaction state, and pure Ratatui rendering.
 `dashboard/layout.rs` computes shared wrapping and scroll bounds and project
 detail text without depending on interaction state or rendering.
 The terminal renderer consumes the same unboxed geometry for viewport size and
-mouse routing. List navigation retains a side-by-side preview at 100 columns or
-wider. Right opens a labeled Work Item summary across the full body at every
-supported width. Shared layout geometry reserves a label row and
-computes wrapping and scroll limits from the remaining full-width area. Terminal
-viewport sizing and mouse routing retain their separate split-pane geometry.
-Tab/Shift+Tab cycle views, Enter opens Workers in details, and Left/Esc returns
-to the list with the same selection and scroll. Changing selection retains the
-old terminal attachment and its Control lease. Inspecting details can hide the
-terminal and releases native input focus. An explicit `t` replaces the retained
-attachment only after the selected worker's exact terminal opens successfully;
-a failed open retains the previous attachment. The `e` control opens a scrollable
-view of all Work read errors, including errors that overflow
-the list. `e` or Esc returns to the preserved selection. Help wraps navigation
-instructions and closes with `?` or Esc. Both controls leave Work files unchanged.
+mouse routing. The full-width list and detail pages use the same supported
+60-column by 15-row minimum. Changing selection retains the old terminal and
+its Control lease. Inspecting details hides terminal input focus; an explicit
+`t` replaces the attachment only after the exact selected worker opens successfully.
+A failed open retains the previous attachment. Read issues and help preserve
+selection and leave Work files unchanged.
 Configured SSH sources use the same project view. `dashboard_sources` reads
 only operator-owned source configuration and polls each selected host through
 OpenSSH with batch authentication, strict host-key checks and forwarding disabled.

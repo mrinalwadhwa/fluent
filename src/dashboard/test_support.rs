@@ -107,6 +107,10 @@ impl TerminalDashboard {
             KeyCode::Esc,
             KeyModifiers::NONE,
         )))?;
+        self.key(CEvent::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))?;
         ensure!(self.app.pane == app::Pane::List);
         self.key(CEvent::Key(crossterm::event::KeyEvent::new(
             KeyCode::Char('i'),
@@ -260,4 +264,40 @@ pub fn assert_handoff_navigation() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Exercise the production command handoff with harmless fixed subprocesses.
+pub fn run_action_fixture(
+    terminal: &mut DashboardTerminal,
+    checkout: &Path,
+    mode: &str,
+) -> Result<String> {
+    let (executable, args) = match mode {
+        "success" => (
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".into(),
+                "test -t 0 && printf 'ACTION_LIVE_OUTPUT\\n'".into(),
+            ],
+        ),
+        "failure" => (PathBuf::from("/bin/sh"), vec!["-c".into(), "exit 7".into()]),
+        "interrupt" => (
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".into(),
+                "printf 'ACTION_INTERRUPT_READY\\n'; exec sleep 30".into(),
+            ],
+        ),
+        "spawn-error" => (checkout.join("missing-executable"), vec![]),
+        _ => anyhow::bail!("unknown action fixture"),
+    };
+    DashboardSession::run_action(
+        terminal,
+        &actions::LocalCommand {
+            executable,
+            args,
+            checkout: checkout.to_owned(),
+        },
+    )
+    .map(|outcome| outcome.to_string())
 }

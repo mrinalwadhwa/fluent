@@ -418,7 +418,7 @@ pub fn project_overview_values(
     width: u16,
 ) -> Vec<String> {
     let mut values = project_detail_values(sources, key);
-    let Some((_, work)) = project::find_work(sources, key) else {
+    let Some((source, work)) = project::find_work(sources, key) else {
         return values;
     };
     if work.status.recovery_blocker.is_none() {
@@ -427,19 +427,42 @@ pub fn project_overview_values(
             work.phase.as_deref().unwrap_or(work.category.label())
         );
     }
-    let actions = super::actions::offered(project::find_work(sources, key).unwrap().0, work);
+    let mut secondary = Vec::new();
+    for (index, label) in [(0, "Title"), (1, "Condition")] {
+        if values[index].width() > usize::from(width) {
+            secondary.push(format!("{label}: {}", values[index]));
+            values[index] = compact(&values[index], usize::from(width));
+        }
+    }
+    let actions = super::actions::offered(source, work);
     if !actions.is_empty() {
         let end = values
             .iter()
             .position(|value| value.starts_with("Workers ("))
             .unwrap_or(3);
+        let mut commands = actions
+            .iter()
+            .map(|action| format!("  {}: {}", action.kind.label(), action.command_text()))
+            .collect::<Vec<_>>();
+        commands.push(format!(
+            "Source checkout: {} · {}",
+            source.host,
+            source.path.display()
+        ));
         let mut card = vec![String::new(), "Next action · a Actions".into()];
-        for action in actions {
+        if width < 100 || project_detail_lines(&commands, width).len() > 3 {
             card.push(format!(
-                "  {}: {}",
-                action.kind.label(),
-                action.command_text()
+                "  {}",
+                actions
+                    .iter()
+                    .map(|action| action.kind.label())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
             ));
+            secondary.push("Commands and source · a Actions to inspect or copy".into());
+            secondary.extend(commands);
+        } else {
+            card.extend(commands);
         }
         card.push(String::new());
         values.splice(2..end, card);
@@ -451,6 +474,10 @@ pub fn project_overview_values(
         .and_then(|value| value.strip_prefix("Next action: "))
         .map(str::to_owned)
     {
+        if next.width() > usize::from(width.saturating_sub(2)) {
+            secondary.push(format!("Guidance: {next}"));
+        }
+        let next = compact(&next, usize::from(width.saturating_sub(2)));
         values.splice(
             2..3,
             [
@@ -513,7 +540,9 @@ pub fn project_overview_values(
         if work.workers.is_empty() {
             rows.push("  No workers recorded".into());
         }
-        rows.extend([String::new(), "Technical identifiers".into()]);
+        rows.push(String::new());
+        rows.extend(secondary);
+        rows.push("Technical identifiers".into());
         values.splice(section + 1..section + 1, rows);
     }
     values

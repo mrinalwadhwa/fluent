@@ -21,7 +21,7 @@ use crate::work_status;
 
 const DATA_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Launch the read-only Work operator console.
+/// Launch the Work operator console with explicitly confirmed local actions.
 pub fn run_dashboard(search_root: &Path) -> Result<()> {
     run_dashboard_with_projects(search_root, &[])
 }
@@ -65,6 +65,7 @@ trait DashboardSession {
     fn draw(&mut self, app: &App) -> Result<()>;
     fn next_event(&mut self, timeout: Duration) -> Result<Option<CEvent>>;
     fn fullscreen(&mut self, terminal: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()>;
+    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome>;
     fn is_active(&self) -> bool;
     fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()>;
 }
@@ -91,6 +92,9 @@ impl DashboardSession for DashboardTerminal {
                 anyhow::ensure!(code == 0, "terminal attachment exited with {code}");
                 Ok(())
             })
+    }
+    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
+        self.handoff(|| command.run())
     }
     fn is_active(&self) -> bool {
         self.is_active()
@@ -169,14 +173,24 @@ fn run_project_loop(
                             refresh_remote(app, remote);
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
+                        if effect == Effect::PrepareAction {
+                            prepare_dashboard_action(app);
+                        }
+                        if matches!(effect, Effect::PrepareAction | Effect::RunAction) {
+                            run_dashboard_action(session, app, local)?;
+                            if !session.is_active() {
+                                break;
+                            }
+                            let (width, height) = session.size()?;
+                            resize_terminal(app, embedded.as_mut(), width, height);
+                            next_poll = Instant::now() + DATA_POLL_INTERVAL;
+                        }
                         if effect == Effect::CopyAction {
                             if let Some(menu) = &app.action_menu {
-                                app.action_message =
-                                    Some(match actions::copy_command(menu.current()) {
-                                        Ok(()) => "Command and source context copied".into(),
-                                        Err(error) => format!("Copy failed: {error:#}"),
-                                    });
-                                app.dirty = true;
+                                let result = actions::copy_command(menu.current());
+                                if let Effect::ToggleMouse(enabled) = app.complete_copy(result) {
+                                    session.set_mouse_enabled(enabled)?;
+                                }
                             }
                         }
                         if let Effect::ToggleMouse(enabled) = effect {
@@ -204,6 +218,91 @@ fn run_project_loop(
             break;
         }
     }
+    Ok(())
+}
+
+/// Prepare a concrete confirmation from a fresh read; never execute guidance.
+fn prepare_dashboard_action(app: &mut App) {
+    let result = (|| {
+        let action = app
+            .action_menu
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No action selected"))?
+            .current()
+            .clone();
+        validate_action_selection(app, &action)?;
+        actions::PreparedAction::prepare(action)
+    })();
+    app.detail_scroll = 0;
+    app.action_message = None;
+    match result {
+        Ok(action) if action.action.kind == actions::ActionKind::CandidateShow => {
+            app.confirmed_action = Some(action)
+        }
+        Ok(action) => app.pending_action = Some(action),
+        Err(error) => app.action_message = Some(format!("Action canceled: {error:#}")),
+    }
+    app.dirty = true;
+}
+
+fn validate_action_selection(app: &App, action: &actions::OfferedAction) -> Result<()> {
+    let key = app
+        .selected_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Work selection changed"))?;
+    anyhow::ensure!(
+        key.source_id == action.source_id && key.work_item_id == action.work_item_id,
+        "Work selection changed; choose the action again"
+    );
+    let (source, work) = project::find_work(&app.snapshot.sources, key)
+        .ok_or_else(|| anyhow::anyhow!("Selected source or Work Item disappeared"))?;
+    anyhow::ensure!(
+        !app.source_warning(source),
+        "Selected source is stale; refresh before choosing an action"
+    );
+    anyhow::ensure!(
+        actions::offered(source, work).contains(action),
+        "Source, Work Item, or action changed; choose it again"
+    );
+    Ok(())
+}
+
+/// Consume one confirmation, restore the dashboard, then request a post-command read.
+fn run_dashboard_action(
+    session: &mut impl DashboardSession,
+    app: &mut App,
+    local: &mut LocalRefresh,
+) -> Result<()> {
+    let Some(action) = app.take_confirmed_action() else {
+        return Ok(());
+    };
+    let result = validate_action_selection(app, &action.action)
+        .and_then(|()| action.validate())
+        .and_then(|command| session.run_action(&command));
+    app.action_menu = None;
+    app.pending_action = None;
+    app.detail_scroll = 0;
+    app.action_message = Some(match result {
+        Ok(outcome) => format!(
+            "{} {outcome}; refreshing source",
+            action.action.kind.label()
+        ),
+        Err(error) => format!(
+            "{} did not complete: {error:#}; refreshing source",
+            action.action.kind.label()
+        ),
+    });
+    app.dirty = true;
+    if !session.is_active() {
+        return Ok(());
+    }
+    let (width, height) = session.size()?;
+    app.resize(width, height);
+    // A read started before the command cannot publish its older snapshot after
+    // the command. Dropping its handle detaches the read-only worker.
+    local.pending.take();
+    local.manual_pending = false;
+    local.request(app, true);
     Ok(())
 }
 
