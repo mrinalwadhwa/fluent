@@ -159,6 +159,11 @@ impl App {
         if self.snapshot == snapshot && !was_stale {
             return;
         }
+        let worker_was_visible = self
+            .selected_worker_position()
+            .is_some_and(|(line, height)| {
+                line >= self.detail_scroll && line - self.detail_scroll < height
+            });
         let prior = self.selected.clone();
         self.snapshot = snapshot;
         self.stale_error = None;
@@ -182,7 +187,11 @@ impl App {
         if self.project_mode() && self.terminal.is_none() {
             self.keep_selection_visible();
         }
-        self.scroll_to_workers();
+        // Keep a visible selection in view after reordering, but do not pull
+        // the operator away from guidance or identifiers they scrolled to read.
+        if worker_was_visible {
+            self.scroll_to_workers();
+        }
         self.dirty = true;
     }
     pub fn refresh_failed(&mut self, error: String) {
@@ -237,7 +246,8 @@ impl App {
         }
     }
 
-    fn scroll_to_workers(&mut self) {
+    /// Return the selected row and the height of its scrollable viewport.
+    fn selected_worker_position(&self) -> Option<(u16, u16)> {
         if !self.project_mode()
             || self.page != ProjectPage::Overview
             || self.pane != Pane::Detail
@@ -245,25 +255,28 @@ impl App {
             || self.help
             || self.errors
         {
-            return;
+            return None;
         }
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
         let content =
             layout::project_detail_content(areas.focused_detail, self.action_message.is_some());
         let lines = layout::wrap_detail_rows(&self.detail_rows(), content.width);
-        let Some(line) = lines
+        let line = lines
             .iter()
-            .position(|line| line.kind == layout::DetailKind::SelectedWorker)
-        else {
+            .position(|line| line.kind == layout::DetailKind::SelectedWorker)?;
+        Some((line.min(usize::from(u16::MAX)) as u16, content.height))
+    }
+
+    fn scroll_to_workers(&mut self) {
+        let Some((line, height)) = self.selected_worker_position() else {
             return;
         };
-        let line = line as u16;
         if line < self.detail_scroll {
             self.detail_scroll = line;
         }
-        if line >= self.detail_scroll + content.height {
-            self.detail_scroll = line + 1 - content.height;
+        if line >= self.detail_scroll.saturating_add(height) {
+            self.detail_scroll = line.saturating_add(1).saturating_sub(height);
         }
         self.detail_scroll = self
             .detail_scroll

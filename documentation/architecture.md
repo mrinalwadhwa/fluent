@@ -2253,8 +2253,11 @@ Enter or Right opens the next level; Left/Esc returns one level. The overview
 shows condition, a next-action card, and a visible worker table before secondary
 identifiers. Up/Down selects a worker there; PageUp/PageDown scrolls details.
 Worker pages show role, state, terminal availability, provider, and elapsed
-information before technical identifiers. The detail projection wraps at words
-with hanging continuation and supplies both drawing and scroll bounds.
+information before technical identifiers.
+Refresh keeps a previously visible selected worker in view if its row moves;
+it preserves deliberate scrolling into guidance or identifiers. Explicit worker
+navigation and overview return reveal the selected worker. The detail projection
+wraps at words with hanging continuation and supplies both drawing and scroll bounds.
 `model::InputOwner` distinguishes navigation from native terminal input. The
 footer shows whole contextual controls that fit. Counted views change only on
 the list. `model::App` reconciles selected workers by their complete key, separate

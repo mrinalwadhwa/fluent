@@ -4867,4 +4867,41 @@ fn project_action_feedback_keeps_full_diagnostics_scrollable() {
         bottom.lines().nth(13).unwrap().contains("Source reads:"),
         "{bottom}"
     );
+    let mut snapshot = app.snapshot.clone();
+    snapshot.sources[0].work[0].workers[0].elapsed_ms = Some(42000);
+    app.refresh(snapshot);
+    assert_eq!(text(&app, 60, 15), bottom);
+}
+
+#[test]
+fn project_overview_preserves_context_scroll_during_elapsed_refresh() {
+    for size in [(60, 15), (160, 24)] {
+        let mut source = project_source("/one", vec![row("work", "executing")]);
+        source.work[0].workers = (0..15)
+            .map(|n| worker_row("/one", &format!("review-{n:02}")))
+            .collect();
+        source.work[0].status.next_action =
+            Some("Read the complete guidance before taking another action. ".repeat(12));
+        let mut app = project_app(vec![source]);
+        app.resize(size.0, size.1);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let selected = app.selected_worker.clone();
+        for _ in 0..30 {
+            app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        }
+        let context = text(&app, size.0, size.1);
+        assert!(context.contains("Technical identifiers"), "{context}");
+        assert!(context.contains("Work Item: work"), "{context}");
+        assert!(!context.contains("> review-00"));
+        let scroll = app.detail_scroll;
+        let mut snapshot = app.snapshot.clone();
+        snapshot.sources[0].work[0].workers[0].elapsed_ms = Some(42000);
+        app.refresh(snapshot);
+        assert_eq!(app.selected_worker, selected);
+        assert_eq!(app.detail_scroll, scroll);
+        assert_eq!(text(&app, size.0, size.1), context);
+        // Deliberate worker navigation still reveals the selected row.
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert!(text(&app, size.0, size.1).contains("> review-01"));
+    }
 }
