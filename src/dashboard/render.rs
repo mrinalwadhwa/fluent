@@ -283,6 +283,17 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
+    if let Some(message) = &app.action_message {
+        let summary = layout::compact(&message.replace('\n', " "), usize::from(area.width));
+        frame.render_widget(
+            Paragraph::new(summary).style(Style::default().add_modifier(Modifier::BOLD)),
+            Rect {
+                height: area.height.min(1),
+                ..area
+            },
+        );
+    }
+    let area = layout::project_detail_content(area, app.action_message.is_some());
     let lines = layout::wrap_detail_rows(&app.detail_rows(), area.width)
         .into_iter()
         .map(|row| {

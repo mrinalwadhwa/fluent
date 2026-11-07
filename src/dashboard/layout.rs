@@ -64,6 +64,19 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
     }
 }
 
+/// Reserve a fixed feedback row without changing the worker terminal viewport.
+pub fn project_detail_content(
+    area: ratatui::layout::Rect,
+    feedback: bool,
+) -> ratatui::layout::Rect {
+    let reserved = u16::from(feedback).min(area.height);
+    ratatui::layout::Rect {
+        y: area.y + reserved,
+        height: area.height - reserved,
+        ..area
+    }
+}
+
 pub fn terminal_content(size: (u16, u16), identity: &str) -> ratatui::layout::Rect {
     let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
     crate::terminal_view::content_area(areas.detail, identity)
@@ -82,6 +95,7 @@ pub fn project_scroll_bounds(
     details: &[DetailRow],
     size: (u16, u16),
     focused_details: bool,
+    feedback: bool,
 ) -> ScrollBounds {
     if size.0 < 60 || size.1 < 15 {
         return ScrollBounds::default();
@@ -103,6 +117,7 @@ pub fn project_scroll_bounds(
     } else {
         areas.detail
     };
+    let detail = project_detail_content(detail, feedback);
     let detail_width = detail.width.max(1) as usize;
     let detail_lines = wrap_detail_rows(details, detail_width as u16).len();
     ScrollBounds {
@@ -465,7 +480,7 @@ impl DetailRow {
             kind: DetailKind::Text,
         }
     }
-    fn heading(text: impl Into<String>) -> Self {
+    pub fn heading(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             kind: DetailKind::Heading,

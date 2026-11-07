@@ -249,7 +249,9 @@ impl App {
         }
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
-        let lines = layout::wrap_detail_rows(&self.detail_rows(), areas.focused_detail.width);
+        let content =
+            layout::project_detail_content(areas.focused_detail, self.action_message.is_some());
+        let lines = layout::wrap_detail_rows(&self.detail_rows(), content.width);
         let Some(line) = lines
             .iter()
             .position(|line| line.kind == layout::DetailKind::SelectedWorker)
@@ -260,8 +262,8 @@ impl App {
         if line < self.detail_scroll {
             self.detail_scroll = line;
         }
-        if line >= self.detail_scroll + areas.focused_detail.height {
-            self.detail_scroll = line + 1 - areas.focused_detail.height;
+        if line >= self.detail_scroll + content.height {
+            self.detail_scroll = line + 1 - content.height;
         }
         self.detail_scroll = self
             .detail_scroll

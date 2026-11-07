@@ -309,7 +309,10 @@ impl App {
     pub fn detail_rows(&self) -> Vec<layout::DetailRow> {
         let mut values = self.page_rows();
         if let Some(message) = &self.action_message {
-            values.insert(0, layout::DetailRow::text(message.clone()));
+            // Keep full diagnostics reachable after the pinned one-line report.
+            values.push(layout::DetailRow::text(""));
+            values.push(layout::DetailRow::heading("Last action"));
+            values.push(layout::DetailRow::text(message.clone()));
         }
         values
     }
@@ -374,6 +377,7 @@ impl App {
                 &self.detail_rows(),
                 self.size,
                 self.pane == Pane::Detail && self.show_details,
+                self.action_message.is_some() && !self.terminal_visible(),
             )
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)

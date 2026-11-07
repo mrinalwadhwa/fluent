@@ -2273,6 +2273,9 @@ directory, without a shell. The existing terminal handoff restores modes around
 foreground output. The child receives terminal interrupts while the dashboard
 survives to restore its UI. After any result, pre-command local reads are discarded
 and a new read supplies Work state; the process result never predicts that state.
+Command feedback stays in a fixed row above scrollable details, with complete
+messages retained under Last action. Worker scrolling therefore cannot hide the
+reported outcome or a fresh-validation rejection.
 SSH sources only expose command text and host/checkout context to copy.
 
 Inspecting details can hide a retained terminal attachment without retargeting

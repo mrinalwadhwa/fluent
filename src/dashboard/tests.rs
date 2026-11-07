@@ -4439,12 +4439,13 @@ fn project_action_confirmation_rejects_stale_or_declined_command() {
 }
 
 struct ActionSession {
+    size: (u16, u16),
     calls: Vec<actions::LocalCommand>,
     outcome: Option<Result<actions::CommandOutcome>>,
 }
 impl DashboardSession for ActionSession {
     fn size(&self) -> Result<(u16, u16)> {
-        Ok((160, 30))
+        Ok(self.size)
     }
     fn draw(&mut self, _: &App) -> Result<()> {
         Ok(())
@@ -4467,53 +4468,90 @@ impl DashboardSession for ActionSession {
     }
 }
 
+fn open_action_for_last_worker(app: &mut App, size: (u16, u16)) {
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    let source = &mut app.snapshot.sources[0];
+    source.work[0].workers = (0..15)
+        .map(|n| worker_row(&source.id, &format!("review-{n:02}")))
+        .collect();
+    app.resize(size.0, size.1);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    for _ in 0..14 {
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert!(text(app, size.0, size.1).contains("> review-14"));
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+}
+
 #[test]
 fn project_action_handoff_returns_and_reports_exact_result() {
-    for (outcome, message) in [
-        (Ok(actions::CommandOutcome::Succeeded), "succeeded"),
-        (Ok(actions::CommandOutcome::Failed(7)), "failed (exit 7)"),
-        (Ok(actions::CommandOutcome::Interrupted), "interrupted"),
-        (Err(anyhow::anyhow!("spawn failed")), "spawn failed"),
-    ] {
-        let (root, mut app) = action_fixture();
-        let before = app.snapshot.sources[0].work[0].status.clone();
-        prepare_dashboard_action(&mut app);
-        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
-        let mut session = ActionSession {
-            calls: vec![],
-            outcome: Some(outcome),
-        };
-        let mut local = LocalRefresh::new(root.path(), &[], root.path());
-        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
-        assert_eq!(session.calls.len(), 1);
-        assert_eq!(
-            session.calls[0].executable,
-            std::env::current_exe().unwrap()
-        );
-        assert_eq!(
-            session.calls[0].args,
-            ["attempt", "run", "work", "attempt-1"]
-        );
-        assert_eq!(
-            session.calls[0].checkout,
-            root.path().canonicalize().unwrap()
-        );
-        assert!(app.action_message.as_ref().unwrap().contains(message));
-        assert!(
-            local.pending.is_some(),
-            "return must request a fresh source read"
-        );
-        assert_eq!(
-            app.snapshot.sources[0].work[0].status, before,
-            "never optimistically change Work state"
-        );
-        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
-        assert_eq!(session.calls.len(), 1, "confirmation is consumed once");
-        finish_local_refresh(&mut local, &mut app);
-        assert!(text(&app, 160, 30).contains(message));
-        assert!(app.action_menu.is_none());
-        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(text(&app, 160, 30).contains("Open Work Item"));
+    for size in [(60, 15), (160, 30)] {
+        for (outcome, message) in [
+            (Ok(actions::CommandOutcome::Succeeded), "succeeded"),
+            (Ok(actions::CommandOutcome::Failed(7)), "failed (exit 7)"),
+            (Ok(actions::CommandOutcome::Interrupted), "interrupted"),
+            (Err(anyhow::anyhow!("spawn failed")), "spawn failed"),
+        ] {
+            let (root, mut app) = action_fixture();
+            open_action_for_last_worker(&mut app, size);
+            let selected = app.selected_worker.clone();
+            let before = app.snapshot.sources[0].work[0].status.clone();
+            prepare_dashboard_action(&mut app);
+            app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
+            let mut session = ActionSession {
+                size,
+                calls: vec![],
+                outcome: Some(outcome),
+            };
+            let mut local = LocalRefresh::new(root.path(), &[], root.path());
+            run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+            let returned = text(&app, size.0, size.1);
+            assert!(
+                returned.lines().nth(2).unwrap().contains(message),
+                "{returned}"
+            );
+            assert!(returned.contains("> review-14"), "{returned}");
+            assert_eq!(app.selected_worker, selected);
+            app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+            assert!(
+                text(&app, size.0, size.1)
+                    .lines()
+                    .nth(2)
+                    .unwrap()
+                    .contains(message)
+            );
+            assert_eq!(app.selected_worker, selected);
+            assert_eq!(session.calls.len(), 1);
+            assert_eq!(
+                session.calls[0].executable,
+                std::env::current_exe().unwrap()
+            );
+            assert_eq!(
+                session.calls[0].args,
+                ["attempt", "run", "work", "attempt-1"]
+            );
+            assert_eq!(
+                session.calls[0].checkout,
+                root.path().canonicalize().unwrap()
+            );
+            assert!(app.action_message.as_ref().unwrap().contains(message));
+            assert!(
+                local.pending.is_some(),
+                "return must request a fresh source read"
+            );
+            assert_eq!(
+                app.snapshot.sources[0].work[0].status, before,
+                "never optimistically change Work state"
+            );
+            run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+            assert_eq!(session.calls.len(), 1, "confirmation is consumed once");
+            finish_local_refresh(&mut local, &mut app);
+            assert!(text(&app, size.0, size.1).contains(message));
+            assert!(app.action_menu.is_none());
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert!(text(&app, size.0, size.1).contains("Open Work Item"));
+        }
     }
 }
 
@@ -4521,6 +4559,7 @@ fn project_action_handoff_returns_and_reports_exact_result() {
 fn project_action_rechecks_selection_and_source_before_launch() {
     for change in ["selection", "source", "eligibility", "remote"] {
         let (root, mut app) = action_fixture();
+        open_action_for_last_worker(&mut app, (60, 15));
         prepare_dashboard_action(&mut app);
         assert!(app.pending_action.is_some());
         match change {
@@ -4536,11 +4575,21 @@ fn project_action_rechecks_selection_and_source_before_launch() {
         }
         app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
         let mut session = ActionSession {
+            size: (60, 15),
             calls: vec![],
             outcome: None,
         };
         let mut local = LocalRefresh::new(root.path(), &[], root.path());
         run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+        let returned = text(&app, 60, 15);
+        assert!(
+            returned
+                .lines()
+                .nth(2)
+                .unwrap()
+                .contains("did not complete"),
+            "{returned}"
+        );
         assert!(session.calls.is_empty(), "launched after {change} changed");
         assert!(
             app.action_message
@@ -4682,6 +4731,7 @@ fn project_action_event_loop_consumes_confirmation_once() {
     let (root, mut app) = action_fixture();
     let mut session = Session {
         runner: ActionSession {
+            size: (160, 30),
             calls: vec![],
             outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
         },
@@ -4787,4 +4837,34 @@ fn project_overview_footer_keeps_worker_keys_with_actions_and_read_issues() {
     assert!(overview.contains("a Actions"), "{overview}");
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
     assert!(text(&app, 60, 15).contains("read failed"));
+}
+
+#[test]
+fn project_action_feedback_keeps_full_diagnostics_scrollable() {
+    let mut source = project_source("/one", vec![row("work", "task-ready")]);
+    source.work[0].workers = vec![worker_row("/one", "writer")];
+    let mut app = project_app(vec![source]);
+    app.resize(60, 15);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.action_message = Some(format!(
+        "Attempt run did not complete: {} diagnostic-end",
+        "full diagnostic context ".repeat(12)
+    ));
+    for _ in 0..20 {
+        app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+    }
+    let bottom = text(&app, 60, 15);
+    assert!(
+        bottom
+            .lines()
+            .nth(2)
+            .unwrap()
+            .contains("Attempt run did not complete"),
+        "{bottom}"
+    );
+    assert!(bottom.contains("diagnostic-end"), "{bottom}");
+    assert!(
+        bottom.lines().nth(13).unwrap().contains("Source reads:"),
+        "{bottom}"
+    );
 }
