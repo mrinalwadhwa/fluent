@@ -34,27 +34,37 @@ but do not need Zig or a separate Ghostty installation.
 The dashboard groups Work by project and shows one row per Work Item. Use
 Tab/Shift+Tab to cycle Current, Needs you, Running, Ready, Waiting, and History.
 Current opens first and excludes only History. Ready includes Ready to land;
-Waiting includes Queued and Planned. Each row keeps its exact status. The
-Updated UTC column uses the latest published transition (or recorded task
+Waiting includes Queued and Planned. History rows show Complete, Merged, or
+Abandoned. Each row keeps its exact status. The Updated UTC column uses the latest published transition (or recorded task
 start/completion) and shows `—` when no timestamp is available, including the
 current SSH snapshot. The `f`/`F` filter aliases remain available when navigation
 owns focus; with a terminal attached, lowercase `f` opens full-screen and `F`
 changes the view.
 
-Use Up/Down to select a Work Item. Enter or Right opens its overview across the
-full body, including a next-action card and a visible worker table. Up/Down
-selects workers in that table; Enter opens the selected worker's page.
-PageUp/PageDown scrolls details. Press `t` to open the selected worker's terminal
-in Observe or reconnect the same retained invocation. Left/Esc returns one level,
+Use Up/Down to select a Work Item. PageUp/PageDown moves selection into the next
+or previous list page and preserves that page through refresh. One blank row
+separates the list from source health above the shortcuts. Enter or Right opens
+its overview across the full body, including a next-action card and a visible
+worker table. Up/Down
+selects workers in that table; Enter opens the selected worker's page. Initial
+selection favors active workers or those needing attention, including workers
+with an available terminal. Narrow rows keep elapsed time and Observe or
+Unavailable beside the readable state. Work and worker selections share the `>`
+marker and emphasis; stale or failed sources show `!` with a distinct warning style.
+PageUp/PageDown scrolls details. Overflow cues and `? help` remain visible at
+60 columns by 15 rows, including when actions and Read issues are available.
+Press `t` to open the selected worker's terminal in Observe or reconnect the same retained invocation. Left/Esc returns one level,
 retaining the Work Item and exact worker selection. Tab/Shift+Tab switches views
-on the project list.
+on the project list. An open overview or worker page retains its source and Work
+Item when refresh moves the item to another view. Back selects a visible row in
+the original view; action feedback remains attributed to its original identity.
 
 Press `a` in the overview for supported local actions or SSH commands to copy.
-Attempt run and Candidate land require `y` on the confirmation screen; `n` or
+Run Attempt and Land Candidate require `y` on the confirmation screen; `n` or
 Esc cancels. Fluent freshly validates the checkout, Work Item, and candidate
 before launch. The foreground command owns the terminal until it exits or is
 interrupted with Ctrl-C. The dashboard restores its modes and mouse preference,
-reports the process result, and requests a new source snapshot. Candidate show
+reports the process result, and requests a new source snapshot. Show Candidate
 runs read-only. SSH commands remain copy-only; no remote command runs here.
 
 Changing selection retains the previous terminal attachment and its Control

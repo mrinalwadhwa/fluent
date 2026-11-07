@@ -473,38 +473,52 @@ context; the detail pane shows the full checkout path. While dashboard navigatio
 owns input, press Tab/Shift+Tab to cycle forward/backward through Current, Needs you,
 Running, Ready, Waiting, and History. Current opens first and excludes only
 History. Ready includes Ready and Ready to land; Waiting includes Queued and
-Planned. Rows keep their exact categories. Header
+Planned. History rows show Complete, Merged, or Abandoned as their outcome. Header
 counts reflect published Work Item lifecycle and queue state. The list shows one
 row per Work Item; workers remain in details.
 
 Enter or Right opens the selected Work Item overview. The overview shows its
 condition, next-action card, and visible worker table before technical identifiers.
-Up/Down selects a worker; Enter opens that worker's page with provider, elapsed,
-and terminal information. Esc or Left goes back one level and retains selection.
-Tab/Shift+Tab changes counted views on the list. PageUp/PageDown scrolls details.
+The overview initially reveals an active worker or one that needs attention,
+including workers with an available terminal. Up/Down selects a worker; Enter
+opens its page with provider, elapsed, and terminal information. Worker rows
+retain compact elapsed time and terminal availability even at 60 columns. States
+use labels such as Running, Needs you, and Provider wait; technical identifiers
+retain the recorded values. Esc or Left goes back one level and retains selection.
+Tab/Shift+Tab changes counted views on the list. PageUp/PageDown moves both the
+list selection and its page; Enter opens the visible selection. Routine refresh
+retains that page. In details, PageUp/PageDown scrolls content; a pinned overflow
+cue shows whether more content is above or below and keeps `? help` visible.
 Press `t` to observe the exact selected worker's terminal. The footer shows
 contextual controls; `?` lists secondary controls, including `r` to refresh and
 `c` to toggle text selection with the mouse.
 
 Press `a` in a Work Item overview to inspect supported Fluent actions. Ready
-Attempts offer Attempt run; merge-ready Work offers Candidate show and Candidate
-land. Each action shows its command and source checkout. Other guidance remains
-readable text. SSH sources offer Copy command (`c`), including host and checkout
+Attempts offer Run Attempt; merge-ready Work offers Show Candidate and Land
+Candidate. Each action shows its command and source checkout. Other guidance
+remains readable text. SSH sources offer Copy command (`c`), including host and checkout
 context, and never execute commands remotely. If clipboard access fails, the
-command stays visible for text selection. Local Attempt run and Candidate land
+command stays visible for text selection. Local Run Attempt and Land Candidate
 require a fresh state check and a confirmation screen naming the command,
 checkout, Work Item, and effect. Press `y` to confirm or `n`/Esc to cancel; Enter
 does not confirm. Fluent checks the source, Work, and candidate again before
-launch. Candidate show is read-only and does not require confirmation.
+launch. Show Candidate is read-only and does not require confirmation.
 
 The dashboard pauses while a local command runs with live output in the foreground.
 Ctrl-C interrupts that command. After exit, failure, or interruption, the dashboard
 returns, reports the process result, and refreshes the source. A successful command
 result does not itself mean that the Work Item completed or the candidate landed;
-those states come from the refreshed source.
+those states come from the refreshed source. If refresh moves the open Work Item
+into another view, its overview or worker page stays on the same source and Work
+Item, and the breadcrumb shows its new category. Back returns to a visible row in
+the original view. Action feedback stays attributed to the Work Item and source
+that produced it; it never follows a different selection.
 
 The top line shows counted views and Fluent. Source-read health appears above
-the shortcuts at the bottom, with healthy, failed, and overdue counts.
+the shortcuts at the bottom, with healthy, failed, and overdue counts. One empty
+row separates the Work list from source health. Work and worker selections use
+the same emphasis and `>` marker. Source warnings use `!` and a warning style
+that differs from ordinary source metadata and healthy Ready rows.
 Initial or requested reads animate after a short delay; routine polling stays
 quiet. Failed or overdue sources retain their last snapshots with a compact `!`
 marker and a global count, including hidden source groups. Read activity remains

@@ -62,7 +62,11 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_work)
 WHEN an operator navigates, filters, refreshes, or resizes the dashboard, THE
 SYSTEM SHALL preserve its selected Work Item or worker when it remains visible
 in the counted view and select the nearest remaining row when it does not.
+An open overview or worker page SHALL retain its exact source and Work Item even
+when refresh moves the item out of the view, with feedback bound to that identity.
+Returning to the list SHALL reconcile selection to a visible row.
 Test: src/dashboard/tests.rs (selection_survives_refresh_reorder_and_filter)
+Test: src/dashboard/tests.rs (project_detail_keeps_work_identity_after_filter_transition)
 
 ### B3
 
@@ -115,10 +119,12 @@ Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_e
 WHEN the project list renders, THE SYSTEM SHALL show counted views and Fluent on
 one top line and use the full body width. Only a visible terminal SHALL introduce
 a list/terminal divider at wide widths. Detail pages SHALL replace counted views
-with a breadcrumb. Health SHALL appear immediately above contextual shortcuts.
+with a breadcrumb. Health SHALL appear immediately above contextual shortcuts,
+with one empty row between the Work list body and health.
 Keep navigation and quit controls useful at 60 columns by 15 rows.
 Test: src/dashboard/tests.rs (project_layout_uses_header_rule_and_one_pane_divider)
 Test: src/dashboard/tests.rs (dashboard_gutters_preserve_content_and_controls)
+Test: src/dashboard/tests.rs (project_list_separates_work_from_source_status)
 
 ### B2
 
@@ -127,21 +133,29 @@ categories, recorded update times when available, a highlighted selection marker
 and stale identification beside each nonempty source group. Empty groups SHALL
 be omitted from drawing and scrolling; an empty view SHALL explain that no Work
 Items match. Ready SHALL include Ready and
-Ready to land; Waiting SHALL include Queued and Planned.
+Ready to land; Waiting SHALL include Queued and Planned. History SHALL remain the
+counted view name; its rows and overviews SHALL show Complete, Merged, or Abandoned
+as the published outcome. Work and worker selections SHALL share emphasis and a
+text marker. Stale or failed source health SHALL use a distinct warning style and
+text marker, separate from ordinary metadata and healthy Ready states.
 Test: src/dashboard/tests.rs (project_rows_preserve_exact_status_and_selection_cues)
 Test: src/dashboard/tests.rs (project_rows_show_recorded_update_times)
+Test: src/dashboard/tests.rs (project_history_shows_actual_outcomes)
+Test: src/dashboard/tests.rs (project_selection_and_source_warning_styles_are_distinct)
 
 ### B3
 
 WHEN a Work Item overview opens, THE SYSTEM SHALL show the full title, condition,
 a distinct next-action card, and a visible worker table before technical
-identifiers. The table SHALL identify workers and states at narrow widths and
-include elapsed time and terminal availability at wide widths. Selection SHALL
+identifiers. The table SHALL identify workers, readable states, elapsed time, and
+terminal availability at narrow and wide widths. Initial selection SHALL reveal
+an active or actionable worker among completed workers. Selection SHALL
 use a visible marker as well as color. Complete guidance and metadata SHALL remain
 readable through scrolling.
 Test: src/dashboard/tests.rs (project_preview_and_full_details_have_distinct_hierarchy)
 Test: src/dashboard/tests.rs (project_actions_keep_commands_readable_and_exact)
 Test: src/dashboard/tests.rs (project_details_wrap_full_context_to_the_last_line)
+Test: src/dashboard/tests.rs (project_overview_prioritizes_active_worker_at_narrow_width)
 
 ### B4
 
@@ -149,9 +163,13 @@ WHEN list navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHAL
 cycle counted views forward or backward and preserve a selection that remains
 visible. Start in Current, which excludes only History, and initially favor Needs
 you, then Running, then Ready or Ready to land, then other unfinished Work.
+PageUp/PageDown SHALL move both the viewport and selection into the destination
+page, so Enter opens a visible row. Routine refresh SHALL preserve selection and
+page position while the selected Work Item remains in the view.
 Test: src/dashboard/tests.rs (tab_views_preserve_selection_and_exact_categories)
 Test: src/dashboard/tests.rs (project_views_exclude_redundant_all_and_preserve_membership)
 Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
+Test: src/dashboard/tests.rs (project_list_paging_moves_visible_selection_and_survives_refresh)
 
 ### B5
 
@@ -188,11 +206,14 @@ the action menu, where it copies the command. WHEN an
 agent terminal is displayed, keep its Observe, Control, or navigation-with-Control
 state visible. Keep quit and navigation return controls visible at minimum size;
 focused terminal Control SHALL advertise Ctrl-] to return to navigation. Advertise
-`] literal` only when the attachment retains Control.
+`] literal` only when the attachment retains Control. An overflowing overview
+SHALL show an overflow cue and expose PageUp/PageDown scrolling and help at
+60 columns by 15 rows, including when actions and Read issues are available.
 Test: src/dashboard/tests.rs (project_footer_shows_contextual_primary_controls)
 Test: src/dashboard/tests.rs (terminal_mode_and_focus_remain_explicit)
 Test: src/dashboard/tests.rs (dashboard_focus_and_footer_follow_input_owner)
 Test: src/dashboard/tests.rs (focused_control_only_advertises_native_return_path)
+Test: src/dashboard/tests.rs (project_overview_advertises_scroll_and_help_at_minimum_size)
 
 ### B8
 
@@ -206,11 +227,15 @@ Test: src/dashboard/tests.rs (hidden_terminal_rejects_native_input)
 
 ### B1
 
-WHEN an overview offers actions, THE SYSTEM SHALL derive only typed Attempt run,
-Candidate show, and Candidate land commands from eligible Work state. Other
+WHEN an overview offers actions, THE SYSTEM SHALL derive only typed Run Attempt,
+Show Candidate, and Land Candidate commands from eligible Work state. Other
 guidance SHALL remain text. Commands SHALL include source context; SSH sources
-SHALL offer copying without remote execution.
+SHALL offer copying without remote execution. Action and state labels and keyboard
+guidance SHALL use consistent readable wording across list, details, menus,
+footer, help, and operator documentation while retaining exact commands and
+machine identities in technical context.
 Test: src/dashboard/tests.rs (project_actions_are_typed_local_and_copy_only_remote)
+Test: src/dashboard/tests.rs (project_action_and_state_labels_match_across_views)
 
 ### B2
 

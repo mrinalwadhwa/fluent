@@ -2242,18 +2242,26 @@ does not hide the rest of the queue.
 Ready, Waiting, and History views filter Work Items. Current opens first and
 excludes only History. Initial selection favors Needs you, then Running, then
 Ready or Ready to land. Ready includes Ready to land; Waiting includes Queued
-and Planned. Source groups with no matching Work Items take no list space.
+and Planned. History rows use the actual published outcome rather than the
+view name. Display labels leave stored states and the SSH schema unchanged.
+Source groups with no matching Work Items take no list space.
 The list uses the full body width. At 100 columns or wider, an explicitly opened
 terminal shares the body with the list, separated by one divider and gutters.
 Rendering, scrolling, terminal dimensions, and mouse translation consume
-`layout::project_areas`.
+`layout::project_areas`. It reserves one row between the list and source health;
+detail pages use that row for pinned overflow, PageUp/PageDown, and help cues.
+List paging uses grouped Work row positions to move selection into the destination
+viewport. Refresh preserves that viewport while the selected row remains visible.
 
 `model::ProjectPage` separates the list, Work Item overview, and worker page.
 Enter or Right opens the next level; Left/Esc returns one level. The overview
 shows condition, a next-action card, and a visible worker table before secondary
 identifiers. Up/Down selects a worker there; PageUp/PageDown scrolls details.
-Worker pages show role, state, terminal availability, provider, and elapsed
-information before technical identifiers.
+Worker pages show role, readable state, terminal availability, provider, and
+elapsed information before technical identifiers. Narrow worker rows retain
+elapsed and terminal cues by reducing identity width. Initial selection favors
+workers needing attention or running, including observable terminal sessions,
+over completed workers. Later refreshes preserve deliberate worker selection.
 Refresh keeps a previously visible selected worker in view if its row moves;
 it preserves deliberate scrolling into guidance or identifiers. Explicit worker
 navigation and overview return reveal the selected worker. The detail projection
@@ -2261,11 +2269,14 @@ wraps at words with hanging continuation and supplies both drawing and scroll bo
 `model::InputOwner` distinguishes navigation from native terminal input. The
 footer shows whole contextual controls that fit. Counted views change only on
 the list. `model::App` reconciles selected workers by their complete key, separate
-from the Work Item and retained terminal. `t` opens that exact worker in Observe;
-browsing never retargets the retained attachment.
+from the Work Item and retained terminal. Open pages resolve their exact source
+and Work Item independently of list membership. If the item leaves the selected
+view, the breadcrumb shows its new category; Back reconciles the list selection.
+Only disappearance of the exact Work key clears the open page's identity. `t`
+opens that exact worker in Observe; browsing never retargets the retained attachment.
 
-`dashboard/actions.rs` derives typed Attempt run, Candidate show, and Candidate
-land commands from published state and typed identities. It never parses
+`dashboard/actions.rs` derives typed Run Attempt, Show Candidate, and Land
+Candidate commands from published state and typed identities. It never parses
 `guidance.rs` text into commands. The action menu freezes the offered identities.
 State-changing local actions require an explicit `y` confirmation after a fresh
 read. Immediately before launch, the coordinator checks the current selection,
@@ -2284,7 +2295,9 @@ result, pre-command local reads are discarded
 and a new read supplies Work state; the process result never predicts that state.
 Command feedback stays in a fixed row above scrollable details, with complete
 messages retained under Last action. Worker scrolling therefore cannot hide the
-reported outcome or a fresh-validation rejection.
+reported outcome or a fresh-validation rejection. Feedback binds the attempted
+action's source and Work Item and retains both in the full report. Another Work
+selection cannot display that result as its own.
 SSH sources only expose command text and host/checkout context to copy.
 
 Inspecting details can hide a retained terminal attachment without retargeting
@@ -2319,7 +2332,10 @@ SSH completions update only the completed source; pending peers gain no receipt
 time. SSH receipt times describe local observation, never remote lifecycle events.
 These fields remain outside stored Work and the SSH wire schema.
 
-`dashboard/render.rs` keeps healthy source headers stable during routine reads.
+`dashboard/render.rs` uses one selection style and a `>` marker for Work and
+workers. It uses a separate warning style and `!` for affected source headers
+and global source health, distinct from Ready rows and ordinary source metadata.
+It keeps healthy source headers stable during routine reads.
 Headers show project and host identity; equal project names on the same host add
 source hashes to distinguish them. Initial loading and manual checking appear
 after 500 milliseconds above the shortcuts, with fixed-width frames every 250

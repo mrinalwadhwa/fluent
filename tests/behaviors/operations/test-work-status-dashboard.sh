@@ -321,7 +321,7 @@ test_dashboard_lists_work_items() {
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
   assert_contains "$OUTPUT" "Attempt:attempt-visible[planned]" || RESULT=1
-  assert_contains "$OUTPUT" "Attemptrun:fluentattemptrunwork-visible" || RESULT=1
+  assert_contains "$OUTPUT" "RunAttempt:fluentattemptrunwork-visible" || RESULT=1
   return $RESULT
 }
 
