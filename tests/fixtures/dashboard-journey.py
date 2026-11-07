@@ -81,6 +81,75 @@ def snapshot(root):
     return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+def capture(binary, project, keys, initial_timeout=20, exit_timeout=3):
+    """Capture frames with bounded startup/quit and owned PTY cleanup."""
+    child, master = pty.fork()
+    if child == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
+        os.chdir(project)
+        os.environ["TERM"] = "xterm-256color"
+        os.execv(binary, [binary, "dashboard", str(project)])
+    output = bytearray()
+    screen = Screen(120, 30)
+    reaped = False
+
+    def read_frame(timeout=0.05):
+        if select.select([master], [], [], timeout)[0]:
+            try:
+                data = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                return
+            output.extend(data)
+            screen.feed(data)
+
+    def poll_exit():
+        nonlocal reaped
+        pid, status = os.waitpid(child, os.WNOHANG)
+        if pid:
+            reaped = True
+            return os.waitstatus_to_exitcode(status)
+        return None
+
+    try:
+        deadline = time.monotonic() + initial_timeout
+        while not (all(word in screen.text() for word in ("Work Items", "q quit", "Source reads: 1 healthy"))
+                   and "Reading sources" not in screen.text()):
+            status = poll_exit()
+            if status is not None:
+                raise AssertionError(f"dashboard exited before its initial read: {status}\n{screen.text()}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"dashboard initial read timed out\n{screen.text()}")
+            read_frame()
+        if keys:
+            os.write(master, keys)
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                read_frame()
+        # Leave confirmation/action overlays before using the navigation quit key.
+        os.write(master, b"\x1b\x1bq")
+        deadline = time.monotonic() + exit_timeout
+        while True:
+            status = poll_exit()
+            if status is not None:
+                assert status == 0, f"dashboard exited with {status}\n{screen.text()}"
+                return bytes(output)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"dashboard did not quit\n{screen.text()}")
+            read_frame()
+    finally:
+        if not reaped:
+            # pty.fork gives this owned child its own session and process group.
+            # Kill the group and reap the child even when rendering or quit stalls.
+            try:
+                os.killpg(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(child, 0)
+        os.close(master)
+
+
 def journey(binary, project, mode):
     before = snapshot(project / ".fluent/work")
     width, height = (100, 24) if mode == "help" else (80, 15)
@@ -191,4 +260,8 @@ def journey(binary, project, mode):
 
 
 if __name__ == "__main__":
-    journey(str(Path(sys.argv[1]).resolve()), Path(sys.argv[2]).resolve(), sys.argv[3])
+    binary, project, mode = str(Path(sys.argv[1]).resolve()), Path(sys.argv[2]).resolve(), sys.argv[3]
+    if mode == "capture":
+        sys.stdout.buffer.write(capture(binary, project, sys.argv[4].encode()))
+    else:
+        journey(binary, project, mode)

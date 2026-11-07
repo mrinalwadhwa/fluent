@@ -110,52 +110,14 @@ wait_for_dashboard_capture() {
 }
 
 capture_dashboard_default() {
-  local PROJECT_PATH="$1"
-  local KEYS="${2:-}"
-  local OUTPUT_FILE="$(mktemp -t fluent-work-dashboard-output-XXXXXX)"
-  local CAPTURE_STATUS="$(mktemp -t fluent-work-dashboard-status-XXXXXX)"
+  local project_path="$1"
+  local keys="${2:-}"
+  HOME="$TEST_DIR" python3 "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" \
+    "$FLUENT_BIN" "$project_path" capture "$(printf '%b' "$keys")"
+}
 
-  (
-    # Reconstruct the rendered screen, including cell updates, rather than
-    # assuming that the asynchronous first snapshot finishes within a second.
-    if python3 - "$PROJECT_DIR/tests/fixtures/dashboard-journey.py" "$OUTPUT_FILE" <<'PY'
-import pathlib
-import runpy
-import sys
-import time
-
-Screen = runpy.run_path(sys.argv[1])["Screen"]
-capture = pathlib.Path(sys.argv[2])
-deadline = time.monotonic() + 20
-while time.monotonic() < deadline:
-    screen = Screen(120, 30)
-    screen.feed(capture.read_bytes())
-    text = screen.text()
-    if (all(word in text for word in ("Fluent", "Work Items", "q quit", "Source reads: 1 healthy"))
-            and "Reading sources" not in text):
-        sys.exit(0)
-    time.sleep(0.05)
-sys.exit("dashboard did not complete its initial local read within 20 seconds")
-PY
-    then
-      printf '0' > "$CAPTURE_STATUS"
-    else
-      printf '1' > "$CAPTURE_STATUS"
-    fi
-    if [ -n "$KEYS" ] && [ "$(cat "$CAPTURE_STATUS")" = 0 ]; then
-      printf '%b' "$KEYS"
-      sleep 1
-    fi
-    printf 'q'
-  ) | HOME="$TEST_DIR" FLUENT_DASH_BIN="$FLUENT_BIN" \
-      FLUENT_DASH_PROJECT="$PROJECT_PATH" \
-      TERM=xterm \
-      script -qF "$OUTPUT_FILE" sh -c 'stty rows 30 cols 120; "$FLUENT_DASH_BIN" dashboard "$FLUENT_DASH_PROJECT"' >/dev/null 2>&1 || true
-
-  cat "$OUTPUT_FILE"
-  local capture_result="$(cat "$CAPTURE_STATUS")"
-  rm -f "$OUTPUT_FILE" "$CAPTURE_STATUS"
-  return "${capture_result:-1}"
+test_dashboard_capture_bounds_child_lifetime() {
+  python3 "$PROJECT_DIR/tests/fixtures/dashboard-capture-tests.py"
 }
 
 capture_dashboard_after_poll_mutation() {
@@ -502,6 +464,7 @@ if [ "${1:-}" = "--verification-layout" ]; then
 fi
 
 if [ "${1:-}" = "--verification-capture" ]; then
+  run_test "dashboard capture bounds child lifetime" test_dashboard_capture_bounds_child_lifetime
   run_test "dashboard waits for initial read" test_dashboard_waits_for_initial_read
   run_test "dashboard surfaces actionable Work" test_dashboard_surfaces_actionable_work
   summarize_and_exit
@@ -519,6 +482,7 @@ fi
 printf 'test-work-status-dashboard\n\n'
 
 run_test "assertions match large literal output" test_assert_contains_large_literal_output
+run_test "dashboard capture bounds child lifetime" test_dashboard_capture_bounds_child_lifetime
 
 run_test "status prints Work Items" test_status_prints_work_items
 run_test "status summarizes Work model vocabulary" test_status_summarizes_work_model_vocabulary
