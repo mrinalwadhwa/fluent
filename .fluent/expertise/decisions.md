@@ -163,6 +163,24 @@ to project snapshots.
 
 ---
 
+## Bind local dashboard confirmation to fresh identity
+
+A local dashboard confirmation binds the canonical source checkout's device and
+inode and the complete persisted Work Item. Recheck both before launching;
+full-record equality intentionally invalidates approval after any aggregate
+change, including a replaced Attempt or Merge Candidate. Consume confirmation
+once. Invoke the current Fluent CLI with typed argument vectors in that checkout,
+without a shell, through the foreground terminal handoff. The CLI remains the
+final authority when state races with launch.
+
+Discard reads started before the command and request a fresh snapshot afterward.
+Report the process result separately from Work state; success does not predict
+landing or completion. SSH actions remain inspectable and copyable only. See the
+[dashboard architecture](../../documentation/architecture.md)
+for the coordinator and terminal boundaries.
+
+---
+
 ## Let dashboard exit without waiting for local reads
 
 An unfinished local snapshot reader may continue until its read completes or
@@ -518,7 +536,7 @@ Writer as immutable history and never grants a second Writer through replay.
 
 ## Dashboard observation owns no durable transition cursor
 
-Status and dashboard must leave the Work tree unchanged. Dashboard refresh
+Status and dashboard observation must leave the Work tree unchanged. Dashboard refresh
 therefore derives its latest-transition view in memory from the same verified
 published Work snapshot as its rows. The Work transition ledger owns the durable
 history; dashboard observation owns no cursor, acknowledgement, or persisted
