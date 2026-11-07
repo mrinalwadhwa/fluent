@@ -1,6 +1,6 @@
 use super::layout;
-use super::model::InputOwner;
 pub(super) use super::model::{App, Pane};
+use super::model::{InputOwner, ProjectPage};
 use super::project::{self, Filter, RowKey};
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -30,7 +30,7 @@ impl App {
             selected: None,
             selected_key: None,
             selected_worker: None,
-            workers_focused: false,
+            page: ProjectPage::List,
             filter: Filter::Current,
             selected_index: 0,
             pane: Pane::List,
@@ -96,7 +96,7 @@ impl App {
             self.selected_key =
                 project::find_work(&self.snapshot.sources, &key).map(|(_, work)| work.key.clone());
             self.selected_worker = Some(key);
-            self.workers_focused = true;
+            self.page = ProjectPage::Worker;
         } else {
             self.selected_key = Some(key);
             self.selected_worker = None;
@@ -218,7 +218,6 @@ impl App {
         }
     }
     fn focus_workers(&mut self) {
-        self.workers_focused = true;
         if self.selected_worker.is_none() {
             self.selected_worker = self
                 .selected_key
@@ -227,19 +226,25 @@ impl App {
                 .and_then(|(_, work)| work.workers.first())
                 .map(|worker| worker.key.clone());
         }
-        self.scroll_to_workers();
     }
 
     fn scroll_to_workers(&mut self) {
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
         let lines = layout::project_detail_lines(&self.detail_values(), areas.focused_detail.width);
-        self.detail_scroll = lines
-            .iter()
-            .position(|line| line.starts_with("Workers ("))
-            .unwrap_or(0)
-            .min(self.scroll_bounds().detail_max_scroll as usize)
-            as u16;
+        let Some(line) = lines.iter().position(|line| line.starts_with("> ")) else {
+            return;
+        };
+        let line = line as u16;
+        if line < self.detail_scroll {
+            self.detail_scroll = line;
+        }
+        if line >= self.detail_scroll + areas.focused_detail.height {
+            self.detail_scroll = line + 1 - areas.focused_detail.height;
+        }
+        self.detail_scroll = self
+            .detail_scroll
+            .min(self.scroll_bounds().detail_max_scroll);
     }
 
     fn move_worker(&mut self, delta: isize) {
@@ -354,14 +359,22 @@ impl App {
             return Effect::None;
         }
         match key {
-            KeyCode::Right if self.project_mode() => {
+            KeyCode::Right | KeyCode::Enter if self.project_mode() => {
+                if self.selected_key.is_none() {
+                    return Effect::None;
+                }
+                if self.pane == Pane::List && self.selected_key.is_some() {
+                    self.page = ProjectPage::Overview;
+                    self.focus_workers();
+                } else if self.page == ProjectPage::Overview && self.selected_worker.is_some() {
+                    self.page = ProjectPage::Worker;
+                }
                 self.pane = Pane::Detail;
                 self.show_details = true;
-                self.workers_focused = false;
                 self.detail_scroll = 0;
                 self.dirty = true;
             }
-            KeyCode::Tab | KeyCode::BackTab if self.project_mode() => {
+            KeyCode::Tab | KeyCode::BackTab if self.project_mode() && self.pane == Pane::List => {
                 self.filter = if key == KeyCode::BackTab || modifiers.contains(KeyModifiers::SHIFT)
                 {
                     self.filter.previous()
@@ -374,21 +387,12 @@ impl App {
                 self.clamp_scrolls();
                 self.dirty = true;
             }
-            KeyCode::Char('f') | KeyCode::Char('F') if self.project_mode() => {
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if self.project_mode() && self.pane == Pane::List =>
+            {
                 self.filter = self.filter.next();
                 self.reconcile_project_selection();
                 self.clamp_scrolls();
-                self.dirty = true;
-            }
-            KeyCode::Enter if self.project_mode() => {
-                if self.input_owner() == InputOwner::List || !self.workers_focused {
-                    self.pane = Pane::Detail;
-                    self.show_details = true;
-                    self.focus_workers();
-                } else {
-                    self.workers_focused = false;
-                    self.detail_scroll = 0;
-                }
                 self.dirty = true;
             }
             KeyCode::Char('a') if self.project_mode() => {}
@@ -408,8 +412,18 @@ impl App {
                 self.pane = Pane::Detail;
                 self.dirty = true;
             }
-            KeyCode::Left if self.project_mode() => {
-                self.pane = Pane::List;
+            KeyCode::Left | KeyCode::Esc if self.project_mode() => {
+                if !self.show_details && self.page != ProjectPage::List {
+                    self.show_details = true;
+                } else if self.page == ProjectPage::Worker {
+                    self.page = ProjectPage::Overview;
+                    self.detail_scroll = 0;
+                    self.scroll_to_workers();
+                } else {
+                    self.page = ProjectPage::List;
+                    self.pane = Pane::List;
+                    self.show_details = false;
+                }
                 self.dirty = true;
             }
             KeyCode::Esc if self.pane == Pane::Detail => {
@@ -420,7 +434,7 @@ impl App {
                 if self.project_mode()
                     && self.pane == Pane::Detail
                     && self.show_details
-                    && self.workers_focused =>
+                    && self.page == ProjectPage::Overview =>
             {
                 self.move_worker(-1)
             }
@@ -428,7 +442,7 @@ impl App {
                 if self.project_mode()
                     && self.pane == Pane::Detail
                     && self.show_details
-                    && self.workers_focused =>
+                    && self.page == ProjectPage::Overview =>
             {
                 self.move_worker(1)
             }

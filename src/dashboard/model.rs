@@ -11,6 +11,13 @@ pub enum Pane {
     List,
     Detail,
 }
+/// Navigate Work and workers independently of a retained terminal attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectPage {
+    List,
+    Overview,
+    Worker,
+}
 /// Identify the pane that receives keys, independently of a retained Control lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputOwner {
@@ -56,7 +63,7 @@ pub struct App {
     pub(super) selected: Option<String>,
     pub selected_key: Option<RowKey>,
     pub selected_worker: Option<RowKey>,
-    pub workers_focused: bool,
+    pub page: ProjectPage,
     pub filter: Filter,
     pub(super) selected_index: usize,
     pub pane: Pane,
@@ -212,48 +219,34 @@ impl App {
 
     pub fn project_navigation_controls(&self) -> Vec<&'static str> {
         let mut controls = if self.input_owner() == InputOwner::List {
-            let mut controls = vec![
+            vec![
                 "q quit",
-                "↑/↓ select",
+                "Enter Open Work Item",
                 "Tab/⇧Tab view",
-                "→ details",
                 "? help",
-            ];
-            if self.selected_key.is_some() {
-                controls.push("Enter workers");
-            }
-            controls
+                "↑/↓ select",
+            ]
         } else if !self.show_details && self.terminal.is_some() && self.terminal_fits() {
             vec![
                 "q quit",
-                "←/Esc list",
+                "Esc Back",
                 "i Control",
                 "f full-screen",
                 "? help",
                 "t reconnect",
                 "o Observe",
             ]
+        } else if self.page == ProjectPage::Worker {
+            vec!["q quit", "Esc Back", "t terminal", "? help", "↑/↓ scroll"]
         } else {
-            let mut controls = vec![
+            vec![
                 "q quit",
-                "←/Esc list",
+                "Esc Back",
+                "Enter Open worker",
                 "? help",
-                if self.workers_focused {
-                    "↑/↓ workers"
-                } else {
-                    "↑/↓ scroll"
-                },
-                if self.workers_focused {
-                    "Enter summary"
-                } else {
-                    "Enter workers"
-                },
-            ];
-            if self.selected_worker.is_some() {
-                let position = controls.len().saturating_sub(1);
-                controls.insert(position, "t terminal");
-            }
-            controls
+                "↑/↓ workers",
+                "t terminal",
+            ]
         };
         if !self.snapshot.errors.is_empty()
             || self.source_warning_count() > 0
@@ -282,39 +275,19 @@ impl App {
         let Some(key) = self.selected_key.as_ref() else {
             return vec!["No Work Item selected".into()];
         };
-        let mut values = layout::project_detail_values(&self.snapshot.sources, key);
-        if let Some((_, work)) = project::find_work(&self.snapshot.sources, key) {
-            if let Some(section) = values
-                .iter()
-                .position(|value| value.starts_with("Workers ("))
-            {
-                values[section].push_str(if self.workers_focused {
-                    " · ↑/↓ select · Enter summary"
-                } else {
-                    " · Enter workers"
-                });
-                let mut worker_values = Vec::new();
-                if let Some(worker_key) = &self.selected_worker {
-                    if let Some(index) = work
-                        .workers
-                        .iter()
-                        .position(|worker| &worker.key == worker_key)
-                    {
-                        worker_values.push(format!(
-                            "Selected worker {}/{}",
-                            index + 1,
-                            work.workers.len()
-                        ));
-                        worker_values
-                            .extend(layout::project_worker_values(&work.workers[index], work));
-                    }
-                } else if self.workers_focused {
-                    worker_values.push("No worker selected".into());
-                }
-                values.splice(section + 1..section + 1, worker_values);
-            }
+        if self.page == ProjectPage::Worker {
+            return self
+                .selected_worker
+                .as_ref()
+                .map(|worker| layout::project_detail_values(&self.snapshot.sources, worker))
+                .unwrap_or_else(|| vec!["Worker unavailable; return and select a worker".into()]);
         }
-        values
+        layout::project_overview_values(
+            &self.snapshot.sources,
+            key,
+            self.selected_worker.as_ref(),
+            self.size.0,
+        )
     }
 
     pub fn selected_id(&self) -> Option<&str> {

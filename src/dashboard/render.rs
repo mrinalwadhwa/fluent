@@ -1,6 +1,7 @@
+use super::layout::compact;
 use super::{
     layout,
-    model::{App, Pane},
+    model::{App, Pane, ProjectPage},
     snapshot::DashboardRow,
 };
 use ratatui::{
@@ -85,7 +86,17 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             selected_end = tabs.iter().map(Span::width).sum::<usize>();
         }
     }
-    let tab_line = Line::from(tabs);
+    let tab_line = if app.pane == Pane::Detail && app.show_details {
+        let label = if app.page == ProjectPage::Worker {
+            "Projects › Work Item › Worker"
+        } else {
+            "Projects › Work Item overview"
+        };
+        selected_end = 0;
+        Line::from(label)
+    } else {
+        Line::from(tabs)
+    };
     frame.render_widget(Block::default().borders(Borders::BOTTOM), areas.header);
     let status_width = areas.header.width.saturating_sub(7);
     frame.render_widget(
@@ -115,22 +126,6 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else if app.errors {
         errors(frame, areas.body, app);
     } else if app.pane == Pane::Detail && app.show_details {
-        let title = if app
-            .selected_key
-            .as_ref()
-            .is_some_and(|key| key.task_id.is_some())
-        {
-            "Worker details"
-        } else {
-            "Work Item details"
-        };
-        frame.render_widget(
-            Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
-            Rect {
-                height: 1,
-                ..areas.body
-            },
-        );
         project_detail(frame, areas.focused_detail, app);
     } else if area.width >= 100 && app.terminal_visible() {
         frame.render_widget(
@@ -282,53 +277,32 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    let focused = app.pane == Pane::Detail && app.show_details;
-    let values = if focused {
-        app.detail_values()
-    } else {
-        app.selected_key
-            .as_ref()
-            .map(|key| layout::project_preview_values(&app.snapshot.sources, key))
-            .unwrap_or_else(|| vec!["No Work Item selected".into()])
-    };
-    frame.render_widget(
-        Paragraph::new(
-            (if focused {
-                layout::project_detail_lines(&values, area.width)
+    let values = app.detail_values();
+    let lines = layout::project_detail_lines(&values, area.width)
+        .into_iter()
+        .map(|value| {
+            let style = if value.starts_with("> ") {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else if value == "Next action"
+                || value == "Next action:"
+                || value.starts_with("Workers (")
+                || value == "Technical identifiers"
+            {
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                values
-                    .iter()
-                    .map(|value| {
-                        if value.width() <= area.width as usize {
-                            return value.clone();
-                        }
-                        let mut preview = String::new();
-                        for word in value.split_whitespace() {
-                            let separator = if preview.is_empty() { "" } else { " " };
-                            if preview.width() + separator.len() + word.width() + 1
-                                > area.width as usize
-                            {
-                                break;
-                            }
-                            preview.push_str(separator);
-                            preview.push_str(word);
-                        }
-                        if preview.is_empty() {
-                            compact(value, area.width as usize)
-                        } else {
-                            format!("{preview}…")
-                        }
-                    })
-                    .collect()
-            })
-            .into_iter()
-            .map(Line::from)
-            .collect::<Vec<_>>(),
-        )
-        .scroll((if focused { app.detail_scroll } else { 0 }, 0)),
-        area,
-    );
+                Style::default()
+            };
+            Line::styled(value, style)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)), area);
 }
+
 fn header(frame: &mut Frame, area: Rect, app: &App) {
     let visible = app.snapshot.visible_rows(app.all_work()).len();
     let stale = app
@@ -480,7 +454,7 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let project_help = format!(
-        "{}; f/F next view (without terminal); r refresh; c text selection (toggle mouse capture); PgUp/PgDn scroll; Enter summary/workers",
+        "{}; f/F next view (without terminal); r refresh; c text selection (toggle mouse capture); PgUp/PgDn scroll; Enter opens Work Item or worker; Esc/Left goes Back",
         app.project_navigation_controls().join("; ")
     );
     let text = if app.project_mode() {
@@ -519,21 +493,4 @@ fn bar(frame: &mut Frame, area: Rect, app: &App) {
         "j/k select  PgUp/PgDn list  a all  e errors  r refresh  ? help  c copy  q quit"
     };
     frame.render_widget(Paragraph::new(text), area);
-}
-fn compact(value: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(value) <= width {
-        return value.into();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for character in value.chars() {
-        let size = UnicodeWidthStr::width(character.encode_utf8(&mut [0; 4]));
-        if used + size + 1 > width {
-            break;
-        }
-        out.push(character);
-        used += size;
-    }
-    out.push('…');
-    out
 }

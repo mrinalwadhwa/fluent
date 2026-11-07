@@ -60,11 +60,7 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
         list,
         divider,
         detail,
-        focused_detail: Rect {
-            y: body.y + 1,
-            height: body.height.saturating_sub(1),
-            ..body
-        },
+        focused_detail: body,
     }
 }
 
@@ -338,31 +334,6 @@ pub fn project_detail_lines(values: &[String], width: u16) -> Vec<String> {
     lines
 }
 
-pub fn project_preview_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
-    let values = project_detail_values(sources, key);
-    if values.len() < 2 {
-        return values;
-    }
-    let next = if values.iter().any(|value| value == "1. Review candidate") {
-        "Review candidate".into()
-    } else {
-        values
-            .iter()
-            .find_map(|value| value.strip_prefix("Next action: "))
-            .unwrap_or("Review details")
-            .lines()
-            .next()
-            .unwrap_or("Review details")
-            .to_owned()
-    };
-    vec![
-        values[0].clone(),
-        values[1].clone(),
-        format!("Next: {next}"),
-        "→ full details · Enter workers".into(),
-    ]
-}
-
 pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
     let Some((source, work)) = project::find_work(sources, key) else {
         return vec!["Selection unavailable".into()];
@@ -383,12 +354,10 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
         });
     let worker = project::find_worker(sources, key);
     let mut values = if let Some(worker) = worker {
-        vec![
-            format!("Worker: {}", worker.role),
-            format!("State: {}", worker.state),
-            format!("Next action: {next_action}"),
-            work.status.title.clone(),
-        ]
+        let mut values = project_worker_values(worker, work);
+        values.insert(8, String::new());
+        values.insert(9, "Technical identifiers".into());
+        values
     } else {
         vec![
             work.status.title.clone(),
@@ -446,9 +415,7 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
             key.attempt_id.as_deref().unwrap_or(&work.status.attempt)
         ),
     ]);
-    if let Some(worker) = worker {
-        values.extend(project_worker_values(worker, work).into_iter().skip(2));
-    } else {
+    if worker.is_none() {
         values.push(format!("Merge Candidate: {}", work.status.merge_candidate));
     }
     values.push(format!(
@@ -471,6 +438,96 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
             .iter()
             .map(|diagnostic| format!("Source diagnostic: {diagnostic}")),
     );
+    values
+}
+
+/// Keep the action and visible worker rows before secondary metadata.
+pub fn project_overview_values(
+    sources: &[SourceSnapshot],
+    key: &RowKey,
+    selected: Option<&RowKey>,
+    width: u16,
+) -> Vec<String> {
+    let mut values = project_detail_values(sources, key);
+    let Some((_, work)) = project::find_work(sources, key) else {
+        return values;
+    };
+    if work.status.recovery_blocker.is_none() {
+        values[1] = format!(
+            "State: {}",
+            work.phase.as_deref().unwrap_or(work.category.label())
+        );
+    }
+    if let Some(next) = values
+        .get(2)
+        .and_then(|value| value.strip_prefix("Next action: "))
+        .map(str::to_owned)
+    {
+        values.splice(
+            2..3,
+            [
+                String::new(),
+                "Next action".into(),
+                format!("  {next}"),
+                String::new(),
+            ],
+        );
+    }
+    if let Some(section) = values
+        .iter()
+        .position(|value| value.starts_with("Workers ("))
+    {
+        let mut rows = vec![if width >= 100 {
+            "  Worker                             State          Elapsed  Terminal".into()
+        } else {
+            "  Worker                             State".into()
+        }];
+        for worker in &work.workers {
+            let task = worker.key.task_id.as_deref().unwrap_or("unavailable");
+            let identity = if worker.role == task {
+                task.into()
+            } else {
+                format!("{} ({task})", worker.role)
+            };
+            let identity = compact(&identity, 34);
+            let mut row = format!(
+                "{} {}{}  {}",
+                if selected == Some(&worker.key) {
+                    ">"
+                } else {
+                    " "
+                },
+                identity,
+                " ".repeat(34usize.saturating_sub(identity.width())),
+                compact(&worker.state, 14)
+            );
+            if width >= 100 {
+                row.push_str(&format!(
+                    "{}  {:>7}  {}",
+                    " ".repeat(14usize.saturating_sub(worker.state.width())),
+                    worker
+                        .elapsed_ms
+                        .map(|ms| format!("{}s", ms / 1000))
+                        .unwrap_or_else(|| "—".into()),
+                    if worker
+                        .terminal
+                        .as_ref()
+                        .is_some_and(|terminal| terminal.can_observe)
+                    {
+                        "Observe"
+                    } else {
+                        "Unavailable"
+                    }
+                ));
+            }
+            rows.push(row);
+        }
+        if work.workers.is_empty() {
+            rows.push("  No workers recorded".into());
+        }
+        rows.extend([String::new(), "Technical identifiers".into()]);
+        values.splice(section + 1..section + 1, rows);
+    }
     values
 }
 
@@ -531,4 +588,22 @@ pub fn project_worker_values(worker: &project::Worker, work: &project::ProjectWo
                 .unwrap_or("unavailable")
         ),
     ]
+}
+
+pub fn compact(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.into();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for character in value.chars() {
+        let size = UnicodeWidthStr::width(character.encode_utf8(&mut [0; 4]));
+        if used + size + 1 > width {
+            break;
+        }
+        out.push(character);
+        used += size;
+    }
+    out.push('…');
+    out
 }

@@ -41,13 +41,13 @@ current SSH snapshot. The `f`/`F` filter aliases remain available when navigatio
 owns focus; with a terminal attached, lowercase `f` opens full-screen and `F`
 changes the view.
 
-Use Up/Down to select a Work Item. Right opens its summary across the full body;
-Enter opens Workers in the same details view. In details, Enter switches between
-summary and worker focus. Up/Down selects workers while Workers has focus, and
-PageUp/PageDown scrolls the details. Press `t` to open the selected worker's
-terminal in Observe or reconnect the same retained invocation. Left/Esc returns
-to the same Work Item and list position at every supported width. Tab/Shift+Tab
-keeps switching views in either pane while navigation owns focus.
+Use Up/Down to select a Work Item. Enter or Right opens its overview across the
+full body, including a next-action card and a visible worker table. Up/Down
+selects workers in that table; Enter opens the selected worker's page.
+PageUp/PageDown scrolls details. Press `t` to open the selected worker's terminal
+in Observe or reconnect the same retained invocation. Left/Esc returns one level,
+retaining the Work Item and exact worker selection. Tab/Shift+Tab switches views
+on the project list.
 
 Changing selection retains the previous terminal attachment and its Control
 lease. Inspecting details can hide that terminal and releases native input

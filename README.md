@@ -477,16 +477,14 @@ Planned. Rows keep their exact categories. Header
 counts reflect published Work Item lifecycle and queue state. The list shows one
 row per Work Item; workers remain in details.
 
-The wide list preview shows a short condition and next step. Full details put the
-next action before worker context and identifiers; merge-ready guidance separates
-review and landing commands into readable steps.
-
-Use Up/Down to select a Work Item. Right opens its full summary; Enter opens
-Workers in details. In details, Enter switches between summary and worker focus,
-Up/Down selects workers while Workers has focus, and PageUp/PageDown scrolls.
-Press `t` to open the selected worker's terminal in Observe mode. Left/Esc returns
-to the same list position. The footer shows primary controls; `?` lists secondary
-controls, including `r` to refresh and `c` to toggle text selection with the mouse.
+Enter or Right opens the selected Work Item overview. The overview shows its
+condition, next-action card, and visible worker table before technical identifiers.
+Up/Down selects a worker; Enter opens that worker's page with provider, elapsed,
+and terminal information. Esc or Left goes back one level and retains selection.
+Tab/Shift+Tab changes counted views on the list. PageUp/PageDown scrolls details.
+Press `t` to observe the exact selected worker's terminal. The footer shows
+contextual controls; `?` lists secondary controls, including `r` to refresh and
+`c` to toggle text selection with the mouse.
 
 The top line shows counted views and Fluent. Source-read health appears above
 the shortcuts at the bottom, with healthy, failed, and overdue counts.
