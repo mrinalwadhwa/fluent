@@ -31,25 +31,35 @@ To prepare the other macOS release target, pass `x86_64-apple-darwin` or
 Installed Fluent executables contain the static library. Operators need tmux,
 but do not need Zig or a separate Ghostty installation.
 
-The dashboard groups Work by project. Use Tab/Shift+Tab to cycle Current, Needs you,
-Running, Ready, Waiting, History, and All. Current opens first and excludes only
-History. Ready includes Ready to land; Waiting
-includes Queued and Planned. Each row keeps its exact status. The Updated UTC
-column uses the latest published transition (or recorded task start/completion)
-and shows `—` when no timestamp is available, including the current SSH snapshot.
-The `f`/`F` filter aliases and `a` History/All shortcut remain available when
-navigation owns focus; with a terminal open, lowercase `f` opens full-screen.
+The dashboard groups Work by project and shows one row per Work Item. Use
+Tab/Shift+Tab to cycle Current, Needs you, Running, Ready, Waiting, and History.
+Current opens first and excludes only History. Ready includes Ready to land;
+Waiting includes Queued and Planned. Each row keeps its exact status. The
+Updated UTC column uses the latest published transition (or recorded task
+start/completion) and shows `—` when no timestamp is available, including the
+current SSH snapshot. The `f`/`F` filter aliases remain available when navigation
+owns focus; with a terminal attached, lowercase `f` opens full-screen and `F`
+changes the view.
 
-Use Up/Down to select a Work Item and Enter to expand or collapse its workers.
-Right opens labeled Work Item or worker details across the full body. Press `t` explicitly to
-open the selected worker terminal in Observe or reconnect its existing view. Moving selection releases the previous
-attachment and waits for an explicit open command before attaching elsewhere.
-Left/Esc returns to the list at every supported width. Tab and
-Shift+Tab keep switching views in either pane while navigation owns focus. Observe clients use tmux's
-`read-only,ignore-size` flags and preserve the worker's dimensions even when
-no controller is attached. Only Control resizes the worker; releasing Control
-retains its last dimensions. Terminal output is interpreted inside Ghostty
-and projected as cells; it cannot set the dashboard title or clipboard.
+Use Up/Down to select a Work Item. Right opens its summary across the full body;
+Enter opens Workers in the same details view. In details, Enter switches between
+summary and worker focus. Up/Down selects workers while Workers has focus, and
+PageUp/PageDown scrolls the details. Press `t` to open the selected worker's
+terminal in Observe or reconnect the same retained invocation. Left/Esc returns
+to the same Work Item and list position at every supported width. Tab/Shift+Tab
+keeps switching views in either pane while navigation owns focus.
+
+Changing selection retains the previous terminal attachment and its Control
+lease. Inspecting details can hide that terminal and releases native input
+focus. An explicit `t` replaces the retained attachment only after the selected
+worker's exact terminal opens successfully; an unavailable terminal leaves the
+previous attachment retained and explains the failure.
+
+Observe clients use tmux's `read-only,ignore-size` flags and preserve the worker's
+dimensions even when no controller is attached. Only Control resizes the worker;
+releasing Control retains its last dimensions. Terminal output is interpreted
+inside Ghostty and projected as cells; it cannot set the dashboard title or
+clipboard.
 
 Press `i` to acquire Control. While the terminal has focus, Esc, Ctrl-C,
 keys, mouse events inside the viewport, and paste reach that invocation.

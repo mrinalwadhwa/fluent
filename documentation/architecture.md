@@ -2313,14 +2313,17 @@ respectively own projection, interaction state, and pure Ratatui rendering.
 detail text without depending on interaction state or rendering.
 The terminal renderer consumes the same unboxed geometry for viewport size and
 mouse routing. List navigation retains a side-by-side preview at 100 columns or
-wider. Right opens a labeled Work Item or worker details view across the full
-body at every supported width. Shared layout geometry reserves a label row and
+wider. Right opens a labeled Work Item summary across the full body at every
+supported width. Shared layout geometry reserves a label row and
 computes wrapping and scroll limits from the remaining full-width area. Terminal
 viewport sizing and mouse routing retain their separate split-pane geometry.
-Tab/Shift+Tab cycle views, Enter opens Workers in details, and Left/Esc returns to the list
-with the same selection and scroll. Moving selection drops the old terminal
-attachment; opening another invocation requires an explicit `t`. The `e` control
-opens a scrollable view of all Work read errors, including errors that overflow
+Tab/Shift+Tab cycle views, Enter opens Workers in details, and Left/Esc returns
+to the list with the same selection and scroll. Changing selection retains the
+old terminal attachment and its Control lease. Inspecting details can hide the
+terminal and releases native input focus. An explicit `t` replaces the retained
+attachment only after the selected worker's exact terminal opens successfully;
+a failed open retains the previous attachment. The `e` control opens a scrollable
+view of all Work read errors, including errors that overflow
 the list. `e` or Esc returns to the preserved selection. Help wraps navigation
 instructions and closes with `?` or Esc. Both controls leave Work files unchanged.
 Configured SSH sources use the same project view. `dashboard_sources` reads
