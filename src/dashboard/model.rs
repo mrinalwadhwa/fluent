@@ -315,7 +315,7 @@ impl App {
     /// Keep feedback on its original Work Item, including after that item disappears.
     pub fn action_feedback(&self) -> Option<&str> {
         self.action_message.as_deref().filter(|_| {
-            self.action_message_key.as_ref().is_none_or(|key| {
+            self.action_message_key.as_ref().is_some_and(|key| {
                 self.selected_key
                     .as_ref()
                     .is_none_or(|selected| selected == key)

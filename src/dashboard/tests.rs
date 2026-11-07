@@ -5137,12 +5137,13 @@ fn project_action_event_loop_consumes_confirmation_once() {
 fn project_action_copy_failure_keeps_command_selectable() {
     let (_, mut app) = action_fixture();
     let command = app.action_menu.as_ref().unwrap().current().command_text();
+    let action = app.action_menu.as_ref().unwrap().current().clone();
     assert_eq!(
         app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE),
         Effect::CopyAction
     );
     assert_eq!(
-        app.complete_copy(Err(anyhow::anyhow!("clipboard unavailable"))),
+        app.complete_copy(&action, Err(anyhow::anyhow!("clipboard unavailable"))),
         Effect::ToggleMouse(false)
     );
     assert!(app.copy_mode);
@@ -5211,10 +5212,15 @@ fn project_action_feedback_keeps_full_diagnostics_scrollable() {
     let mut app = project_app(vec![source]);
     app.resize(60, 15);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-    app.action_message = Some(format!(
-        "Run Attempt did not complete: {} diagnostic-end",
-        "full diagnostic context ".repeat(12)
-    ));
+    let action =
+        actions::offered(&app.snapshot.sources[0], &app.snapshot.sources[0].work[0]).remove(0);
+    app.set_action_feedback(
+        &action,
+        format!(
+            "Run Attempt did not complete: {} diagnostic-end",
+            "full diagnostic context ".repeat(12)
+        ),
+    );
     for _ in 0..20 {
         app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
     }
@@ -5754,4 +5760,125 @@ fn project_selection_and_source_warning_styles_are_distinct() {
         assert_eq!(warned[(0, 22)].style(), warned[(0, 3)].style());
         assert_ne!(warned[(0, 22)].style(), selected);
     }
+}
+
+#[test]
+fn project_action_feedback_keeps_retained_identity_after_disappearance() {
+    for (operation, remote) in [
+        ("prepare", false),
+        ("decline", false),
+        ("copy", false),
+        ("copy-failed", false),
+        ("copy", true),
+        ("copy-failed", true),
+    ] {
+        let (_root, mut app) = action_fixture();
+        if remote {
+            let mut source = project_source("ssh:remote", vec![row("work", "task-ready")]);
+            source.host = "remote.example".into();
+            source.path = "/remote/project".into();
+            app = project_app(vec![source]);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+            assert_eq!(
+                app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+                Effect::None
+            );
+        }
+        app.resize(60, 15);
+        let action = app.action_menu.as_ref().unwrap().current().clone();
+        let expected_key = project::RowKey::work(&action.source_id, &action.work_item_id);
+        if operation == "decline" {
+            prepare_dashboard_action(&mut app);
+            assert!(app.pending_action.is_some());
+        }
+        let mut snapshot = app.snapshot.clone();
+        snapshot.sources[0].work =
+            project_source(&action.source_id, vec![row("other", "task-ready")]).work;
+        snapshot.sources.push(project_source(
+            "/another-source",
+            vec![row("work", "task-ready")],
+        ));
+        app.refresh(snapshot);
+        assert!(app.selected_key.is_none());
+        let message = match operation {
+            "prepare" => {
+                assert_eq!(
+                    app.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+                    Effect::PrepareAction
+                );
+                prepare_dashboard_action(&mut app);
+                "Action canceled: Work selection changed"
+            }
+            "decline" => {
+                assert_eq!(
+                    app.handle_key(KeyCode::Char('n'), KeyModifiers::NONE),
+                    Effect::None
+                );
+                "Canceled; no command was launched"
+            }
+            "copy" => {
+                assert_eq!(
+                    app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE),
+                    Effect::CopyAction
+                );
+                assert_eq!(app.complete_copy(&action, Ok(())), Effect::None);
+                "Command and source context copied"
+            }
+            _ => {
+                assert_eq!(
+                    app.handle_key(KeyCode::Char('c'), KeyModifiers::NONE),
+                    Effect::CopyAction
+                );
+                assert_eq!(
+                    app.complete_copy(&action, Err(anyhow::anyhow!("clipboard unavailable"))),
+                    Effect::ToggleMouse(false)
+                );
+                "Copy failed: clipboard unavailable"
+            }
+        };
+        assert!(app.pending_action.is_none() && app.confirmed_action.is_none());
+        assert_eq!(
+            app.action_message_key.as_ref(),
+            Some(&expected_key),
+            "{operation}, remote={remote}"
+        );
+        // Closing the retained menu must leave a readable, attributable result.
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        let feedback = app.action_feedback().unwrap();
+        assert!(feedback.contains(message));
+        assert!(feedback.contains("Work Item: work"));
+        assert!(feedback.contains(&format!("Source: {}", action.context())));
+        assert!(app.detail_values().join("\n").contains(feedback));
+        assert!(text(&app, 60, 15).contains(message));
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        for key in [
+            project::RowKey::work(&action.source_id, "other"),
+            project::RowKey::work("/another-source", "work"),
+        ] {
+            app.select_key(key.clone());
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.selected_key.as_ref(), Some(&key));
+            assert!(app.action_feedback().is_none());
+            let details = app.detail_values().join("\n");
+            assert!(!details.contains(message) && !details.contains("Last action"));
+            assert!(!text(&app, 60, 15).contains(message));
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        }
+    }
+    let mut app = project_app(vec![project_source(
+        "/one",
+        vec![row("work", "task-ready")],
+    )]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.action_message = Some("Unattributed result".into());
+    assert!(
+        app.action_feedback().is_none(),
+        "a missing key must not apply feedback to every Work Item"
+    );
+    assert!(
+        !app.detail_values()
+            .join("\n")
+            .contains("Unattributed result")
+    );
 }

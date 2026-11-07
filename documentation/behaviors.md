@@ -67,6 +67,7 @@ when refresh moves the item out of the view, with feedback bound to that identit
 Returning to the list SHALL reconcile selection to a visible row.
 Test: src/dashboard/tests.rs (selection_survives_refresh_reorder_and_filter)
 Test: src/dashboard/tests.rs (project_detail_keeps_work_identity_after_filter_transition)
+Test: src/dashboard/tests.rs (project_action_feedback_keeps_retained_identity_after_disappearance)
 
 ### B3
 

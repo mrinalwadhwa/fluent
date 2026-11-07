@@ -403,9 +403,11 @@ impl App {
                     return Effect::RunAction;
                 }
                 KeyCode::Char('n') | KeyCode::Esc | KeyCode::Left => {
-                    self.pending_action = None;
-                    self.action_message_key = self.selected_key.clone();
-                    self.action_message = Some("Canceled; no command was launched".into());
+                    let action = self.pending_action.take().unwrap();
+                    self.set_action_feedback(
+                        &action.action,
+                        "Canceled; no command was launched".into(),
+                    );
                     self.detail_scroll = 0;
                 }
                 KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
@@ -684,22 +686,34 @@ impl App {
         Effect::None
     }
 
-    pub fn complete_copy(&mut self, result: anyhow::Result<()>) -> Effect {
-        self.action_message_key = self.selected_key.clone();
+    /// Bind every report to its retained action, independent of current selection.
+    pub fn set_action_feedback(&mut self, action: &super::actions::OfferedAction, message: String) {
+        self.action_message_key = Some(RowKey::work(&action.source_id, &action.work_item_id));
+        self.action_message = Some(format!(
+            "{message}\nWork Item: {}\nSource: {}",
+            action.work_item_id,
+            action.context()
+        ));
         self.dirty = true;
-        match result {
-            Ok(()) => {
-                self.action_message = Some("Command and source context copied".into());
-                Effect::None
-            }
+    }
+
+    pub fn complete_copy(
+        &mut self,
+        action: &super::actions::OfferedAction,
+        result: anyhow::Result<()>,
+    ) -> Effect {
+        let (effect, message) = match result {
+            Ok(()) => (Effect::None, "Command and source context copied".into()),
             Err(error) => {
-                self.action_message = Some(format!(
-                    "Copy failed: {error:#}; mouse text selection enabled"
-                ));
                 self.copy_mode = true;
-                Effect::ToggleMouse(false)
+                (
+                    Effect::ToggleMouse(false),
+                    format!("Copy failed: {error:#}; mouse text selection enabled"),
+                )
             }
-        }
+        };
+        self.set_action_feedback(action, message);
+        effect
     }
 
     pub fn take_confirmed_action(&mut self) -> Option<super::actions::PreparedAction> {

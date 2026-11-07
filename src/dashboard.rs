@@ -202,9 +202,13 @@ fn run_project_loop(
                             next_poll = Instant::now() + DATA_POLL_INTERVAL;
                         }
                         if effect == Effect::CopyAction {
-                            if let Some(menu) = &app.action_menu {
-                                let result = actions::copy_command(menu.current());
-                                if let Effect::ToggleMouse(enabled) = app.complete_copy(result) {
+                            if let Some(action) =
+                                app.action_menu.as_ref().map(|menu| menu.current().clone())
+                            {
+                                let result = actions::copy_command(&action);
+                                if let Effect::ToggleMouse(enabled) =
+                                    app.complete_copy(&action, result)
+                                {
                                     session.set_mouse_enabled(enabled)?;
                                 }
                             }
@@ -239,25 +243,20 @@ fn run_project_loop(
 
 /// Prepare a concrete confirmation from a fresh read; never execute guidance.
 fn prepare_dashboard_action(app: &mut App) {
-    let result = (|| {
-        let action = app
-            .action_menu
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No action selected"))?
-            .current()
-            .clone();
-        validate_action_selection(app, &action)?;
-        actions::PreparedAction::prepare(action)
-    })();
+    let Some(action) = app.action_menu.as_ref().map(|menu| menu.current().clone()) else {
+        return;
+    };
+    let result = validate_action_selection(app, &action)
+        .and_then(|()| actions::PreparedAction::prepare(action.clone()));
     app.detail_scroll = 0;
     app.action_message = None;
-    app.action_message_key = app.selected_key.clone();
+    app.action_message_key = None;
     match result {
         Ok(action) if action.action.kind == actions::ActionKind::CandidateShow => {
             app.confirmed_action = Some(action)
         }
         Ok(action) => app.pending_action = Some(action),
-        Err(error) => app.action_message = Some(format!("Action canceled: {error:#}")),
+        Err(error) => app.set_action_feedback(&action, format!("Action canceled: {error:#}")),
     }
     app.dirty = true;
 }
@@ -303,10 +302,6 @@ fn run_dashboard_action(
     app.action_menu = None;
     app.pending_action = None;
     app.detail_scroll = 0;
-    app.action_message_key = Some(project::RowKey::work(
-        &action.action.source_id,
-        &action.action.work_item_id,
-    ));
     let message = match result {
         Ok(outcome) => format!(
             "{} {outcome}; refreshing source",
@@ -317,12 +312,7 @@ fn run_dashboard_action(
             action.action.kind.label()
         ),
     };
-    app.action_message = Some(format!(
-        "{message}\nWork Item: {}\nSource: {}",
-        action.action.work_item_id,
-        action.action.context()
-    ));
-    app.dirty = true;
+    app.set_action_feedback(&action.action, message);
     if !session.is_active() {
         return Ok(());
     }

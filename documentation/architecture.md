@@ -2297,7 +2297,9 @@ Command feedback stays in a fixed row above scrollable details, with complete
 messages retained under Last action. Worker scrolling therefore cannot hide the
 reported outcome or a fresh-validation rejection. Feedback binds the attempted
 action's source and Work Item and retains both in the full report. Another Work
-selection cannot display that result as its own.
+selection cannot display that result as its own. Preparation failures, declined
+confirmations, and copy results also retain the offered or prepared action's
+identity and readable source context when the selected Work Item disappears.
 SSH sources only expose command text and host/checkout context to copy.
 
 Inspecting details can hide a retained terminal attachment without retargeting
