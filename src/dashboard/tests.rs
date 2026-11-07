@@ -4762,3 +4762,29 @@ fn project_overview_treats_section_like_titles_as_display_text() {
         assert!(text(&app, 60, 15).contains("Worker: review-14"));
     }
 }
+
+#[test]
+fn project_overview_footer_keeps_worker_keys_with_actions_and_read_issues() {
+    let mut source = project_source("/one", vec![row("work", "task-ready")]);
+    source.work[0].workers = vec![worker_row("/one", "writer")];
+    let mut hidden = project_source("/hidden", vec![]);
+    hidden.stale = Some("read failed".into());
+    let mut app = project_app(vec![source, hidden.clone()]);
+    app.record_source_read(&hidden);
+    app.resize(60, 15);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let overview = text(&app, 60, 15);
+    let footer = overview.lines().last().unwrap();
+    for control in [
+        "q quit",
+        "Esc Back",
+        "Enter Open worker",
+        "↑/↓ workers",
+        "e Read issues",
+    ] {
+        assert!(footer.contains(control), "missing {control}: {overview}");
+    }
+    assert!(overview.contains("a Actions"), "{overview}");
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    assert!(text(&app, 60, 15).contains("read failed"));
+}

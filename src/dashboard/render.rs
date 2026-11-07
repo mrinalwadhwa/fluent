@@ -141,7 +141,13 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     }
     let mut footer = String::new();
     for control in app.project_controls() {
-        let separator = if footer.is_empty() { "" } else { "  " };
+        let separator = if footer.is_empty() {
+            ""
+        } else if areas.footer.width < 100 {
+            " "
+        } else {
+            "  "
+        };
         if footer.width() + separator.width() + control.width() <= areas.footer.width as usize {
             footer.push_str(separator);
             footer.push_str(control);

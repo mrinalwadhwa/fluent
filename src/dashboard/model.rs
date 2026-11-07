@@ -237,6 +237,8 @@ impl App {
     }
 
     pub fn project_navigation_controls(&self) -> Vec<&'static str> {
+        let overview =
+            self.pane == Pane::Detail && self.show_details && self.page == ProjectPage::Overview;
         let mut controls = if self.input_owner() == InputOwner::List {
             vec![
                 "q quit",
@@ -262,27 +264,25 @@ impl App {
                 "q quit",
                 "Esc Back",
                 "Enter Open worker",
-                "? help",
                 "↑/↓ workers",
+                "? help",
                 "t terminal",
             ]
         };
-        if self.pane == Pane::Detail
-            && self.show_details
-            && self.page == ProjectPage::Overview
+        if overview
             && self
                 .selected_key
                 .as_ref()
                 .and_then(|key| project::find_work(&self.snapshot.sources, key))
                 .is_some_and(|(source, work)| !super::actions::offered(source, work).is_empty())
         {
-            controls.insert(2, "a Actions");
+            controls.insert(4, "a Actions");
         }
         if !self.snapshot.errors.is_empty()
             || self.source_warning_count() > 0
             || self.stale_error.is_some()
         {
-            controls.insert(1, "e Read issues");
+            controls.insert(if overview { 4 } else { 1 }, "e Read issues");
         }
         // A retained attachment can still be explicitly focused from the list.
         if self.terminal.is_some() && self.terminal_fits() && self.input_owner() == InputOwner::List
