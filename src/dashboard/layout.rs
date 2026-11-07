@@ -401,16 +401,7 @@ pub fn project_detail_rows(sources: &[SourceSnapshot], key: &RowKey) -> Vec<Deta
     } else {
         vec![
             work.status.title.clone(),
-            work.status
-                .recovery_blocker
-                .as_ref()
-                .map(|reason| format!("Reason: {reason}"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "State: {}",
-                        work.phase.as_deref().unwrap_or(&work.status.action)
-                    )
-                }),
+            work_condition(work),
             format!("Next action: {next_action}"),
         ]
         .into_iter()
@@ -429,6 +420,19 @@ pub fn project_detail_rows(sources: &[SourceSnapshot], key: &RowKey) -> Vec<Deta
             .map(DetailRow::text),
     );
     values
+}
+
+fn work_condition(work: &project::ProjectWork) -> String {
+    let mut condition = format!("State: {}", work.state_label());
+    if work.category != project::Category::History {
+        if let Some(phase) = &work.phase {
+            condition.push_str(&format!(" · {phase}"));
+        }
+        if let Some(reason) = &work.status.recovery_blocker {
+            condition.push_str(&format!(" · Reason: {reason}"));
+        }
+    }
+    condition
 }
 
 fn next_action(work: &project::ProjectWork) -> String {
@@ -456,6 +460,7 @@ fn project_metadata(
 ) -> Vec<String> {
     let mut values = vec![
         format!("Work Item: {}", work.status.id),
+        format!("Published state: {}", work.status.action),
         format!(
             "Attempt: {}",
             key.attempt_id.as_deref().unwrap_or(&work.status.attempt)
@@ -539,17 +544,7 @@ pub fn project_overview_rows(
     let Some((source, work)) = project::find_work(sources, key) else {
         return vec![DetailRow::text("Selection unavailable")];
     };
-    let condition = work
-        .status
-        .recovery_blocker
-        .as_ref()
-        .map(|reason| format!("Reason: {reason}"))
-        .unwrap_or_else(|| {
-            format!(
-                "State: {}",
-                work.phase.as_deref().unwrap_or(work.category.label())
-            )
-        });
+    let condition = work_condition(work);
     let mut rows = Vec::new();
     let mut secondary = Vec::new();
     for (label, value) in [("Title", &work.status.title), ("Condition", &condition)] {
@@ -623,11 +618,11 @@ pub fn project_overview_rows(
             if is_selected { ">" } else { " " },
             identity,
             " ".repeat(identity_width.saturating_sub(identity.width())),
-            compact(&worker.state, 14)
+            compact(worker.state_label(), 14)
         );
         text.push_str(&format!(
             "{}  {:>7}  {}",
-            " ".repeat(14usize.saturating_sub(worker.state.width())),
+            " ".repeat(14usize.saturating_sub(worker.state_label().width())),
             compact(
                 &worker
                     .elapsed_ms
@@ -672,7 +667,7 @@ pub fn project_overview_rows(
 pub fn project_worker_values(worker: &project::Worker, work: &project::ProjectWork) -> Vec<String> {
     vec![
         format!("Worker: {}", worker.role),
-        format!("State: {}", worker.state),
+        format!("State: {}", worker.state_label()),
         format!(
             "Agent terminal: {}",
             worker
@@ -724,6 +719,7 @@ pub fn project_worker_values(worker: &project::Worker, work: &project::ProjectWo
                 .as_deref()
                 .unwrap_or("unavailable")
         ),
+        format!("Recorded state: {}", worker.state),
     ]
 }
 

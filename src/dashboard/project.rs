@@ -91,6 +91,22 @@ pub struct Worker {
     pub terminal: Option<TerminalDescriptor>,
     pub unavailable_reason: String,
 }
+impl Worker {
+    pub fn state_label(&self) -> &str {
+        match self.state.as_str() {
+            "executing" => "Running",
+            "provider-wait" => "Provider wait",
+            "needs-user" => "Needs you",
+            "planned" => "Planned",
+            "complete" => "Complete",
+            "failed" => "Failed",
+            "interrupted" => "Interrupted",
+            "superseded" => "Superseded",
+            _ => "Unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectWork {
     pub key: RowKey,
@@ -102,6 +118,22 @@ pub struct ProjectWork {
     pub updated_at: Option<String>,
     pub workers: Vec<Worker>,
 }
+impl ProjectWork {
+    /// History is a counted view; display the actual published outcome in rows.
+    pub fn state_label(&self) -> &str {
+        if self.category == Category::History {
+            match self.status.action.as_str() {
+                "complete" => "Complete",
+                "merged" => "Merged",
+                "abandoned" => "Abandoned",
+                _ => "Unknown",
+            }
+        } else {
+            self.category.label()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceSnapshot {
     pub schema_version: u32,

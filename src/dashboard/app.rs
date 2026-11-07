@@ -260,6 +260,13 @@ impl App {
                         .min_by_key(|worker| match worker.state.as_str() {
                             "needs-user" => 0,
                             "executing" | "provider-wait" => 1,
+                            _ if worker
+                                .terminal
+                                .as_ref()
+                                .is_some_and(|terminal| terminal.can_observe) =>
+                            {
+                                1
+                            }
                             "interrupted" | "failed" => 2,
                             "planned" => 3,
                             _ => 4,

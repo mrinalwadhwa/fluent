@@ -16,9 +16,9 @@ pub enum ActionKind {
 impl ActionKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::AttemptRun => "Attempt run",
-            Self::CandidateShow => "Candidate show",
-            Self::CandidateLand => "Candidate land",
+            Self::AttemptRun => "Run Attempt",
+            Self::CandidateShow => "Show Candidate",
+            Self::CandidateLand => "Land Candidate",
         }
     }
     pub fn effect(self) -> &'static str {

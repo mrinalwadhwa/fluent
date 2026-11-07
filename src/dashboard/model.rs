@@ -158,7 +158,12 @@ impl App {
         if !self.snapshot.errors.is_empty() || self.stale_error.is_some() {
             parts.push("read issues available".into());
         }
-        parts.join(" · ")
+        let status = parts.join(" · ");
+        if failed + overdue > 0 {
+            format!("! {status}")
+        } else {
+            status
+        }
     }
 
     pub fn diagnostic_snapshot(&self) -> DashboardSnapshot {
@@ -215,7 +220,7 @@ impl App {
                 "q quit",
                 "e/Esc back",
                 "↑/↓ scroll",
-                "PgUp/PgDn page",
+                "PgUp/PgDn scroll",
                 "? help",
             ];
         }

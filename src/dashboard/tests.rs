@@ -1820,7 +1820,7 @@ fn loaded_worker_metadata_reaches_rows_and_details() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let rendered = text(&app, 140, 30);
     assert!(rendered.contains("Worker: architecture"));
-    assert!(rendered.contains("State: complete"));
+    assert!(rendered.contains("State: Complete"));
     let details = text(&app, 140, 30);
     assert!(details.contains("Provider: fixture"));
     assert!(details.contains("Model: review-model"));
@@ -1832,7 +1832,7 @@ fn loaded_worker_metadata_reaches_rows_and_details() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let unavailable = text(&app, 140, 30);
     assert!(unavailable.contains("Worker: tests"));
-    assert!(unavailable.contains("State: planned"));
+    assert!(unavailable.contains("State: Planned"));
     assert!(unavailable.contains("Agent terminal:"));
     assert!(unavailable.contains("unavailable"));
 }
@@ -1956,7 +1956,7 @@ fn failed_source_does_not_hide_healthy_projects() {
     assert!(refreshed[1].stale.is_none());
     let rendered = text(&app, 140, 24);
     assert!(rendered.contains("last good Work"));
-    assert_eq!(rendered.matches("! ").count(), 1);
+    assert_eq!(rendered.matches("! ").count(), 2);
     assert!(rendered.contains("Retain me"));
     assert!(rendered.contains("Healthy now"));
     assert!(
@@ -2144,7 +2144,9 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
                 "{rendered}"
             );
             assert!(lines[1].chars().all(|c| c == '─'), "{rendered}");
-            for line in &lines[2..height as usize - 2] {
+            let areas = layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height));
+            assert!(lines[areas.detail_hint.y as usize].trim().is_empty());
+            for line in &lines[areas.body.y as usize..areas.body.bottom() as usize] {
                 assert_eq!(
                     line.matches('│').count(),
                     usize::from(terminal_open),
@@ -2157,7 +2159,7 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
             }
             let divider = lines[2].chars().position(|c| c == '│').unwrap();
             assert!(divider >= width as usize * 3 / 5);
-            for y in 2..height - 2 {
+            for y in areas.divider.y..areas.divider.bottom() {
                 assert_eq!(buffer[(divider as u16, y)].symbol(), "│");
             }
             assert!(lines[2].contains("Work Items") && lines[2].contains("Status"));
@@ -2345,7 +2347,10 @@ fn details_put_title_reason_and_action_before_identifiers() {
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let overview = app.detail_values().join("\n");
-    assert!(overview.starts_with("Full selected title\nReason: Host proof is missing"));
+    assert!(
+        overview
+            .starts_with("Full selected title\nState: Needs you · Reason: Host proof is missing")
+    );
     assert!(overview.find("Next action").unwrap() < overview.find("Workers (").unwrap());
     assert!(overview.find("Workers (").unwrap() < overview.find("Work Item:").unwrap());
     assert!(overview.contains("fluent work-item show WI-42"));
@@ -2354,7 +2359,7 @@ fn details_put_title_reason_and_action_before_identifiers() {
     let worker = app.detail_values().join("\n");
     for field in [
         "Worker: writer",
-        "State: executing",
+        "State: Running",
         "Task: write-1",
         "Invocation: generation-1",
         "headless execution",
@@ -3733,7 +3738,7 @@ fn project_source_warnings_use_one_global_status() {
             .contains("1 failed · 1 overdue"),
         "{rendered}"
     );
-    assert_eq!(rendered.matches("! ").count(), 1);
+    assert_eq!(rendered.matches("! ").count(), 2);
     assert!(!rendered.contains("Last read UTC"));
     assert!(rendered.contains("retained"));
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
@@ -3936,15 +3941,15 @@ fn project_actions_keep_commands_readable_and_exact() {
     let app = project_app(vec![project_source("/one", vec![status.clone()])]);
     let values = app.detail_values();
     assert!(values.contains(&format!(
-        "  Candidate show: fluent merge-candidate show {} {}",
+        "  Show Candidate: fluent merge-candidate show {} {}",
         status.id, status.merge_candidate
     )));
     assert!(values.contains(&format!(
-        "  Candidate land: fluent merge-candidate land {} {}",
+        "  Land Candidate: fluent merge-candidate land {} {}",
         status.id, status.merge_candidate
     )));
-    assert!(values.iter().any(|value| value.contains("Candidate show:")));
-    assert!(values.iter().any(|value| value.contains("Candidate land:")));
+    assert!(values.iter().any(|value| value.contains("Show Candidate:")));
+    assert!(values.iter().any(|value| value.contains("Land Candidate:")));
     for command in values
         .iter()
         .filter(|value| value.starts_with("  Candidate"))
@@ -4001,7 +4006,7 @@ fn project_actions_keep_commands_readable_and_exact() {
     let app = project_app(vec![project_source("/one", vec![custom])]);
     let full = app.detail_values().join("\n");
     assert!(full.contains("Inspect host evidence before any landing command"));
-    assert!(full.contains("Candidate land: fluent merge-candidate land"));
+    assert!(full.contains("Land Candidate: fluent merge-candidate land"));
 }
 
 #[test]
@@ -4239,7 +4244,7 @@ fn worker_page_keeps_exact_terminal_identity_and_clear_unavailability() {
     let rendered = text(&app, 100, 24);
     for field in [
         "Worker: tester",
-        "State: executing",
+        "State: Running",
         "Agent terminal: headless execution",
         "Provider:",
         "Elapsed:",
@@ -4685,7 +4690,7 @@ fn project_action_candidate_land_requires_confirmation() {
             app.action_message
                 .as_ref()
                 .unwrap()
-                .contains("Candidate land succeeded")
+                .contains("Land Candidate succeeded")
         );
         assert!(local.pending.is_some());
         finish_local_refresh(&mut local, &mut app);
@@ -4804,7 +4809,7 @@ fn project_action_candidate_show_runs_without_confirmation() {
         app.action_message
             .as_ref()
             .unwrap()
-            .contains("Candidate show succeeded")
+            .contains("Show Candidate succeeded")
     );
     assert!(local.pending.is_some());
     finish_local_refresh(&mut local, &mut app);
@@ -4925,14 +4930,25 @@ fn project_action_rechecks_selection_and_source_before_launch() {
         let mut local = LocalRefresh::new(root.path(), &[], root.path());
         run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
         let returned = text(&app, 60, 15);
-        assert!(
-            returned
-                .lines()
-                .nth(2)
-                .unwrap()
-                .contains("did not complete"),
-            "{returned}"
-        );
+        if change == "remote" {
+            // A rejected action with a different source cannot appear as this
+            // local Work Item's outcome. The retained report names its source.
+            assert!(app.action_feedback().is_none());
+            assert!(app.action_message.as_ref().unwrap().contains("ssh:remote"));
+            assert_eq!(
+                app.action_message_key.as_ref().unwrap().source_id,
+                "ssh:remote"
+            );
+        } else {
+            assert!(
+                returned
+                    .lines()
+                    .nth(2)
+                    .unwrap()
+                    .contains("did not complete"),
+                "{returned}"
+            );
+        }
         assert!(session.calls.is_empty(), "launched after {change} changed");
         assert!(
             app.action_message
@@ -5103,7 +5119,7 @@ fn project_action_event_loop_consumes_confirmation_once() {
         session
             .frames
             .iter()
-            .any(|frame| frame.contains("Attempt run succeeded"))
+            .any(|frame| frame.contains("Run Attempt succeeded"))
     );
     assert!(session.frames.last().unwrap().contains("Open Work Item"));
     assert_eq!(app.page, model::ProjectPage::List);
@@ -5191,7 +5207,7 @@ fn project_action_feedback_keeps_full_diagnostics_scrollable() {
     app.resize(60, 15);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     app.action_message = Some(format!(
-        "Attempt run did not complete: {} diagnostic-end",
+        "Run Attempt did not complete: {} diagnostic-end",
         "full diagnostic context ".repeat(12)
     ));
     for _ in 0..20 {
@@ -5203,7 +5219,7 @@ fn project_action_feedback_keeps_full_diagnostics_scrollable() {
             .lines()
             .nth(2)
             .unwrap()
-            .contains("Attempt run did not complete"),
+            .contains("Run Attempt did not complete"),
         "{bottom}"
     );
     assert!(bottom.contains("diagnostic-end"), "{bottom}");
@@ -5525,6 +5541,7 @@ fn project_overview_prioritizes_active_worker_at_narrow_width() {
         }
         let mut source = project_source("/one", vec![row("work", "executing")]);
         let mut worker = worker_row("/one", "writer");
+        worker.state = "complete".into();
         worker.elapsed_ms = Some(7000);
         worker.terminal = Some(crate::terminal_sessions::TerminalDescriptor {
             schema_version: 1,
@@ -5542,7 +5559,9 @@ fn project_overview_prioritizes_active_worker_at_narrow_width() {
             can_control: true,
             unavailable_reason: None,
         });
-        source.work[0].workers = vec![worker];
+        let mut planned = worker_row("/one", "next-worker");
+        planned.state = "planned".into();
+        source.work[0].workers = vec![worker, planned];
         let mut app = project_app(vec![source]);
         app.resize(width, 15);
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -5555,5 +5574,179 @@ fn project_overview_prioritizes_active_worker_at_narrow_width() {
             visible.contains("7s") && visible.contains("Observe"),
             "{overview}"
         );
+    }
+}
+
+#[test]
+fn project_history_shows_actual_outcomes() {
+    for width in [60, 160] {
+        let mut source = project_source(
+            "/one",
+            vec![
+                row("done", "complete"),
+                row("landed", "merged"),
+                row("dropped", "abandoned"),
+            ],
+        );
+        // A retained execution phase must not replace the published outcome.
+        for work in &mut source.work {
+            work.phase = Some("Writing".into());
+        }
+        let mut app = project_app(vec![source]);
+        app.resize(width, 15);
+        app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let history = text(&app, width, 15);
+        assert!(history.contains("History 3"), "{history}");
+        for (id, outcome) in [
+            ("done", "Complete"),
+            ("landed", "Merged"),
+            ("dropped", "Abandoned"),
+        ] {
+            let line = history
+                .lines()
+                .find(|line| line.contains(&format!("{id} title")))
+                .unwrap();
+            assert!(
+                line.contains(outcome) && !line.contains("History"),
+                "{history}"
+            );
+            app.select_key(project::RowKey::work("/one", id));
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            let overview = text(&app, width, 15);
+            assert!(
+                overview.contains(&format!("State: {outcome}")),
+                "{overview}"
+            );
+            assert!(
+                !overview.contains("State: History") && !overview.contains("Writing"),
+                "{overview}"
+            );
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        }
+    }
+}
+
+#[test]
+fn project_action_and_state_labels_match_across_views() {
+    for (raw, label) in [
+        ("executing", "Running"),
+        ("needs-user", "Needs you"),
+        ("provider-wait", "Provider wait"),
+        ("planned", "Planned"),
+        ("complete", "Complete"),
+        ("failed", "Failed"),
+        ("interrupted", "Interrupted"),
+        ("superseded", "Superseded"),
+    ] {
+        let mut source = project_source("/one", vec![row("work", "task-ready")]);
+        let mut worker = worker_row("/one", "writer");
+        worker.state = raw.into();
+        source.work[0].workers.push(worker);
+        let mut app = project_app(vec![source]);
+        app.resize(80, 24);
+        assert!(text(&app, 80, 24).contains("Ready"));
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let overview = text(&app, 80, 24);
+        assert!(overview.contains("State: Ready"));
+        let worker_row = overview
+            .lines()
+            .find(|line| line.starts_with("> writer"))
+            .unwrap();
+        assert!(worker_row.contains(label), "{overview}");
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(text(&app, 80, 24).contains(&format!("State: {label}")));
+        assert_eq!(app.snapshot.sources[0].work[0].workers[0].state, raw);
+    }
+    for (state, labels) in [
+        ("task-ready", vec!["Run Attempt"]),
+        ("merge-ready", vec!["Show Candidate", "Land Candidate"]),
+    ] {
+        let source = project_source("/one", vec![row("work", state)]);
+        let actions = actions::offered(&source, &source.work[0]);
+        let mut app = project_app(vec![source]);
+        app.resize(160, 30);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let overview = text(&app, 160, 30);
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let menu = text(&app, 160, 30);
+        for (action, label) in actions.iter().zip(labels) {
+            assert_eq!(action.kind.label(), label);
+            assert!(overview.contains(label) && menu.contains(label));
+            let expected_verb = match action.kind {
+                actions::ActionKind::AttemptRun => "run",
+                actions::ActionKind::CandidateShow => "show",
+                actions::ActionKind::CandidateLand => "land",
+            };
+            assert_eq!(action.args()[1], expected_verb);
+            assert!(text(&app, 160, 30).contains(&action.command_text()));
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        let controls = app.project_controls();
+        let overview = text(&app, 160, 30);
+        app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        let help = text(&app, 160, 30);
+        for cue in ["Esc Back", "Enter Open worker", "a Actions", "? help"] {
+            assert!(
+                controls.contains(&cue) && overview.contains(cue) && help.contains(cue),
+                "{cue}: {help}"
+            );
+        }
+        assert!(
+            overview.contains("PgUp/PgDn scroll") || app.scroll_bounds().detail_max_scroll == 0
+        );
+    }
+}
+
+#[test]
+fn project_selection_and_source_warning_styles_are_distinct() {
+    use ratatui::style::Modifier;
+    let mut source = project_source(
+        "/one",
+        vec![row("work", "task-ready"), row("ready", "task-ready")],
+    );
+    source.work[0].workers = vec![worker_row("/one", "writer")];
+    let mut app = project_app(vec![source]);
+    app.resize(80, 24);
+    let capture = |app: &App| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render::draw(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let list = capture(&app);
+    let selected = list[(0, 4)].style();
+    assert_eq!(list[(0, 4)].symbol(), ">");
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let overview = capture(&app);
+    let row = buffer_text(&overview)
+        .lines()
+        .position(|line| line.starts_with("> writer"))
+        .unwrap() as u16;
+    assert_eq!(overview[(0, row)].style(), selected);
+    assert!(selected.add_modifier.contains(Modifier::BOLD));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    for overdue in [false, true] {
+        let mut warning = app.snapshot.sources[0].clone();
+        if overdue {
+            app.snapshot.sources[0].stale = None;
+            app.source_reads.insert(
+                warning.id.clone(),
+                super::model::ReadHealth {
+                    pending: true,
+                    last_success: Some(chrono::Utc::now() - chrono::Duration::seconds(30)),
+                    error: None,
+                },
+            );
+        } else {
+            warning.stale = Some("source read failed".into());
+            app.snapshot.sources[0] = warning;
+        }
+        let warned = capture(&app);
+        assert_eq!(warned[(0, 3)].symbol(), "!");
+        assert_ne!(warned[(0, 3)].style(), list[(0, 3)].style());
+        assert_ne!(warned[(0, 3)].fg, list[(0, 5)].fg);
+        assert_eq!(warned[(0, 22)].symbol(), "!");
+        assert_eq!(warned[(0, 22)].style(), warned[(0, 3)].style());
+        assert_ne!(warned[(0, 22)].style(), selected);
     }
 }

@@ -118,7 +118,13 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         },
     );
     frame.render_widget(
-        Paragraph::new(compact(&app.source_status(), areas.health.width as usize)),
+        Paragraph::new(compact(&app.source_status(), areas.health.width as usize)).style(
+            if app.source_warning_count() > 0 {
+                source_warning_style()
+            } else {
+                Style::default()
+            },
+        ),
         areas.health,
     );
     frame.render_widget(
@@ -196,6 +202,19 @@ fn updated_time(value: Option<&str>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+fn selection_style() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(74, 165, 239))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn source_warning_style() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn project_row(
     title: &str,
     status: &str,
@@ -219,10 +238,7 @@ fn project_row(
         spans.push(Span::raw(format!("{updated:>12}")));
     }
     Line::from(spans).style(if selected {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Rgb(74, 165, 239))
-            .add_modifier(Modifier::BOLD)
+        selection_style()
     } else {
         Style::default().fg(tone)
     })
@@ -272,7 +288,11 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
                 source.project,
                 source.host
             ),
-            Style::default().fg(Color::DarkGray),
+            if warning {
+                source_warning_style()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
         ));
         for item in work {
             use super::project::Category;
@@ -285,7 +305,7 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             let selected = app.selected_key.as_ref() == Some(&item.key);
             lines.push(project_row(
                 &item.status.title,
-                item.category.label(),
+                item.state_label(),
                 &updated_time(item.updated_at.as_deref()),
                 if selected { ">" } else { " " },
                 area.width,
@@ -327,10 +347,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         .into_iter()
         .map(|row| {
             let style = match row.kind {
-                layout::DetailKind::SelectedWorker => Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
+                layout::DetailKind::SelectedWorker => selection_style(),
                 layout::DetailKind::Heading => Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),
