@@ -320,16 +320,7 @@ impl App {
                 }
                 self.dirty = true;
             }
-            KeyCode::Char('a') if self.project_mode() => {
-                self.filter = if self.filter == Filter::History {
-                    Filter::All
-                } else {
-                    Filter::History
-                };
-                self.reconcile_project_selection();
-                self.clamp_scrolls();
-                self.dirty = true;
-            }
+            KeyCode::Char('a') if self.project_mode() => {}
             KeyCode::Char('a') => {
                 self.all_work = !self.all_work;
                 self.reconcile_selection(self.selected.clone());
@@ -408,17 +399,6 @@ impl App {
                         break;
                     }
                     line += 1;
-                    if self.expanded.contains(&work.key) {
-                        if let Some(index) = work
-                            .workers
-                            .iter()
-                            .position(|worker| &worker.key == selected)
-                        {
-                            line += index as u16;
-                            break;
-                        }
-                        line += work.workers.len() as u16;
-                    }
                 }
                 if selected.source_id == source.id {
                     break;

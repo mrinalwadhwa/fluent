@@ -396,14 +396,13 @@ pub enum Filter {
     History,
 }
 impl Filter {
-    pub const VIEWS: [Self; 7] = [
+    pub const VIEWS: [Self; 6] = [
         Self::Current,
         Self::NeedsYou,
         Self::Running,
         Self::Ready,
         Self::Waiting,
         Self::History,
-        Self::All,
     ];
     pub fn matches(self, category: Category) -> bool {
         match self {
@@ -428,11 +427,18 @@ impl Filter {
         }
     }
     pub fn next(self) -> Self {
-        Self::VIEWS
-            [(Self::VIEWS.iter().position(|view| *view == self).unwrap() + 1) % Self::VIEWS.len()]
+        Self::VIEWS[(Self::VIEWS
+            .iter()
+            .position(|view| *view == self)
+            .unwrap_or(0)
+            + 1)
+            % Self::VIEWS.len()]
     }
     pub fn previous(self) -> Self {
-        Self::VIEWS[(Self::VIEWS.iter().position(|view| *view == self).unwrap()
+        Self::VIEWS[(Self::VIEWS
+            .iter()
+            .position(|view| *view == self)
+            .unwrap_or(0)
             + Self::VIEWS.len()
             - 1)
             % Self::VIEWS.len()]
@@ -442,16 +448,13 @@ impl Filter {
 pub fn visible_keys(
     sources: &[SourceSnapshot],
     filter: Filter,
-    expanded: &BTreeSet<RowKey>,
+    _expanded: &BTreeSet<RowKey>,
 ) -> Vec<RowKey> {
     let mut keys = Vec::new();
     for source in sources {
         for work in &source.work {
             if filter.matches(work.category) {
                 keys.push(work.key.clone());
-                if expanded.contains(&work.key) {
-                    keys.extend(work.workers.iter().map(|worker| worker.key.clone()));
-                }
             }
         }
     }

@@ -261,14 +261,9 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
                 Category::Ready | Category::ReadyToLand => Color::LightGreen,
                 _ => Color::Gray,
             };
-            let triangle = if app.expanded.contains(&item.key) {
-                "▾"
-            } else {
-                "▸"
-            };
             let selected = app.selected_key.as_ref() == Some(&item.key);
             lines.push(project_row(
-                &format!("{triangle} {}", item.status.title),
+                &item.status.title,
                 item.category.label(),
                 &updated_time(item.updated_at.as_deref()),
                 if selected { ">" } else { " " },
@@ -276,25 +271,6 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
                 selected,
                 tone,
             ));
-            if app.expanded.contains(&item.key) {
-                for worker in &item.workers {
-                    let selected = app.selected_key.as_ref() == Some(&worker.key);
-                    let available = worker.terminal.as_ref().is_some_and(|t| t.can_observe);
-                    lines.push(project_row(
-                        &format!(
-                            "  ↳ {} · {}",
-                            worker.role,
-                            if available { "session" } else { "no session" }
-                        ),
-                        &worker.state,
-                        &updated_time(worker.updated_at.as_deref()),
-                        if selected { ">" } else { " " },
-                        area.width,
-                        selected,
-                        Color::Gray,
-                    ));
-                }
-            }
         }
     }
     if app.project_keys().is_empty() {
@@ -484,7 +460,10 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
-    let project_help = app.project_navigation_controls().join("; ");
+    let project_help = format!(
+        "{}; f/F next view (without terminal); r refresh; c text selection (toggle mouse capture); PgUp/PgDn scroll; Enter summary/workers",
+        app.project_navigation_controls().join("; ")
+    );
     let text = if app.project_mode() {
         project_help.as_str()
     } else if app.size.0 >= 100 {

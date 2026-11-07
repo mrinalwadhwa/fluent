@@ -680,7 +680,7 @@ fn selection_survives_refresh_reorder_and_filter() {
             .iter()
             .any(|error| error.contains("Current remote diagnostic"))
     );
-    assert!(text(&app, 140, 24).contains("> ▸ Updated local"));
+    assert!(text(&app, 140, 24).contains("> Updated local"));
 }
 #[test]
 fn slow_local_refresh_does_not_block_selection() {
@@ -717,7 +717,7 @@ fn slow_local_refresh_does_not_block_selection() {
         Some(project::RowKey::work("/local", "selected"))
     );
     assert!(app.take_dirty());
-    assert!(text(&app, 140, 24).contains("> ▸ selected title"));
+    assert!(text(&app, 140, 24).contains("> selected title"));
     handle_terminal_key(
         &mut app,
         &mut embedded,
@@ -1669,7 +1669,7 @@ fn expanded_work_shows_parallel_worker_roles() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.project_keys().len(), 3);
     let rendered = text(&app, 140, 24);
-    assert!(rendered.contains("All 1"));
+    assert!(!rendered.contains("All 1"));
     assert!(rendered.contains("architecture"));
     assert!(rendered.contains("tests"));
     assert!(rendered.contains("architecture") && rendered.contains("· session"));
@@ -1912,7 +1912,7 @@ fn selection_preserves_composite_worker_identity() {
         app.selected_key,
         Some(project::RowKey::work("/one", "same"))
     );
-    assert!(text(&app, 80, 20).contains("> ▸ Neighbor"));
+    assert!(text(&app, 80, 20).contains("> Neighbor"));
 }
 
 #[test]
@@ -2014,7 +2014,7 @@ fn project_layout_keeps_selected_content_visible() {
             assert!(rendered.contains("q quit"));
         } else {
             assert!(rendered.contains("work-29"));
-            assert!(rendered.contains("> ▸ work-29"));
+            assert!(rendered.contains("> work-29"));
             assert!(rendered.contains('漢') && rendered.contains('字'));
             assert!(rendered.contains("e\u{301}"));
             assert!(rendered.contains("q quit"));
@@ -2141,9 +2141,8 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
             let lines = rendered.lines().collect::<Vec<_>>();
             assert!(lines[0].ends_with("Fluent"), "{rendered}");
             assert!(
-                lines[1].contains(
-                    "Current 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0  All 1"
-                ),
+                lines[1]
+                    .contains("Current 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0"),
                 "{rendered}"
             );
             assert!(lines[2].chars().all(|c| c == '─'), "{rendered}");
@@ -2226,7 +2225,7 @@ fn tab_views_preserve_selection_and_exact_categories() {
         (Filter::Waiting, vec!["queue", "plan"]),
         (Filter::History, vec!["past"]),
         (
-            Filter::All,
+            Filter::Current,
             vec![
                 "attention",
                 "run",
@@ -2234,7 +2233,6 @@ fn tab_views_preserve_selection_and_exact_categories() {
                 "land",
                 "queue",
                 "plan",
-                "past",
                 "future",
             ],
         ),
@@ -2254,9 +2252,11 @@ fn tab_views_preserve_selection_and_exact_categories() {
         }
         let rendered = text(&app, 120, 28);
         assert!(
-            rendered.lines().nth(1).unwrap().contains(
-                "Current 7  Needs you 1  Running 1  Ready 2  Waiting 2  History 1  All 8"
-            )
+            rendered
+                .lines()
+                .nth(1)
+                .unwrap()
+                .contains("Current 7  Needs you 1  Running 1  Ready 2  Waiting 2  History 1")
         );
         if filter == Filter::Ready {
             assert!(rendered.contains("Ready to land"));
@@ -2269,15 +2269,15 @@ fn tab_views_preserve_selection_and_exact_categories() {
     assert_eq!(app.filter, Filter::History);
     let selected = app.selected_key.clone();
     app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(app.selected_key, selected);
+    assert_ne!(app.selected_key, selected);
     app.handle_key(KeyCode::Tab, KeyModifiers::SHIFT);
     assert_eq!(app.filter, Filter::History);
     app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE);
-    assert_eq!(app.filter, Filter::All);
+    assert_eq!(app.filter, Filter::Current);
     app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(app.filter, Filter::History);
+    assert_eq!(app.filter, Filter::Current);
     app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(app.filter, Filter::All);
+    assert_eq!(app.filter, Filter::Current);
 }
 
 #[test]
@@ -2310,7 +2310,7 @@ fn project_rows_show_recorded_update_times() {
     let rendered = text(&app, 120, 28);
     assert!(rendered.contains("Updated UTC"), "{rendered}");
     assert!(rendered.contains(&updated), "{rendered}");
-    assert_eq!(rendered.matches(&updated).count(), 2, "{rendered}");
+    assert_eq!(rendered.matches(&updated).count(), 1, "{rendered}");
 }
 
 #[test]
@@ -2774,7 +2774,7 @@ fn project_views_keep_large_counts_and_detail_overflow_visible() {
             .collect(),
     )]);
     app.resize(60, 15);
-    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    app.handle_key(KeyCode::BackTab, KeyModifiers::NONE);
     assert!(
         text(&app, 60, 15)
             .lines()
@@ -2931,7 +2931,7 @@ fn initial_snapshot_preserves_view_and_remote_updates() {
             .iter()
             .any(|error| error.contains("Remote item diagnostic"))
     );
-    assert!(text(&app, 140, 24).contains("> ▸ New remote state"));
+    assert!(text(&app, 140, 24).contains("> New remote state"));
     assert!(text(&app, 140, 24).contains("local title"));
 }
 
@@ -3219,10 +3219,10 @@ fn dashboard_opens_on_current_project_work() {
         })
         .collect();
     let initially_selected = project_app(next.sources.clone());
-    assert!(text(&initially_selected, 100, 24).contains("> ▸ attention"));
+    assert!(text(&initially_selected, 100, 24).contains("> attention"));
     empty.refresh(next);
     assert_eq!(empty.selected_key, selected);
-    assert!(text(&empty, 100, 24).contains("> ▸ running"));
+    assert!(text(&empty, 100, 24).contains("> running"));
     empty.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
     assert_eq!(empty.filter, project::Filter::History);
     assert!(empty.project_keys().is_empty());
@@ -3731,4 +3731,81 @@ fn project_source_warnings_use_one_global_status() {
     let diagnostics = text(&app, 160, 30);
     assert!(diagnostics.contains("remote failed in detail"));
     assert!(diagnostics.contains("Last read UTC"));
+}
+
+#[test]
+fn project_views_exclude_redundant_all_and_preserve_membership() {
+    use project::{Category as C, Filter};
+    assert_eq!(
+        Filter::VIEWS,
+        [
+            Filter::Current,
+            Filter::NeedsYou,
+            Filter::Running,
+            Filter::Ready,
+            Filter::Waiting,
+            Filter::History
+        ]
+    );
+    assert!(Filter::Current.matches(C::Unknown));
+    assert!(!Filter::Current.matches(C::History));
+    assert!(Filter::Ready.matches(C::ReadyToLand));
+    assert!(Filter::Waiting.matches(C::Queued));
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    for _ in 0..6 {
+        app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    }
+    assert_eq!(app.filter, Filter::Current);
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.filter, Filter::History);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    assert_eq!(app.filter, Filter::History);
+}
+
+#[test]
+fn project_list_keeps_one_row_per_work_item() {
+    let mut source = project_source(
+        "/one",
+        vec![row("work", "executing"), row("other", "planned")],
+    );
+    source.work[0].workers = (0..100)
+        .map(|i| worker_row("/one", &format!("historical-{i}")))
+        .collect();
+    let mut app = project_app(vec![source]);
+    app.expanded.insert(app.project_keys()[0].clone());
+    assert_eq!(app.project_keys().len(), 2);
+    for width in [60, 160] {
+        let rendered = text(&app, width, 24);
+        assert!(!rendered.contains("historical-"));
+        assert!(!rendered.contains('↳'));
+        assert_eq!(app.scroll_bounds().list_max_scroll, 0);
+    }
+}
+
+#[test]
+fn project_footer_shows_contextual_primary_controls() {
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    let controls = app.project_controls().join("; ");
+    assert!(controls.contains("Tab/⇧Tab view"));
+    for secondary in [
+        "e errors",
+        "r refresh",
+        "c copy",
+        "History/All",
+        "F next view",
+    ] {
+        assert!(!controls.contains(secondary), "{controls}");
+    }
+    app.snapshot.errors.push("bad source".into());
+    assert!(app.project_controls().contains(&"e errors"));
+    app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+    let help = text(&app, 60, 24);
+    assert!(help.contains("text selection"), "{help}");
+    assert!(
+        help.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("r refresh")
+    );
+    assert!(!help.contains("c copy"));
 }

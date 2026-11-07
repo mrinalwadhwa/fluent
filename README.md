@@ -469,11 +469,11 @@ Run `fluent dashboard` from a checkout to see its Work alongside checkouts alrea
 The list groups Work by source. Each group shows project name, host, and path
 context; the detail pane shows the full checkout path. While dashboard navigation
 owns input, press Tab/Shift+Tab to cycle forward/backward through Current, Needs you,
-Running, Ready, Waiting, History, and All. Current opens first and excludes only
+Running, Ready, Waiting, and History. Current opens first and excludes only
 History. Ready includes Ready and Ready to land; Waiting includes Queued and
 Planned. Rows keep their exact categories. Header
-counts reflect published Work Item lifecycle and queue state; expanding workers
-does not change them.
+counts reflect published Work Item lifecycle and queue state. The list shows one
+row per Work Item; workers remain in details.
 
 Use Up/Down to select a row and Enter on a Work Item to expand or collapse its
 Attempt's worker Tasks. Press Right to focus the selected Work Item or worker's

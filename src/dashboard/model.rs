@@ -179,7 +179,6 @@ impl App {
                 "↑/↓ scroll",
                 "PgUp/PgDn page",
                 "? help",
-                "r refresh",
             ];
         }
         self.project_navigation_controls()
@@ -187,7 +186,7 @@ impl App {
 
     pub fn project_navigation_controls(&self) -> Vec<&'static str> {
         let mut controls = if self.input_owner() == InputOwner::List {
-            let mut controls = vec!["q quit", "? help", "↑/↓ select", "→ details"];
+            let mut controls = vec!["q quit", "↑/↓ select", "→ details", "? help"];
             if self
                 .selected_key
                 .as_ref()
@@ -219,14 +218,15 @@ impl App {
             }
             controls
         };
-        controls.extend([
-            "Tab/⇧Tab view",
-            "F next view",
-            "a History/All",
-            "e errors",
-            "r refresh",
-            "c copy",
-        ]);
+        if self.input_owner() == InputOwner::List {
+            controls.push("Tab/⇧Tab view");
+        }
+        if !self.snapshot.errors.is_empty()
+            || self.source_warning_count() > 0
+            || self.stale_error.is_some()
+        {
+            controls.push("e errors");
+        }
         // A retained attachment can still be explicitly focused from the list.
         if self.terminal.is_some() && self.terminal_fits() && self.input_owner() == InputOwner::List
         {

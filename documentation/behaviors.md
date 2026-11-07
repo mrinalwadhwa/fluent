@@ -109,7 +109,7 @@ Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_e
 
 WHEN the project dashboard renders its list at 100 columns or wider, THE SYSTEM SHALL
 show two compact header lines with counted Current, Needs you, Running, Ready,
-Waiting, History, and All views, one horizontal rule, and one continuous divider
+Waiting, and History views, one horizontal rule, and one continuous divider
 between the project list and details or terminal, without pane boxes. Leave one
 blank column on each side of the divider and one blank row below the header
 rule. Keep navigation and quit controls visible at the minimum supported size.

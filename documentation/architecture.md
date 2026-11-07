@@ -2239,7 +2239,7 @@ inspection self-loop and allowing other actionable Work to surface. The boundary
 returns valid rows and per-file read errors together so one bad Work Item file
 does not hide the rest of the queue.
 `fluent dashboard` projects those rows into a read-only operator console grouped
-by project. Counted Current, Needs you, Running, Ready, Waiting, History, and All
+by project. Counted Current, Needs you, Running, Ready, Waiting, and History
 views filter Work Items. Current opens first and excludes only History. Initial
 selection favors Needs you, then Running, then Ready or Ready to land. Ready
 includes Ready to land, and Waiting includes Queued and Planned. Rows retain their

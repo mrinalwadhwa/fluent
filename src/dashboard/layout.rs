@@ -89,7 +89,7 @@ pub struct ScrollBounds {
 pub fn project_scroll_bounds(
     sources: &[SourceSnapshot],
     filter: Filter,
-    expanded: &BTreeSet<RowKey>,
+    _expanded: &BTreeSet<RowKey>,
     selected_key: Option<&RowKey>,
     size: (u16, u16),
     focused_details: bool,
@@ -105,13 +105,7 @@ pub fn project_scroll_bounds(
         .flat_map(|source| &source.work)
         .filter(|work| filter.matches(work.category))
         .count();
-    let workers = sources
-        .iter()
-        .flat_map(|source| &source.work)
-        .filter(|work| filter.matches(work.category) && expanded.contains(&work.key))
-        .map(|work| work.workers.len())
-        .sum::<usize>();
-    let lines = groups + work + workers + usize::from(work == 0);
+    let lines = groups + work + usize::from(work == 0);
     let detail = if focused_details {
         areas.focused_detail
     } else {
