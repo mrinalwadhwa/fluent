@@ -5322,3 +5322,67 @@ fn project_detail_keeps_work_identity_after_filter_transition() {
         assert!(!app.detail_values().join("\n").contains("succeeded"));
     }
 }
+
+#[test]
+fn project_list_paging_moves_visible_selection_and_survives_refresh() {
+    for (width, height) in [(60, 15), (160, 24)] {
+        let mut app = project_app(
+            (0..4)
+                .map(|source| {
+                    project_source(
+                        &format!("/source-{source}"),
+                        (0..12)
+                            .map(|n| row(&format!("work-{source}-{n:02}"), "task-ready"))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+        app.resize(width, height);
+        for direction in [
+            KeyCode::PageDown,
+            KeyCode::PageDown,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::PageUp,
+        ] {
+            let before = app.selected_key.clone();
+            app.handle_key(direction, KeyModifiers::NONE);
+            assert_ne!(app.selected_key, before);
+            let selected = app.selected_key.clone().unwrap();
+            let rendered = text(&app, width, height);
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.starts_with(&format!("> {} title", selected.work_item_id))),
+                "{rendered}"
+            );
+            let scroll = app.list_scroll;
+            let mut snapshot = app.snapshot.clone();
+            snapshot.sources[0].work[0].updated_at = Some(format!("refresh-{scroll}"));
+            app.refresh(snapshot);
+            assert_eq!(app.selected_key.as_ref(), Some(&selected));
+            assert_eq!(app.list_scroll, scroll);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                text(&app, width, height).contains(&format!("{} title", selected.work_item_id))
+            );
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(app.selected_key.as_ref(), Some(&selected));
+            assert_eq!(app.list_scroll, scroll);
+        }
+        // Page boundaries and source headers still leave a visible selectable row.
+        for key in [KeyCode::PageDown, KeyCode::PageUp] {
+            for _ in 0..20 {
+                app.handle_key(key, KeyModifiers::NONE);
+            }
+            let rendered = text(&app, width, height);
+            assert!(
+                rendered.lines().any(
+                    |line| line.starts_with(&format!("> {} title", app.selected_id().unwrap()))
+                ),
+                "{rendered}"
+            );
+        }
+    }
+}

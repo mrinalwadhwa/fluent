@@ -316,6 +316,41 @@ impl App {
         self.dirty = true;
     }
 
+    fn page_project_list(&mut self, down: bool) {
+        let bounds = self.scroll_bounds();
+        let height = bounds.list_height.max(1);
+        let positions = layout::project_work_positions(&self.snapshot.sources, self.filter);
+        let current = positions
+            .iter()
+            .find(|(key, _)| Some(*key) == self.selected_key.as_ref())
+            .map(|(_, line)| *line)
+            .unwrap_or(self.list_scroll);
+        let target = if down {
+            self.list_scroll = self
+                .list_scroll
+                .saturating_add(height)
+                .min(bounds.list_max_scroll);
+            current.saturating_add(height)
+        } else {
+            self.list_scroll = self.list_scroll.saturating_sub(height);
+            current.saturating_sub(height)
+        };
+        if let Some((index, (key, _))) = positions
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, line))| {
+                *line >= self.list_scroll && *line < self.list_scroll.saturating_add(height)
+            })
+            .min_by_key(|(_, (_, line))| line.abs_diff(target))
+        {
+            self.selected_key = Some((*key).clone());
+            self.selected_index = index;
+            self.selected_worker = None;
+            self.detail_scroll = 0;
+        }
+        self.dirty = true;
+    }
+
     fn move_selection(&mut self, delta: isize) {
         if self.project_mode() {
             let keys = self.project_keys();
@@ -594,6 +629,11 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if self.input_owner() == InputOwner::List => {
                 self.move_selection(1);
             }
+            KeyCode::PageUp | KeyCode::PageDown
+                if self.project_mode() && self.input_owner() == InputOwner::List =>
+            {
+                self.page_project_list(key == KeyCode::PageDown);
+            }
             KeyCode::PageUp if self.input_owner() == InputOwner::List => {
                 self.list_scroll = self
                     .list_scroll
@@ -651,30 +691,12 @@ impl App {
             let Some(selected) = &self.selected_key else {
                 return;
             };
-            if !self.project_keys().contains(selected) {
+            let Some(line) = layout::project_work_positions(&self.snapshot.sources, self.filter)
+                .into_iter()
+                .find_map(|(key, line)| (key == selected).then_some(line))
+            else {
                 return;
-            }
-            let mut line = 0u16;
-            for source in &self.snapshot.sources {
-                let matching = source
-                    .work
-                    .iter()
-                    .filter(|work| self.filter.matches(work.category))
-                    .collect::<Vec<_>>();
-                if matching.is_empty() {
-                    continue;
-                }
-                line += 1;
-                for work in matching {
-                    if &work.key == selected {
-                        break;
-                    }
-                    line += 1;
-                }
-                if selected.source_id == source.id {
-                    break;
-                }
-            }
+            };
             if line < self.list_scroll {
                 self.list_scroll = line;
             } else if bounds.list_height > 0 && line >= self.list_scroll + bounds.list_height {

@@ -89,6 +89,28 @@ pub struct ScrollBounds {
     pub detail_max_scroll: u16,
 }
 
+/// Locate selectable Work rows in the grouped, scrollable list body.
+pub fn project_work_positions(sources: &[SourceSnapshot], filter: Filter) -> Vec<(&RowKey, u16)> {
+    let mut positions = Vec::new();
+    let mut line = 0u16;
+    for source in sources {
+        let mut work = source
+            .work
+            .iter()
+            .filter(|work| filter.matches(work.category))
+            .peekable();
+        if work.peek().is_none() {
+            continue;
+        }
+        line = line.saturating_add(1); // Source header.
+        for work in work {
+            positions.push((&work.key, line));
+            line = line.saturating_add(1);
+        }
+    }
+    positions
+}
+
 pub fn project_scroll_bounds(
     sources: &[SourceSnapshot],
     filter: Filter,
