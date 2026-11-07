@@ -1943,7 +1943,7 @@ fn failed_source_does_not_hide_healthy_projects() {
     assert_eq!(refreshed[0].work[0].status.title, "Retain me");
     assert!(refreshed[1].stale.is_none());
     let rendered = text(&app, 140, 24);
-    assert!(rendered.contains("Read warning"));
+    assert!(rendered.contains("last good Work"));
     assert_eq!(rendered.matches("! ").count(), 1);
     assert!(rendered.contains("Retain me"));
     assert!(rendered.contains("Healthy now"));
@@ -2014,15 +2014,7 @@ fn project_layout_keeps_selected_content_visible() {
             assert!(rendered.contains("? help"));
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| render::draw(frame, &app)).unwrap();
-            if width >= 100 {
-                let boundary =
-                    layout::project_areas(ratatui::layout::Rect::new(0, 0, width, height))
-                        .divider
-                        .x;
-                for y in 4..height - 1 {
-                    assert_eq!(terminal.backend().buffer()[(boundary, y)].symbol(), "│");
-                }
-            }
+            assert!(!buffer_text(terminal.backend().buffer()).contains('│'));
         }
     }
     let mut compact = project_app(vec![project_source(
@@ -2134,21 +2126,28 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
             let lines = rendered.lines().collect::<Vec<_>>();
             assert!(lines[0].ends_with("Fluent"), "{rendered}");
             assert!(
-                lines[1]
+                lines[0]
                     .contains("Current 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0"),
                 "{rendered}"
             );
-            assert!(lines[2].chars().all(|c| c == '─'), "{rendered}");
-            for line in &lines[4..height as usize - 1] {
-                assert_eq!(line.matches('│').count(), 1, "{rendered}");
+            assert!(lines[1].chars().all(|c| c == '─'), "{rendered}");
+            for line in &lines[2..height as usize - 2] {
+                assert_eq!(
+                    line.matches('│').count(),
+                    usize::from(terminal_open),
+                    "{rendered}"
+                );
                 assert!(!line.contains(['┌', '┐', '└', '┘', '─']), "{rendered}");
             }
-            let divider = lines[4].chars().position(|c| c == '│').unwrap();
+            if !terminal_open {
+                continue;
+            }
+            let divider = lines[2].chars().position(|c| c == '│').unwrap();
             assert!(divider >= width as usize * 3 / 5);
-            for y in 4..height - 1 {
+            for y in 2..height - 2 {
                 assert_eq!(buffer[(divider as u16, y)].symbol(), "│");
             }
-            assert!(lines[4].contains("Tasks") && lines[4].contains("Status"));
+            assert!(lines[2].contains("Work Items") && lines[2].contains("Status"));
         }
     }
 }
@@ -2173,22 +2172,22 @@ fn project_rows_preserve_exact_status_and_selection_cues() {
     let buffer = terminal.backend().buffer();
     let rendered = buffer_text(buffer);
     let lines = rendered.lines().collect::<Vec<_>>();
-    assert!(lines[5].contains("! "), "{rendered}");
+    assert!(lines[3].contains("! "), "{rendered}");
     assert!(
-        lines[6].contains('漢')
-            && lines[6].contains('字')
-            && lines[6].contains("e\u{301}")
-            && lines[6].contains("Running"),
+        lines[4].contains('漢')
+            && lines[4].contains('字')
+            && lines[4].contains("e\u{301}")
+            && lines[4].contains("Running"),
         "{rendered}"
     );
-    assert!(lines[7].contains("Ready to land"), "{rendered}");
-    assert!(lines[8].contains("Planned"), "{rendered}");
-    assert_eq!(buffer[(0, 6)].symbol(), ">");
-    assert_ne!(buffer[(0, 6)].bg, buffer[(0, 7)].bg);
-    let status_x = lines[4].find("Status").unwrap() as u16;
-    assert_eq!(buffer[(status_x, 6)].symbol(), "R");
-    assert_eq!(buffer[(status_x, 7)].symbol(), "R");
-    assert!(lines[4].contains("Updated"));
+    assert!(lines[5].contains("Ready to land"), "{rendered}");
+    assert!(lines[6].contains("Planned"), "{rendered}");
+    assert_eq!(buffer[(0, 4)].symbol(), ">");
+    assert_ne!(buffer[(0, 4)].bg, buffer[(0, 5)].bg);
+    let status_x = lines[2].find("Status").unwrap() as u16;
+    assert_eq!(buffer[(status_x, 4)].symbol(), "R");
+    assert_eq!(buffer[(status_x, 5)].symbol(), "R");
+    assert!(lines[2].contains("Updated"));
 }
 
 #[test]
@@ -2247,7 +2246,7 @@ fn tab_views_preserve_selection_and_exact_categories() {
         assert!(
             rendered
                 .lines()
-                .nth(1)
+                .next()
                 .unwrap()
                 .contains("Current 7  Needs you 1  Running 1  Ready 2  Waiting 2  History 1")
         );
@@ -2768,7 +2767,7 @@ fn project_views_keep_large_counts_and_detail_overflow_visible() {
     assert!(
         text(&app, 60, 15)
             .lines()
-            .nth(1)
+            .next()
             .unwrap()
             .contains("History 120")
     );
@@ -2962,7 +2961,7 @@ fn refresh_health_distinguishes_loading_success_and_error() {
     assert_eq!(app.source_reads[&id].last_success, None);
     assert_eq!(app.local_read.last_success, None);
     assert!(!app.source_reads[&id].pending);
-    assert!(text(&app, 160, 30).contains("Read warning"));
+    assert!(text(&app, 160, 30).contains("last good Work"));
     std::fs::remove_file(&items).unwrap();
     let store = crate::work_model::WorkModelStore::new(root.path());
     store
@@ -3097,7 +3096,7 @@ fn remote_read_health_tracks_receipts_independently() {
             .iter()
             .any(|error| error.contains("host unavailable"))
     );
-    assert!(text(&app, 160, 30).contains("Read warning"));
+    assert!(text(&app, 160, 30).contains("last good Work"));
 }
 
 #[test]
@@ -3130,11 +3129,12 @@ fn dashboard_gutters_preserve_content_and_controls() {
         assert!(rendered.contains("work"), "{rendered}");
         assert!(rendered.contains("q quit"), "{rendered}");
         assert!(rendered.contains("→ details"), "{rendered}");
+        assert!(!rendered.contains('│'));
+        app.set_terminal(terminal_display());
+        terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
         if width >= 100 {
-            assert_eq!(areas.body.y, areas.header.bottom() + 1);
-            for x in 0..width {
-                assert_eq!(buffer[(x, areas.header.bottom())].symbol(), " ");
-            }
+            assert_eq!(areas.body.y, areas.header.bottom());
             assert_eq!(areas.list.right() + 1, areas.divider.x);
             assert_eq!(areas.divider.right() + 1, areas.detail.x);
             for y in areas.body.y..areas.body.bottom() {
@@ -3540,7 +3540,7 @@ fn project_source_headers_stay_quiet_during_polling() {
     assert_eq!(before, during);
     assert!(!during.contains("Last read UTC"));
     assert!(!during.contains(&app.snapshot.sources[0].short_id()));
-    let mut other = project_source("/two", vec![]);
+    let mut other = project_source("/two", vec![row("other", "executing")]);
     other.path = app.snapshot.sources[0].path.clone();
     app.snapshot.sources.push(other);
     let collided = text(&app, 160, 30);
@@ -3560,13 +3560,13 @@ fn project_read_progress_is_global_and_contextual() {
     let now = Instant::now();
     app.update_read_display(now);
     app.update_read_display(now + Duration::from_millis(600));
-    assert_eq!(text(&app, 160, 30).matches("Checking").count(), 1);
+    assert_eq!(text(&app, 160, 30).matches("Reading sources").count(), 1);
     finish_local_refresh(&mut local, &mut app);
     app.update_read_display(now + Duration::from_millis(850));
-    assert!(text(&app, 160, 30).contains("Checking"));
+    assert!(text(&app, 160, 30).contains("Reading sources"));
     finish_local_refresh(&mut local, &mut app);
     app.update_read_display(now + Duration::from_secs(1));
-    assert!(!text(&app, 160, 30).contains("Checking"));
+    assert!(!text(&app, 160, 30).contains("Reading sources"));
 }
 
 #[test]
@@ -3582,7 +3582,7 @@ fn project_source_read_warnings_preserve_work() {
         Some(chrono::Utc::now() - chrono::Duration::seconds(30));
     for width in [80, 160] {
         let rendered = text(&app, width, 30);
-        assert!(rendered.contains("Read warning"));
+        assert!(rendered.contains("last good Work"));
         assert!(!rendered.contains("Last read UTC"));
         assert!(rendered.contains("retained"));
     }
@@ -3590,12 +3590,12 @@ fn project_source_read_warnings_preserve_work() {
         .get_mut("/one")
         .unwrap()
         .complete(Some("full diagnostic"));
-    assert!(text(&app, 160, 30).contains("Read warning"));
+    assert!(text(&app, 160, 30).contains("last good Work"));
     assert!(text(&app, 160, 30).contains("retained"));
     app.source_reads.clear();
     app.snapshot.sources[0].stale = Some("offline: full source diagnostic".into());
     app.snapshot.errors = project_diagnostics(&app.snapshot.sources);
-    assert!(text(&app, 160, 30).contains("Read warning"));
+    assert!(text(&app, 160, 30).contains("last good Work"));
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
     assert!(text(&app, 160, 30).contains("offline: full source diagnostic"));
 }
@@ -3614,7 +3614,7 @@ fn right_arrow_opens_full_details_on_wide_dashboard() {
             }
             let before = text(&app, width, 24);
             if width >= 100 && !worker {
-                assert!(before.contains('│'));
+                assert!(!before.contains('│'));
             }
             app.handle_key(KeyCode::Right, KeyModifiers::NONE);
             let opened = text(&app, width, 24);
@@ -3698,22 +3698,22 @@ fn project_read_indicator_appears_only_for_visible_reads() {
     let mut app = loading_project_app();
     let start = Instant::now();
     app.update_read_display(start);
-    assert!(!text(&app, 80, 24).contains("Checking"));
+    assert!(!text(&app, 80, 24).contains("Reading sources"));
     app.update_read_display(start + Duration::from_millis(600));
     let first = text(&app, 80, 24);
-    assert!(first.contains("Checking"));
+    assert!(first.contains("Reading sources"));
     app.update_read_display(start + Duration::from_millis(850));
     let second = text(&app, 80, 24);
-    assert_ne!(first.lines().next(), second.lines().next());
+    assert_ne!(first.lines().nth(22), second.lines().nth(22));
     assert_eq!(
-        first.lines().next().unwrap().len(),
-        second.lines().next().unwrap().len()
+        first.lines().nth(22).unwrap().len(),
+        second.lines().nth(22).unwrap().len()
     );
     app.local_read.complete(None);
     app.update_read_display(start + Duration::from_secs(1));
     app.begin_local_read();
     app.update_read_display(start + Duration::from_secs(2));
-    assert!(!text(&app, 80, 24).contains("Checking"));
+    assert!(!text(&app, 80, 24).contains("Reading sources"));
 }
 
 #[test]
@@ -3734,10 +3734,14 @@ fn project_source_warnings_use_one_global_status() {
         .complete(Some("remote failed in detail"));
     let rendered = text(&app, 160, 30);
     assert!(
-        rendered.lines().next().unwrap().contains("2 sources"),
+        rendered
+            .lines()
+            .nth(28)
+            .unwrap()
+            .contains("1 failed · 1 overdue"),
         "{rendered}"
     );
-    assert_eq!(rendered.matches("! ").count(), 2);
+    assert_eq!(rendered.matches("! ").count(), 1);
     assert!(!rendered.contains("Last read UTC"));
     assert!(rendered.contains("retained"));
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
@@ -3815,7 +3819,7 @@ fn project_footer_shows_contextual_primary_controls() {
     let controls = app.project_controls().join("; ");
     assert!(controls.contains("Tab/⇧Tab view"));
     for secondary in [
-        "e errors",
+        "e Read issues",
         "r refresh",
         "c copy",
         "History/All",
@@ -3824,7 +3828,7 @@ fn project_footer_shows_contextual_primary_controls() {
         assert!(!controls.contains(secondary), "{controls}");
     }
     app.snapshot.errors.push("bad source".into());
-    assert!(app.project_controls().contains(&"e errors"));
+    assert!(app.project_controls().contains(&"e Read issues"));
     app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
     let help = text(&app, 60, 24);
     assert!(help.contains("text selection"), "{help}");
@@ -3918,13 +3922,9 @@ fn project_preview_and_full_details_have_distinct_hierarchy() {
     status.merge_candidate = "candidate-7".into();
     let mut app = project_app(vec![project_source("/one", vec![status])]);
     let preview = text(&app, 160, 30);
-    let pane = preview
-        .lines()
-        .filter_map(|line| line.split('│').nth(1))
-        .collect::<String>();
-    assert!(pane.contains("Next: Review candidate"), "{preview}");
-    assert!(!pane.contains("fluent merge-candidate"));
-    assert!(!pane.contains("Work Item:"));
+    assert!(!preview.contains('│'));
+    assert!(!preview.contains("fluent merge-candidate"));
+    assert!(!preview.contains("Work Item:"));
     app.handle_key(KeyCode::Right, KeyModifiers::NONE);
     let full = app.detail_values().join("\n");
     assert!(full.starts_with("Full title with more context\nState:"));
@@ -4003,4 +4003,117 @@ fn project_actions_keep_commands_readable_and_exact() {
     let full = app.detail_values().join("\n");
     assert!(full.contains("Inspect host evidence before any landing command"));
     assert!(!full.contains("2. Land candidate"));
+}
+
+#[test]
+fn project_list_hides_empty_groups_without_hiding_read_issues() {
+    let mut hidden = project_source("/hidden", vec![row("old", "complete")]);
+    hidden.project = "hidden-project".into();
+    hidden.stale = Some("hidden read failed".into());
+    let mut app = project_app(vec![
+        hidden,
+        project_source("/visible", vec![row("work", "executing")]),
+    ]);
+    app.snapshot.errors = project_diagnostics(&app.snapshot.sources);
+    app.resize(60, 15);
+    let rendered = text(&app, 60, 15);
+    assert!(!rendered.contains("hidden-project"), "{rendered}");
+    assert!(rendered.contains("1 failed"), "{rendered}");
+    assert!(rendered.contains("Read issues"), "{rendered}");
+    assert_eq!(app.scroll_bounds().list_max_scroll, 0);
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    assert!(text(&app, 60, 15).contains("hidden read failed"));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    app.filter = project::Filter::Ready;
+    let empty = text(&app, 60, 15);
+    assert!(empty.contains("No Work Items in this view"));
+    assert!(!empty.contains("same-name"));
+}
+
+#[test]
+fn project_list_uses_full_width_until_terminal_is_visible() {
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    app.snapshot.sources[0].work[0].status.title =
+        "A Work Item title that occupies more than the former narrow list could show".into();
+    app.resize(120, 24);
+    let rendered = text(&app, 120, 24);
+    assert!(
+        rendered.contains("former narrow list could show"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains('│'));
+    app.set_terminal(terminal_display());
+    let split = text(&app, 120, 24);
+    assert!(split.contains('│'));
+    assert!(split.contains("same-name"));
+    assert!(split.contains("Observe"));
+    app.resize(60, 15);
+    assert!(text(&app, 60, 15).contains("same-name"));
+}
+
+#[test]
+fn project_footer_explains_source_health_and_read_issues() {
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    app.record_source_read(&app.snapshot.sources[0].clone());
+    app.local_read.complete(None);
+    for width in [60, 160] {
+        let healthy = text(&app, width, 15);
+        assert!(
+            healthy
+                .lines()
+                .nth(13)
+                .unwrap()
+                .contains("Source reads: 1 healthy"),
+            "{healthy}"
+        );
+        assert!(healthy.lines().next().unwrap().ends_with("Fluent"));
+        assert_eq!(healthy.matches("Tab/⇧Tab view").count(), 1);
+    }
+    app.source_reads.get_mut("/one").unwrap().last_success =
+        Some(chrono::Utc::now() - chrono::Duration::seconds(30));
+    app.source_reads.get_mut("/one").unwrap().pending = true;
+    let overdue = text(&app, 60, 15);
+    assert!(
+        overdue.lines().nth(13).unwrap().contains("1 overdue"),
+        "{overdue}"
+    );
+    assert!(overdue.contains("last good"));
+    app.source_reads
+        .get_mut("/one")
+        .unwrap()
+        .complete(Some("full diagnostic"));
+    assert!(text(&app, 60, 15).contains("1 failed"));
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    let issues = text(&app, 60, 15);
+    assert!(issues.contains("full diagnostic"));
+    assert!(issues.contains("Last read UTC"));
+}
+
+#[test]
+fn project_read_activity_coexists_with_warnings_and_stays_quiet_on_poll() {
+    let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    app.record_source_read(&app.snapshot.sources[0].clone());
+    app.local_read.complete(None);
+    app.source_reads
+        .get_mut("/one")
+        .unwrap()
+        .complete(Some("offline"));
+    app.begin_local_read();
+    app.checking_sources = true;
+    let now = Instant::now();
+    app.update_read_display(now);
+    assert!(!text(&app, 60, 15).contains("Reading sources"));
+    app.update_read_display(now + Duration::from_millis(600));
+    let first = text(&app, 60, 15);
+    assert!(first.contains("Reading sources"), "{first}");
+    assert!(first.contains("1 failed"));
+    app.update_read_display(now + Duration::from_millis(850));
+    assert_ne!(first, text(&app, 60, 15));
+    app.source_reads.get_mut("/one").unwrap().complete(None);
+    app.local_read.complete(None);
+    app.update_read_display(now + Duration::from_secs(1));
+    let idle = text(&app, 60, 15);
+    app.begin_local_read();
+    app.update_read_display(now + Duration::from_secs(2));
+    assert_eq!(idle, text(&app, 60, 15));
 }

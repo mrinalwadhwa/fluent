@@ -12,6 +12,7 @@ pub struct ProjectAreas {
     pub header: ratatui::layout::Rect,
     pub body: ratatui::layout::Rect,
     pub footer: ratatui::layout::Rect,
+    pub health: ratatui::layout::Rect,
     pub list: ratatui::layout::Rect,
     pub divider: ratatui::layout::Rect,
     pub detail: ratatui::layout::Rect,
@@ -21,20 +22,13 @@ pub struct ProjectAreas {
 pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
     use ratatui::layout::{Constraint, Layout, Rect};
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Min(1),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .split(area);
-    let body = if area.width >= 100 {
-        Rect {
-            y: rows[1].y + 1,
-            height: rows[1].height.saturating_sub(1),
-            ..rows[1]
-        }
-    } else {
-        rows[1]
-    };
+    let body = rows[1];
     let (list, divider, detail) = if area.width >= 100 {
         // Give terminal output more room than the static prototype's 73% list.
         let panes = Layout::horizontal([
@@ -61,7 +55,8 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
     ProjectAreas {
         header: rows[0],
         body,
-        footer: rows[2],
+        health: rows[2],
+        footer: rows[3],
         list,
         divider,
         detail,
@@ -97,7 +92,10 @@ pub fn project_scroll_bounds(
     }
     let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
     let inner_height = areas.list.height.saturating_sub(1);
-    let groups = sources.len();
+    let groups = sources
+        .iter()
+        .filter(|source| source.work.iter().any(|work| filter.matches(work.category)))
+        .count();
     let work = sources
         .iter()
         .flat_map(|source| &source.work)

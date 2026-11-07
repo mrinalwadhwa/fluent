@@ -466,7 +466,9 @@ Each completed change improves the project and shapes how Fluent approaches futu
 
 Run `fluent dashboard` from a checkout to see its Work alongside checkouts already registered with the scheduler. Add an unregistered checkout with `--project /path/to/checkout`; repeat the option for more projects. The dashboard reads the existing registry and Work snapshots without registering or changing any project.
 
-The list groups Work by source. Each group shows project name, host, and path
+The list uses the full body width until a terminal is opened. It groups Work by
+source and omits groups with no Work Items in the selected view. Each visible
+group shows project name, host, and path
 context; the detail pane shows the full checkout path. While dashboard navigation
 owns input, press Tab/Shift+Tab to cycle forward/backward through Current, Needs you,
 Running, Ready, Waiting, and History. Current opens first and excludes only
@@ -486,10 +488,12 @@ Press `t` to open the selected worker's terminal in Observe mode. Left/Esc retur
 to the same list position. The footer shows primary controls; `?` lists secondary
 controls, including `r` to refresh and `c` to toggle text selection with the mouse.
 
-The top header keeps one source-read status on the left and Fluent on the right.
+The top line shows counted views and Fluent. Source-read health appears above
+the shortcuts at the bottom, with healthy, failed, and overdue counts.
 Initial or requested reads animate after a short delay; routine polling stays
 quiet. Failed or overdue sources retain their last snapshots with a compact `!`
-marker and a global affected-source count. Press `e` for complete diagnostics and
+marker and a global count, including hidden source groups. Read activity remains
+visible alongside warnings. Press `e` (Read issues) for complete diagnostics and
 last successful read times. Worker details use `unavailable` where Fluent has no
 recorded model, elapsed time, or provider wait. A headless worker has no terminal.
 

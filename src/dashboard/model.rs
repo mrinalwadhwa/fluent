@@ -100,7 +100,7 @@ impl App {
             self.visible_read_since = None;
             self.checking_sources = false;
         }
-        let frame = if pending && self.checking_sources && self.source_warning_count() == 0 {
+        let frame = if pending && self.checking_sources {
             let start = *self.visible_read_since.get_or_insert(now);
             let elapsed = now.saturating_duration_since(start).as_millis();
             (elapsed >= 500).then_some((elapsed / 250 % 4) as usize)
@@ -114,16 +114,39 @@ impl App {
     }
 
     pub fn source_status(&self) -> String {
-        let count = self.source_warning_count();
-        if count > 0 {
-            format!("Read warning: {count} sources · e errors")
-        } else if let Some(error) = &self.stale_error {
-            format!("{error} · e errors")
-        } else if let Some(frame) = self.read_indicator {
-            format!("Checking {}", ["|", "/", "-", "\\"][frame])
-        } else {
-            String::new()
+        let mut failed = 0;
+        let mut overdue = 0;
+        for source in &self.snapshot.sources {
+            let read = self.source_reads.get(&source.id);
+            if source.stale.is_some() || read.is_some_and(|read| read.error.is_some()) {
+                failed += 1;
+            } else if read.is_some_and(ReadHealth::warns) {
+                overdue += 1;
+            }
         }
+        failed = failed.max(usize::from(self.local_read.error.is_some()));
+        let mut parts = Vec::new();
+        if let Some(frame) = self.read_indicator {
+            parts.push(format!("{} Reading sources", ["|", "/", "-", "\\"][frame]));
+        }
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        if overdue > 0 {
+            parts.push(format!("{overdue} overdue"));
+        }
+        if failed + overdue > 0 {
+            parts.push("last good Work".into());
+        } else if self.read_indicator.is_none() {
+            parts.push(format!(
+                "Source reads: {} healthy",
+                self.snapshot.sources.len()
+            ));
+        }
+        if !self.snapshot.errors.is_empty() || self.stale_error.is_some() {
+            parts.push("read issues available".into());
+        }
+        parts.join(" · ")
     }
 
     pub fn diagnostic_snapshot(&self) -> DashboardSnapshot {
@@ -236,7 +259,7 @@ impl App {
             || self.source_warning_count() > 0
             || self.stale_error.is_some()
         {
-            controls.push("e errors");
+            controls.insert(1, "e Read issues");
         }
         // A retained attachment can still be explicitly focused from the list.
         if self.terminal.is_some() && self.terminal_fits() && self.input_owner() == InputOwner::List

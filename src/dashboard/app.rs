@@ -493,6 +493,9 @@ impl App {
                     .iter()
                     .filter(|work| self.filter.matches(work.category))
                     .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    continue;
+                }
                 line += 1;
                 for work in matching {
                     if &work.key == selected {

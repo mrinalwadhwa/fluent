@@ -86,18 +86,11 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         }
     }
     let tab_line = Line::from(tabs);
-    let hint = "Tab/⇧Tab view";
-    let mut tab_line = tab_line;
-    if tab_line.width() + hint.width() + 2 <= area.width as usize {
-        tab_line.spans.push(Span::raw("  "));
-        tab_line
-            .spans
-            .push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
-    }
     frame.render_widget(Block::default().borders(Borders::BOTTOM), areas.header);
     let status_width = areas.header.width.saturating_sub(7);
     frame.render_widget(
-        Paragraph::new(compact(&app.source_status(), status_width as usize)),
+        Paragraph::new(tab_line)
+            .scroll((0, selected_end.saturating_sub(status_width as usize) as u16)),
         Rect {
             width: status_width,
             height: 1,
@@ -105,19 +98,14 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         },
     );
     frame.render_widget(
+        Paragraph::new(compact(&app.source_status(), areas.health.width as usize)),
+        areas.health,
+    );
+    frame.render_widget(
         Paragraph::new("Fluent"),
         Rect {
             x: areas.header.right().saturating_sub(6),
             width: 6,
-            height: 1,
-            ..areas.header
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(tab_line)
-            .scroll((0, selected_end.saturating_sub(area.width as usize) as u16)),
-        Rect {
-            y: areas.header.y + 1,
             height: 1,
             ..areas.header
         },
@@ -144,7 +132,7 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             },
         );
         project_detail(frame, areas.focused_detail, app);
-    } else if area.width >= 100 {
+    } else if area.width >= 100 && app.terminal_visible() {
         frame.render_widget(
             Paragraph::new(vec![Line::from("│"); areas.divider.height as usize]),
             areas.divider,
@@ -152,7 +140,7 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         project_list(frame, areas.list, app);
         project_detail(frame, areas.detail, app);
     } else if app.pane == Pane::List {
-        project_list(frame, areas.list, app);
+        project_list(frame, areas.body, app);
     } else {
         project_detail(frame, areas.detail, app);
     }
@@ -212,7 +200,7 @@ fn project_row(
 
 fn project_list(frame: &mut Frame, area: Rect, app: &App) {
     let columns = project_row(
-        "Tasks",
+        "Work Items",
         "Status",
         "Updated UTC",
         " ",
@@ -228,6 +216,9 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .filter(|work| app.filter.matches(work.category))
             .collect::<Vec<_>>();
+        if work.is_empty() {
+            continue;
+        }
         let parent = source
             .path
             .parent()
@@ -466,10 +457,7 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
         .map(Line::from)
         .collect::<Vec<_>>();
     if app.project_mode() {
-        frame.render_widget(
-            Paragraph::new("Work Item read errors"),
-            Rect { height: 1, ..area },
-        );
+        frame.render_widget(Paragraph::new("Read issues"), Rect { height: 1, ..area });
         frame.render_widget(
             Paragraph::new(lines).scroll((app.error_scroll, 0)),
             Rect {
