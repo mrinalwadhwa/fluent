@@ -1,6 +1,6 @@
 ---
 name: dashboard-source-health-keeps-polling-quiet
-description: Keep healthy source headers stable during polling and show read activity only for explicit checks or source warnings
+description: Keep routine polls quiet while reporting source health independently of filtered Work rows
 metadata:
   type: convention
 ---
@@ -10,15 +10,17 @@ Healthy source headers keep their project and host identity stable during
 routine polls: successful receipt times and source hashes do not appear on
 every refresh. Add a source disambiguator when project names collide on the
 same host. Show initial loading and operator-requested checking once in the
-global header, including a manual request coalesced behind an in-flight read.
+global health row above the shortcuts, including a manual request coalesced
+behind an in-flight read.
 
-Keep failures and stale retained snapshots visible with a compact marker at
-the affected source and count each affected source once in the global header.
-Keep full diagnostics and last successful read times in the errors view rather
-than expanding source headers. Initial and requested reads use a delayed,
-fixed-width global indicator; routine polls remain quiet. Preserve the last
-good Work rows and keep read timestamps separate from recorded Work update
-times.
+Omit source groups with no Work in the selected view from drawing and list
+scroll bounds, while retaining their health and diagnostics. Mark visible
+affected groups compactly and count failed and overdue sources in the global
+health row even when their groups are hidden. Keep full diagnostics and last
+successful read times in Read issues rather than expanding source headers.
+Initial and requested reads use a delayed, fixed-width global indicator that
+can coexist with warnings; routine polls remain quiet. Preserve the last good
+Work rows and keep read timestamps separate from recorded Work update times.
 
 Pending reads can become stale without completing. Poll ticks must still
 request a redraw while the reader is blocked so the time-based warning becomes
