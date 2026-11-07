@@ -1416,7 +1416,6 @@ fn terminal_controls_require_an_open_view() {
         app.handle_key(KeyCode::Char(']'), KeyModifiers::NONE),
         Effect::LiteralEscape
     );
-    let selected = app.selected_key.clone();
     assert_eq!(
         app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE),
         Effect::FullscreenTerminal
@@ -1426,7 +1425,11 @@ fn terminal_controls_require_an_open_view() {
     refreshed.errors.push("attachment failed".into());
     refreshed.sources[0].work.clear();
     app.refresh(refreshed);
-    assert_eq!(app.selected_key, selected);
+    assert_eq!(app.selected_key, None);
+    assert_eq!(
+        app.terminal.as_ref().unwrap().identity,
+        "selected generation"
+    );
     assert_eq!(app.size, (150, 40));
     let filter = app.filter;
     app.handle_key(KeyCode::Char('F'), KeyModifiers::SHIFT);
@@ -1667,13 +1670,12 @@ fn expanded_work_shows_parallel_worker_roles() {
     });
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(app.project_keys().len(), 3);
-    let rendered = text(&app, 140, 24);
-    assert!(!rendered.contains("All 1"));
-    assert!(rendered.contains("architecture"));
-    assert!(rendered.contains("tests"));
-    assert!(rendered.contains("architecture") && rendered.contains("· session"));
-    assert!(rendered.contains("tests") && rendered.contains("no session"));
+    assert_eq!(app.project_keys().len(), 1);
+    assert!(text(&app, 140, 30).contains("Worker: architecture"));
+    assert!(text(&app, 140, 30).contains("Observe available"));
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    assert!(text(&app, 140, 30).contains("Worker: tests"));
+    assert!(text(&app, 140, 30).contains("Agent terminal:"));
 }
 
 #[test]
@@ -1702,7 +1704,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
     let details =
-        layout::project_detail_values(&app.snapshot.sources, app.selected_key.as_ref().unwrap());
+        layout::project_detail_values(&app.snapshot.sources, app.selected_worker.as_ref().unwrap());
     assert!(details.contains(&"Provider: Codex".into()));
     assert!(details.contains(&"Model: unavailable".into()));
     assert!(details.contains(&"Elapsed: unavailable".into()));
@@ -1739,7 +1741,7 @@ fn details_distinguish_recorded_values_from_unknowns() {
         .provider_wait_ms = 4_000;
     app.select_key(selected);
     let rendered = text(&app, 140, 30);
-    assert!(rendered.contains("· session"));
+    assert!(rendered.contains("Observe available"));
     assert!(rendered.contains("Provider: Codex"));
     assert!(rendered.contains("Model: test-model"));
     assert!(rendered.contains("Effort: high"));
@@ -1809,13 +1811,8 @@ fn loaded_worker_metadata_reaches_rows_and_details() {
     let mut app = project_app(vec![source]);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let rendered = text(&app, 140, 30);
-    assert!(rendered.lines().any(|line| line.contains("architecture")
-        && line.contains("session")
-        && line.contains("complete")));
-    assert!(rendered.lines().any(|line| line.contains("tests")
-        && line.contains("no session")
-        && line.contains("planned")));
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
+    assert!(rendered.contains("Worker: architecture"));
+    assert!(rendered.contains("State: complete"));
     let details = text(&app, 140, 30);
     assert!(details.contains("Provider: fixture"));
     assert!(details.contains("Model: review-model"));
@@ -1824,6 +1821,8 @@ fn loaded_worker_metadata_reaches_rows_and_details() {
     assert!(details.contains("Agent terminal: Observe available"));
     app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
     let unavailable = text(&app, 140, 30);
+    assert!(unavailable.contains("Worker: tests"));
+    assert!(unavailable.contains("State: planned"));
     assert!(unavailable.contains("Agent terminal:"));
     assert!(unavailable.contains("unavailable"));
 }
@@ -1868,7 +1867,7 @@ fn selection_preserves_composite_worker_identity() {
     finish_local_refresh(&mut local, &mut app);
     assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
     assert_eq!(
-        app.selected_key
+        app.selected_worker
             .as_ref()
             .unwrap()
             .execution_generation
@@ -1879,9 +1878,8 @@ fn selection_preserves_composite_worker_identity() {
     assert_eq!(app.selected_key.as_ref().unwrap().source_id, "/two");
     app.handle_key(KeyCode::Char('k'), KeyModifiers::NONE);
     assert_eq!(app.selected_key.as_ref().unwrap().task_id, None);
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::NONE);
     assert_eq!(
-        app.selected_key.as_ref().unwrap().task_id.as_deref(),
+        app.selected_worker.as_ref().unwrap().task_id.as_deref(),
         Some("write")
     );
     app.handle_key(KeyCode::Char('f'), KeyModifiers::NONE);
@@ -1896,23 +1894,18 @@ fn selection_preserves_composite_worker_identity() {
         .execution_generation = Some("generation-3".into());
     app.refresh(changed);
     assert_eq!(
-        app.selected_key
-            .as_ref()
-            .unwrap()
-            .execution_generation
-            .as_deref(),
-        Some("generation-3")
+        app.selected_worker, None,
+        "never select a replacement invocation implicitly"
     );
-    assert!(text(&app, 80, 20).contains("Writer"));
     let mut removed = app.snapshot.clone();
     removed.sources[0].work[0].workers.clear();
     removed.sources[1].work[0].status.title = "Neighbor".into();
     app.refresh(removed);
     assert_eq!(
         app.selected_key,
-        Some(project::RowKey::work("/one", "same"))
+        Some(project::RowKey::work("/two", "same"))
     );
-    assert!(text(&app, 80, 20).contains("> Neighbor"));
+    assert_eq!(app.selected_worker, None);
 }
 
 #[test]
@@ -1950,8 +1943,8 @@ fn failed_source_does_not_hide_healthy_projects() {
     assert_eq!(refreshed[0].work[0].status.title, "Retain me");
     assert!(refreshed[1].stale.is_none());
     let rendered = text(&app, 140, 24);
-    assert!(rendered.contains("STALE"));
-    assert_eq!(rendered.matches("STALE").count(), 1);
+    assert!(rendered.contains("Read warning"));
+    assert_eq!(rendered.matches("! ").count(), 1);
     assert!(rendered.contains("Retain me"));
     assert!(rendered.contains("Healthy now"));
     assert!(
@@ -2306,7 +2299,6 @@ fn project_rows_show_recorded_update_times() {
             .to_string();
     let source = project::SourceSnapshot::load(root.path()).unwrap();
     let mut app = project_app(vec![source]);
-    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let rendered = text(&app, 120, 28);
     assert!(rendered.contains("Updated UTC"), "{rendered}");
     assert!(rendered.contains(&updated), "{rendered}");
@@ -2344,16 +2336,13 @@ fn details_put_title_reason_and_action_before_identifiers() {
             app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
             app.handle_key(KeyCode::Down, KeyModifiers::NONE);
         }
-        let values = layout::project_detail_values(
-            &app.snapshot.sources,
-            app.selected_key.as_ref().unwrap(),
-        );
+        let values = app.detail_values();
         let joined = values.join("\n");
         assert!(joined.contains("Full selected title"), "{joined}");
         assert!(joined.find("Next action:").unwrap() < joined.find("Work Item:").unwrap());
         if worker {
             assert!(
-                joined.starts_with("Worker: writer\nState: executing"),
+                joined.contains("Worker: writer\nState: executing"),
                 "{joined}"
             );
         } else {
@@ -2378,15 +2367,10 @@ fn details_put_title_reason_and_action_before_identifiers() {
         } else {
             assert!(joined.contains("Host proof is missing"));
         }
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
         let rendered = text(&app, 120, 28);
-        let detail = rendered
-            .lines()
-            .skip(3)
-            .take(24)
-            .map(|line| line.split('│').nth(1).unwrap_or(""))
-            .collect::<String>();
-        assert!(detail.contains("Next action:"), "{rendered}");
-        assert!(detail.contains("Full selected title"), "{rendered}");
+        assert!(rendered.contains("Next action:"), "{rendered}");
+        assert!(rendered.contains("Full selected title"), "{rendered}");
     }
 }
 
@@ -2441,9 +2425,8 @@ fn worker_arrow_opens_details_and_t_opens_terminal() {
     assert!(app.terminal.is_none());
     app.pane = app::Pane::List;
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(app.project_keys().len(), 3);
-    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
-    let selected = app.selected_key.clone();
+    assert_eq!(app.project_keys().len(), 1);
+    let selected = app.selected_worker.clone();
     assert_eq!(
         app.handle_key(KeyCode::Right, KeyModifiers::NONE),
         Effect::None
@@ -2460,8 +2443,10 @@ fn worker_arrow_opens_details_and_t_opens_terminal() {
         app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE),
         Effect::OpenTerminal
     );
-    assert_eq!(app.selected_key, selected);
-    app.pane = app::Pane::List;
+    assert_eq!(app.selected_worker, selected);
+    app.pane = app::Pane::Detail;
+    app.show_details = true;
+    app.workers_focused = true;
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
     assert_eq!(
         app.handle_key(KeyCode::Right, KeyModifiers::NONE),
@@ -2469,7 +2454,8 @@ fn worker_arrow_opens_details_and_t_opens_terminal() {
     );
     assert!(text(&app, 120, 28).contains("headless execution"));
     assert!(app.terminal.is_none());
-    app.pane = app::Pane::List;
+    app.pane = app::Pane::Detail;
+    app.workers_focused = true;
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
     app.snapshot.sources[0].work[0].workers[0]
         .terminal
@@ -2480,7 +2466,8 @@ fn worker_arrow_opens_details_and_t_opens_terminal() {
         app.handle_key(KeyCode::Right, KeyModifiers::NONE),
         Effect::None
     );
-    app.pane = app::Pane::List;
+    app.pane = app::Pane::Detail;
+    app.workers_focused = true;
     app.handle_key(KeyCode::Up, KeyModifiers::NONE);
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(app.project_keys().len(), 1);
@@ -2526,7 +2513,6 @@ fn terminal_shortcut_observes_without_retargeting_on_selection() {
             let mut app = project_app(vec![source]);
             let mut embedded = None;
             app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
             handle_terminal_key(
                 &mut app,
                 &mut embedded,
@@ -2545,18 +2531,22 @@ fn terminal_shortcut_observes_without_retargeting_on_selection() {
             assert!(terminal.state_label().starts_with("Observe"));
             assert!(!terminal.focused());
             assert!(!terminal.has_control());
-            app.pane = app::Pane::List;
+            app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
             handle_terminal_key(
                 &mut app,
                 &mut embedded,
                 KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
                 |_| Ok(()),
             );
-            assert!(
-                embedded.is_none(),
-                "moving selection must wait for t before opening another worker"
+            assert_eq!(
+                embedded.as_ref().unwrap().descriptor(),
+                sessions[0].descriptor()
             );
-            assert!(app.terminal.is_none());
+            assert!(
+                app.terminal.is_some(),
+                "browsing retains the attached invocation"
+            );
             handle_terminal_key(
                 &mut app,
                 &mut embedded,
@@ -2817,7 +2807,7 @@ impl DashboardSession for StartupSession {
     fn next_event(&mut self, _: Duration) -> Result<Option<CEvent>> {
         use std::os::unix::fs::OpenOptionsExt;
         if self.writer.is_none() {
-            assert!(self.frames[0].contains("Loading"));
+            assert!(self.frames[0].lines().next().unwrap().ends_with("Fluent"));
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 match std::fs::OpenOptions::new()
@@ -3223,13 +3213,11 @@ fn dashboard_opens_on_current_project_work() {
     empty.refresh(next);
     assert_eq!(empty.selected_key, selected);
     assert!(text(&empty, 100, 24).contains("> running"));
-    empty.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    empty.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(empty.filter, project::Filter::History);
     assert!(empty.project_keys().is_empty());
-    empty.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-    assert_eq!(empty.filter, project::Filter::All);
     empty.handle_key(KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(empty.filter.label(), "Current");
+    assert_eq!(empty.filter, project::Filter::Current);
 }
 
 #[test]
@@ -3238,15 +3226,12 @@ fn dashboard_focus_and_footer_follow_input_owner() {
         let mut app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
         app.resize(width, height);
         let list = text(&app, width, height);
-        assert!(list.lines().next().unwrap().contains("· List"), "{list}");
+        assert!(list.lines().next().unwrap().ends_with("Fluent"), "{list}");
         assert!(list.lines().last().unwrap().contains("q quit"));
         assert!(list.lines().last().unwrap().contains("→ details"));
         app.handle_key(KeyCode::Right, KeyModifiers::NONE);
         let detail = text(&app, width, height);
-        assert!(
-            detail.lines().next().unwrap().contains("· Details"),
-            "{detail}"
-        );
+        assert!(detail.contains("Work Item details"), "{detail}");
         assert!(
             detail.lines().last().unwrap().contains("↑/↓ scroll"),
             "{detail}"
@@ -3255,7 +3240,7 @@ fn dashboard_focus_and_footer_follow_input_owner() {
             detail.lines().last().unwrap().contains("←/Esc list"),
             "{detail}"
         );
-        assert!(!detail.lines().last().unwrap().contains("Enter workers"));
+        assert!(app.project_controls().contains(&"Enter workers"));
         app.handle_key(KeyCode::Left, KeyModifiers::NONE);
         assert_eq!(app.pane, app::Pane::List);
         app.handle_key(KeyCode::Char('t'), KeyModifiers::NONE);
@@ -3458,18 +3443,12 @@ fn focused_control_only_advertises_native_return_path() {
         display.state = "Control · Ctrl-] navigate".into();
         app.set_terminal(display);
         let rendered = text(&app, width, height);
-        assert!(
-            rendered
-                .lines()
-                .next()
-                .unwrap()
-                .contains("Terminal Control")
-        );
+        assert!(rendered.contains("Control · Ctrl-] navigate"));
         assert_eq!(rendered.lines().last().unwrap().trim(), "Ctrl-] navigate");
         app.terminal.as_mut().unwrap().focused = false;
         app.terminal.as_mut().unwrap().state = "Control · navigation".into();
         let navigation = text(&app, width, height);
-        assert!(navigation.lines().next().unwrap().contains("· Details"));
+        assert!(navigation.contains("Control · navigation"));
         assert!(navigation.lines().last().unwrap().contains("q quit"));
     }
 }
@@ -3592,19 +3571,12 @@ fn right_arrow_opens_full_details_on_wide_dashboard() {
                 app.handle_key(KeyCode::Down, KeyModifiers::NONE);
             }
             let before = text(&app, width, 24);
-            if width >= 100 {
+            if width >= 100 && !worker {
                 assert!(before.contains('│'));
             }
             app.handle_key(KeyCode::Right, KeyModifiers::NONE);
             let opened = text(&app, width, 24);
-            assert!(
-                opened.contains(if worker {
-                    "Worker details"
-                } else {
-                    "Work Item details"
-                }),
-                "{opened}"
-            );
+            assert!(opened.contains("Work Item details"), "{opened}");
             assert!(!opened.contains('│'), "{opened}");
             assert!(!opened.contains("Updated UTC"));
             assert!(opened.contains("Work Item: work"));
@@ -3648,8 +3620,7 @@ fn focused_details_return_preserves_selection_and_terminal_shortcut() {
                 app.handle_key(KeyCode::Down, KeyModifiers::NONE);
             }
             assert_eq!(app.detail_scroll, app.scroll_bounds().detail_max_scroll);
-            let values =
-                layout::project_detail_values(&app.snapshot.sources, selected.as_ref().unwrap());
+            let values = app.detail_values();
             let body = layout::project_areas(ratatui::layout::Rect::new(0, 0, width, 18)).body;
             let expected = layout::project_detail_lines(&values, body.width)
                 .len()
@@ -3772,7 +3743,6 @@ fn project_list_keeps_one_row_per_work_item() {
         .map(|i| worker_row("/one", &format!("historical-{i}")))
         .collect();
     let mut app = project_app(vec![source]);
-    app.expanded.insert(app.project_keys()[0].clone());
     assert_eq!(app.project_keys().len(), 2);
     for width in [60, 160] {
         let rendered = text(&app, width, 24);
@@ -3808,4 +3778,64 @@ fn project_footer_shows_contextual_primary_controls() {
             .contains("r refresh")
     );
     assert!(!help.contains("c copy"));
+}
+
+#[test]
+fn project_details_open_summary_or_workers_and_return_to_selection() {
+    for width in [60, 160] {
+        let mut source = project_source(
+            "/one",
+            (0..30)
+                .map(|i| row(&format!("work-{i}"), "executing"))
+                .collect(),
+        );
+        source.work[29].workers = vec![worker_row("/one", "writer")];
+        let mut app = project_app(vec![source]);
+        app.resize(width, 24);
+        for _ in 0..29 {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        let key = app.selected_key.clone();
+        let scroll = app.list_scroll;
+        app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+        assert!(!app.workers_focused);
+        app.handle_key(KeyCode::Left, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.workers_focused);
+        assert!(app.selected_worker.is_some());
+        assert!(text(&app, width, 24).contains("Workers"));
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.workers_focused);
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.selected_key, key);
+        assert_eq!(app.list_scroll, scroll);
+    }
+}
+
+#[test]
+fn detail_worker_selection_preserves_exact_terminal_target() {
+    let mut source = project_source("/one", vec![row("work", "executing")]);
+    source.work[0].workers = vec![worker_row("/one", "writer"), worker_row("/one", "reviewer")];
+    let mut app = project_app(vec![source]);
+    let parent = app.selected_key.clone();
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let first = app.selected_worker.clone();
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    let second = app.selected_worker.clone();
+    assert_ne!(first, second);
+    assert_eq!(app.selected_key, parent);
+    assert!(text(&app, 160, 30).contains("headless execution"));
+    let error = open_embedded(&app).err().unwrap().to_string();
+    assert_eq!(error, "headless execution");
+    let mut refreshed = app.snapshot.clone();
+    refreshed.sources[0].work[0].workers.reverse();
+    app.refresh(refreshed.clone());
+    assert_eq!(app.selected_worker, second);
+    refreshed.sources[0].work[0]
+        .workers
+        .retain(|worker| Some(&worker.key) != second.as_ref());
+    app.refresh(refreshed);
+    assert_eq!(app.selected_worker, None);
+    assert_eq!(app.selected_key, parent);
+    assert!(open_embedded(&app).is_err());
 }

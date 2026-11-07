@@ -50,7 +50,7 @@ impl TerminalDashboard {
             app,
             embedded: None,
         };
-        for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Char('t')] {
+        for code in [KeyCode::Enter, KeyCode::Char('t')] {
             dashboard.key(CEvent::Key(crossterm::event::KeyEvent::new(
                 code,
                 KeyModifiers::NONE,
@@ -64,10 +64,12 @@ impl TerminalDashboard {
         ensure!(
             dashboard
                 .app
-                .project_keys()
+                .snapshot
+                .sources
                 .iter()
-                .filter(|key| key.task_id.is_some())
-                .count()
+                .flat_map(|source| &source.work)
+                .map(|work| work.workers.len())
+                .sum::<usize>()
                 == 2,
             "fixture must publish two selectable workers"
         );
@@ -75,7 +77,7 @@ impl TerminalDashboard {
     }
 
     pub fn terminal(&mut self) -> &mut crate::terminal_view::EmbeddedTerminal {
-        let selected = self.app.selected_key.as_ref().unwrap();
+        let selected = self.app.selected_worker.as_ref().unwrap();
         let worker = project::find_worker(&self.app.snapshot.sources, selected).unwrap();
         let terminal = self
             .embedded
@@ -164,7 +166,7 @@ pub fn navigate_and_refresh(
 ) -> Result<()> {
     let paths = vec![root.to_owned()];
     let mut app = App::new(load_project_snapshot(&paths, Vec::new()));
-    app.filter = project::Filter::All;
+    app.filter = project::Filter::Current;
     let keys = app.project_keys();
     ensure!(keys.len() >= 2, "fixture must publish two Work items");
     app.select_key(keys[0].clone());
@@ -229,7 +231,7 @@ pub fn assert_handoff_navigation() -> Result<()> {
         store.create_work_item(&crate::work_model::WorkItem::planned(id, id))?;
     }
     let mut app = App::new(load_project_snapshot(&[root.path().to_owned()], Vec::new()));
-    app.filter = project::Filter::All;
+    app.filter = project::Filter::Current;
     app.resize(100, 30);
     let original = app.selected_key.clone();
     for (index, expected) in [

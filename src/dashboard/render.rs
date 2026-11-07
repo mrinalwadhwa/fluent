@@ -1,6 +1,6 @@
 use super::{
     layout,
-    model::{App, InputOwner, Pane},
+    model::{App, Pane},
     snapshot::DashboardRow,
 };
 use ratatui::{
@@ -291,11 +291,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    let values = app
-        .selected_key
-        .as_ref()
-        .map(|key| layout::project_detail_values(&app.snapshot.sources, key))
-        .unwrap_or_else(|| vec!["No Work Item selected".into()]);
+    let values = app.detail_values();
     frame.render_widget(
         Paragraph::new(
             layout::project_detail_lines(&values, area.width)

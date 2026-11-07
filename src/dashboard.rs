@@ -229,7 +229,6 @@ fn handle_terminal_key(
     key: crossterm::event::KeyEvent,
     fullscreen: impl FnOnce(&mut crate::terminal_view::EmbeddedTerminal) -> Result<()>,
 ) -> Effect {
-    let previous = app.selected_key.clone();
     let effect = app.handle_key(key.code, key.modifiers);
     if let Some(terminal) = embedded.as_mut() {
         let result = match effect {
@@ -244,13 +243,17 @@ fn handle_terminal_key(
         }
         app.set_terminal(terminal.display());
     }
-    if embedded.is_some() && previous != app.selected_key {
-        // Navigation releases the old attachment; opening another worker is explicit.
-        embedded.take();
-        app.terminal = None;
-    }
     if effect == Effect::OpenTerminal {
-        let same_view = previous == app.selected_key && embedded.is_some();
+        let same_view = app
+            .selected_worker
+            .as_ref()
+            .and_then(|key| project::find_worker(&app.snapshot.sources, key))
+            .and_then(|worker| worker.terminal.as_ref())
+            .is_some_and(|descriptor| {
+                embedded
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.descriptor() == descriptor)
+            });
         let result = if same_view {
             embedded.as_mut().unwrap().reconnect()
         } else {
@@ -264,6 +267,7 @@ fn handle_terminal_key(
                 app.set_terminal(embedded.as_ref().unwrap().display());
             }
             Err(error) => {
+                app.show_details = true;
                 app.refresh_failed(format!("Terminal unavailable: {error:#}"));
             }
         }
@@ -315,15 +319,23 @@ fn resize_terminal(
 fn open_embedded(app: &App) -> Result<crate::terminal_view::EmbeddedTerminal> {
     use anyhow::Context;
     let key = app
-        .selected_key
+        .selected_worker
         .as_ref()
-        .context("select an agent worker, then press t")?;
+        .context("open Workers in details and select an agent worker, then press t")?;
     let worker = project::find_worker(&app.snapshot.sources, key)
-        .context("expand the Work Item and select an agent worker")?;
+        .context("open Workers in details and select an agent worker")?;
     let descriptor = worker
         .terminal
         .as_ref()
         .context(worker.unavailable_reason.clone())?;
+    anyhow::ensure!(
+        descriptor.can_observe,
+        "{}",
+        descriptor
+            .unavailable_reason
+            .as_deref()
+            .unwrap_or(&worker.unavailable_reason)
+    );
     let source = app
         .snapshot
         .sources

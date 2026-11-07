@@ -2253,7 +2253,11 @@ identifiers in details; worker details lead with role and state. The shared deta
 projection wraps display cells for drawing and scroll bounds.
 `model::InputOwner` and the shared control projection identify List, Details,
 or native terminal input; the footer keeps only whole controls that fit. Right
-focuses details, while `t` explicitly opens the selected worker in Observe.
+focuses the summary; Enter opens Workers. Within details Enter switches focus,
+Up/Down selects workers, and PageUp/PageDown scrolls. `model::App` stores the
+selected worker separately from the Work Item row and reconciles its complete
+key on refresh. `t` explicitly opens that worker in Observe. Browsing worker
+selection never retargets a retained attachment.
 Inspecting details can hide a retained terminal attachment without retargeting
 its invocation or changing its Control lease. The existing hidden-terminal rule
 releases native input focus. `terminal_view::Display::focused` carries ephemeral
@@ -2264,7 +2268,7 @@ From 60–99 columns the console shows one pane; below 60 columns or 15 rows it
 shows a resize message. Selection uses source, Work Item, Task, and invocation
 identity, so refresh preserves a visible selection across reordering. The old
 status-grouped snapshot remains an internal compatibility path.
-The console draws an empty project view with `Loading local Work` before
+The console draws a usable empty project view before
 requesting its initial local discovery and Work read. The event loop requests
 later read-only snapshots every two seconds or on request and draws when visible
 state changes. `dashboard.rs` runs initial and recurring local reads in one
@@ -2310,7 +2314,7 @@ wider. Right opens a labeled Work Item or worker details view across the full
 body at every supported width. Shared layout geometry reserves a label row and
 computes wrapping and scroll limits from the remaining full-width area. Terminal
 viewport sizing and mouse routing retain their separate split-pane geometry.
-Tab/Shift+Tab cycle views, Enter toggles workers, and Left/Esc returns to the list
+Tab/Shift+Tab cycle views, Enter opens Workers in details, and Left/Esc returns to the list
 with the same selection and scroll. Moving selection drops the old terminal
 attachment; opening another invocation requires an explicit `t`. The `e` control
 opens a scrollable view of all Work read errors, including errors that overflow

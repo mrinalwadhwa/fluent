@@ -548,6 +548,9 @@ fn terminal_control_input_pty_child() {
     dashboard
         .key(key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
+    dashboard
+        .key(key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
     dashboard.key(read_pty_input("navigation")).unwrap();
     dashboard
         .key(key(KeyCode::Char('t'), KeyModifiers::NONE))

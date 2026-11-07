@@ -146,14 +146,15 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 
 ### B5
 
-WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL expand or collapse its
-workers. WHEN Right is pressed on a Work Item or worker, THE SYSTEM SHALL focus
-a labeled details view that occupies the full body at every supported width.
-Left or Esc SHALL return to the list with the same selection and list scroll.
-Details SHALL scroll within their visible width and height.
-WHEN t is pressed on a worker, open only that worker's available
-session in Observe or show why it is unavailable, without starting or retargeting
-Work. Help and footer controls SHALL describe these explicit bindings.
+WHEN Enter is pressed on a Work Item, THE SYSTEM SHALL open details at Workers.
+WHEN Right is pressed, THE SYSTEM SHALL open details at the summary. The list
+SHALL contain one selectable row per Work Item and no worker rows. In details,
+Enter SHALL switch summary/worker focus, Up/Down SHALL select workers while
+Workers has focus, and PageUp/PageDown SHALL scroll. Left or Esc SHALL return to
+the same Work Item and list position. A removed worker SHALL clear only worker
+selection; refresh SHALL preserve a still-present worker's exact identity.
+WHEN t is pressed on a selected worker, open only that worker's available session
+in Observe or explain its unavailability, without starting or retargeting Work.
 Test: src/dashboard/tests.rs (right_arrow_opens_full_details_on_wide_dashboard)
 Test: src/dashboard/tests.rs (focused_details_return_preserves_selection_and_terminal_shortcut)
 Test: src/dashboard/tests.rs (worker_arrow_opens_details_and_t_opens_terminal)
@@ -169,8 +170,9 @@ Test: src/dashboard/tests.rs (narrow_view_keeps_filter_and_return_keys_distinct)
 
 ### B7
 
-WHEN input focus changes, THE SYSTEM SHALL identify List, Details, or terminal
-Control input and advertise the controls that apply to that state. WHEN an
+WHEN input focus changes, THE SYSTEM SHALL advertise primary controls for the
+list, summary, Workers, errors, or terminal context and put secondary shortcuts in
+help. Advertise errors only when present, and describe `c` as text selection. WHEN an
 agent terminal is displayed, keep its Observe, Control, or navigation-with-Control
 state visible. Keep quit and navigation return controls visible at minimum size;
 focused terminal Control SHALL advertise Ctrl-] to return to navigation. Advertise

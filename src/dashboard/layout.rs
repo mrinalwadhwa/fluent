@@ -1,6 +1,5 @@
 use super::project::{self, Filter, RowKey, SourceSnapshot};
 use super::snapshot::{DashboardRow, DashboardSnapshot};
-use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
 
 pub fn terminal_size(size: (u16, u16), identity: &str) -> (u16, u16) {
@@ -89,7 +88,6 @@ pub struct ScrollBounds {
 pub fn project_scroll_bounds(
     sources: &[SourceSnapshot],
     filter: Filter,
-    _expanded: &BTreeSet<RowKey>,
     selected_key: Option<&RowKey>,
     size: (u16, u16),
     focused_details: bool,

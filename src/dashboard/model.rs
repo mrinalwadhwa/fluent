@@ -4,7 +4,7 @@ use super::{
     project::{self, Filter, RowKey},
     snapshot::DashboardSnapshot,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
@@ -55,8 +55,9 @@ pub struct App {
     pub(super) all_work: bool,
     pub(super) selected: Option<String>,
     pub selected_key: Option<RowKey>,
+    pub selected_worker: Option<RowKey>,
+    pub workers_focused: bool,
     pub filter: Filter,
-    pub expanded: BTreeSet<RowKey>,
     pub(super) selected_index: usize,
     pub pane: Pane,
     pub help: bool,
@@ -116,6 +117,8 @@ impl App {
         let count = self.source_warning_count();
         if count > 0 {
             format!("Read warning: {count} sources · e errors")
+        } else if let Some(error) = &self.stale_error {
+            format!("{error} · e errors")
         } else if let Some(frame) = self.read_indicator {
             format!("Checking {}", ["|", "/", "-", "\\"][frame])
         } else {
@@ -186,14 +189,14 @@ impl App {
 
     pub fn project_navigation_controls(&self) -> Vec<&'static str> {
         let mut controls = if self.input_owner() == InputOwner::List {
-            let mut controls = vec!["q quit", "↑/↓ select", "→ details", "? help"];
-            if self
-                .selected_key
-                .as_ref()
-                .is_some_and(|key| key.task_id.is_some())
-            {
-                controls.push("t terminal");
-            } else if self.selected_key.is_some() {
+            let mut controls = vec![
+                "q quit",
+                "↑/↓ select",
+                "Tab/⇧Tab view",
+                "→ details",
+                "? help",
+            ];
+            if self.selected_key.is_some() {
                 controls.push("Enter workers");
             }
             controls
@@ -208,19 +211,26 @@ impl App {
                 "o Observe",
             ]
         } else {
-            let mut controls = vec!["q quit", "? help", "←/Esc list", "↑/↓ scroll"];
-            if self
-                .selected_key
-                .as_ref()
-                .is_some_and(|key| key.task_id.is_some())
-            {
+            let mut controls = vec![
+                "q quit",
+                "←/Esc list",
+                "? help",
+                if self.workers_focused {
+                    "↑/↓ workers"
+                } else {
+                    "↑/↓ scroll"
+                },
+                if self.workers_focused {
+                    "Enter summary"
+                } else {
+                    "Enter workers"
+                },
+            ];
+            if self.selected_worker.is_some() {
                 controls.push("t terminal");
             }
             controls
         };
-        if self.input_owner() == InputOwner::List {
-            controls.push("Tab/⇧Tab view");
-        }
         if !self.snapshot.errors.is_empty()
             || self.source_warning_count() > 0
             || self.stale_error.is_some()
@@ -244,6 +254,44 @@ impl App {
         controls
     }
 
+    pub fn detail_values(&self) -> Vec<String> {
+        let Some(key) = self.selected_key.as_ref() else {
+            return vec!["No Work Item selected".into()];
+        };
+        let mut values = layout::project_detail_values(&self.snapshot.sources, key);
+        if let Some((_, work)) = project::find_work(&self.snapshot.sources, key) {
+            values.push(format!(
+                "Workers ({}){}",
+                work.workers.len(),
+                if self.workers_focused {
+                    " · ↑/↓ select · Enter summary"
+                } else {
+                    " · Enter workers"
+                }
+            ));
+            if let Some(worker_key) = &self.selected_worker {
+                if let Some(index) = work
+                    .workers
+                    .iter()
+                    .position(|worker| &worker.key == worker_key)
+                {
+                    values.push(format!(
+                        "Selected worker {}/{}",
+                        index + 1,
+                        work.workers.len()
+                    ));
+                    values.extend(layout::project_detail_values(
+                        &self.snapshot.sources,
+                        worker_key,
+                    ));
+                }
+            } else if self.workers_focused {
+                values.push("No worker selected".into());
+            }
+        }
+        values
+    }
+
     pub fn selected_id(&self) -> Option<&str> {
         self.selected_key
             .as_ref()
@@ -254,21 +302,33 @@ impl App {
         self.snapshot.project_view
     }
     pub fn project_keys(&self) -> Vec<RowKey> {
-        project::visible_keys(&self.snapshot.sources, self.filter, &self.expanded)
+        project::visible_keys(&self.snapshot.sources, self.filter)
     }
     pub fn all_work(&self) -> bool {
         self.all_work
     }
     pub fn scroll_bounds(&self) -> layout::ScrollBounds {
         if self.project_mode() {
-            layout::project_scroll_bounds(
+            let mut bounds = layout::project_scroll_bounds(
                 &self.snapshot.sources,
                 self.filter,
-                &self.expanded,
                 self.selected_key.as_ref(),
                 self.size,
                 self.pane == Pane::Detail && self.show_details,
-            )
+            );
+            let areas =
+                layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
+            let detail = if self.pane == Pane::Detail && self.show_details {
+                areas.focused_detail
+            } else {
+                areas.detail
+            };
+            bounds.detail_max_scroll =
+                layout::project_detail_lines(&self.detail_values(), detail.width)
+                    .len()
+                    .saturating_sub(detail.height as usize)
+                    .min(u16::MAX as usize) as u16;
+            bounds
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
         }

@@ -4,7 +4,6 @@ pub(super) use super::model::{App, Pane};
 use super::project::{self, Filter, RowKey};
 use super::snapshot::DashboardSnapshot;
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -30,8 +29,9 @@ impl App {
             all_work: false,
             selected: None,
             selected_key: None,
+            selected_worker: None,
+            workers_focused: false,
             filter: Filter::Current,
-            expanded: BTreeSet::new(),
             selected_index: 0,
             pane: Pane::List,
             help: false,
@@ -92,7 +92,15 @@ impl App {
     }
 
     pub fn select_key(&mut self, key: RowKey) {
-        self.selected_key = Some(key);
+        if key.task_id.is_some() {
+            self.selected_key =
+                project::find_work(&self.snapshot.sources, &key).map(|(_, work)| work.key.clone());
+            self.selected_worker = Some(key);
+            self.workers_focused = true;
+        } else {
+            self.selected_key = Some(key);
+            self.selected_worker = None;
+        }
         self.reconcile_project_selection();
         self.keep_selection_visible();
         self.dirty = true;
@@ -125,6 +133,13 @@ impl App {
     }
     pub fn resize(&mut self, width: u16, height: u16) {
         self.size = (width, height);
+        if self
+            .selected_worker
+            .as_ref()
+            .is_some_and(|key| project::find_worker(&self.snapshot.sources, key).is_none())
+        {
+            self.selected_worker = None;
+        }
         self.clamp_scrolls();
         if self.project_mode() && self.terminal.is_none() {
             self.keep_selection_visible();
@@ -140,16 +155,20 @@ impl App {
         self.snapshot = snapshot;
         self.stale_error = None;
         if self.project_mode() {
-            // Keep the displayed generation selected until explicit navigation,
-            // even when a source refresh removes its row.
-            if self.terminal.is_none() {
-                if self.selected_key.is_none() {
-                    self.selected_key = project::initial_key(&self.snapshot.sources, self.filter);
-                }
-                self.reconcile_project_selection();
+            // Reconcile navigation independently of the retained terminal identity.
+            if self.selected_key.is_none() {
+                self.selected_key = project::initial_key(&self.snapshot.sources, self.filter);
             }
+            self.reconcile_project_selection();
         } else {
             self.reconcile_selection(prior);
+        }
+        if self
+            .selected_worker
+            .as_ref()
+            .is_some_and(|key| project::find_worker(&self.snapshot.sources, key).is_none())
+        {
+            self.selected_worker = None;
         }
         self.clamp_scrolls();
         if self.project_mode() && self.terminal.is_none() {
@@ -191,6 +210,51 @@ impl App {
             self.selected_key = keys.get(self.selected_index).cloned();
         }
     }
+    fn focus_workers(&mut self) {
+        self.workers_focused = true;
+        if self.selected_worker.is_none() {
+            self.selected_worker = self
+                .selected_key
+                .as_ref()
+                .and_then(|key| project::find_work(&self.snapshot.sources, key))
+                .and_then(|(_, work)| work.workers.first())
+                .map(|worker| worker.key.clone());
+        }
+        self.scroll_to_workers();
+    }
+
+    fn scroll_to_workers(&mut self) {
+        let areas =
+            layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
+        let lines = layout::project_detail_lines(&self.detail_values(), areas.focused_detail.width);
+        self.detail_scroll = lines
+            .iter()
+            .position(|line| line.starts_with("Workers ("))
+            .unwrap_or(0)
+            .min(self.scroll_bounds().detail_max_scroll as usize)
+            as u16;
+    }
+
+    fn move_worker(&mut self, delta: isize) {
+        if let Some((_, work)) = self
+            .selected_key
+            .as_ref()
+            .and_then(|key| project::find_work(&self.snapshot.sources, key))
+        {
+            let current = self
+                .selected_worker
+                .as_ref()
+                .and_then(|key| work.workers.iter().position(|worker| &worker.key == key))
+                .unwrap_or(0);
+            let index = (current as isize + delta)
+                .clamp(0, work.workers.len().saturating_sub(1) as isize)
+                as usize;
+            self.selected_worker = work.workers.get(index).map(|worker| worker.key.clone());
+        }
+        self.scroll_to_workers();
+        self.dirty = true;
+    }
+
     fn move_selection(&mut self, delta: isize) {
         if self.project_mode() {
             let keys = self.project_keys();
@@ -200,6 +264,7 @@ impl App {
             self.selected_index =
                 (self.selected_index as isize + delta).clamp(0, keys.len() as isize - 1) as usize;
             self.selected_key = keys.get(self.selected_index).cloned();
+            self.selected_worker = None;
             self.keep_selection_visible();
             self.detail_scroll = 0;
             self.dirty = true;
@@ -285,6 +350,7 @@ impl App {
             KeyCode::Right if self.project_mode() => {
                 self.pane = Pane::Detail;
                 self.show_details = true;
+                self.workers_focused = false;
                 self.detail_scroll = 0;
                 self.dirty = true;
             }
@@ -296,6 +362,8 @@ impl App {
                     self.filter.next()
                 };
                 self.reconcile_project_selection();
+                self.selected_worker = None;
+                self.keep_selection_visible();
                 self.detail_scroll = 0;
                 self.clamp_scrolls();
                 self.dirty = true;
@@ -306,17 +374,14 @@ impl App {
                 self.clamp_scrolls();
                 self.dirty = true;
             }
-            KeyCode::Enter if self.project_mode() && self.input_owner() == InputOwner::List => {
-                if let Some(selected) = self.selected_key.clone() {
-                    if selected.task_id.is_none() {
-                        if !self.expanded.remove(&selected) {
-                            self.expanded.insert(selected);
-                        }
-                        self.reconcile_project_selection();
-                        self.clamp_scrolls();
-                    } else if self.size.0 < 100 {
-                        self.pane = Pane::Detail;
-                    }
+            KeyCode::Enter if self.project_mode() => {
+                if self.input_owner() == InputOwner::List || !self.workers_focused {
+                    self.pane = Pane::Detail;
+                    self.show_details = true;
+                    self.focus_workers();
+                } else {
+                    self.workers_focused = false;
+                    self.detail_scroll = 0;
                 }
                 self.dirty = true;
             }
@@ -343,6 +408,35 @@ impl App {
             }
             KeyCode::Esc if self.pane == Pane::Detail => {
                 self.pane = Pane::List;
+                self.dirty = true;
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if self.project_mode()
+                    && self.pane == Pane::Detail
+                    && self.show_details
+                    && self.workers_focused =>
+            {
+                self.move_worker(-1)
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.project_mode()
+                    && self.pane == Pane::Detail
+                    && self.show_details
+                    && self.workers_focused =>
+            {
+                self.move_worker(1)
+            }
+            KeyCode::PageUp if self.project_mode() && self.pane == Pane::Detail => {
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_sub(self.size.1.saturating_sub(6).max(1));
+                self.dirty = true;
+            }
+            KeyCode::PageDown if self.project_mode() && self.pane == Pane::Detail => {
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_add(self.size.1.saturating_sub(6).max(1))
+                    .min(self.scroll_bounds().detail_max_scroll);
                 self.dirty = true;
             }
             KeyCode::Up | KeyCode::Char('k') if self.input_owner() == InputOwner::List => {

@@ -123,7 +123,7 @@ def journey(binary, project, mode):
             os.write(master, b"\x1b")
             wait_for("Tasks", "Visible Work", absent=("?/Esc close help",))
         elif mode == "refresh":
-            wait_for("> ▸ Visible Work", "Second Work")
+            wait_for("> Visible Work", "Second Work")
             # Opening the writer proves that a real snapshot read has reached
             # the FIFO. Retain it without bytes or EOF until navigation ends.
             os.mkfifo(refresh_gate)
@@ -138,7 +138,7 @@ def journey(binary, project, mode):
                     assert time.monotonic() < deadline, "local snapshot read did not start"
                     time.sleep(0.01)
             os.write(master, b"j")
-            wait_for("> ▸ Second Work")
+            wait_for("> Second Work")
             os.write(master, b"\t")
             wait_for("No Work Items in this view", absent=("Second Work",))
             os.write(master, b"\x1b[Z")

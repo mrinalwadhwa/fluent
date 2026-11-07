@@ -475,14 +475,19 @@ Planned. Rows keep their exact categories. Header
 counts reflect published Work Item lifecycle and queue state. The list shows one
 row per Work Item; workers remain in details.
 
-Use Up/Down to select a row and Enter on a Work Item to expand or collapse its
-Attempt's worker Tasks. Press Right to focus the selected Work Item or worker's
-full details, including its condition and next action. Press `t` to open a worker
-terminal in Observe mode. The header identifies which pane owns input, and the
-footer shows its controls. Left/Esc returns to the list; Tab/Shift+Tab still changes
-views in either pane while navigation owns input. Press `e` for read errors, `r` to refresh, and `?` for help.
+Use Up/Down to select a Work Item. Right opens its full summary; Enter opens
+Workers in details. In details, Enter switches between summary and worker focus,
+Up/Down selects workers while Workers has focus, and PageUp/PageDown scrolls.
+Press `t` to open the selected worker's terminal in Observe mode. Left/Esc returns
+to the same list position. The footer shows primary controls; `?` lists secondary
+controls, including `r` to refresh and `c` to toggle text selection with the mouse.
 
-A source that fails a later refresh keeps its last snapshot with a `STALE` label while other projects continue updating. Worker details use `unavailable` where Fluent has no recorded model, elapsed time, or provider wait. Agent-terminal availability comes from managed terminal descriptors; a headless worker has no interactive terminal.
+The top header keeps one source-read status on the left and Fluent on the right.
+Initial or requested reads animate after a short delay; routine polling stays
+quiet. Failed or overdue sources retain their last snapshots with a compact `!`
+marker and a global affected-source count. Press `e` for complete diagnostics and
+last successful read times. Worker details use `unavailable` where Fluent has no
+recorded model, elapsed time, or provider wait. A headless worker has no terminal.
 
 Select a native agent worker and press `t` to observe its terminal. Wide dashboards keep the project list beside the terminal. Press `i` for Control, `Ctrl-]` for dashboard navigation, `o` to observe, and `f` for full-screen attachment. Press `Ctrl-]` then `]` to send the reserved chord literally. See [terminal source builds](docs/terminal-build.md) to prepare the pinned native library before compiling Fluent.
 

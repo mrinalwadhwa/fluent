@@ -388,7 +388,6 @@ pub fn refresh_sources(previous: &[SourceSnapshot], paths: &[PathBuf]) -> Vec<So
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
     Current,
-    All,
     NeedsYou,
     Running,
     Ready,
@@ -407,7 +406,6 @@ impl Filter {
     pub fn matches(self, category: Category) -> bool {
         match self {
             Self::Current => category != Category::History,
-            Self::All => true,
             Self::NeedsYou => category == Category::NeedsYou,
             Self::Running => category == Category::Running,
             Self::Ready => matches!(category, Category::Ready | Category::ReadyToLand),
@@ -418,7 +416,6 @@ impl Filter {
     pub fn label(self) -> &'static str {
         match self {
             Self::Current => "Current",
-            Self::All => "All",
             Self::NeedsYou => "Needs you",
             Self::Running => "Running",
             Self::Ready => "Ready",
@@ -445,11 +442,7 @@ impl Filter {
     }
 }
 
-pub fn visible_keys(
-    sources: &[SourceSnapshot],
-    filter: Filter,
-    _expanded: &BTreeSet<RowKey>,
-) -> Vec<RowKey> {
+pub fn visible_keys(sources: &[SourceSnapshot], filter: Filter) -> Vec<RowKey> {
     let mut keys = Vec::new();
     for source in sources {
         for work in &source.work {
