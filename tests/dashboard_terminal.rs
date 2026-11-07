@@ -1414,8 +1414,12 @@ fn action_command_pty_child() {
         ("interrupt", "interrupted"),
         ("spawn-error", "run Fluent command"),
     ] {
-        let result =
-            fluent::dashboard::test_support::run_action_fixture(&mut terminal, root.path(), mode);
+        let result = fluent::dashboard::test_support::run_action_fixture(
+            &mut terminal,
+            root.path(),
+            mode,
+            None,
+        );
         let actual = result.unwrap_or_else(|error| error.to_string());
         assert!(actual.contains(expected), "{mode}: {actual}");
         assert!(terminal.is_active());

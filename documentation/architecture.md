@@ -2274,7 +2274,13 @@ Merge Candidate identity and commit. It consumes each confirmation once and
 runs the current executable with argument vectors and a canonical working
 directory, without a shell. The existing terminal handoff restores modes around
 foreground output. The child receives terminal interrupts while the dashboard
-survives to restore its UI. After any result, pre-command local reads are discarded
+survives to restore its UI. While waiting for the child, the handoff refreshes
+the retained terminal transport on the same thread without reading dashboard
+input or drawing. SSH heartbeats, bounded output consumption, display credits,
+and invocation checks continue on the existing connection, preserving Observe
+or Control. The pipe-based SSH helper owns a separate process group so a local
+command's terminal interrupt cannot drop the retained remote lease. After any
+result, pre-command local reads are discarded
 and a new read supplies Work state; the process result never predicts that state.
 Command feedback stays in a fixed row above scrollable details, with complete
 messages retained under Last action. Worker scrolling therefore cannot hide the

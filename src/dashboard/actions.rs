@@ -332,7 +332,7 @@ impl std::fmt::Display for CommandOutcome {
     }
 }
 impl LocalCommand {
-    pub fn run(&self) -> Result<CommandOutcome> {
+    pub fn run(&self, mut maintain: impl FnMut()) -> Result<CommandOutcome> {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
         // The child shares the foreground process group. Ignore terminal interrupts
         // only in the dashboard; reset them in the child before exec so Ctrl-C
@@ -352,7 +352,16 @@ impl LocalCommand {
                 Ok(())
             });
         }
-        let status = command.status().context("run Fluent command")?;
+        let mut child = command.spawn().context("run Fluent command")?;
+        let status = loop {
+            // Keep retained attachments alive without reading dashboard input
+            // or drawing over the foreground command's inherited terminal.
+            maintain();
+            if let Some(status) = child.try_wait().context("wait for Fluent command")? {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        };
         Ok(if status.success() {
             CommandOutcome::Succeeded
         } else if status.signal().is_some() || matches!(status.code(), Some(130 | 143)) {

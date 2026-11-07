@@ -65,7 +65,11 @@ trait DashboardSession {
     fn draw(&mut self, app: &App) -> Result<()>;
     fn next_event(&mut self, timeout: Duration) -> Result<Option<CEvent>>;
     fn fullscreen(&mut self, terminal: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()>;
-    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome>;
+    fn run_action(
+        &mut self,
+        command: &actions::LocalCommand,
+        retained: Option<&mut crate::terminal_view::EmbeddedTerminal>,
+    ) -> Result<actions::CommandOutcome>;
     fn is_active(&self) -> bool;
     fn set_mouse_enabled(&mut self, enabled: bool) -> Result<()>;
 }
@@ -93,8 +97,20 @@ impl DashboardSession for DashboardTerminal {
                 Ok(())
             })
     }
-    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
-        self.handoff(|| command.run())
+    fn run_action(
+        &mut self,
+        command: &actions::LocalCommand,
+        mut retained: Option<&mut crate::terminal_view::EmbeddedTerminal>,
+    ) -> Result<actions::CommandOutcome> {
+        self.handoff(|| {
+            command.run(|| {
+                if let Some(terminal) = retained.as_deref_mut() {
+                    // Refresh the existing transport, including output credit
+                    // and liveness. Reconnecting would discard retained Control.
+                    terminal.refresh();
+                }
+            })
+        })
     }
     fn is_active(&self) -> bool {
         self.is_active()
@@ -177,7 +193,7 @@ fn run_project_loop(
                             prepare_dashboard_action(app);
                         }
                         if matches!(effect, Effect::PrepareAction | Effect::RunAction) {
-                            run_dashboard_action(session, app, local)?;
+                            run_dashboard_action(session, app, local, embedded.as_mut())?;
                             if !session.is_active() {
                                 break;
                             }
@@ -272,13 +288,17 @@ fn run_dashboard_action(
     session: &mut impl DashboardSession,
     app: &mut App,
     local: &mut LocalRefresh,
+    mut retained: Option<&mut crate::terminal_view::EmbeddedTerminal>,
 ) -> Result<()> {
     let Some(action) = app.take_confirmed_action() else {
         return Ok(());
     };
     let result = validate_action_selection(app, &action.action)
         .and_then(|()| action.validate())
-        .and_then(|command| session.run_action(&command));
+        .and_then(|command| session.run_action(&command, retained.as_deref_mut()));
+    if let Some(terminal) = retained {
+        app.set_terminal(terminal.display());
+    }
     app.action_menu = None;
     app.pending_action = None;
     app.detail_scroll = 0;

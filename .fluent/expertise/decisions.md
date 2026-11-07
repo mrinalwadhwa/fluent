@@ -74,10 +74,14 @@ the ordering and cancellation/retry regressions.
 Embedded/full-screen handoff keeps the remote helper and its Control lease
 alive while repaint replaces only the tmux display client. Reconnect creates a
 new Observe attachment to the saved invocation. Preserve this distinction to
-avoid a Control reacquisition gap. See the
+avoid a Control reacquisition gap. Foreground local actions also keep servicing
+the retained transport while waiting for their child; pausing dashboard drawing
+must not pause heartbeats or display credit. The pipe-based helper uses its own
+process group to survive interrupts sent to the local action. See the
 [attachment lifetime](learnings/terminal-control-lease-follows-client.md), the
 [dashboard architecture](../../documentation/architecture.md), and
-`ssh_fullscreen_handoff_keeps_remote_control_lease` in
+`ssh_fullscreen_handoff_keeps_remote_control_lease` and
+`dashboard_action_preserves_retained_ssh_attachment` in
 [`tests/ssh_agent_sources.rs`](../../tests/ssh_agent_sources.rs).
 
 ---

@@ -2802,7 +2802,11 @@ impl DashboardSession for StartupSession {
     fn fullscreen(&mut self, _: &mut crate::terminal_view::EmbeddedTerminal) -> Result<()> {
         unreachable!()
     }
-    fn run_action(&mut self, _: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
+    fn run_action(
+        &mut self,
+        _: &actions::LocalCommand,
+        _: Option<&mut crate::terminal_view::EmbeddedTerminal>,
+    ) -> Result<actions::CommandOutcome> {
         unreachable!()
     }
     fn is_active(&self) -> bool {
@@ -4462,7 +4466,11 @@ impl DashboardSession for ActionSession {
     fn set_mouse_enabled(&mut self, _: bool) -> Result<()> {
         Ok(())
     }
-    fn run_action(&mut self, command: &actions::LocalCommand) -> Result<actions::CommandOutcome> {
+    fn run_action(
+        &mut self,
+        command: &actions::LocalCommand,
+        _: Option<&mut crate::terminal_view::EmbeddedTerminal>,
+    ) -> Result<actions::CommandOutcome> {
         self.calls.push(command.clone());
         self.outcome.take().unwrap()
     }
@@ -4505,7 +4513,7 @@ fn project_action_handoff_returns_and_reports_exact_result() {
                 outcome: Some(outcome),
             };
             let mut local = LocalRefresh::new(root.path(), &[], root.path());
-            run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+            run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
             let returned = text(&app, size.0, size.1);
             assert!(
                 returned.lines().nth(2).unwrap().contains(message),
@@ -4544,7 +4552,7 @@ fn project_action_handoff_returns_and_reports_exact_result() {
                 app.snapshot.sources[0].work[0].status, before,
                 "never optimistically change Work state"
             );
-            run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+            run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
             assert_eq!(session.calls.len(), 1, "confirmation is consumed once");
             finish_local_refresh(&mut local, &mut app);
             assert!(text(&app, size.0, size.1).contains(message));
@@ -4580,7 +4588,7 @@ fn project_action_rechecks_selection_and_source_before_launch() {
             outcome: None,
         };
         let mut local = LocalRefresh::new(root.path(), &[], root.path());
-        run_dashboard_action(&mut session, &mut app, &mut local).unwrap();
+        run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
         let returned = text(&app, 60, 15);
         assert!(
             returned
@@ -4724,8 +4732,9 @@ fn project_action_event_loop_consumes_confirmation_once() {
         fn run_action(
             &mut self,
             command: &actions::LocalCommand,
+            retained: Option<&mut crate::terminal_view::EmbeddedTerminal>,
         ) -> Result<actions::CommandOutcome> {
-            self.runner.run_action(command)
+            self.runner.run_action(command, retained)
         }
     }
     let (root, mut app) = action_fixture();

@@ -49,6 +49,9 @@ if pid == 0:
     test = "fullscreen_attachment_pty_child" if attachment_mode else "fullscreen_pty_child"
     if mode == "action":
         test = "action_command_pty_child"
+    elif mode == "action-ssh":
+        test = "ssh_dashboard_action_pty_child"
+        os.environ["FLUENT_SSH_ACTION_MODE"] = sys.argv[3]
     if input_mode:
         variable, test = (
             ("FLUENT_INPUT_PTY_CHILD", "terminal_input_pty_child")
@@ -59,7 +62,7 @@ if pid == 0:
     os.execv(sys.argv[1], [sys.argv[1], "--exact", test, "--nocapture"])
 
 output = bytearray()
-deadline = time.monotonic() + (35 if nested else 15)
+deadline = time.monotonic() + (35 if nested or mode == "action-ssh" else 15)
 status = None
 eof = False
 resized = False
@@ -83,7 +86,7 @@ try:
             output.extend(chunk)
             if len(phases) == 1 and chunk:
                 phases.append({"phase": "first-output", "elapsed": time.monotonic() - started})
-            if mode == "action" and "interrupt" not in sent and b"ACTION_INTERRUPT_READY" in output:
+            if mode in ("action", "action-ssh") and "interrupt" not in sent and b"ACTION_INTERRUPT_READY" in output:
                 assert os.write(master, b"\x03") == 1
                 sent.add("interrupt")
             if input_mode:
@@ -129,6 +132,12 @@ try:
         assert resized, "the full-screen client never attached"
         assert detached, "the full-screen client never requested native detach"
         print(f"ok: full-screen {attachment_mode} resize and detach")
+    elif mode == "action-ssh":
+        assert sent == {"interrupt"}, output
+        assert b"SSH_FULLSCREEN_PAINT" not in output, "retained output leaked into command output"
+        for sequence in (b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[?2004h", b"\x1b[?2004l"):
+            assert output.count(sequence) == 3, output
+        print(f"ok: retained SSH {sys.argv[3]} across long local action and interruption")
     elif mode == "action":
         assert b"ACTION_LIVE_OUTPUT" in output, output
         assert sent == {"interrupt"}, output

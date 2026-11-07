@@ -55,6 +55,11 @@ full-screen input use the same Crossterm reader, so a view change cannot split
 an incomplete input sequence between competing readers. Full-screen keys use
 the native client's keyboard modes and retain native detach.
 
+Running a local dashboard action keeps a retained SSH attachment connected in
+its existing Observe or Control mode. Its transport continues heartbeats and
+bounded display updates while dashboard navigation pauses. Interrupting the
+local command with Ctrl-C leaves the remote attachment and lease intact.
+
 If a Control request acquires the lease but cannot start its terminal client,
 Fluent releases that newly acquired lease and reports the setup error. Reopening
 a client preserves an existing lease; switching to Observe releases it even

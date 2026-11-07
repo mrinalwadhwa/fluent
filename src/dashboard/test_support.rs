@@ -271,6 +271,7 @@ pub fn run_action_fixture(
     terminal: &mut DashboardTerminal,
     checkout: &Path,
     mode: &str,
+    retained: Option<&mut crate::terminal_view::EmbeddedTerminal>,
 ) -> Result<String> {
     let (executable, args) = match mode {
         "success" => (
@@ -280,6 +281,7 @@ pub fn run_action_fixture(
                 "test -t 0 && printf 'ACTION_LIVE_OUTPUT\\n'".into(),
             ],
         ),
+        "delayed" => (PathBuf::from("/bin/sleep"), vec!["11".into()]),
         "failure" => (PathBuf::from("/bin/sh"), vec!["-c".into(), "exit 7".into()]),
         "interrupt" => (
             PathBuf::from("/bin/sh"),
@@ -298,6 +300,7 @@ pub fn run_action_fixture(
             args,
             checkout: checkout.to_owned(),
         },
+        retained,
     )
     .map(|outcome| outcome.to_string())
 }

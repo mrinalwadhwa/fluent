@@ -5,6 +5,7 @@ use crate::terminal_sessions::TerminalDescriptor;
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
 
@@ -61,7 +62,11 @@ impl RemoteConnection {
             ],
             true,
         )?;
+        // This pipe-based transport is retained while a local foreground
+        // command owns the terminal. Its Ctrl-C must not kill the SSH helper
+        // and implicitly release the remote Control lease.
         let mut child = command
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

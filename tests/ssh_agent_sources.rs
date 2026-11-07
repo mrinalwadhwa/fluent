@@ -601,6 +601,129 @@ fn ssh_native_detach_discards_inflight_input_and_retains_control() {
 }
 
 #[test]
+fn dashboard_action_preserves_retained_ssh_attachment() {
+    for mode in ["control", "observe"] {
+        let output = std::process::Command::new("python3")
+            .args(["-I", "-S", "tests/fixtures/dashboard-terminal-handoff.py"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["action-ssh", mode])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn ssh_dashboard_action_pty_child() {
+    let Ok(mode) = std::env::var("FLUENT_SSH_ACTION_MODE") else {
+        return;
+    };
+    use fluent::dashboard::test_support::run_action_fixture;
+    use fluent::dashboard_sources::RemoteConnection;
+    use fluent::terminal_view::EmbeddedTerminal;
+    let root = tempfile::tempdir().unwrap();
+    let mut owner = terminal_fixture(TerminalIdentity::fixture(
+        root.path(),
+        "remote",
+        "attempt-1",
+        "writer",
+    ))
+    .unwrap();
+    let descriptor = owner.descriptor().clone();
+    // More than a display-credit window must drain without drawing into the
+    // foreground command's terminal or retaining unbounded output.
+    let ssh = fake_ssh_with_output(root.path(), 2000);
+    let config = source(root.path());
+    let mut view =
+        EmbeddedTerminal::observe_ssh(ssh.clone(), config.clone(), descriptor.clone(), 60, 10)
+            .unwrap();
+    if mode == "control" {
+        view.acquire_control().unwrap();
+    }
+    view.release_focus(); // Browsing local Work hides the retained attachment.
+    let helper_pid: i32 = std::fs::read_to_string(root.path().join("ssh.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let probe_control = || {
+        let mut competitor =
+            RemoteConnection::open(ssh.clone(), config.clone(), descriptor.clone(), 40, 8).unwrap();
+        if mode == "control" {
+            assert!(
+                competitor
+                    .acquire_control()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("occupied")
+            );
+        } else {
+            competitor.acquire_control().unwrap();
+            competitor.observe_only().unwrap();
+        }
+    };
+    let mut terminal = fluent::dashboard::terminal::DashboardTerminal::open().unwrap();
+    terminal.set_mouse_enabled(false).unwrap();
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let probe = scope.spawn(|| {
+            // Probe during the local command, after the remote peer's eight
+            // second timeout. A stale has_control flag cannot satisfy this.
+            std::thread::sleep(std::time::Duration::from_secs(9));
+            probe_control();
+        });
+        assert_eq!(
+            run_action_fixture(&mut terminal, root.path(), "delayed", Some(&mut view)).unwrap(),
+            "succeeded"
+        );
+        probe.join().unwrap();
+    });
+    assert!(started.elapsed() >= std::time::Duration::from_secs(11));
+    for interrupted in [false, true] {
+        if interrupted {
+            assert_eq!(
+                run_action_fixture(&mut terminal, root.path(), "interrupt", Some(&mut view))
+                    .unwrap(),
+                "interrupted"
+            );
+        }
+        view.refresh();
+        assert_eq!(view.descriptor(), &descriptor);
+        assert_eq!(
+            unsafe { libc::kill(helper_pid, 0) },
+            0,
+            "original SSH helper exited"
+        );
+        assert!(
+            !view.state_label().contains("Disconnected"),
+            "{}",
+            view.state_label()
+        );
+        assert_eq!(view.has_control(), mode == "control");
+        assert!(!view.focused());
+        assert!(
+            view.frame().text().contains("SSH_FULLSCREEN_PAINT_END"),
+            "{}",
+            view.frame().text()
+        );
+        assert_eq!(view.frame().cells.len(), 60 * 10);
+        probe_control();
+        assert!(owner.is_live().unwrap());
+        assert!(terminal.is_active());
+        assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+        assert!(!terminal.mouse_enabled());
+    }
+    drop(view);
+    owner.stop().unwrap();
+    drop(terminal);
+    assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
+}
+
+#[test]
 fn ssh_fullscreen_handoff_keeps_remote_control_lease() {
     for mode in ["observe", "control"] {
         let output = std::process::Command::new("python3")
