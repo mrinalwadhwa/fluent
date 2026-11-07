@@ -5249,3 +5249,76 @@ fn project_overview_preserves_context_scroll_during_elapsed_refresh() {
         assert!(text(&app, size.0, size.1).contains("> review-01"));
     }
 }
+
+#[test]
+fn project_detail_keeps_work_identity_after_filter_transition() {
+    for worker_page in [false, true] {
+        let (root, mut app) = action_fixture();
+        app.resize(60, 15);
+        let original = app.selected_key.clone();
+        prepare_dashboard_action(&mut app);
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        let mut session = ActionSession {
+            size: (60, 15),
+            calls: vec![],
+            outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
+        };
+        let mut local = LocalRefresh::new(root.path(), &[], root.path());
+        run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
+        finish_local_refresh(&mut local, &mut app);
+        let source_id = app.snapshot.sources[0].id.clone();
+        app.snapshot.sources[0].work[0].workers = vec![worker_row(&source_id, "writer")];
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        if worker_page {
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.page, super::model::ProjectPage::Worker);
+        }
+        let worker = app.selected_worker.clone();
+        let mut snapshot = app.snapshot.clone();
+        snapshot.sources[0].work[0].category = project::Category::History;
+        snapshot.sources[0].work[0].status.action = "merged".into();
+        snapshot.sources[0]
+            .work
+            .extend(project_source(&source_id, vec![row("other", "task-ready")]).work);
+        snapshot.sources.push(project_source(
+            "/another-source",
+            vec![row("work", "task-ready")],
+        ));
+        app.refresh(snapshot.clone());
+        assert_eq!(app.selected_key, original);
+        assert_eq!(app.selected_worker, worker);
+        assert!(text(&app, 60, 15).contains("succeeded"));
+        assert!(
+            text(&app, 60, 15)
+                .lines()
+                .next()
+                .unwrap()
+                .contains("History")
+        );
+        // Deleting the exact item must never retarget its result to another source.
+        snapshot.sources[0].work.remove(0);
+        app.refresh(snapshot.clone());
+        snapshot.sources[0].work[0].updated_at = Some("2026-11-07T10:00:00Z".into());
+        app.refresh(snapshot);
+        assert!(app.selected_key.is_none());
+        assert!(
+            app.detail_values()
+                .join("\n")
+                .contains(&root.path().canonicalize().unwrap().display().to_string())
+        );
+        if worker_page {
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        }
+        app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.selected_id(), Some("other"));
+        let list = text(&app, 60, 15);
+        assert!(
+            list.lines().any(|line| line.starts_with("> other")),
+            "{list}"
+        );
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!text(&app, 60, 15).contains("succeeded"));
+        assert!(!app.detail_values().join("\n").contains("succeeded"));
+    }
+}

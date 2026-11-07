@@ -66,6 +66,7 @@ pub struct App {
     pub page: ProjectPage,
     pub action_menu: Option<super::actions::ActionMenu>,
     pub action_message: Option<String>,
+    pub action_message_key: Option<RowKey>,
     pub pending_action: Option<super::actions::PreparedAction>,
     pub confirmed_action: Option<super::actions::PreparedAction>,
     pub filter: Filter,
@@ -306,13 +307,24 @@ impl App {
         self.detail_rows().into_iter().map(|row| row.text).collect()
     }
 
+    /// Keep feedback on its original Work Item, including after that item disappears.
+    pub fn action_feedback(&self) -> Option<&str> {
+        self.action_message.as_deref().filter(|_| {
+            self.action_message_key.as_ref().is_none_or(|key| {
+                self.selected_key
+                    .as_ref()
+                    .is_none_or(|selected| selected == key)
+            })
+        })
+    }
+
     pub fn detail_rows(&self) -> Vec<layout::DetailRow> {
         let mut values = self.page_rows();
-        if let Some(message) = &self.action_message {
+        if let Some(message) = self.action_feedback() {
             // Keep full diagnostics reachable after the pinned one-line report.
             values.push(layout::DetailRow::text(""));
             values.push(layout::DetailRow::heading("Last action"));
-            values.push(layout::DetailRow::text(message.clone()));
+            values.push(layout::DetailRow::text(message));
         }
         values
     }
@@ -377,7 +389,7 @@ impl App {
                 &self.detail_rows(),
                 self.size,
                 self.pane == Pane::Detail && self.show_details,
-                self.action_message.is_some() && !self.terminal_visible(),
+                self.action_feedback().is_some() && !self.terminal_visible(),
             )
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)

@@ -93,7 +93,16 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             "Projects › Work Item overview"
         };
         selected_end = 0;
-        Line::from(label)
+        let outside = app
+            .selected_key
+            .as_ref()
+            .and_then(|key| super::project::find_work(&app.snapshot.sources, key))
+            .filter(|(_, work)| !app.filter.matches(work.category));
+        Line::from(if let Some((_, work)) = outside {
+            format!("{} · {}", work.category.label(), label)
+        } else {
+            label.to_owned()
+        })
     } else {
         Line::from(tabs)
     };
@@ -283,7 +292,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    if let Some(message) = &app.action_message {
+    if let Some(message) = app.action_feedback() {
         let summary = layout::compact(&message.replace('\n', " "), usize::from(area.width));
         frame.render_widget(
             Paragraph::new(summary).style(Style::default().add_modifier(Modifier::BOLD)),
@@ -293,7 +302,7 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
             },
         );
     }
-    let area = layout::project_detail_content(area, app.action_message.is_some());
+    let area = layout::project_detail_content(area, app.action_feedback().is_some());
     let lines = layout::wrap_detail_rows(&app.detail_rows(), area.width)
         .into_iter()
         .map(|row| {

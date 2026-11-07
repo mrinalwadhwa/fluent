@@ -251,6 +251,7 @@ fn prepare_dashboard_action(app: &mut App) {
     })();
     app.detail_scroll = 0;
     app.action_message = None;
+    app.action_message_key = app.selected_key.clone();
     match result {
         Ok(action) if action.action.kind == actions::ActionKind::CandidateShow => {
             app.confirmed_action = Some(action)
@@ -302,7 +303,11 @@ fn run_dashboard_action(
     app.action_menu = None;
     app.pending_action = None;
     app.detail_scroll = 0;
-    app.action_message = Some(match result {
+    app.action_message_key = Some(project::RowKey::work(
+        &action.action.source_id,
+        &action.action.work_item_id,
+    ));
+    let message = match result {
         Ok(outcome) => format!(
             "{} {outcome}; refreshing source",
             action.action.kind.label()
@@ -311,7 +316,12 @@ fn run_dashboard_action(
             "{} did not complete: {error:#}; refreshing source",
             action.action.kind.label()
         ),
-    });
+    };
+    app.action_message = Some(format!(
+        "{message}\nWork Item: {}\nSource: {}",
+        action.action.work_item_id,
+        action.action.context()
+    ));
     app.dirty = true;
     if !session.is_active() {
         return Ok(());

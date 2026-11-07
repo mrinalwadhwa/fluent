@@ -36,6 +36,7 @@ impl App {
             page: ProjectPage::List,
             action_menu: None,
             action_message: None,
+            action_message_key: None,
             pending_action: None,
             confirmed_action: None,
             filter: Filter::Current,
@@ -169,7 +170,7 @@ impl App {
         self.stale_error = None;
         if self.project_mode() {
             // Reconcile navigation independently of the retained terminal identity.
-            if self.selected_key.is_none() {
+            if self.selected_key.is_none() && self.page == ProjectPage::List {
                 self.selected_key = project::initial_key(&self.snapshot.sources, self.filter);
             }
             self.reconcile_project_selection();
@@ -216,6 +217,18 @@ impl App {
         }
     }
     fn reconcile_project_selection(&mut self) {
+        // Open pages resolve their exact identity independently of list membership.
+        if self.page != ProjectPage::List {
+            if self
+                .selected_key
+                .as_ref()
+                .is_some_and(|key| project::find_work(&self.snapshot.sources, key).is_none())
+            {
+                self.selected_key = None;
+                self.selected_worker = None;
+            }
+            return;
+        }
         let keys = self.project_keys();
         if let Some(index) = self
             .selected_key
@@ -260,7 +273,7 @@ impl App {
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
         let content =
-            layout::project_detail_content(areas.focused_detail, self.action_message.is_some());
+            layout::project_detail_content(areas.focused_detail, self.action_feedback().is_some());
         let lines = layout::wrap_detail_rows(&self.detail_rows(), content.width);
         let line = lines
             .iter()
@@ -339,6 +352,7 @@ impl App {
                 }
                 KeyCode::Char('n') | KeyCode::Esc | KeyCode::Left => {
                     self.pending_action = None;
+                    self.action_message_key = self.selected_key.clone();
                     self.action_message = Some("Canceled; no command was launched".into());
                     self.detail_scroll = 0;
                 }
@@ -536,6 +550,8 @@ impl App {
                     self.page = ProjectPage::List;
                     self.pane = Pane::List;
                     self.show_details = false;
+                    self.reconcile_project_selection();
+                    self.keep_selection_visible();
                 }
                 self.dirty = true;
             }
@@ -608,6 +624,7 @@ impl App {
     }
 
     pub fn complete_copy(&mut self, result: anyhow::Result<()>) -> Effect {
+        self.action_message_key = self.selected_key.clone();
         self.dirty = true;
         match result {
             Ok(()) => {
@@ -634,6 +651,9 @@ impl App {
             let Some(selected) = &self.selected_key else {
                 return;
             };
+            if !self.project_keys().contains(selected) {
+                return;
+            }
             let mut line = 0u16;
             for source in &self.snapshot.sources {
                 let matching = source
