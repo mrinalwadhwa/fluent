@@ -19,6 +19,15 @@ and retained Control as separate state. `terminal_view::Display` reports focus
 and retained Control for presentation; these flags never grant input authority.
 Runtime attachment methods still validate the live lease and exact invocation.
 
+Keep the selected Work Item, selected worker, and retained terminal invocation
+independent. Refresh reconciles a worker by its complete source, Work Item,
+Attempt, Task, and execution-generation key; a replacement generation clears
+worker selection rather than silently selecting the new invocation. Browsing
+does not retarget or release the retained attachment. An explicit terminal open
+replaces it only after the exact selected target opens successfully; a failed
+open preserves the previous attachment and Control lease. Reopening the same
+descriptor reconnects the retained view.
+
 Help and the footer share the model's control projection. Advertise literal
 terminal input only when the attachment retains Control, including when
 navigation owns focus; an Observe attachment alone cannot send it. While native
