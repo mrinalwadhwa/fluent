@@ -23,6 +23,8 @@ impl App {
             snapshot,
             local_read: Default::default(),
             checking_sources: false,
+            visible_read_since: None,
+            read_indicator: None,
             source_reads: Default::default(),
             configuration_errors: Vec::new(),
             all_work: false,
@@ -56,7 +58,7 @@ impl App {
     }
 
     pub fn begin_local_read(&mut self) {
-        self.checking_sources =
+        self.checking_sources |=
             self.local_read.last_success.is_none() && self.local_read.error.is_none();
         self.local_read.pending = true;
         for source in &self.snapshot.sources {
@@ -264,7 +266,7 @@ impl App {
                 .saturating_sub(if self.project_mode() { 5 } else { 6 })
                 .max(1);
             let max = if self.project_mode() {
-                layout::project_error_max_scroll(&self.snapshot, self.size)
+                layout::project_error_max_scroll(&self.diagnostic_snapshot(), self.size)
             } else {
                 layout::error_max_scroll(&self.snapshot, self.size)
             };
@@ -449,7 +451,7 @@ impl App {
 
     fn clamp_scrolls(&mut self) {
         self.error_scroll = self.error_scroll.min(if self.project_mode() {
-            layout::project_error_max_scroll(&self.snapshot, self.size)
+            layout::project_error_max_scroll(&self.diagnostic_snapshot(), self.size)
         } else {
             layout::error_max_scroll(&self.snapshot, self.size)
         });

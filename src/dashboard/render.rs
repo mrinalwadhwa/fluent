@@ -94,34 +94,21 @@ fn draw_projects(frame: &mut Frame, app: &App) {
             .spans
             .push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
     }
-    let position = match app.input_owner() {
-        InputOwner::List => " · List",
-        InputOwner::Details => " · Details · ←/Esc list",
-        InputOwner::Terminal => " · Terminal Control",
-    };
-    let mut title = format!("Fluent work{position}");
-    if !app.terminal_visible() {
-        if let Some(display) = &app.terminal {
-            title.push_str(&format!(" · {}", display.state));
-        }
-    }
-    if app.local_read.pending && app.checking_sources {
-        title.push_str(if app.local_read.last_success.is_some() {
-            " · Checking local Work"
-        } else {
-            " · Loading local Work"
-        });
-    }
-    if let Some(error) = &app.local_read.error {
-        title.push_str(&format!(" · Local read failed: {error}"));
-    }
-    if let Some(error) = &app.stale_error {
-        title.push_str(&format!(" · {error}"));
-    }
     frame.render_widget(Block::default().borders(Borders::BOTTOM), areas.header);
+    let status_width = areas.header.width.saturating_sub(7);
     frame.render_widget(
-        Paragraph::new(title),
+        Paragraph::new(compact(&app.source_status(), status_width as usize)),
         Rect {
+            width: status_width,
+            height: 1,
+            ..areas.header
+        },
+    );
+    frame.render_widget(
+        Paragraph::new("Fluent"),
+        Rect {
+            x: areas.header.right().saturating_sub(6),
+            width: 6,
             height: 1,
             ..areas.header
         },
@@ -178,27 +165,6 @@ fn draw_projects(frame: &mut Frame, app: &App) {
         }
     }
     frame.render_widget(Paragraph::new(footer), areas.footer);
-}
-
-fn read_health_label(health: &super::model::ReadHealth) -> String {
-    let observed = health
-        .last_success
-        .map(|time| format!("Last read UTC {}", time.format("%m-%d %H:%M:%S")));
-    let state = if health.error.is_some() {
-        "Read failed"
-    } else if health.pending
-        && health.last_success.is_some_and(|time| {
-            chrono::Utc::now().signed_duration_since(time) >= chrono::Duration::seconds(10)
-        })
-    {
-        "STALE · Checking"
-    } else {
-        return String::new();
-    };
-    match (state, observed) {
-        (state, Some(observed)) => format!("{state} · {observed}"),
-        (state, None) => state.to_owned(),
-    }
 }
 
 fn updated_time(value: Option<&str>) -> String {
@@ -271,22 +237,12 @@ fn project_list(frame: &mut Frame, area: Rect, app: &App) {
         let collision = app.snapshot.sources.iter().any(|other| {
             other.id != source.id && other.project == source.project && other.host == source.host
         });
-        let health = app.source_reads.get(&source.id);
-        let warning = health.map(read_health_label).unwrap_or_default();
+        let warning = app.source_warning(source);
         // Keep warnings first so a long source name cannot hide them.
         lines.push(Line::styled(
             format!(
-                "{}{}{}{parent}/{} · {}",
-                if source.stale.is_some() {
-                    "STALE · "
-                } else {
-                    ""
-                },
-                if warning.is_empty() {
-                    String::new()
-                } else {
-                    format!("{warning} · ")
-                },
+                "{}{}{parent}/{} · {}",
+                if warning { "! " } else { "" },
                 if collision {
                     format!("{} · ", source.short_id())
                 } else {
@@ -497,7 +453,8 @@ fn errors(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         area.width
     };
-    let lines = layout::error_lines(&app.snapshot, width)
+    let snapshot = app.diagnostic_snapshot();
+    let lines = layout::error_lines(&snapshot, width)
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();

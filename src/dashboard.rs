@@ -130,6 +130,7 @@ fn run_project_loop(
                 app.set_terminal(terminal.display());
             }
         }
+        app.update_read_display(Instant::now());
         if app.take_dirty() {
             session.draw(app)?;
         }

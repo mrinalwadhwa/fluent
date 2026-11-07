@@ -89,14 +89,16 @@ Test: src/dashboard/tests.rs (project_source_headers_stay_quiet_during_polling)
 ### B2
 
 WHEN the dashboard first loads or the operator refreshes, THE SYSTEM SHALL show
-one global loading or checking indicator. Routine polling SHALL hide it.
+one delayed, fixed-width checking indicator on the left of the top header line,
+with Fluent at its right edge. Routine polling SHALL hide the indicator.
 Test: src/dashboard/tests.rs (project_read_progress_is_global_and_contextual)
 
 ### B3
 
 IF a source fails, becomes stale, or its pending read retains a snapshot older
 than ten seconds, THEN THE SYSTEM SHALL mark that source, preserve its last good
-Work Items, and keep its last successful observation or full diagnostic available.
+Work Items, and keep its last successful observation and full diagnostic in errors.
+The header SHALL count affected sources once; source rows SHALL use a compact `!` marker.
 Source read times SHALL remain separate from Work update times.
 Test: src/dashboard/tests.rs (project_source_read_warnings_preserve_work)
 Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_error)

@@ -2041,7 +2041,7 @@ fn project_layout_keeps_selected_content_visible() {
     compact.resize(60, 15);
     compact.handle_key(KeyCode::Right, KeyModifiers::NONE);
     let rendered = text(&compact, 60, 15);
-    assert!(rendered.contains("Details"));
+    assert!(rendered.contains("Work Item details"));
     assert!(rendered.contains("Work Item: 長"));
     compact.resize(100, 18);
     let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
@@ -2139,7 +2139,7 @@ fn project_layout_uses_header_rule_and_one_pane_divider() {
             let buffer = terminal.backend().buffer();
             let rendered = buffer_text(buffer);
             let lines = rendered.lines().collect::<Vec<_>>();
-            assert!(lines[0].starts_with("Fluent work"), "{rendered}");
+            assert!(lines[0].ends_with("Fluent"), "{rendered}");
             assert!(
                 lines[1].contains(
                     "Current 1  Needs you 0  Running 1  Ready 0  Waiting 0  History 0  All 1"
@@ -2181,7 +2181,7 @@ fn project_rows_preserve_exact_status_and_selection_cues() {
     let buffer = terminal.backend().buffer();
     let rendered = buffer_text(buffer);
     let lines = rendered.lines().collect::<Vec<_>>();
-    assert!(lines[5].contains("STALE"), "{rendered}");
+    assert!(lines[5].contains("! "), "{rendered}");
     assert!(
         lines[6].contains('漢')
             && lines[6].contains('字')
@@ -2946,7 +2946,13 @@ fn refresh_health_distinguishes_loading_success_and_error() {
         .into_owned();
     let mut app = loading_project_app();
     let mut local = LocalRefresh::new(root.path(), &[], root.path());
-    assert!(text(&app, 160, 30).contains("Loading local Work"));
+    assert!(
+        text(&app, 160, 30)
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("Fluent")
+    );
     // A collection failure on the first read must not masquerade as empty success.
     let items = root.path().join(".fluent/work/items");
     std::fs::create_dir_all(items.parent().unwrap()).unwrap();
@@ -2957,7 +2963,7 @@ fn refresh_health_distinguishes_loading_success_and_error() {
     assert_eq!(app.source_reads[&id].last_success, None);
     assert_eq!(app.local_read.last_success, None);
     assert!(!app.source_reads[&id].pending);
-    assert!(text(&app, 160, 30).contains("Read failed"));
+    assert!(text(&app, 160, 30).contains("Read warning"));
     std::fs::remove_file(&items).unwrap();
     let store = crate::work_model::WorkModelStore::new(root.path());
     store
@@ -3059,7 +3065,7 @@ fn remote_read_health_tracks_receipts_independently() {
             .iter()
             .any(|error| error.contains("host unavailable"))
     );
-    assert!(text(&app, 160, 30).contains("Read failed"));
+    assert!(text(&app, 160, 30).contains("Read warning"));
 }
 
 #[test]
@@ -3524,29 +3530,22 @@ fn project_source_headers_stay_quiet_during_polling() {
 
 #[test]
 fn project_read_progress_is_global_and_contextual() {
-    let mut app = loading_project_app();
-    assert_eq!(text(&app, 160, 30).matches("Loading local Work").count(), 1);
     let root = tempfile::tempdir().unwrap();
+    let mut app = project_app(vec![]);
+    app.local_read.complete(None);
     let mut local = LocalRefresh::new(root.path(), &[], root.path());
     local.request(&mut app, false);
-    finish_local_refresh(&mut local, &mut app);
-    local.request(&mut app, false);
-    assert!(!text(&app, 160, 30).contains("Refreshing"));
-    local.request(&mut app, true); // Coalesce a manual request during a routine read.
-    assert_eq!(
-        text(&app, 160, 30).matches("Checking local Work").count(),
-        1
-    );
-    finish_local_refresh(&mut local, &mut app);
-    assert!(text(&app, 160, 30).contains("Checking local Work"));
-    finish_local_refresh(&mut local, &mut app);
-    assert!(!text(&app, 160, 30).contains("Checking local Work"));
     local.request(&mut app, true);
-    assert_eq!(
-        text(&app, 160, 30).matches("Checking local Work").count(),
-        1
-    );
+    let now = Instant::now();
+    app.update_read_display(now);
+    app.update_read_display(now + Duration::from_millis(600));
+    assert_eq!(text(&app, 160, 30).matches("Checking").count(), 1);
     finish_local_refresh(&mut local, &mut app);
+    app.update_read_display(now + Duration::from_millis(850));
+    assert!(text(&app, 160, 30).contains("Checking"));
+    finish_local_refresh(&mut local, &mut app);
+    app.update_read_display(now + Duration::from_secs(1));
+    assert!(!text(&app, 160, 30).contains("Checking"));
 }
 
 #[test]
@@ -3562,20 +3561,20 @@ fn project_source_read_warnings_preserve_work() {
         Some(chrono::Utc::now() - chrono::Duration::seconds(30));
     for width in [80, 160] {
         let rendered = text(&app, width, 30);
-        assert!(rendered.contains("STALE"));
-        assert!(rendered.contains("Last read UTC"));
+        assert!(rendered.contains("Read warning"));
+        assert!(!rendered.contains("Last read UTC"));
         assert!(rendered.contains("retained"));
     }
     app.source_reads
         .get_mut("/one")
         .unwrap()
         .complete(Some("full diagnostic"));
-    assert!(text(&app, 160, 30).contains("Read failed"));
+    assert!(text(&app, 160, 30).contains("Read warning"));
     assert!(text(&app, 160, 30).contains("retained"));
     app.source_reads.clear();
     app.snapshot.sources[0].stale = Some("offline: full source diagnostic".into());
     app.snapshot.errors = project_diagnostics(&app.snapshot.sources);
-    assert!(text(&app, 160, 30).contains("STALE"));
+    assert!(text(&app, 160, 30).contains("Read warning"));
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
     assert!(text(&app, 160, 30).contains("offline: full source diagnostic"));
 }
@@ -3667,4 +3666,69 @@ fn focused_details_return_preserves_selection_and_terminal_shortcut() {
             assert!(text(&app, width, 18).contains("Updated UTC"));
         }
     }
+}
+
+#[test]
+fn project_header_uses_one_read_status_and_right_brand() {
+    let app = project_app(vec![project_source("/one", vec![row("work", "executing")])]);
+    for width in [60, 160] {
+        let rendered = text(&app, width, 24);
+        let header = rendered.lines().next().unwrap();
+        assert!(header.ends_with("Fluent"), "{rendered}");
+        assert!(!header.contains("List"));
+        assert!(!rendered.contains("Last read UTC"));
+    }
+}
+
+#[test]
+fn project_read_indicator_appears_only_for_visible_reads() {
+    let mut app = loading_project_app();
+    let start = Instant::now();
+    app.update_read_display(start);
+    assert!(!text(&app, 80, 24).contains("Checking"));
+    app.update_read_display(start + Duration::from_millis(600));
+    let first = text(&app, 80, 24);
+    assert!(first.contains("Checking"));
+    app.update_read_display(start + Duration::from_millis(850));
+    let second = text(&app, 80, 24);
+    assert_ne!(first.lines().next(), second.lines().next());
+    assert_eq!(
+        first.lines().next().unwrap().len(),
+        second.lines().next().unwrap().len()
+    );
+    app.local_read.complete(None);
+    app.update_read_display(start + Duration::from_secs(1));
+    app.begin_local_read();
+    app.update_read_display(start + Duration::from_secs(2));
+    assert!(!text(&app, 80, 24).contains("Checking"));
+}
+
+#[test]
+fn project_source_warnings_use_one_global_status() {
+    let mut app = project_app(vec![
+        project_source("/one", vec![row("retained", "executing")]),
+        project_source("/two", vec![]),
+    ]);
+    for source in app.snapshot.sources.clone() {
+        app.record_source_read(&source);
+    }
+    app.source_reads.get_mut("/one").unwrap().last_success =
+        Some(chrono::Utc::now() - chrono::Duration::seconds(30));
+    app.source_reads.get_mut("/one").unwrap().pending = true;
+    app.source_reads
+        .get_mut("/two")
+        .unwrap()
+        .complete(Some("remote failed in detail"));
+    let rendered = text(&app, 160, 30);
+    assert!(
+        rendered.lines().next().unwrap().contains("2 sources"),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("! ").count(), 2);
+    assert!(!rendered.contains("Last read UTC"));
+    assert!(rendered.contains("retained"));
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+    let diagnostics = text(&app, 160, 30);
+    assert!(diagnostics.contains("remote failed in detail"));
+    assert!(diagnostics.contains("Last read UTC"));
 }

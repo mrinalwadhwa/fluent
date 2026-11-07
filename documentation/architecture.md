@@ -2289,10 +2289,11 @@ These fields remain outside stored Work and the SSH wire schema.
 `dashboard/render.rs` keeps healthy source headers stable during routine reads.
 Headers show project and host identity; equal project names on the same host add
 source hashes to distinguish them. Initial loading and manual checking appear
-once in the dashboard header. Routine polling hides that indicator. Failed or
+after 500 milliseconds in the top header, with fixed-width frames every 250
+milliseconds and Fluent at the right edge. Routine polling hides that indicator. Failed or
 stale sources stay marked, and a pending read marks a snapshot stale once its
-last successful observation is ten seconds old. Warnings retain the last read
-UTC time when available; `e` shows full source diagnostics. The `Updated UTC`
+last successful observation is ten seconds old. The header counts affected sources once and each affected source gets a compact
+`!` marker. `e` shows full source diagnostics and last read UTC times. The `Updated UTC`
 column continues to show recorded Work or Task transitions; unavailable remote
 lifecycle times remain unavailable. Source headers remain visible even when a
 source has no Work Items in the selected view. Read health stays in memory and
