@@ -185,6 +185,18 @@ for the coordinator and terminal boundaries.
 
 ---
 
+## Retain dashboard detail identity outside the counted view
+
+Open overview and worker pages retain their source and Work Item when refresh
+changes list membership; Back reconciles selection with the original counted
+view. Disappearance clears the detail selection. Action feedback retains the
+offered or prepared action's identity and never follows another selection.
+Preserve the [identity rule](learnings/dashboard-detail-retains-work-identity.md)
+and its distinction from list reconciliation in the
+[dashboard architecture](../../documentation/architecture.md).
+
+---
+
 ## Let dashboard exit without waiting for local reads
 
 An unfinished local snapshot reader may continue until its read completes or

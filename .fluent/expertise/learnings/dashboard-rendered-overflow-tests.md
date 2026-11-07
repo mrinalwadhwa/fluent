@@ -27,3 +27,11 @@ the marker across a row boundary regardless of the host's temporary-directory
 path; a raw substring check on one frame otherwise depends on that path's
 length. Keep separate assertions for preserved Work rows and unchanged Work
 update times so normalization does not weaken the stale-snapshot contract.
+
+Dashboard action labels can change while their CLI commands remain exact. In
+command-wrapping regressions, require a nonempty selection of the expected
+command rows and prove the fixture actually wraps at the constrained width
+before reconstructing each complete command. Keep selectors aligned with the
+current action labels or iterate over explicit expected commands. Otherwise a
+label rename can leave the preservation assertion inside an empty loop, even
+when separate assertions still find the commands in the unwrapped details.
