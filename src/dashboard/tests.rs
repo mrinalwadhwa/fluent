@@ -2927,7 +2927,16 @@ fn initial_snapshot_preserves_view_and_remote_updates() {
 
 #[test]
 fn refresh_health_distinguishes_loading_success_and_error() {
-    let root = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let parent_path = parent.path().canonicalize().unwrap();
+    // Place STALE across a display-row boundary regardless of the host's temp path.
+    let parent_width = unicode_width::UnicodeWidthStr::width(parent_path.to_str().unwrap());
+    let prefix_len = (156 + 160 - (parent_width + 1 + 6) % 160) % 160;
+    let root = tempfile::Builder::new()
+        .prefix(&"p".repeat(prefix_len))
+        .rand_bytes(6)
+        .tempdir_in(parent_path)
+        .unwrap();
     let id = root
         .path()
         .canonicalize()
@@ -2997,8 +3006,41 @@ fn refresh_health_distinguishes_loading_success_and_error() {
         app.snapshot.sources[0].work[0].status.title,
         "Keep good Work"
     );
+    app.resize(160, 30);
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
-    assert!(text(&app, 160, 30).contains("STALE"));
+    let areas = layout::project_areas(ratatui::layout::Rect::new(0, 0, 160, 30));
+    let mut diagnostic = String::new();
+    loop {
+        // Diagnostic words can cross rendered rows, and long paths can add pages.
+        let rendered = text(&app, 160, 30);
+        diagnostic.extend(
+            rendered
+                .lines()
+                .skip(usize::from(areas.body.y + 1))
+                .take(usize::from(areas.body.height - 1))
+                .flat_map(str::chars)
+                .filter(|character| !character.is_whitespace()),
+        );
+        let before = app.error_scroll;
+        app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        if app.error_scroll == before {
+            break;
+        }
+    }
+    assert!(diagnostic.contains("STALE"), "{diagnostic}");
+    let error = app.source_reads[&id]
+        .error
+        .as_ref()
+        .unwrap()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(diagnostic.contains(&error), "{diagnostic}");
+    assert!(diagnostic.contains("LastreadUTC"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&observed.unwrap().to_rfc3339()),
+        "{diagnostic}"
+    );
     app.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
     // A successful partial snapshot clears the read error and keeps diagnostics.
     std::fs::remove_file(&items).unwrap();
