@@ -277,27 +277,20 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    let values = app.detail_values();
-    let lines = layout::project_detail_lines(&values, area.width)
+    let lines = layout::wrap_detail_rows(&app.detail_rows(), area.width)
         .into_iter()
-        .map(|value| {
-            let style = if value.starts_with("> ") {
-                Style::default()
+        .map(|row| {
+            let style = match row.kind {
+                layout::DetailKind::SelectedWorker => Style::default()
                     .fg(Color::White)
                     .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else if value == "Next action"
-                || value == "Next action:"
-                || value.starts_with("Workers (")
-                || value == "Technical identifiers"
-            {
-                Style::default()
+                    .add_modifier(Modifier::BOLD),
+                layout::DetailKind::Heading => Style::default()
                     .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+                    .add_modifier(Modifier::BOLD),
+                layout::DetailKind::Text => Style::default(),
             };
-            Line::styled(value, style)
+            Line::styled(row.text, style)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)), area);

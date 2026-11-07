@@ -301,32 +301,49 @@ impl App {
         controls
     }
 
+    #[cfg(test)]
     pub fn detail_values(&self) -> Vec<String> {
-        let mut values = self.page_values();
+        self.detail_rows().into_iter().map(|row| row.text).collect()
+    }
+
+    pub fn detail_rows(&self) -> Vec<layout::DetailRow> {
+        let mut values = self.page_rows();
         if let Some(message) = &self.action_message {
-            values.insert(0, message.clone());
+            values.insert(0, layout::DetailRow::text(message.clone()));
         }
         values
     }
 
-    fn page_values(&self) -> Vec<String> {
+    fn page_rows(&self) -> Vec<layout::DetailRow> {
         if let Some(action) = &self.pending_action {
-            return action.values();
+            return action
+                .values()
+                .into_iter()
+                .map(layout::DetailRow::text)
+                .collect();
         }
         if let Some(menu) = &self.action_menu {
-            return menu.values();
+            return menu
+                .values()
+                .into_iter()
+                .map(layout::DetailRow::text)
+                .collect();
         }
         let Some(key) = self.selected_key.as_ref() else {
-            return vec!["No Work Item selected".into()];
+            return vec![layout::DetailRow::text("No Work Item selected")];
         };
         if self.page == ProjectPage::Worker {
             return self
                 .selected_worker
                 .as_ref()
-                .map(|worker| layout::project_detail_values(&self.snapshot.sources, worker))
-                .unwrap_or_else(|| vec!["Worker unavailable; return and select a worker".into()]);
+                .map(|worker| layout::project_detail_rows(&self.snapshot.sources, worker))
+                .unwrap_or_else(|| {
+                    vec![layout::DetailRow::text(
+                        "Worker unavailable; return and select a worker",
+                    )]
+                });
         }
-        layout::project_overview_values(
+        layout::project_overview_rows(
             &self.snapshot.sources,
             key,
             self.selected_worker.as_ref(),
@@ -354,7 +371,7 @@ impl App {
             layout::project_scroll_bounds(
                 &self.snapshot.sources,
                 self.filter,
-                &self.detail_values(),
+                &self.detail_rows(),
                 self.size,
                 self.pane == Pane::Detail && self.show_details,
             )

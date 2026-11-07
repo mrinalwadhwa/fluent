@@ -79,7 +79,7 @@ pub struct ScrollBounds {
 pub fn project_scroll_bounds(
     sources: &[SourceSnapshot],
     filter: Filter,
-    details: &[String],
+    details: &[DetailRow],
     size: (u16, u16),
     focused_details: bool,
 ) -> ScrollBounds {
@@ -104,7 +104,7 @@ pub fn project_scroll_bounds(
         areas.detail
     };
     let detail_width = detail.width.max(1) as usize;
-    let detail_lines = project_detail_lines(details, detail_width as u16).len();
+    let detail_lines = wrap_detail_rows(details, detail_width as u16).len();
     ScrollBounds {
         list_height: inner_height,
         list_max_scroll: lines
@@ -334,29 +334,27 @@ pub fn project_detail_lines(values: &[String], width: u16) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
+    project_detail_rows(sources, key)
+        .into_iter()
+        .map(|row| row.text)
+        .collect()
+}
+
+pub fn project_detail_rows(sources: &[SourceSnapshot], key: &RowKey) -> Vec<DetailRow> {
     let Some((source, work)) = project::find_work(sources, key) else {
-        return vec!["Selection unavailable".into()];
+        return vec![DetailRow::text("Selection unavailable")];
     };
-    let next_action = crate::guidance::next_action_for_status_row(&work.status)
-        .map(|action| {
-            action
-                .trim()
-                .trim_start_matches("→ Next:")
-                .trim()
-                .to_string()
-        })
-        .unwrap_or_else(|| match work.category {
-            project::Category::Queued => "Awaiting queue dispatch".into(),
-            project::Category::Running => "Workflow running".into(),
-            project::Category::History => "No operator action".into(),
-            _ => "unavailable".into(),
-        });
+    let next_action = next_action(work);
     let worker = project::find_worker(sources, key);
     let mut values = if let Some(worker) = worker {
-        let mut values = project_worker_values(worker, work);
-        values.insert(8, String::new());
-        values.insert(9, "Technical identifiers".into());
+        let mut values = project_worker_values(worker, work)
+            .into_iter()
+            .map(DetailRow::text)
+            .collect::<Vec<_>>();
+        values.insert(8, DetailRow::text(""));
+        values.insert(9, DetailRow::heading("Technical identifiers"));
         values
     } else {
         vec![
@@ -373,18 +371,55 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
                 }),
             format!("Next action: {next_action}"),
         ]
+        .into_iter()
+        .map(DetailRow::text)
+        .collect()
     };
     if worker.is_none() {
-        values.push(format!("Workers ({})", work.workers.len()));
+        values.push(DetailRow::heading(format!(
+            "Workers ({})",
+            work.workers.len()
+        )));
     }
-    values.extend([
+    values.extend(
+        project_metadata(source, work, key, worker.is_some())
+            .into_iter()
+            .map(DetailRow::text),
+    );
+    values
+}
+
+fn next_action(work: &project::ProjectWork) -> String {
+    crate::guidance::next_action_for_status_row(&work.status)
+        .map(|action| {
+            action
+                .trim()
+                .trim_start_matches("→ Next:")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_else(|| match work.category {
+            project::Category::Queued => "Awaiting queue dispatch".into(),
+            project::Category::Running => "Workflow running".into(),
+            project::Category::History => "No operator action".into(),
+            _ => "unavailable".into(),
+        })
+}
+
+fn project_metadata(
+    source: &SourceSnapshot,
+    work: &project::ProjectWork,
+    key: &RowKey,
+    worker: bool,
+) -> Vec<String> {
+    let mut values = vec![
         format!("Work Item: {}", work.status.id),
         format!(
             "Attempt: {}",
             key.attempt_id.as_deref().unwrap_or(&work.status.attempt)
         ),
-    ]);
-    if worker.is_none() {
+    ];
+    if !worker {
         values.push(format!("Merge Candidate: {}", work.status.merge_candidate));
     }
     values.push(format!(
@@ -410,36 +445,81 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
     values
 }
 
-/// Keep the action and visible worker rows before secondary metadata.
-pub fn project_overview_values(
+/// Keep semantic row roles independent of unrestricted display text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetailKind {
+    Text,
+    Heading,
+    SelectedWorker,
+}
+
+#[derive(Clone, Debug)]
+pub struct DetailRow {
+    pub text: String,
+    pub kind: DetailKind,
+}
+impl DetailRow {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: DetailKind::Text,
+        }
+    }
+    fn heading(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: DetailKind::Heading,
+        }
+    }
+}
+
+/// Preserve row roles through the same wrapping used by drawing and scrolling.
+pub fn wrap_detail_rows(rows: &[DetailRow], width: u16) -> Vec<DetailRow> {
+    rows.iter()
+        .flat_map(|row| {
+            project_detail_lines(std::slice::from_ref(&row.text), width)
+                .into_iter()
+                .map(|text| DetailRow {
+                    text,
+                    kind: row.kind,
+                })
+        })
+        .collect()
+}
+
+/// Build the action, worker table, and secondary context as explicit sections.
+pub fn project_overview_rows(
     sources: &[SourceSnapshot],
     key: &RowKey,
     selected: Option<&RowKey>,
     width: u16,
-) -> Vec<String> {
-    let mut values = project_detail_values(sources, key);
+) -> Vec<DetailRow> {
     let Some((source, work)) = project::find_work(sources, key) else {
-        return values;
+        return vec![DetailRow::text("Selection unavailable")];
     };
-    if work.status.recovery_blocker.is_none() {
-        values[1] = format!(
-            "State: {}",
-            work.phase.as_deref().unwrap_or(work.category.label())
-        );
-    }
+    let condition = work
+        .status
+        .recovery_blocker
+        .as_ref()
+        .map(|reason| format!("Reason: {reason}"))
+        .unwrap_or_else(|| {
+            format!(
+                "State: {}",
+                work.phase.as_deref().unwrap_or(work.category.label())
+            )
+        });
+    let mut rows = Vec::new();
     let mut secondary = Vec::new();
-    for (index, label) in [(0, "Title"), (1, "Condition")] {
-        if values[index].width() > usize::from(width) {
-            secondary.push(format!("{label}: {}", values[index]));
-            values[index] = compact(&values[index], usize::from(width));
+    for (label, value) in [("Title", &work.status.title), ("Condition", &condition)] {
+        if value.width() > usize::from(width) {
+            secondary.push(format!("{label}: {value}"));
         }
+        rows.push(DetailRow::text(compact(value, usize::from(width))));
     }
+    rows.push(DetailRow::text(""));
     let actions = super::actions::offered(source, work);
     if !actions.is_empty() {
-        let end = values
-            .iter()
-            .position(|value| value.starts_with("Workers ("))
-            .unwrap_or(3);
+        rows.push(DetailRow::heading("Next action · a Actions"));
         let mut commands = actions
             .iter()
             .map(|action| format!("  {}: {}", action.kind.label(), action.command_text()))
@@ -449,103 +529,100 @@ pub fn project_overview_values(
             source.host,
             source.path.display()
         ));
-        let mut card = vec![String::new(), "Next action · a Actions".into()];
         if width < 100 || project_detail_lines(&commands, width).len() > 3 {
-            card.push(format!(
+            rows.push(DetailRow::text(format!(
                 "  {}",
                 actions
                     .iter()
                     .map(|action| action.kind.label())
                     .collect::<Vec<_>>()
                     .join(" · ")
-            ));
+            )));
             secondary.push("Commands and source · a Actions to inspect or copy".into());
             secondary.extend(commands);
         } else {
-            card.extend(commands);
+            rows.extend(commands.into_iter().map(DetailRow::text));
         }
-        card.push(String::new());
-        values.splice(2..end, card);
         if let Some(guidance) = &work.status.next_action {
-            values.push(format!("Guidance: {guidance}"));
+            secondary.push(format!("Guidance: {guidance}"));
         }
-    } else if let Some(next) = values
-        .get(2)
-        .and_then(|value| value.strip_prefix("Next action: "))
-        .map(str::to_owned)
-    {
+    } else {
+        rows.push(DetailRow::heading("Next action"));
+        let next = next_action(work);
         if next.width() > usize::from(width.saturating_sub(2)) {
             secondary.push(format!("Guidance: {next}"));
         }
-        let next = compact(&next, usize::from(width.saturating_sub(2)));
-        values.splice(
-            2..3,
-            [
-                String::new(),
-                "Next action".into(),
-                format!("  {next}"),
-                String::new(),
-            ],
-        );
+        rows.push(DetailRow::text(format!(
+            "  {}",
+            compact(&next, usize::from(width.saturating_sub(2)))
+        )));
     }
-    if let Some(section) = values
-        .iter()
-        .position(|value| value.starts_with("Workers ("))
-    {
-        let mut rows = vec![if width >= 100 {
-            "  Worker                             State          Elapsed  Terminal".into()
+    rows.push(DetailRow::text(""));
+    rows.push(DetailRow::heading(format!(
+        "Workers ({})",
+        work.workers.len()
+    )));
+    rows.push(DetailRow::text(if width >= 100 {
+        "  Worker                             State          Elapsed  Terminal"
+    } else {
+        "  Worker                             State"
+    }));
+    for worker in &work.workers {
+        let task = worker.key.task_id.as_deref().unwrap_or("unavailable");
+        let identity = if worker.role == task {
+            task.into()
         } else {
-            "  Worker                             State".into()
-        }];
-        for worker in &work.workers {
-            let task = worker.key.task_id.as_deref().unwrap_or("unavailable");
-            let identity = if worker.role == task {
-                task.into()
-            } else {
-                format!("{} ({task})", worker.role)
-            };
-            let identity = compact(&identity, 34);
-            let mut row = format!(
-                "{} {}{}  {}",
-                if selected == Some(&worker.key) {
-                    ">"
+            format!("{} ({task})", worker.role)
+        };
+        let identity = compact(&identity, 34);
+        let is_selected = selected == Some(&worker.key);
+        let mut text = format!(
+            "{} {}{}  {}",
+            if is_selected { ">" } else { " " },
+            identity,
+            " ".repeat(34usize.saturating_sub(identity.width())),
+            compact(&worker.state, 14)
+        );
+        if width >= 100 {
+            text.push_str(&format!(
+                "{}  {:>7}  {}",
+                " ".repeat(14usize.saturating_sub(worker.state.width())),
+                worker
+                    .elapsed_ms
+                    .map(|ms| format!("{}s", ms / 1000))
+                    .unwrap_or_else(|| "—".into()),
+                if worker
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.can_observe)
+                {
+                    "Observe"
                 } else {
-                    " "
-                },
-                identity,
-                " ".repeat(34usize.saturating_sub(identity.width())),
-                compact(&worker.state, 14)
-            );
-            if width >= 100 {
-                row.push_str(&format!(
-                    "{}  {:>7}  {}",
-                    " ".repeat(14usize.saturating_sub(worker.state.width())),
-                    worker
-                        .elapsed_ms
-                        .map(|ms| format!("{}s", ms / 1000))
-                        .unwrap_or_else(|| "—".into()),
-                    if worker
-                        .terminal
-                        .as_ref()
-                        .is_some_and(|terminal| terminal.can_observe)
-                    {
-                        "Observe"
-                    } else {
-                        "Unavailable"
-                    }
-                ));
-            }
-            rows.push(row);
+                    "Unavailable"
+                }
+            ));
         }
-        if work.workers.is_empty() {
-            rows.push("  No workers recorded".into());
-        }
-        rows.push(String::new());
-        rows.extend(secondary);
-        rows.push("Technical identifiers".into());
-        values.splice(section + 1..section + 1, rows);
+        rows.push(DetailRow {
+            text,
+            kind: if is_selected {
+                DetailKind::SelectedWorker
+            } else {
+                DetailKind::Text
+            },
+        });
     }
-    values
+    if work.workers.is_empty() {
+        rows.push(DetailRow::text("  No workers recorded"));
+    }
+    rows.push(DetailRow::text(""));
+    rows.extend(secondary.into_iter().map(DetailRow::text));
+    rows.push(DetailRow::heading("Technical identifiers"));
+    rows.extend(
+        project_metadata(source, work, key, false)
+            .into_iter()
+            .map(DetailRow::text),
+    );
+    rows
 }
 
 /// Project a selected worker without repeating its parent's guidance.

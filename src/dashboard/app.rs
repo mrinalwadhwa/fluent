@@ -238,8 +238,11 @@ impl App {
     fn scroll_to_workers(&mut self) {
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
-        let lines = layout::project_detail_lines(&self.detail_values(), areas.focused_detail.width);
-        let Some(line) = lines.iter().position(|line| line.starts_with("> ")) else {
+        let lines = layout::wrap_detail_rows(&self.detail_rows(), areas.focused_detail.width);
+        let Some(line) = lines
+            .iter()
+            .position(|line| line.kind == layout::DetailKind::SelectedWorker)
+        else {
             return;
         };
         let line = line as u16;

@@ -4726,3 +4726,29 @@ fn project_action_copy_failure_keeps_command_selectable() {
     assert!(rendered.contains(&command));
     assert!(app.pending_action.is_none());
 }
+
+#[test]
+fn project_overview_treats_section_like_titles_as_display_text() {
+    for title in ["Workers (dashboard)", "> an ordinary Work title"] {
+        let mut source = project_source("/one", vec![row("work", "task-ready")]);
+        source.work[0].status.title = title.into();
+        source.work[0].workers = (0..15)
+            .map(|n| worker_row("/one", &format!("review-{n:02}")))
+            .collect();
+        let mut app = project_app(vec![source]);
+        app.resize(60, 15);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let overview = text(&app, 60, 15);
+        assert!(overview.contains(title), "{overview}");
+        assert_eq!(app.detail_rows()[0].kind, layout::DetailKind::Text);
+        assert!(overview.contains("Next action"), "{overview}");
+        assert!(overview.contains("Workers (15)"), "{overview}");
+        for _ in 0..14 {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        let overview = text(&app, 60, 15);
+        assert!(overview.contains("> review-14"), "{overview}");
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(text(&app, 60, 15).contains("Worker: review-14"));
+    }
+}
