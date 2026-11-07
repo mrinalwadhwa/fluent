@@ -227,6 +227,7 @@ restore a usable dashboard after success, failure, or interruption. It SHALL
 refresh the source, report the process result without predicting Work state,
 and consume each confirmation at most once.
 Test: src/dashboard/tests.rs (project_action_handoff_returns_and_reports_exact_result)
+Test: tests/dashboard_terminal.rs (dashboard_action_process_restores_terminal_after_each_result)
 
 
 ## Scheduled public verification
