@@ -3950,11 +3950,16 @@ fn project_actions_keep_commands_readable_and_exact() {
     )));
     assert!(values.iter().any(|value| value.contains("Show Candidate:")));
     assert!(values.iter().any(|value| value.contains("Land Candidate:")));
-    for command in values
+    let commands = values
         .iter()
-        .filter(|value| value.starts_with("  Candidate"))
-    {
+        .filter(|value| {
+            value.starts_with("  Show Candidate:") || value.starts_with("  Land Candidate:")
+        })
+        .collect::<Vec<_>>();
+    assert!(!commands.is_empty(), "expected candidate commands to wrap");
+    for command in commands {
         let lines = layout::project_detail_lines(std::slice::from_ref(command), 60);
+        assert!(lines.len() > 1, "expected a wrapped command: {command}");
         assert_eq!(
             lines
                 .iter()
