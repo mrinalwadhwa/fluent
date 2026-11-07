@@ -254,7 +254,17 @@ impl App {
                 .selected_key
                 .as_ref()
                 .and_then(|key| project::find_work(&self.snapshot.sources, key))
-                .and_then(|(_, work)| work.workers.first())
+                .and_then(|(_, work)| {
+                    work.workers
+                        .iter()
+                        .min_by_key(|worker| match worker.state.as_str() {
+                            "needs-user" => 0,
+                            "executing" | "provider-wait" => 1,
+                            "interrupted" | "failed" => 2,
+                            "planned" => 3,
+                            _ => 4,
+                        })
+                })
                 .map(|worker| worker.key.clone());
         }
     }

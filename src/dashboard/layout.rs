@@ -604,11 +604,11 @@ pub fn project_overview_rows(
         "Workers ({})",
         work.workers.len()
     )));
-    rows.push(DetailRow::text(if width >= 100 {
-        "  Worker                             State          Elapsed  Terminal"
-    } else {
-        "  Worker                             State"
-    }));
+    let identity_width = usize::from(width).saturating_sub(40).min(34);
+    rows.push(DetailRow::text(format!(
+        "  {:identity_width$}  {:14}  {:>7}  Terminal",
+        "Worker", "State", "Elapsed"
+    )));
     for worker in &work.workers {
         let task = worker.key.task_id.as_deref().unwrap_or("unavailable");
         let identity = if worker.role == task {
@@ -616,34 +616,35 @@ pub fn project_overview_rows(
         } else {
             format!("{} ({task})", worker.role)
         };
-        let identity = compact(&identity, 34);
+        let identity = compact(&identity, identity_width);
         let is_selected = selected == Some(&worker.key);
         let mut text = format!(
             "{} {}{}  {}",
             if is_selected { ">" } else { " " },
             identity,
-            " ".repeat(34usize.saturating_sub(identity.width())),
+            " ".repeat(identity_width.saturating_sub(identity.width())),
             compact(&worker.state, 14)
         );
-        if width >= 100 {
-            text.push_str(&format!(
-                "{}  {:>7}  {}",
-                " ".repeat(14usize.saturating_sub(worker.state.width())),
-                worker
+        text.push_str(&format!(
+            "{}  {:>7}  {}",
+            " ".repeat(14usize.saturating_sub(worker.state.width())),
+            compact(
+                &worker
                     .elapsed_ms
                     .map(|ms| format!("{}s", ms / 1000))
                     .unwrap_or_else(|| "—".into()),
-                if worker
-                    .terminal
-                    .as_ref()
-                    .is_some_and(|terminal| terminal.can_observe)
-                {
-                    "Observe"
-                } else {
-                    "Unavailable"
-                }
-            ));
-        }
+                7
+            ),
+            if worker
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.can_observe)
+            {
+                "Observe"
+            } else {
+                "Unavailable"
+            }
+        ));
         rows.push(DetailRow {
             text,
             kind: if is_selected {

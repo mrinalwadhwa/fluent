@@ -5473,3 +5473,87 @@ fn project_overview_advertises_scroll_and_help_at_minimum_size() {
     app.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
     assert!(app.detail_scroll < app.scroll_bounds().detail_max_scroll);
 }
+
+#[test]
+fn project_overview_prioritizes_active_worker_at_narrow_width() {
+    for width in [60, 80, 99] {
+        for state in [
+            "executing",
+            "provider-wait",
+            "needs-user",
+            "interrupted",
+            "failed",
+            "planned",
+        ] {
+            let mut source = project_source("/one", vec![row("work", "task-ready")]);
+            source.work[0].workers = (0..15)
+                .map(|n| {
+                    let mut worker = worker_row("/one", &format!("worker-{n:02}"));
+                    worker.state = "complete".into();
+                    worker
+                })
+                .collect();
+            let worker = &mut source.work[0].workers[14];
+            worker.state = state.into();
+            worker.elapsed_ms = Some(42000);
+            let selected = worker.key.clone();
+            let mut app = project_app(vec![source]);
+            app.resize(width, 15);
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(app.selected_worker.as_ref(), Some(&selected));
+            let overview = text(&app, width, 15);
+            let visible = overview
+                .lines()
+                .find(|line| line.starts_with("> worker-14"))
+                .unwrap_or_else(|| panic!("{overview}"));
+            assert!(
+                visible.contains("42s") && visible.contains("Unavailable"),
+                "{overview}"
+            );
+            app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            assert!(text(&app, width, 15).contains("Worker: worker-14"));
+            app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            app.handle_key(KeyCode::Up, KeyModifiers::NONE);
+            let retained = app.selected_worker.clone();
+            let mut snapshot = app.snapshot.clone();
+            snapshot.sources[0].work[0].workers[14].elapsed_ms = Some(43000);
+            app.refresh(snapshot);
+            assert_eq!(
+                app.selected_worker, retained,
+                "refresh must respect deliberate worker selection"
+            );
+        }
+        let mut source = project_source("/one", vec![row("work", "executing")]);
+        let mut worker = worker_row("/one", "writer");
+        worker.elapsed_ms = Some(7000);
+        worker.terminal = Some(crate::terminal_sessions::TerminalDescriptor {
+            schema_version: 1,
+            source_id: "/one".into(),
+            project_identity: "/one".into(),
+            work_item_id: "work".into(),
+            attempt_id: "attempt-1".into(),
+            task_id: "writer".into(),
+            execution_generation: "generation-writer".into(),
+            session_id: "session-1".into(),
+            role: "Writer".into(),
+            provider: "Codex".into(),
+            lifecycle: crate::terminal_sessions::TerminalLifecycle::Running,
+            can_observe: true,
+            can_control: true,
+            unavailable_reason: None,
+        });
+        source.work[0].workers = vec![worker];
+        let mut app = project_app(vec![source]);
+        app.resize(width, 15);
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let overview = text(&app, width, 15);
+        let visible = overview
+            .lines()
+            .find(|line| line.starts_with("> writer"))
+            .unwrap();
+        assert!(
+            visible.contains("7s") && visible.contains("Observe"),
+            "{overview}"
+        );
+    }
+}
