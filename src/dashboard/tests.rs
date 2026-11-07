@@ -4504,6 +4504,313 @@ impl DashboardSession for ActionSession {
     }
 }
 
+fn commit_action_candidate(root: &Path, message: &str) -> String {
+    crate::git::run(
+        root,
+        &[
+            "-c",
+            "user.name=Dashboard tests",
+            "-c",
+            "user.email=dashboard@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            message,
+        ],
+        "commit action fixture",
+    )
+    .unwrap();
+    crate::git::run_stdout(root, &["rev-parse", "HEAD"], "read action fixture commit")
+        .unwrap()
+        .trim()
+        .into()
+}
+
+fn merge_ready_action_fixture() -> (tempfile::TempDir, App) {
+    use crate::work_model::{
+        AttemptLearning, AttemptReviewState, AttemptStatus, TaskOutput, TaskStatus,
+    };
+    let (root, _) = action_fixture();
+    let commit = commit_action_candidate(root.path(), "Initial candidate");
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let mut item = store.read_work_item_snapshot("work").unwrap();
+    let attempt = &mut item.attempts[0];
+    let workspace = attempt.tasks[0].workspace_access.writes[0].clone();
+    attempt.tasks[0].status = TaskStatus::Complete;
+    attempt.tasks[0].output = Some(TaskOutput {
+        workspace_id: workspace.id,
+        workspace_path: workspace.path,
+        source_branch: "candidate".into(),
+        base_commit: None,
+        commit,
+        no_change: None,
+        learner_canonicalization: None,
+    });
+    attempt.status = AttemptStatus::Complete;
+    attempt.review_state = Some(AttemptReviewState::Passed);
+    attempt.learning = Some(AttemptLearning::succeeded(
+        1,
+        crate::follow_up::ArtifactRef {
+            path: "handoff.json".into(),
+            digest: "sha256:fixture".into(),
+        },
+    ));
+    // Status uses the persisted ordinary review bindings, not just the
+    // Attempt's summary flag. Retained Git objects authenticate each review.
+    item.add_review_tasks("attempt-1", crate::review::REVIEWERS)
+        .unwrap();
+    for task in item.attempts[0]
+        .tasks
+        .iter_mut()
+        .filter(|task| task.kind == crate::work_model::TaskKind::Review)
+    {
+        task.status = TaskStatus::Complete;
+        let area = root.path().join(&task.artifact_area.as_ref().unwrap().path);
+        std::fs::create_dir_all(&area).unwrap();
+        std::fs::write(area.join("review.md"), "Verdict: pass\n").unwrap();
+    }
+    item.attempts[0].status = AttemptStatus::Complete;
+    item.attempts[0].review_state = Some(AttemptReviewState::Passed);
+    item.create_or_get_merge_candidate("attempt-1").unwrap();
+    store.write_work_item(&item).unwrap();
+    let source = project::SourceSnapshot::load(root.path()).unwrap();
+    assert_eq!(source.work[0].status.action, "merge-ready");
+    let mut app = project_app(vec![source]);
+    app.resize(160, 30);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    (root, app)
+}
+
+/// Drive the same action effects as the event loop, replacing only the runner.
+fn dispatch_action_key(
+    app: &mut App,
+    session: &mut ActionSession,
+    local: &mut LocalRefresh,
+    key: KeyCode,
+) {
+    let effect = app.handle_key(key, KeyModifiers::NONE);
+    if effect == Effect::PrepareAction {
+        prepare_dashboard_action(app);
+    }
+    if matches!(effect, Effect::PrepareAction | Effect::RunAction) {
+        run_dashboard_action(session, app, local, None).unwrap();
+    }
+}
+
+#[test]
+fn project_action_candidate_land_requires_confirmation() {
+    for decline in [KeyCode::Char('n'), KeyCode::Esc] {
+        let (root, mut app) = merge_ready_action_fixture();
+        let store = crate::work_model::WorkModelStore::new(root.path());
+        let original = store.read_work_item_snapshot("work").unwrap();
+        let candidate = &original.merge_candidates[0].id;
+        let mut session = ActionSession {
+            size: (160, 30),
+            calls: vec![],
+            outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
+        };
+        let mut local = LocalRefresh::new(root.path(), &[], root.path());
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Down);
+        assert_eq!(
+            app.action_menu.as_ref().unwrap().current().kind,
+            actions::ActionKind::CandidateLand
+        );
+        assert!(session.calls.is_empty(), "selecting land must not launch");
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Enter);
+        assert!(
+            session.calls.is_empty(),
+            "opening land confirmation must not launch"
+        );
+        assert!(app.pending_action.is_some());
+        let confirmation = text(&app, 160, 30);
+        for expected in [
+            "Confirm local action",
+            "Work Item: work",
+            "Land this Merge Candidate",
+            "y Confirm",
+            "n Cancel",
+        ] {
+            assert!(confirmation.contains(expected), "{confirmation}");
+        }
+        assert!(confirmation.contains(&format!("fluent merge-candidate land work {candidate}")));
+        let canonical = root.path().canonicalize().unwrap();
+        assert!(
+            confirmation
+                .split_whitespace()
+                .collect::<String>()
+                .contains(
+                    &canonical
+                        .to_str()
+                        .unwrap()
+                        .split_whitespace()
+                        .collect::<String>()
+                )
+        );
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Enter);
+        assert!(
+            session.calls.is_empty(),
+            "Enter cannot approve a state-changing command"
+        );
+        assert!(app.pending_action.is_some());
+        dispatch_action_key(&mut app, &mut session, &mut local, decline);
+        assert!(session.calls.is_empty(), "declining must not launch");
+        assert!(app.pending_action.is_none() && app.confirmed_action.is_none());
+        assert!(app.action_message.as_ref().unwrap().contains("Canceled"));
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Char('y'));
+        assert!(
+            session.calls.is_empty(),
+            "a declined confirmation cannot be reused"
+        );
+
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Enter);
+        assert!(session.calls.is_empty());
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Char('y'));
+        assert_eq!(session.calls.len(), 1);
+        assert_eq!(
+            session.calls[0].executable,
+            std::env::current_exe().unwrap()
+        );
+        assert_eq!(
+            session.calls[0].args,
+            ["merge-candidate", "land", "work", candidate]
+        );
+        assert_eq!(session.calls[0].checkout, canonical);
+        dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Char('y'));
+        run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
+        assert_eq!(session.calls.len(), 1, "one confirmation must launch once");
+        assert!(
+            app.action_message
+                .as_ref()
+                .unwrap()
+                .contains("Candidate land succeeded")
+        );
+        assert!(local.pending.is_some());
+        finish_local_refresh(&mut local, &mut app);
+        assert_eq!(app.snapshot.sources[0].work[0].status.action, "merge-ready");
+        assert_eq!(
+            store.read_work_item_snapshot("work").unwrap(),
+            original,
+            "the fake runner must not land Work or predict its state"
+        );
+    }
+}
+
+#[test]
+fn project_action_candidate_land_rechecks_persisted_candidate() {
+    for before_confirmation in [true, false] {
+        for field in ["identity", "commit"] {
+            let (root, mut app) = merge_ready_action_fixture();
+            let mut session = ActionSession {
+                size: (160, 30),
+                calls: vec![],
+                outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
+            };
+            let mut local = LocalRefresh::new(root.path(), &[], root.path());
+            dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Down);
+            if !before_confirmation {
+                dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Enter);
+                assert!(app.pending_action.is_some());
+            }
+            let store = crate::work_model::WorkModelStore::new(root.path());
+            let mut changed = store.read_work_item_snapshot("work").unwrap();
+            if field == "identity" {
+                changed.merge_candidates[0].id = "replacement-candidate".into();
+            } else {
+                let commit = commit_action_candidate(root.path(), "Replacement candidate");
+                changed.merge_candidates[0].candidate_commit = commit.clone();
+                changed.attempts[0].tasks[0].output.as_mut().unwrap().commit = commit.clone();
+                for task in &mut changed.attempts[0].tasks {
+                    if let Some(context) = &mut task.review_context {
+                        context.candidate_commit = commit.clone();
+                    }
+                }
+            }
+            store.write_work_item(&changed).unwrap();
+            assert_eq!(
+                project::SourceSnapshot::load(root.path()).unwrap().work[0]
+                    .status
+                    .action,
+                "merge-ready",
+                "the changed record must remain otherwise eligible"
+            );
+            dispatch_action_key(
+                &mut app,
+                &mut session,
+                &mut local,
+                if before_confirmation {
+                    KeyCode::Enter
+                } else {
+                    KeyCode::Char('y')
+                },
+            );
+            assert!(
+                session.calls.is_empty(),
+                "changed {field} must prevent launch (before confirmation: {before_confirmation})"
+            );
+            assert!(app.pending_action.is_none() && app.confirmed_action.is_none());
+            let message = app.action_message.as_ref().unwrap();
+            assert!(
+                message.contains("Merge Candidate") && message.contains("changed"),
+                "{message}"
+            );
+            if local.pending.is_some() {
+                finish_local_refresh(&mut local, &mut app);
+            }
+        }
+    }
+}
+
+#[test]
+fn project_action_candidate_show_runs_without_confirmation() {
+    let (root, mut app) = merge_ready_action_fixture();
+    let store = crate::work_model::WorkModelStore::new(root.path());
+    let original = store.read_work_item_snapshot("work").unwrap();
+    let mut session = ActionSession {
+        size: (160, 30),
+        calls: vec![],
+        outcome: Some(Ok(actions::CommandOutcome::Succeeded)),
+    };
+    let mut local = LocalRefresh::new(root.path(), &[], root.path());
+    assert_eq!(
+        app.action_menu.as_ref().unwrap().current().kind,
+        actions::ActionKind::CandidateShow
+    );
+    dispatch_action_key(&mut app, &mut session, &mut local, KeyCode::Enter);
+    assert_eq!(session.calls.len(), 1, "read-only show runs immediately");
+    assert!(app.pending_action.is_none() && app.confirmed_action.is_none());
+    assert_eq!(
+        session.calls[0].executable,
+        std::env::current_exe().unwrap()
+    );
+    assert_eq!(
+        session.calls[0].args,
+        [
+            "merge-candidate",
+            "show",
+            "work",
+            &original.merge_candidates[0].id
+        ]
+    );
+    assert_eq!(
+        session.calls[0].checkout,
+        root.path().canonicalize().unwrap()
+    );
+    run_dashboard_action(&mut session, &mut app, &mut local, None).unwrap();
+    assert_eq!(session.calls.len(), 1);
+    assert!(
+        app.action_message
+            .as_ref()
+            .unwrap()
+            .contains("Candidate show succeeded")
+    );
+    assert!(local.pending.is_some());
+    finish_local_refresh(&mut local, &mut app);
+    assert_eq!(store.read_work_item_snapshot("work").unwrap(), original);
+}
+
 fn open_action_for_last_worker(app: &mut App, size: (u16, u16)) {
     app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
     app.handle_key(KeyCode::Esc, KeyModifiers::NONE);

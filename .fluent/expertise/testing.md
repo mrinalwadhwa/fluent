@@ -2,6 +2,8 @@
 
 ## Patterns
 
+- [build-merge-ready-fixtures](testing/patterns/build-merge-ready-fixtures.md) — read when testing local Candidate actions through persisted dashboard state.
+
 - [native-websocket-pressure](testing/patterns/native-websocket-pressure.md) — read when testing concurrent input and partial native display writes
 
 - [verified-historical-readers](testing/patterns/verified-historical-readers.md) — read when adding pinned historical executable fixtures that run across worktrees.
