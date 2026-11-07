@@ -5386,3 +5386,90 @@ fn project_list_paging_moves_visible_selection_and_survives_refresh() {
         }
     }
 }
+
+#[test]
+fn project_list_separates_work_from_source_status() {
+    for (view, state) in project::Filter::VIEWS.into_iter().zip([
+        "task-ready",
+        "needs-user",
+        "executing",
+        "task-ready",
+        "planned",
+        "merged",
+    ]) {
+        for (width, height) in [(60, 15), (160, 24)] {
+            let mut app = project_app(vec![project_source(
+                "/one",
+                (0..40)
+                    .map(|n| row(&format!("work-{n:02}"), state))
+                    .collect(),
+            )]);
+            app.filter = view;
+            app.select_key(project::RowKey::work("/one", "work-00"));
+            app.resize(width, height);
+            for _ in 0..2 {
+                let rendered = text(&app, width, height);
+                let lines = rendered.lines().collect::<Vec<_>>();
+                assert!(lines[height as usize - 3].trim().is_empty(), "{rendered}");
+                assert!(
+                    lines[height as usize - 2].contains("Source reads:"),
+                    "{rendered}"
+                );
+                assert!(
+                    lines[height as usize - 1].contains("Open Work Item"),
+                    "{rendered}"
+                );
+                assert!(lines[height as usize - 4].contains("title"), "{rendered}");
+                assert!(
+                    lines
+                        .iter()
+                        .any(|line| line
+                            .starts_with(&format!("> {} title", app.selected_id().unwrap()))),
+                    "{rendered}"
+                );
+                app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+            }
+        }
+    }
+}
+
+#[test]
+fn project_overview_advertises_scroll_and_help_at_minimum_size() {
+    let mut source = project_source("/one", vec![row("work", "task-ready")]);
+    source.work[0].workers = (0..15)
+        .map(|n| worker_row("/one", &format!("worker-{n:02}")))
+        .collect();
+    source.stale = Some("read failed".into());
+    let mut app = project_app(vec![source]);
+    app.resize(60, 15);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let overview = text(&app, 60, 15);
+    for cue in [
+        "More below",
+        "PgUp/PgDn scroll",
+        "? help",
+        "a Actions",
+        "e Read issues",
+        "> worker-00",
+    ] {
+        assert!(overview.contains(cue), "missing {cue}: {overview}");
+    }
+    app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+    assert!(app.detail_scroll > 0);
+    for _ in 0..20 {
+        app.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+    }
+    let bottom = text(&app, 60, 15);
+    assert!(bottom.contains("More above"), "{bottom}");
+    assert!(!bottom.contains("More below"), "{bottom}");
+    assert!(
+        bottom.contains("PgUp/PgDn scroll") && bottom.contains("? help"),
+        "{bottom}"
+    );
+    app.handle_key(KeyCode::Char('?'), KeyModifiers::NONE);
+    assert!(text(&app, 60, 15).contains("Help"));
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(text(&app, 60, 15), bottom);
+    app.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
+    assert!(app.detail_scroll < app.scroll_bounds().detail_max_scroll);
+}

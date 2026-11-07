@@ -148,6 +148,26 @@ fn draw_projects(frame: &mut Frame, app: &App) {
     } else {
         project_detail(frame, areas.detail, app);
     }
+    if app.pane == Pane::Detail
+        && app.show_details
+        && !app.help
+        && !app.errors
+        && app.action_menu.is_none()
+        && app.pending_action.is_none()
+    {
+        let max = app.scroll_bounds().detail_max_scroll;
+        if max > 0 {
+            let overflow = match (app.detail_scroll > 0, app.detail_scroll < max) {
+                (true, true) => "↑↓ More above/below",
+                (true, false) => "↑ More above",
+                _ => "↓ More below",
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{overflow} · PgUp/PgDn scroll · ? help")),
+                areas.detail_hint,
+            );
+        }
+    }
     let mut footer = String::new();
     for control in app.project_controls() {
         let separator = if footer.is_empty() {

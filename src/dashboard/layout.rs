@@ -13,6 +13,8 @@ pub struct ProjectAreas {
     pub body: ratatui::layout::Rect,
     pub footer: ratatui::layout::Rect,
     pub health: ratatui::layout::Rect,
+    /// Leave lists separated from health; show scroll guidance on detail pages.
+    pub detail_hint: ratatui::layout::Rect,
     pub list: ratatui::layout::Rect,
     pub divider: ratatui::layout::Rect,
     pub detail: ratatui::layout::Rect,
@@ -24,6 +26,7 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -55,8 +58,9 @@ pub fn project_areas(area: ratatui::layout::Rect) -> ProjectAreas {
     ProjectAreas {
         header: rows[0],
         body,
-        health: rows[2],
-        footer: rows[3],
+        detail_hint: rows[2],
+        health: rows[3],
+        footer: rows[4],
         list,
         divider,
         detail,
@@ -308,9 +312,10 @@ pub fn error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
 }
 
 pub fn project_error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) -> u16 {
-    error_lines(snapshot, size.0.saturating_add(2))
+    let areas = project_areas(ratatui::layout::Rect::new(0, 0, size.0, size.1));
+    error_lines(snapshot, areas.body.width.saturating_add(2))
         .len()
-        .saturating_sub(size.1.saturating_sub(5) as usize)
+        .saturating_sub(areas.body.height.saturating_sub(1) as usize)
         .min(u16::MAX as usize) as u16
 }
 

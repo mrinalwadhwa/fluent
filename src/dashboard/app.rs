@@ -475,11 +475,15 @@ impl App {
             return Effect::None;
         }
         if self.errors {
-            let page = self
-                .size
-                .1
-                .saturating_sub(if self.project_mode() { 5 } else { 6 })
-                .max(1);
+            let page = if self.project_mode() {
+                layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1))
+                    .body
+                    .height
+                    .saturating_sub(1)
+            } else {
+                self.size.1.saturating_sub(6)
+            }
+            .max(1);
             let max = if self.project_mode() {
                 layout::project_error_max_scroll(&self.diagnostic_snapshot(), self.size)
             } else {
