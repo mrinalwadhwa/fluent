@@ -1597,6 +1597,24 @@ fn run_command(
     .with_context(|| format!("spawning Tester command: {command}"))?;
     let duration = start.elapsed();
 
+    // Cancellation fixtures hold the gap after the first child settles without
+    // replacing protected command logs with a pipe or relying on scheduler timing.
+    #[cfg(feature = "test-support")]
+    if index == 0 {
+        if let Some(barrier) = std::env::var_os("FLUENT_TEST_TESTER_SETTLED_BARRIER") {
+            let barrier = PathBuf::from(barrier);
+            fs::write(barrier.with_extension("ready"), b"settled")?;
+            let deadline = Instant::now() + std::time::Duration::from_secs(20);
+            while !barrier.is_file() {
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "Tester settled-command fixture was not released"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
     crate::tester_permissions::write_command_artifact(&stdout_path, &output.stdout)?;
     crate::tester_permissions::write_command_artifact(&stderr_path, &output.stderr)?;
 

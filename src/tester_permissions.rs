@@ -1061,6 +1061,25 @@ mod receipt_tests {
     }
 
     #[test]
+    fn command_log_write_rejects_fifo() {
+        use std::os::unix::{ffi::OsStrExt, fs::FileTypeExt};
+        let temporary = tempfile::tempdir().unwrap();
+        let log = temporary.path().join("0-stdout.log");
+        let name = std::ffi::CString::new(log.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // Let an incorrect ordinary file write finish, so this regression fails
+        // an assertion rather than waiting forever for a FIFO reader.
+        let _reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&log)
+            .unwrap();
+        let error = write_command_artifact(&log, b"output").unwrap_err();
+        assert!(error.to_string().contains("not a regular unaliased file"));
+        assert!(fs::symlink_metadata(&log).unwrap().file_type().is_fifo());
+    }
+
+    #[test]
     fn receipt_claims_reject_synthetic_or_changed_result() {
         let mut receipt: AppliedPermissionReceipt = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
