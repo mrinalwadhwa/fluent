@@ -151,6 +151,7 @@ impl App {
         if self.project_mode() && self.terminal.is_none() {
             self.keep_selection_visible();
         }
+        self.scroll_to_workers();
         self.dirty = true;
     }
     pub fn refresh(&mut self, snapshot: DashboardSnapshot) {
@@ -181,6 +182,7 @@ impl App {
         if self.project_mode() && self.terminal.is_none() {
             self.keep_selection_visible();
         }
+        self.scroll_to_workers();
         self.dirty = true;
     }
     pub fn refresh_failed(&mut self, error: String) {
@@ -236,6 +238,15 @@ impl App {
     }
 
     fn scroll_to_workers(&mut self) {
+        if !self.project_mode()
+            || self.page != ProjectPage::Overview
+            || self.pane != Pane::Detail
+            || !self.show_details
+            || self.help
+            || self.errors
+        {
+            return;
+        }
         let areas =
             layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
         let lines = layout::wrap_detail_rows(&self.detail_rows(), areas.focused_detail.width);
@@ -333,6 +344,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Left => {
                     self.action_menu = None;
                     self.detail_scroll = 0;
+                    self.scroll_to_workers();
                 }
                 KeyCode::Up => {
                     menu.selected = menu.selected.saturating_sub(1);
@@ -434,6 +446,7 @@ impl App {
                 self.pane = Pane::Detail;
                 self.show_details = true;
                 self.detail_scroll = 0;
+                self.scroll_to_workers();
                 self.dirty = true;
             }
             KeyCode::Tab | KeyCode::BackTab if self.project_mode() && self.pane == Pane::List => {
@@ -499,6 +512,7 @@ impl App {
             KeyCode::Left | KeyCode::Esc if self.project_mode() => {
                 if !self.show_details && self.page != ProjectPage::List {
                     self.show_details = true;
+                    self.scroll_to_workers();
                 } else if self.page == ProjectPage::Worker {
                     self.page = ProjectPage::Overview;
                     self.detail_scroll = 0;

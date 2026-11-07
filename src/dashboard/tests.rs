@@ -4180,30 +4180,40 @@ fn project_overview_shows_action_and_visible_worker_table() {
 
 #[test]
 fn project_enter_opens_visible_hierarchy_and_preserves_selection() {
-    for width in [60, 160] {
+    for (width, height) in [(60, 15), (160, 24)] {
         let mut source = project_source("/one", vec![row("work", "executing")]);
-        source.work[0].workers = vec![worker_row("/one", "writer"), worker_row("/one", "tester")];
+        source.work[0].workers = (0..15)
+            .map(|n| worker_row("/one", &format!("review-{n:02}")))
+            .collect();
         let mut app = project_app(vec![source]);
-        app.resize(width, 24);
+        app.resize(width, height);
         app.handle_key(KeyCode::Right, KeyModifiers::NONE);
-        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        for _ in 0..14 {
+            app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
         let selected = app.selected_worker.clone();
-        assert!(text(&app, width, 24).contains("> tester"));
+        assert!(text(&app, width, height).contains("> review-14"));
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(text(&app, width, 24).contains("Worker: tester"));
-        let mut snapshot = app.snapshot.clone();
-        snapshot.sources[0].work[0].workers.reverse();
-        app.refresh(snapshot);
-        assert_eq!(app.selected_worker, selected);
+        assert!(text(&app, width, height).contains("Worker: review-14"));
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(text(&app, width, 24).contains("> tester"));
+        assert!(text(&app, width, height).contains("> review-14"));
         app.handle_key(KeyCode::Left, KeyModifiers::NONE);
-        assert!(text(&app, width, 24).contains("Open Work Item"));
+        assert!(text(&app, width, height).contains("Open Work Item"));
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.selected_worker, selected);
-        assert!(text(&app, width, 24).contains("> tester"));
+        let reopened = text(&app, width, height);
+        assert!(reopened.contains("> review-14"), "{reopened}");
+        // Reordering must reveal the same worker at either end of the table.
+        for _ in 0..2 {
+            let mut snapshot = app.snapshot.clone();
+            snapshot.sources[0].work[0].workers.reverse();
+            app.refresh(snapshot);
+            assert_eq!(app.selected_worker, selected);
+            let refreshed = text(&app, width, height);
+            assert!(refreshed.contains("> review-14"), "{refreshed}");
+        }
         let mut snapshot = app.snapshot.clone();
-        snapshot.sources[0].work[0].workers[0]
+        snapshot.sources[0].work[0].workers[14]
             .key
             .execution_generation = Some("replacement".into());
         app.refresh(snapshot);
