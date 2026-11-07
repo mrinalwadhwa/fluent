@@ -257,9 +257,7 @@ fn handle_terminal_key(
         let result = if same_view {
             embedded.as_mut().unwrap().reconnect()
         } else {
-            // An explicit selection releases the old client's authority.
-            embedded.take();
-            app.terminal = None;
+            // Replace the retained invocation only after the exact new target opens.
             open_embedded(app).map(|terminal| *embedded = Some(terminal))
         };
         match result {

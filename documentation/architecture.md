@@ -2248,9 +2248,12 @@ and a single divider separates the list from details at 100 columns or wider.
 The split uses 65% of the width for the list, with a blank column on both sides
 of the divider and a blank row below the header rule. Rendering, scrolling,
 terminal dimensions, and mouse translation consume `layout::project_areas`.
-Full Work titles, conditions or blockers, and canonical next actions precede
-identifiers in details; worker details lead with role and state. The shared detail
-projection wraps display cells for drawing and scroll bounds.
+The wide preview shows a short condition and next step. Focused details order the
+full title, condition, next action, worker summary, and identifiers. Known
+merge-ready guidance uses separate review and landing commands derived from the
+authoritative IDs; explicit recovery guidance remains authoritative. The shared
+detail projection wraps at words with hanging continuation for drawing and scroll
+bounds, splitting only tokens wider than the available line.
 `model::InputOwner` and the shared control projection identify List, Details,
 or native terminal input; the footer keeps only whole controls that fit. Right
 focuses the summary; Enter opens Workers. Within details Enter switches focus,

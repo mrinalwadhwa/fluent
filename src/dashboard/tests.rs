@@ -3750,6 +3750,21 @@ fn project_list_keeps_one_row_per_work_item() {
         assert!(!rendered.contains('↳'));
         assert_eq!(app.scroll_bounds().list_max_scroll, 0);
     }
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    for _ in 0..99 {
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert_eq!(
+        app.selected_worker.as_ref().unwrap().task_id.as_deref(),
+        Some("historical-99")
+    );
+    assert!(
+        app.detail_values()
+            .join("\n")
+            .contains("headless execution")
+    );
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.project_keys().len(), 2);
 }
 
 #[test]
@@ -3789,7 +3804,9 @@ fn project_details_open_summary_or_workers_and_return_to_selection() {
                 .map(|i| row(&format!("work-{i}"), "executing"))
                 .collect(),
         );
-        source.work[29].workers = vec![worker_row("/one", "writer")];
+        let mut worker = worker_row("/one", "writer");
+        worker.key.work_item_id = "work-29".into();
+        source.work[29].workers = vec![worker];
         let mut app = project_app(vec![source]);
         app.resize(width, 24);
         for _ in 0..29 {
@@ -3803,7 +3820,12 @@ fn project_details_open_summary_or_workers_and_return_to_selection() {
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.workers_focused);
         assert!(app.selected_worker.is_some());
-        assert!(text(&app, width, 24).contains("Workers"));
+        let rendered = text(&app, width, 24);
+        assert!(rendered.contains("Workers"));
+        assert!(
+            rendered.lines().last().unwrap().contains("t terminal"),
+            "{rendered}"
+        );
         app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert!(!app.workers_focused);
         app.handle_key(KeyCode::Esc, KeyModifiers::NONE);
@@ -3814,12 +3836,19 @@ fn project_details_open_summary_or_workers_and_return_to_selection() {
 
 #[test]
 fn detail_worker_selection_preserves_exact_terminal_target() {
-    let mut source = project_source("/one", vec![row("work", "executing")]);
+    let mut source = project_source("/one", vec![row("work", "needs-user")]);
     source.work[0].workers = vec![worker_row("/one", "writer"), worker_row("/one", "reviewer")];
     let mut app = project_app(vec![source]);
     let parent = app.selected_key.clone();
     app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
     let first = app.selected_worker.clone();
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(
+        app.selected_worker, first,
+        "a visible parent keeps its worker across views"
+    );
+    app.handle_key(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.selected_worker, first);
     app.handle_key(KeyCode::Down, KeyModifiers::NONE);
     let second = app.selected_worker.clone();
     assert_ne!(first, second);
@@ -3838,4 +3867,98 @@ fn detail_worker_selection_preserves_exact_terminal_target() {
     assert_eq!(app.selected_worker, None);
     assert_eq!(app.selected_key, parent);
     assert!(open_embedded(&app).is_err());
+}
+
+#[test]
+fn project_preview_and_full_details_have_distinct_hierarchy() {
+    let mut status = row("work", "merge-ready");
+    status.title = "Full title with more context".into();
+    status.merge_candidate = "candidate-7".into();
+    let mut app = project_app(vec![project_source("/one", vec![status])]);
+    let preview = text(&app, 160, 30);
+    let pane = preview
+        .lines()
+        .filter_map(|line| line.split('│').nth(1))
+        .collect::<String>();
+    assert!(pane.contains("Next: Review candidate"), "{preview}");
+    assert!(!pane.contains("fluent merge-candidate"));
+    assert!(!pane.contains("Work Item:"));
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE);
+    let full = app.detail_values().join("\n");
+    assert!(full.starts_with("Full title with more context\nState:"));
+    assert!(full.find("Next action:").unwrap() < full.find("Workers (").unwrap());
+    assert!(full.find("Workers (").unwrap() < full.find("Work Item:").unwrap());
+    assert!(full.contains("Merge Candidate: candidate-7"));
+}
+
+#[test]
+fn project_actions_keep_commands_readable_and_exact() {
+    let mut status = row("20261106-dashboard-with-a-long-name", "merge-ready");
+    status.merge_candidate = "attempt-1-merge-candidate".into();
+    let app = project_app(vec![project_source("/one", vec![status.clone()])]);
+    let values = app.detail_values();
+    assert!(values.contains(&format!(
+        "  fluent merge-candidate show {} {}",
+        status.id, status.merge_candidate
+    )));
+    assert!(values.contains(&format!(
+        "  fluent merge-candidate land {} {}",
+        status.id, status.merge_candidate
+    )));
+    assert!(values.contains(&"1. Review candidate".into()));
+    assert!(values.contains(&"2. Land candidate".into()));
+    for command in values.iter().filter(|value| value.starts_with("  fluent")) {
+        let lines = layout::project_detail_lines(std::slice::from_ref(command), 60);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+            command.trim()
+        );
+    }
+    let guidance = vec![
+        "Next action: Inspect the pending evidence carefully before resuming the selected attempt"
+            .into(),
+    ];
+    let wrapped = layout::project_detail_lines(&guidance, 30);
+    assert_eq!(
+        wrapped
+            .iter()
+            .map(|line| line.trim())
+            .collect::<Vec<_>>()
+            .join(" "),
+        guidance[0]
+    );
+    assert!(wrapped.iter().skip(1).all(|line| line.starts_with("  ")));
+    for width in [1, 2, 17, 60, 160] {
+        let wrapped = layout::project_detail_lines(&values, width);
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= width as usize)
+        );
+    }
+    let unicode = "漢字 e\u{301} words";
+    let wrapped = layout::project_detail_lines(&[unicode.into()], 2);
+    let compact = |value: &str| {
+        value
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    assert_eq!(compact(&wrapped.join("")), compact(unicode));
+    assert!(
+        wrapped
+            .iter()
+            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 2)
+    );
+    // Recovery guidance remains authoritative, even for a merge-ready row.
+    let mut custom = status;
+    custom.next_action = Some("Inspect host evidence before any landing command".into());
+    let app = project_app(vec![project_source("/one", vec![custom])]);
+    let full = app.detail_values().join("\n");
+    assert!(full.contains("Inspect host evidence before any landing command"));
+    assert!(!full.contains("2. Land candidate"));
 }

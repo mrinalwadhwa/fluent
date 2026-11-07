@@ -227,7 +227,8 @@ impl App {
                 },
             ];
             if self.selected_worker.is_some() {
-                controls.push("t terminal");
+                let position = controls.len().saturating_sub(1);
+                controls.insert(position, "t terminal");
             }
             controls
         };
@@ -260,33 +261,34 @@ impl App {
         };
         let mut values = layout::project_detail_values(&self.snapshot.sources, key);
         if let Some((_, work)) = project::find_work(&self.snapshot.sources, key) {
-            values.push(format!(
-                "Workers ({}){}",
-                work.workers.len(),
-                if self.workers_focused {
+            if let Some(section) = values
+                .iter()
+                .position(|value| value.starts_with("Workers ("))
+            {
+                values[section].push_str(if self.workers_focused {
                     " · ↑/↓ select · Enter summary"
                 } else {
                     " · Enter workers"
+                });
+                let mut worker_values = Vec::new();
+                if let Some(worker_key) = &self.selected_worker {
+                    if let Some(index) = work
+                        .workers
+                        .iter()
+                        .position(|worker| &worker.key == worker_key)
+                    {
+                        worker_values.push(format!(
+                            "Selected worker {}/{}",
+                            index + 1,
+                            work.workers.len()
+                        ));
+                        worker_values
+                            .extend(layout::project_worker_values(&work.workers[index], work));
+                    }
+                } else if self.workers_focused {
+                    worker_values.push("No worker selected".into());
                 }
-            ));
-            if let Some(worker_key) = &self.selected_worker {
-                if let Some(index) = work
-                    .workers
-                    .iter()
-                    .position(|worker| &worker.key == worker_key)
-                {
-                    values.push(format!(
-                        "Selected worker {}/{}",
-                        index + 1,
-                        work.workers.len()
-                    ));
-                    values.extend(layout::project_detail_values(
-                        &self.snapshot.sources,
-                        worker_key,
-                    ));
-                }
-            } else if self.workers_focused {
-                values.push("No worker selected".into());
+                values.splice(section + 1..section + 1, worker_values);
             }
         }
         values
@@ -309,26 +311,13 @@ impl App {
     }
     pub fn scroll_bounds(&self) -> layout::ScrollBounds {
         if self.project_mode() {
-            let mut bounds = layout::project_scroll_bounds(
+            layout::project_scroll_bounds(
                 &self.snapshot.sources,
                 self.filter,
-                self.selected_key.as_ref(),
+                &self.detail_values(),
                 self.size,
                 self.pane == Pane::Detail && self.show_details,
-            );
-            let areas =
-                layout::project_areas(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
-            let detail = if self.pane == Pane::Detail && self.show_details {
-                areas.focused_detail
-            } else {
-                areas.detail
-            };
-            bounds.detail_max_scroll =
-                layout::project_detail_lines(&self.detail_values(), detail.width)
-                    .len()
-                    .saturating_sub(detail.height as usize)
-                    .min(u16::MAX as usize) as u16;
-            bounds
+            )
         } else {
             layout::scroll_bounds(&self.snapshot, self.all_work, self.selected_id(), self.size)
         }

@@ -85,6 +85,7 @@ WHEN a healthy source is polled, THE SYSTEM SHALL keep its identity stable and
 hide routine read activity, timestamps, and hashes. Equal project names on the
 same host SHALL include a source disambiguator.
 Test: src/dashboard/tests.rs (project_source_headers_stay_quiet_during_polling)
+Test: src/dashboard/tests.rs (project_header_uses_one_read_status_and_right_brand)
 
 ### B2
 
@@ -92,6 +93,7 @@ WHEN the dashboard first loads or the operator refreshes, THE SYSTEM SHALL show
 one delayed, fixed-width checking indicator on the left of the top header line,
 with Fluent at its right edge. Routine polling SHALL hide the indicator.
 Test: src/dashboard/tests.rs (project_read_progress_is_global_and_contextual)
+Test: src/dashboard/tests.rs (project_read_indicator_appears_only_for_visible_reads)
 
 ### B3
 
@@ -101,6 +103,7 @@ Work Items, and keep its last successful observation and full diagnostic in erro
 The header SHALL count affected sources once; source rows SHALL use a compact `!` marker.
 Source read times SHALL remain separate from Work update times.
 Test: src/dashboard/tests.rs (project_source_read_warnings_preserve_work)
+Test: src/dashboard/tests.rs (project_source_warnings_use_one_global_status)
 Test: src/dashboard/tests.rs (refresh_health_distinguishes_loading_success_and_error)
 
 ## Project dashboard layout and navigation
@@ -127,12 +130,15 @@ Test: src/dashboard/tests.rs (project_rows_show_recorded_update_times)
 
 ### B3
 
-WHEN a Work Item is selected, THE SYSTEM SHALL show its full title, condition
-or blocker, and canonical next action before identifiers. WHEN a worker is
-selected, THE SYSTEM SHALL show its role and state before its parent Work's
-next action, with the full title, Task, invocation, and terminal availability
-still available below. Wrapped details SHALL remain scrollable to the last line.
-Test: src/dashboard/tests.rs (details_put_title_reason_and_action_before_identifiers)
+WHEN a Work Item is selected in the wide list, THE SYSTEM SHALL show a concise
+preview of its condition and short next step. Focused details SHALL show the full
+title, condition, next action, worker summary, and identifiers in that order.
+Known merge-ready guidance SHALL show separate review and landing steps with
+exact commands derived from the Work Item and Merge Candidate IDs. Other guidance
+SHALL remain complete and wrap at word boundaries with hanging continuation.
+Wrapped details SHALL remain scrollable to the last line.
+Test: src/dashboard/tests.rs (project_preview_and_full_details_have_distinct_hierarchy)
+Test: src/dashboard/tests.rs (project_actions_keep_commands_readable_and_exact)
 Test: src/dashboard/tests.rs (project_details_wrap_full_context_to_the_last_line)
 
 ### B4
@@ -142,6 +148,7 @@ cycle counted views forward or backward and preserve a selection that remains
 visible. Start in Current, which excludes only History, and initially favor Needs
 you, then Running, then Ready or Ready to land, then other unfinished Work.
 Test: src/dashboard/tests.rs (tab_views_preserve_selection_and_exact_categories)
+Test: src/dashboard/tests.rs (project_views_exclude_redundant_all_and_preserve_membership)
 Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
 
 ### B5
@@ -155,6 +162,9 @@ the same Work Item and list position. A removed worker SHALL clear only worker
 selection; refresh SHALL preserve a still-present worker's exact identity.
 WHEN t is pressed on a selected worker, open only that worker's available session
 in Observe or explain its unavailability, without starting or retargeting Work.
+Test: src/dashboard/tests.rs (project_list_keeps_one_row_per_work_item)
+Test: src/dashboard/tests.rs (project_details_open_summary_or_workers_and_return_to_selection)
+Test: src/dashboard/tests.rs (detail_worker_selection_preserves_exact_terminal_target)
 Test: src/dashboard/tests.rs (right_arrow_opens_full_details_on_wide_dashboard)
 Test: src/dashboard/tests.rs (focused_details_return_preserves_selection_and_terminal_shortcut)
 Test: src/dashboard/tests.rs (worker_arrow_opens_details_and_t_opens_terminal)
@@ -177,6 +187,7 @@ agent terminal is displayed, keep its Observe, Control, or navigation-with-Contr
 state visible. Keep quit and navigation return controls visible at minimum size;
 focused terminal Control SHALL advertise Ctrl-] to return to navigation. Advertise
 `] literal` only when the attachment retains Control.
+Test: src/dashboard/tests.rs (project_footer_shows_contextual_primary_controls)
 Test: src/dashboard/tests.rs (terminal_mode_and_focus_remain_explicit)
 Test: src/dashboard/tests.rs (dashboard_focus_and_footer_follow_input_owner)
 Test: src/dashboard/tests.rs (focused_control_only_advertises_native_return_path)
@@ -4183,7 +4194,10 @@ changed. IF source changes during removal, THE SYSTEM SHALL refuse remaining
 removals.
 Test: tests/binary.rs (cleanup_rechecks_source_before_removal), tests/binary.rs (cleanup_refuses_late_source_changes)
 
-## Dashboard
+## Internal compatibility dashboard
+
+The following behaviors describe the retained internal status-grouped snapshot.
+The public CLI uses the project dashboard specified above.
 
 ### B1
 

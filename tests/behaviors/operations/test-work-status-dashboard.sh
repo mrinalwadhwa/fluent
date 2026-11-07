@@ -131,8 +131,8 @@ while time.monotonic() < deadline:
     screen = Screen(120, 30)
     screen.feed(capture.read_bytes())
     text = screen.text()
-    if (all(word in text for word in ("Fluent work", "Tasks", "q quit"))
-            and "Loading local Work" not in text):
+    if (all(word in text for word in ("Fluent", "Tasks", "q quit", "local"))
+            and "Checking" not in text):
         sys.exit(0)
     time.sleep(0.05)
 sys.exit("dashboard did not complete its initial local read within 20 seconds")
@@ -353,8 +353,8 @@ test_dashboard_lists_work_items() {
   create_planned_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
-  assert_contains "$OUTPUT" "All1" || RESULT=1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[C" | clean_dashboard_output)" || return 1
+  assert_contains "$OUTPUT" "Current1" || RESULT=1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "VisibleWork" || RESULT=1
@@ -371,7 +371,7 @@ test_dashboard_refreshes_work_items_on_poll() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "r" | clean_dashboard_output)" || return 1
-  assert_contains "$OUTPUT" "All2" || RESULT=1
+  assert_contains "$OUTPUT" "Current2" || RESULT=1
   assert_contains "$OUTPUT" "Planned" || RESULT=1
   assert_contains "$OUTPUT" "PolledWork" || RESULT=1
   return $RESULT
@@ -383,12 +383,12 @@ test_dashboard_surfaces_actionable_work() {
   create_merge_ready_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[C" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Ready1" || RESULT=1
   assert_contains "$OUTPUT" "work-action" || RESULT=1
   assert_contains "$OUTPUT" "ActionableWork" || RESULT=1
   assert_contains "$OUTPUT" "Readytoland" || RESULT=1
-  assert_contains "$OUTPUT" "Nextaction:fluentmerge-candidateshowwork-action" || RESULT=1
+  assert_contains "$OUTPUT" "fluentmerge-candidateshowwork-action" || RESULT=1
   return $RESULT
 }
 
@@ -429,7 +429,7 @@ test_dashboard_surfaces_needs_user_work() {
   create_needs_user_work_item
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[C" | clean_dashboard_output)" || return 1
   assert_contains "$OUTPUT" "Needsyou1" || RESULT=1
   assert_contains "$OUTPUT" "work-needs-user" || RESULT=1
   assert_contains "$OUTPUT" "NeedsUserWork" || RESULT=1
@@ -445,8 +445,8 @@ test_dashboard_reports_work_read_errors() {
   printf '{ invalid json\n' > .fluent/work/items/broken-work.json
 
   RESULT=0
-  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "e" | clean_dashboard_output)" || return 1
-  assert_contains "$OUTPUT" "All1" || RESULT=1
+  OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" "\x1b[Ce" | clean_dashboard_output)" || return 1
+  assert_contains "$OUTPUT" "Current1" || RESULT=1
   assert_contains "$OUTPUT" "work-visible" || RESULT=1
   assert_contains "$OUTPUT" "failedtoparse" || RESULT=1
   return $RESULT
@@ -458,7 +458,7 @@ test_dashboard_shows_empty_work_view() {
 
   RESULT=0
   OUTPUT="$(capture_dashboard_default "$TEST_DIR/project" | clean_dashboard_output)" || return 1
-  assert_contains "$OUTPUT" "All0" || RESULT=1
+  assert_contains "$OUTPUT" "Current0" || RESULT=1
   assert_contains "$OUTPUT" "NoWorkItemsinthisview" || RESULT=1
   return $RESULT
 }

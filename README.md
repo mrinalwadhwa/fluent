@@ -475,6 +475,10 @@ Planned. Rows keep their exact categories. Header
 counts reflect published Work Item lifecycle and queue state. The list shows one
 row per Work Item; workers remain in details.
 
+The wide list preview shows a short condition and next step. Full details put the
+next action before worker context and identifiers; merge-ready guidance separates
+review and landing commands into readable steps.
+
 Use Up/Down to select a Work Item. Right opens its full summary; Enter opens
 Workers in details. In details, Enter switches between summary and worker focus,
 Up/Down selects workers while Workers has focus, and PageUp/PageDown scrolls.
@@ -493,4 +497,4 @@ Select a native agent worker and press `t` to observe its terminal. Wide dashboa
 
 Configure existing remote macOS projects in `~/.config/fluent/dashboard-sources.json` to include them through OpenSSH. The same terminal controls reach the remote runtime; disconnect drops queued input, and reconnect revalidates the original invocation in Observe mode. See [SSH agent sources](docs/ssh-agent-sources.md) for configuration, prerequisites, and the separately authorized host acceptance journey.
 
-The dashboard's source snapshot contract is version 1. A local source identity is its canonical checkout path; a configured remote source uses `ssh:<name>`. In both cases, a Work row adds the Work Item ID, and a worker row adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records and does not scan transcripts or change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.
+The dashboard's source snapshot contract is version 1. A local source identity is its canonical checkout path; a configured remote source uses `ssh:<name>`. In both cases, a Work row adds the Work Item ID, and a worker record adds Attempt ID, Task ID, and the execution generation when a managed terminal descriptor exists. Each source snapshot carries its published Work state, displayed Attempt workers, queued Work Item IDs, optional terminal descriptors, diagnostics, and a stale marker. The dashboard reads bounded records and does not scan transcripts or change Work state. Failed source reads preserve only the last successful snapshot for that source; lifecycle labels from such a snapshot remain visibly stale until a successful refresh.

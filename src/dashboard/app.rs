@@ -209,6 +209,13 @@ impl App {
             self.selected_index = self.selected_index.min(keys.len().saturating_sub(1));
             self.selected_key = keys.get(self.selected_index).cloned();
         }
+        if self.selected_worker.as_ref().is_some_and(|worker| {
+            self.selected_key.as_ref().is_none_or(|work| {
+                worker.source_id != work.source_id || worker.work_item_id != work.work_item_id
+            }) || project::find_worker(&self.snapshot.sources, worker).is_none()
+        }) {
+            self.selected_worker = None;
+        }
     }
     fn focus_workers(&mut self) {
         self.workers_focused = true;
@@ -362,7 +369,6 @@ impl App {
                     self.filter.next()
                 };
                 self.reconcile_project_selection();
-                self.selected_worker = None;
                 self.keep_selection_visible();
                 self.detail_scroll = 0;
                 self.clamp_scrolls();

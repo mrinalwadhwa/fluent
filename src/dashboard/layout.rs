@@ -88,7 +88,7 @@ pub struct ScrollBounds {
 pub fn project_scroll_bounds(
     sources: &[SourceSnapshot],
     filter: Filter,
-    selected_key: Option<&RowKey>,
+    details: &[String],
     size: (u16, u16),
     focused_details: bool,
 ) -> ScrollBounds {
@@ -110,10 +110,7 @@ pub fn project_scroll_bounds(
         areas.detail
     };
     let detail_width = detail.width.max(1) as usize;
-    let details = selected_key
-        .map(|key| project_detail_values(sources, key))
-        .unwrap_or_default();
-    let detail_lines = project_detail_lines(&details, detail_width as u16).len();
+    let detail_lines = project_detail_lines(details, detail_width as u16).len();
     ScrollBounds {
         list_height: inner_height,
         list_max_scroll: lines
@@ -286,27 +283,86 @@ pub fn project_error_max_scroll(snapshot: &DashboardSnapshot, size: (u16, u16)) 
         .min(u16::MAX as usize) as u16
 }
 
-/// Wrap at display cells once so the renderer and scroll bounds agree.
+/// Wrap at words with hanging continuation; split only tokens wider than a line.
+/// Drawing and scroll bounds consume the same lines.
 pub fn project_detail_lines(values: &[String], width: u16) -> Vec<String> {
     let width = usize::from(width.max(1));
     let mut lines = Vec::new();
     for value in values {
         for paragraph in value.split('\n') {
-            let mut line = String::new();
-            let mut used = 0;
-            for character in paragraph.chars() {
-                let columns = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-                if used + columns > width && !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                    used = 0;
+            let mut remaining = paragraph;
+            let mut continuation = false;
+            loop {
+                let indent = if continuation {
+                    " ".repeat(2.min(width.saturating_sub(1)))
+                } else {
+                    String::new()
+                };
+                let available = width - indent.len();
+                if UnicodeWidthStr::width(remaining) <= available {
+                    lines.push(format!("{indent}{remaining}"));
+                    break;
                 }
-                line.push(character);
-                used += columns;
+                let mut used = 0;
+                let mut end = 0;
+                let mut word_break = None;
+                for (index, character) in remaining.char_indices() {
+                    let columns = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+                    if used + columns > available {
+                        break;
+                    }
+                    used += columns;
+                    end = index + character.len_utf8();
+                    if character.is_whitespace() && !remaining[..index].trim().is_empty() {
+                        word_break = Some(index);
+                    }
+                }
+                // At an exact word boundary, retain the complete fitting word.
+                let split = if remaining[end..].starts_with(char::is_whitespace) {
+                    end
+                } else {
+                    word_break.unwrap_or(end)
+                };
+                if split == 0 {
+                    // Retain a wide character on its own when continuation
+                    // indentation leaves no room; never discard diagnostic text.
+                    let character = remaining.chars().next().unwrap();
+                    remaining = &remaining[character.len_utf8()..];
+                    lines.push(character.to_string());
+                } else {
+                    lines.push(format!("{indent}{}", remaining[..split].trim_end()));
+                    remaining = remaining[split..].trim_start();
+                }
+                continuation = true;
             }
-            lines.push(line);
         }
     }
     lines
+}
+
+pub fn project_preview_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
+    let values = project_detail_values(sources, key);
+    if values.len() < 2 {
+        return values;
+    }
+    let next = if values.iter().any(|value| value == "1. Review candidate") {
+        "Review candidate".into()
+    } else {
+        values
+            .iter()
+            .find_map(|value| value.strip_prefix("Next action: "))
+            .unwrap_or("Review details")
+            .lines()
+            .next()
+            .unwrap_or("Review details")
+            .to_owned()
+    };
+    vec![
+        values[0].clone(),
+        values[1].clone(),
+        format!("Next: {next}"),
+        "→ full details · Enter workers".into(),
+    ]
 }
 
 pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<String> {
@@ -351,6 +407,40 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
             format!("Next action: {next_action}"),
         ]
     };
+    if worker.is_none() {
+        let canonical = crate::guidance::next_action_for_action(
+            "merge-ready",
+            &work.status.id,
+            &work.status.merge_candidate,
+        )
+        .map(|action| {
+            action
+                .trim()
+                .trim_start_matches("→ Next:")
+                .trim()
+                .to_owned()
+        });
+        if work.status.action == "merge-ready"
+            && canonical.as_deref() == Some(next_action.as_str())
+            && work.status.merge_candidate != "-"
+        {
+            values.pop();
+            values.extend([
+                "Next action:".into(),
+                "1. Review candidate".into(),
+                format!(
+                    "  fluent merge-candidate show {} {}",
+                    work.status.id, work.status.merge_candidate
+                ),
+                "2. Land candidate".into(),
+                format!(
+                    "  fluent merge-candidate land {} {}",
+                    work.status.id, work.status.merge_candidate
+                ),
+            ]);
+        }
+        values.push(format!("Workers ({})", work.workers.len()));
+    }
     values.extend([
         format!("Work Item: {}", work.status.id),
         format!(
@@ -359,59 +449,9 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
         ),
     ]);
     if let Some(worker) = worker {
-        values.extend([
-            format!(
-                "Task: {}",
-                worker.key.task_id.as_deref().unwrap_or("unavailable")
-            ),
-            format!(
-                "Invocation: {}",
-                worker
-                    .key
-                    .execution_generation
-                    .as_deref()
-                    .unwrap_or("unavailable")
-            ),
-            format!(
-                "Agent terminal: {}",
-                worker
-                    .terminal
-                    .as_ref()
-                    .map(|terminal| if terminal.can_observe {
-                        "Observe available".into()
-                    } else {
-                        worker.unavailable_reason.clone()
-                    })
-                    .unwrap_or_else(|| worker.unavailable_reason.clone())
-            ),
-            format!(
-                "Provider: {}",
-                worker.provider.as_deref().unwrap_or("unavailable")
-            ),
-            format!(
-                "Model: {}",
-                worker.model.as_deref().unwrap_or("unavailable")
-            ),
-            format!(
-                "Effort: {}",
-                worker.effort.as_deref().unwrap_or("unavailable")
-            ),
-            format!(
-                "Elapsed: {}",
-                worker
-                    .elapsed_ms
-                    .map(|ms| format!("{}s", ms / 1000))
-                    .unwrap_or_else(|| "unavailable".into())
-            ),
-            format!(
-                "Work provider wait: {}",
-                if work.status.metrics.provider_wait_ms > 0 {
-                    format!("{}s", work.status.metrics.provider_wait_ms / 1000)
-                } else {
-                    "unavailable".into()
-                }
-            ),
-        ]);
+        values.extend(project_worker_values(worker, work).into_iter().skip(2));
+    } else {
+        values.push(format!("Merge Candidate: {}", work.status.merge_candidate));
     }
     values.push(format!(
         "Source: {} · {}",
@@ -434,4 +474,63 @@ pub fn project_detail_values(sources: &[SourceSnapshot], key: &RowKey) -> Vec<St
             .map(|diagnostic| format!("Source diagnostic: {diagnostic}")),
     );
     values
+}
+
+/// Project a selected worker without repeating its parent's guidance.
+pub fn project_worker_values(worker: &project::Worker, work: &project::ProjectWork) -> Vec<String> {
+    vec![
+        format!("Worker: {}", worker.role),
+        format!("State: {}", worker.state),
+        format!(
+            "Agent terminal: {}",
+            worker
+                .terminal
+                .as_ref()
+                .map(|terminal| if terminal.can_observe {
+                    "Observe available".into()
+                } else {
+                    worker.unavailable_reason.clone()
+                })
+                .unwrap_or_else(|| worker.unavailable_reason.clone())
+        ),
+        format!(
+            "Provider: {}",
+            worker.provider.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+            "Model: {}",
+            worker.model.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+            "Effort: {}",
+            worker.effort.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+            "Elapsed: {}",
+            worker
+                .elapsed_ms
+                .map(|ms| format!("{}s", ms / 1000))
+                .unwrap_or_else(|| "unavailable".into())
+        ),
+        format!(
+            "Work provider wait: {}",
+            if work.status.metrics.provider_wait_ms > 0 {
+                format!("{}s", work.status.metrics.provider_wait_ms / 1000)
+            } else {
+                "unavailable".into()
+            }
+        ),
+        format!(
+            "Task: {}",
+            worker.key.task_id.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+            "Invocation: {}",
+            worker
+                .key
+                .execution_generation
+                .as_deref()
+                .unwrap_or("unavailable")
+        ),
+    ]
 }

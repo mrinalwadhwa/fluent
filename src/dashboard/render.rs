@@ -291,15 +291,50 @@ fn project_detail(frame: &mut Frame, area: Rect, app: &App) {
         crate::terminal_view::draw(frame, area, display);
         return;
     }
-    let values = app.detail_values();
+    let focused = app.pane == Pane::Detail && app.show_details;
+    let values = if focused {
+        app.detail_values()
+    } else {
+        app.selected_key
+            .as_ref()
+            .map(|key| layout::project_preview_values(&app.snapshot.sources, key))
+            .unwrap_or_else(|| vec!["No Work Item selected".into()])
+    };
     frame.render_widget(
         Paragraph::new(
-            layout::project_detail_lines(&values, area.width)
-                .into_iter()
-                .map(Line::from)
-                .collect::<Vec<_>>(),
+            (if focused {
+                layout::project_detail_lines(&values, area.width)
+            } else {
+                values
+                    .iter()
+                    .map(|value| {
+                        if value.width() <= area.width as usize {
+                            return value.clone();
+                        }
+                        let mut preview = String::new();
+                        for word in value.split_whitespace() {
+                            let separator = if preview.is_empty() { "" } else { " " };
+                            if preview.width() + separator.len() + word.width() + 1
+                                > area.width as usize
+                            {
+                                break;
+                            }
+                            preview.push_str(separator);
+                            preview.push_str(word);
+                        }
+                        if preview.is_empty() {
+                            compact(value, area.width as usize)
+                        } else {
+                            format!("{preview}…")
+                        }
+                    })
+                    .collect()
+            })
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>(),
         )
-        .scroll((app.detail_scroll, 0)),
+        .scroll((if focused { app.detail_scroll } else { 0 }, 0)),
         area,
     );
 }
