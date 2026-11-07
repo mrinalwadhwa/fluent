@@ -59,12 +59,14 @@ Test: src/dashboard/tests.rs (dashboard_opens_on_current_work)
 
 ### B2
 
-WHEN an operator navigates, filters, refreshes, or resizes the dashboard, THE
-SYSTEM SHALL preserve its selected Work Item or worker when it remains visible
-in the counted view and select the nearest remaining row when it does not.
-An open overview or worker page SHALL retain its exact source and Work Item even
-when refresh moves the item out of the view, with feedback bound to that identity.
-Returning to the list SHALL reconcile selection to a visible row.
+WHILE the Work list is open, WHEN an operator navigates, filters, refreshes, or
+resizes the dashboard, THE SYSTEM SHALL preserve the selected Work Item when it
+remains in the counted view and select the nearest remaining row when it does not.
+WHILE an overview or worker page is open, WHEN a refresh moves its Work Item out
+of the counted view, THE SYSTEM SHALL retain the exact source and Work Item, with
+feedback bound to that identity.
+WHEN the operator returns to the list, THE SYSTEM SHALL reconcile selection to
+a visible row.
 Test: src/dashboard/tests.rs (selection_survives_refresh_reorder_and_filter)
 Test: src/dashboard/tests.rs (project_detail_keeps_work_identity_after_filter_transition)
 Test: src/dashboard/tests.rs (project_action_feedback_keeps_retained_identity_after_disappearance)
@@ -162,11 +164,15 @@ Test: src/dashboard/tests.rs (project_overview_prioritizes_active_worker_at_narr
 
 WHEN list navigation owns input and Tab or Shift+Tab is pressed, THE SYSTEM SHALL
 cycle counted views forward or backward and preserve a selection that remains
-visible. Start in Current, which excludes only History, and initially favor Needs
-you, then Running, then Ready or Ready to land, then other unfinished Work.
-PageUp/PageDown SHALL move both the viewport and selection into the destination
-page, so Enter opens a visible row. Routine refresh SHALL preserve selection and
-page position while the selected Work Item remains in the view.
+visible.
+WHEN the dashboard opens, THE SYSTEM SHALL start in Current, which excludes only
+History, and initially favor Needs you, then Running, then Ready or Ready to land,
+then other unfinished Work.
+WHILE list navigation owns input, WHEN PageUp or PageDown is pressed, THE SYSTEM
+SHALL move both the viewport and selection into the destination page, so Enter
+opens a visible row.
+WHILE the Work list is open, WHEN a routine refresh retains the selected Work
+Item in the view, THE SYSTEM SHALL preserve selection and page position.
 Test: src/dashboard/tests.rs (tab_views_preserve_selection_and_exact_categories)
 Test: src/dashboard/tests.rs (project_views_exclude_redundant_all_and_preserve_membership)
 Test: src/dashboard/tests.rs (dashboard_opens_on_current_project_work)
