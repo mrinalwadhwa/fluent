@@ -1096,14 +1096,22 @@ fn run_write_task_with_coder(
             return Err(error);
         }
     };
-    let claude_home = (coder_kind == CoderKind::Claude).then(|| {
-        config
-            .project_root
-            .join(".fluent/work/artifacts")
-            .join(config.work_item_id)
-            .join(config.attempt_id)
-            .join("claude-home")
-    });
+    let managed_home = match coder_kind {
+        CoderKind::Claude => Some(
+            config
+                .project_root
+                .join(".fluent/work/artifacts")
+                .join(config.work_item_id)
+                .join(config.attempt_id)
+                .join("claude-home"),
+        ),
+        CoderKind::Opencode => Some(opencode_home_dir(
+            config.project_root,
+            config.work_item_id,
+            config.attempt_id,
+        )),
+        _ => None,
+    };
     let prior_snapshot = match previous_writer_codex_session_snapshot(
         &item,
         config.attempt_id,
@@ -1202,7 +1210,7 @@ fn run_write_task_with_coder(
         config.no_sandbox,
         coder_kind,
         provider_readiness.codex_worker(),
-        claude_home.as_deref(),
+        managed_home.as_deref(),
         &writer_cache,
     ) {
         Ok(profile) => profile,
@@ -1357,7 +1365,7 @@ fn run_write_task_with_coder(
             reservation.effort.as_deref(),
             &pump_config,
             provider_readiness.codex_worker(),
-            claude_home.as_deref(),
+            managed_home.as_deref(),
             &writer_cache,
             sandbox_profile.as_ref(),
             coder_override,
@@ -1415,7 +1423,7 @@ fn run_write_task_with_coder(
                 reservation.effort.as_deref(),
                 &pump_config,
                 provider_readiness.codex_worker(),
-                claude_home.as_deref(),
+                managed_home.as_deref(),
                 &writer_cache,
                 sandbox_profile.as_ref(),
                 coder_override,
@@ -1490,7 +1498,7 @@ fn run_write_task_with_coder(
                 reservation.effort.as_deref(),
                 &pump_config,
                 provider_readiness.codex_worker(),
-                claude_home.as_deref(),
+                managed_home.as_deref(),
                 &writer_cache,
                 sandbox_profile.as_ref(),
                 coder_override,
@@ -4831,7 +4839,7 @@ fn preflight_write_sandbox_profile(
     no_sandbox: bool,
     coder_kind: CoderKind,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
     writer_cache: &crate::writer_cache::WriterDependencyCache,
 ) -> Result<Option<os::SandboxProfile>> {
     // A first Writer's worktree does not exist until after reservation.
@@ -4871,7 +4879,7 @@ fn preflight_write_sandbox_profile(
     if let Some(artifact_area) = task.artifact_area.as_ref() {
         writable_roots.push(project_root.join(&artifact_area.path));
     }
-    writable_roots.extend(claude_home.map(Path::to_path_buf));
+    writable_roots.extend(managed_home.map(Path::to_path_buf));
     writable_roots.push(writer_cache.root().to_path_buf());
 
     let profile = if coder_kind == CoderKind::Claude {
@@ -5209,7 +5217,7 @@ fn run_task_coder_with_optional_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
     writer_cache: &crate::writer_cache::WriterDependencyCache,
     sandbox_profile: Option<&os::SandboxProfile>,
     coder_override: Option<&dyn Fn(CoderSandbox) -> Box<dyn crate::coder::Coder>>,
@@ -5230,7 +5238,7 @@ fn run_task_coder_with_optional_coder(
         effort,
         pump_config,
         codex_worker,
-        claude_home,
+        managed_home,
         writer_cache,
         sandbox_profile,
         handoff_feedback,
@@ -5262,7 +5270,7 @@ fn run_task_coder_with_coder(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
     writer_cache: &crate::writer_cache::WriterDependencyCache,
     sandbox_profile: Option<&os::SandboxProfile>,
     make_coder: impl FnOnce(CoderSandbox, Option<&Path>) -> Box<dyn crate::coder::Coder>,
@@ -5282,7 +5290,7 @@ fn run_task_coder_with_coder(
         effort,
         pump_config,
         codex_worker,
-        claude_home,
+        managed_home,
         writer_cache,
         sandbox_profile,
         None,
@@ -5306,7 +5314,7 @@ fn run_task_coder_with_coder_with_feedback(
     effort: Option<&str>,
     pump_config: &crate::transcript_pump::TranscriptPumpConfig,
     codex_worker: Option<&crate::codex_worker::CodexWorkerEnvironment>,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
     writer_cache: &crate::writer_cache::WriterDependencyCache,
     sandbox_profile: Option<&os::SandboxProfile>,
     handoff_feedback: Option<&str>,
@@ -5322,7 +5330,7 @@ fn run_task_coder_with_coder_with_feedback(
         }
         credential::inject_credentials()?;
         credential::setup_git_signing();
-    } else if needs_managed_claude_credential_bridge(coder_kind, claude_home) {
+    } else if needs_managed_claude_credential_bridge(coder_kind, managed_home) {
         credential::inject_claude_credentials()?;
     }
 
@@ -5330,9 +5338,12 @@ fn run_task_coder_with_coder_with_feedback(
     if let Some(worker) = codex_worker {
         launch_env.push(worker.launch_env());
     }
-    if let Some(home) = claude_home {
+    if let Some(home) = managed_home {
+        if coder_kind == CoderKind::Opencode {
+            prepare_opencode_home(home)?;
+        }
         fs::create_dir_all(home)
-            .with_context(|| format!("creating confined Claude home {}", home.display()))?;
+            .with_context(|| format!("creating managed home {}", home.display()))?;
         launch_env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
         // Native and headless Writers must resolve the same persistent state,
         // even when the coordinator inherited a different Claude config root.
@@ -5955,9 +5966,112 @@ fn run_task_coder_with_coder_with_feedback(
 
 fn needs_managed_claude_credential_bridge(
     coder_kind: CoderKind,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
 ) -> bool {
-    coder_kind == CoderKind::Claude && claude_home.is_some()
+    coder_kind == CoderKind::Claude && managed_home.is_some()
+}
+
+fn opencode_home_dir(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    project_root
+        .join(".fluent/work/artifacts")
+        .join(work_item_id)
+        .join(attempt_id)
+        .join("opencode-home")
+}
+
+/// Seed an autonomous OpenCode home with only the operator's provider
+/// credentials and configuration.
+///
+/// Plugins, custom agents, commands, and global instructions are deliberately
+/// not copied: an autonomous Worker must not run operator-authored plugin code,
+/// and the Fluent system prompt is the role's instruction surface.
+pub(crate) fn prepare_opencode_home(home: &Path) -> Result<()> {
+    let source_home = std::env::var_os("HOME").map(PathBuf::from);
+    prepare_opencode_home_from(home, source_home.as_deref())
+}
+
+fn prepare_opencode_home_from(home: &Path, source_home: Option<&Path>) -> Result<()> {
+    fs::create_dir_all(home)?;
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+
+    copy_opencode_private_file_if_newer(
+        &source_home.join(".local/share/opencode/auth.json"),
+        &home.join(".local/share/opencode/auth.json"),
+    )?;
+    for name in ["opencode.json", "opencode.jsonc"] {
+        copy_opencode_private_file_if_newer(
+            &source_home.join(".config/opencode").join(name),
+            &home.join(".config/opencode").join(name),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Copy an OpenCode credential or configuration file into the private home.
+///
+/// The private copy wins when it is newer, because OpenCode may refresh a token
+/// there during a Writer continuation. A newer operator file still replaces it,
+/// so re-authenticating on the host recovers a stale private home.
+fn copy_opencode_private_file_if_newer(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_file() {
+        return Ok(());
+    }
+    if destination.is_file() {
+        let source_modified = fs::metadata(source).and_then(|m| m.modified()).ok();
+        let destination_modified = fs::metadata(destination).and_then(|m| m.modified()).ok();
+        if let (Some(source_modified), Some(destination_modified)) =
+            (source_modified, destination_modified)
+            && source_modified <= destination_modified
+        {
+            return Ok(());
+        }
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "copy OpenCode private file from {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Build the launch environment for an autonomous OpenCode role that owns its
+/// own provider state under `artifact_dir`.
+pub(crate) fn opencode_role_launch_env(
+    coder_kind: CoderKind,
+    artifact_dir: &Path,
+) -> Result<Vec<(String, String)>> {
+    let source_home = std::env::var_os("HOME").map(PathBuf::from);
+    opencode_role_launch_env_from(coder_kind, artifact_dir, source_home.as_deref())
+}
+
+fn opencode_role_launch_env_from(
+    coder_kind: CoderKind,
+    artifact_dir: &Path,
+    source_home: Option<&Path>,
+) -> Result<Vec<(String, String)>> {
+    if coder_kind != CoderKind::Opencode {
+        return Ok(Vec::new());
+    }
+    let home = artifact_dir.join("opencode-home");
+    prepare_opencode_home_from(&home, source_home)?;
+    Ok(vec![(
+        "HOME".to_string(),
+        home.to_string_lossy().into_owned(),
+    )])
 }
 
 fn writer_coder_session<'a>(
@@ -8169,6 +8283,12 @@ fn run_learner_with_coder_with_provider_readiness(
     if let Some(worker) = &codex_worker {
         extra_env.push(worker.launch_env());
     }
+    if inputs.coder_kind == CoderKind::Opencode {
+        extra_env.extend(opencode_role_launch_env(
+            inputs.coder_kind,
+            inputs.handoff_dir,
+        )?);
+    }
     // Providers and deterministic doubles must not infer the public Task identity
     // or managed output destination from prompt wording. These values describe the
     // same host-owned boundary already rendered into the prompt and granted by the
@@ -9270,9 +9390,14 @@ fn run_review_coder_with_coder(
     capture_coder_info(coder_kind, &effective_model, artifact_dir);
 
     let transcript_path = artifact_dir.join("transcript.jsonl");
-    let launch_env = codex_worker
+    let mut launch_env = codex_worker
         .map(|worker| vec![worker.launch_env()])
         .unwrap_or_default();
+    if coder_kind == CoderKind::Opencode {
+        // Each reviewer Task gets its own home so parallel reviews do not share
+        // one session database.
+        launch_env.extend(opencode_role_launch_env(coder_kind, artifact_dir)?);
+    }
     // Use the capture config the caller resolved once per logical Reviewer run, so
     // every outer retry threads the SAME immutable config rather than re-resolving.
     let capture =
@@ -9386,6 +9511,9 @@ fn run_review_coder_with_coder(
                     private_root: None,
                     launch_env: &launch_env,
                 })?
+            }
+            CoderKind::Opencode => {
+                anyhow::bail!("OpenCode does not support the native Reviewer path")
             }
         }
         crate::usage::log_usage_from_transcript(
@@ -14125,6 +14253,191 @@ mod tests {
             recorded
                 .iter()
                 .any(|(key, value)| { key == "HOME" && Path::new(value) == managed_home })
+        );
+    }
+
+    #[test]
+    fn writer_launch_sets_opencode_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let workspace = project_root.join("workspace");
+        fs::create_dir_all(workspace.join(".fluent/expertise")).unwrap();
+        fs::write(workspace.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        let mut item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Confine OpenCode home".to_string(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let managed_home =
+            project_root.join(".fluent/work/artifacts/work-1/attempt-1/opencode-home");
+        let resolver = ContentResolver::new(Some(project_root));
+        let pump_config = crate::transcript_pump::resolve_config(project_root);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded_for_coder = Arc::clone(&recorded);
+        let writer_cache = test_writer_cache(project_root);
+
+        run_task_coder_with_coder(
+            &item,
+            "attempt-1",
+            "attempt-1-write-1",
+            project_root,
+            &workspace,
+            &[],
+            &resolver,
+            &[],
+            CoderKind::Opencode,
+            true,
+            None,
+            None,
+            &pump_config,
+            None,
+            Some(&managed_home),
+            &writer_cache,
+            None,
+            move |_sandbox, _executable| {
+                Box::new(RecordingEnvironmentCoder {
+                    recorded: recorded_for_coder,
+                })
+            },
+        )
+        .unwrap();
+
+        assert!(managed_home.is_dir());
+        let recorded = recorded.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(key, value)| { key == "HOME" && Path::new(value) == managed_home })
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn opencode_home_seeds_auth_and_config() {
+        let source_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source_home.path().join(".local/share/opencode")).unwrap();
+        fs::write(
+            source_home.path().join(".local/share/opencode/auth.json"),
+            "{\"anthropic\":{}}",
+        )
+        .unwrap();
+        fs::create_dir_all(source_home.path().join(".config/opencode")).unwrap();
+        fs::write(
+            source_home.path().join(".config/opencode/opencode.json"),
+            "{}",
+        )
+        .unwrap();
+
+        prepare_opencode_home_from(home.path(), Some(source_home.path())).unwrap();
+
+        let auth = home.path().join(".local/share/opencode/auth.json");
+        assert_eq!(fs::read_to_string(&auth).unwrap(), "{\"anthropic\":{}}");
+        let config = home.path().join(".config/opencode/opencode.json");
+        assert!(config.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let auth_mode = fs::metadata(&auth).unwrap().permissions().mode() & 0o777;
+            assert_eq!(auth_mode, 0o600, "seeded auth must stay private");
+            let config_mode = fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+            assert_eq!(config_mode, 0o600, "seeded config may carry credentials");
+        }
+    }
+
+    #[test]
+    fn opencode_home_preserves_a_refreshed_auth_token() {
+        let source_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let source_auth = source_home.path().join(".local/share/opencode/auth.json");
+        fs::create_dir_all(source_auth.parent().unwrap()).unwrap();
+        fs::write(&source_auth, "operator").unwrap();
+
+        prepare_opencode_home_from(home.path(), Some(source_home.path())).unwrap();
+        let private_auth = home.path().join(".local/share/opencode/auth.json");
+        fs::write(&private_auth, "refreshed").unwrap();
+
+        // The private copy is newer, so a continuation launch must keep it.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&source_auth)
+            .unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        prepare_opencode_home_from(home.path(), Some(source_home.path())).unwrap();
+        assert_eq!(fs::read_to_string(&private_auth).unwrap(), "refreshed");
+    }
+
+    #[test]
+    fn opencode_home_excludes_plugins_and_agents() {
+        let source_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        for relative in ["plugin", "agent", "command"] {
+            let directory = source_home.path().join(".config/opencode").join(relative);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("operator-defined.ts"), "export {}").unwrap();
+        }
+        fs::write(
+            source_home.path().join(".config/opencode/AGENTS.md"),
+            "operator rules",
+        )
+        .unwrap();
+
+        prepare_opencode_home_from(home.path(), Some(source_home.path())).unwrap();
+
+        for relative in ["plugin", "agent", "command", "AGENTS.md"] {
+            assert!(
+                !home.path().join(".config/opencode").join(relative).exists(),
+                "{relative} must not be copied into an autonomous OpenCode home"
+            );
+        }
+    }
+
+    #[test]
+    fn reviewer_launch_sets_opencode_home() {
+        let source_home = tempfile::tempdir().unwrap();
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let envs = opencode_role_launch_env_from(
+            CoderKind::Opencode,
+            artifact_dir.path(),
+            Some(source_home.path()),
+        )
+        .unwrap();
+        let expected = artifact_dir.path().join("opencode-home");
+        assert!(expected.is_dir());
+        assert!(
+            envs.iter()
+                .any(|(key, value)| key == "HOME" && Path::new(value) == expected)
+        );
+        assert!(
+            opencode_role_launch_env_from(
+                CoderKind::Claude,
+                artifact_dir.path(),
+                Some(source_home.path())
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn learner_launch_sets_opencode_home() {
+        let source_home = tempfile::tempdir().unwrap();
+        let handoff_dir = tempfile::tempdir().unwrap();
+        let envs = opencode_role_launch_env_from(
+            CoderKind::Opencode,
+            handoff_dir.path(),
+            Some(source_home.path()),
+        )
+        .unwrap();
+        let expected = handoff_dir.path().join("opencode-home");
+        assert!(expected.is_dir());
+        assert!(
+            envs.iter()
+                .any(|(key, value)| key == "HOME" && Path::new(value) == expected)
         );
     }
 

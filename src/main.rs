@@ -83,6 +83,9 @@ fn main() -> Result<()> {
             std::slice::from_ref(&sandbox_root),
             coder_kind,
         )?;
+        if coder_kind == CoderKind::Opencode {
+            os::grant_opencode_operator_state(&profile, &home)?;
+        }
         println!("--- Rendered Seatbelt profile ---");
         println!("HOME         = {home}");
         println!("SANDBOX_ROOT = {}", sandbox_root.display());
@@ -1424,12 +1427,14 @@ fn cmd_attempt(
                     } else {
                         coder_mapping
                     };
-                    let coder_kind = CoderKind::resolve(coder_mapping.write.coder.as_str().into())?;
+                    for pair in [&coder_mapping.write, &coder_mapping.review] {
+                        fargate::ensure_remote_capable_coder(pair.coder)?;
+                    }
                     fargate::launch_work_attempt(
                         project_root,
                         &work_item_id,
                         &attempt_id,
-                        coder_kind,
+                        coder_mapping.write.coder,
                     )?;
                     println!(
                         "Launched Attempt {attempt_id} for Work Item {work_item_id} on Fargate"
@@ -2539,6 +2544,9 @@ fn cmd_interactive(
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = vec![sandbox_root.to_path_buf()];
     let profile = os::render_profile_for_roots_for_coder(resolver, &home, &roots, coder_kind)?;
+    if coder_kind == CoderKind::Opencode {
+        os::grant_opencode_operator_state(&profile, &home)?;
+    }
     let sandbox = CoderSandbox::SeatbeltProfile(profile.path.to_string_lossy().to_string());
 
     eprintln!("  Fluent           interactive session");

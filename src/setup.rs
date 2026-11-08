@@ -97,6 +97,11 @@ impl ConfiguredSetup {
                 review: codex_pair("gpt-5.6-terra"),
             }
             .overlay_run_inputs(&role_inputs)?,
+            "opencode-default" => CoderMapping {
+                write: opencode_pair(),
+                review: opencode_pair(),
+            }
+            .overlay_run_inputs(&role_inputs)?,
             "custom" => {
                 let values = [
                     (&role_inputs.write_coder, "--write-coder"),
@@ -116,7 +121,7 @@ impl ConfiguredSetup {
                 resolve_coder_mapping(&role_inputs)?
             }
             other => bail!(
-                "unknown --coder-profile {other:?}; expected codex-balanced, codex-stronger, claude-balanced, codex-write-claude-review, claude-write-codex-review, or custom"
+                "unknown --coder-profile {other:?}; expected codex-balanced, codex-stronger, claude-balanced, opencode-default, codex-write-claude-review, claude-write-codex-review, or custom"
             ),
         };
         Ok(Some(Self {
@@ -139,6 +144,16 @@ fn claude_pair() -> CoderModelPair {
         coder: CoderKind::Claude,
         model: String::new(),
         effort: Some("medium".to_string()),
+    }
+}
+
+/// An empty model lets OpenCode use the provider-qualified default from its own
+/// configuration instead of a model name Fluent would have to guess.
+fn opencode_pair() -> CoderModelPair {
+    CoderModelPair {
+        coder: CoderKind::Opencode,
+        model: String::new(),
+        effort: None,
     }
 }
 
@@ -305,6 +320,31 @@ mod tests {
         assert!(claude_writer.mapping.write.model.is_empty());
         assert_eq!(claude_writer.mapping.review.coder, CoderKind::Codex);
         assert_eq!(claude_writer.mapping.review.model, "gpt-5.6-terra");
+    }
+
+    #[test]
+    fn configured_profile_opencode_default_sets_both_roles() {
+        let opencode = configured_profile("opencode-default");
+        assert_eq!(opencode.mapping.write.coder, CoderKind::Opencode);
+        assert!(opencode.mapping.write.model.is_empty());
+        assert_eq!(opencode.mapping.write.effort, None);
+        assert_eq!(opencode.mapping.review, opencode.mapping.write);
+    }
+
+    #[test]
+    fn configured_profile_lists_opencode_default() {
+        let error = ConfiguredSetup::from_inputs(InitSetupInputs {
+            coder_profile: Some("unknown-profile".into()),
+            follow_up_mode: Some("propose".into()),
+            ..Default::default()
+        })
+        .err()
+        .expect("unknown profile must be rejected")
+        .to_string();
+        assert!(
+            error.contains("opencode-default"),
+            "profile list should include opencode-default: {error}"
+        );
     }
 
     #[test]

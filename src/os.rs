@@ -1160,8 +1160,34 @@ fn sandbox_profile_path(coder_kind: CoderKind) -> &'static str {
     match coder_kind {
         CoderKind::Claude => "sandbox/claude-code.sb",
         CoderKind::Codex => "sandbox/codex.sb",
+        CoderKind::Opencode => "sandbox/opencode.sb",
         CoderKind::Pi => "sandbox/pi.sb",
     }
+}
+
+/// Append the operator's own OpenCode configuration and state grants.
+///
+/// Autonomous launches use a private `HOME` whose contents are already covered
+/// by their writable roots, so they must not receive these grants. Only an
+/// interactive session runs against the operator's real config, data, cache,
+/// and state directories.
+pub fn grant_opencode_operator_state(profile: &SandboxProfile, home: &str) -> Result<()> {
+    let home = Path::new(home);
+    let mut rules = String::new();
+    for relative in [
+        ".config/opencode",
+        ".local/share/opencode",
+        ".cache/opencode",
+        ".local/state/opencode",
+    ] {
+        let path = sbpl_string(&home.join(relative));
+        rules.push_str(&format!(
+            "(allow file-read*  (subpath {path}))\n(allow file-write* (subpath {path}))\n"
+        ));
+    }
+    let content = format!("{}\n{rules}", std::fs::read_to_string(&profile.path)?);
+    std::fs::write(&profile.path, content)?;
+    Ok(())
 }
 
 fn render_root_rules(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> String {
@@ -1307,6 +1333,60 @@ mod tests {
         assert!(!content.contains("_HOME_"));
         assert!(!content.contains("_SANDBOX_ROOT_"));
         assert!(!content.contains("_SANDBOX_ROOT_RULES_"));
+    }
+
+    #[test]
+    fn opencode_profile_grants_installer_root_without_operator_state() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_for_roots_for_coder(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/project")],
+            CoderKind::Opencode,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        assert!(content.contains("(allow file-read* (subpath \"/Users/test/.opencode\"))"));
+        assert!(
+            !content.contains("(subpath \"/Users/test/.config/opencode\")"),
+            "autonomous profiles must not grant the operator's OpenCode config"
+        );
+        assert!(
+            !content.contains("(subpath \"/Users/test/.local/share/opencode\")"),
+            "autonomous profiles must not grant the operator's OpenCode data"
+        );
+    }
+
+    #[test]
+    fn grant_opencode_operator_state_appends_config_and_data_grants() {
+        let resolver = ContentResolver::new(None);
+        let profile = render_profile_for_roots_for_coder(
+            &resolver,
+            "/Users/test",
+            &[PathBuf::from("/Users/test/project")],
+            CoderKind::Opencode,
+        )
+        .unwrap();
+
+        grant_opencode_operator_state(&profile, "/Users/test").unwrap();
+        let content = std::fs::read_to_string(&profile.path).unwrap();
+        for relative in [
+            ".config/opencode",
+            ".local/share/opencode",
+            ".cache/opencode",
+            ".local/state/opencode",
+        ] {
+            let path = format!("\"/Users/test/{relative}\"");
+            assert!(
+                content.contains(&format!("(allow file-read*  (subpath {path}))")),
+                "missing read grant for {relative}"
+            );
+            assert!(
+                content.contains(&format!("(allow file-write* (subpath {path}))")),
+                "missing write grant for {relative}"
+            );
+        }
     }
 
     #[test]

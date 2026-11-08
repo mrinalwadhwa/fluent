@@ -288,8 +288,8 @@ Autonomous Codex workers use a private authentication home, not the interactive
 Codex configuration or hooks. If Fluent pauses an Attempt for Codex
 authentication, run `codex login`, then resume it with `fluent attempt run
 <work-item-id> [attempt-id]`. Interactive sessions use the user's normal
-configuration. For explicit skill roots or the autonomous Claude home, read
-[`references/coder-environment.md`](references/coder-environment.md).
+configuration. For explicit skill roots or the autonomous Claude or OpenCode
+home, read [`references/coder-environment.md`](references/coder-environment.md).
 
 ### Recover Claude readiness failures
 
@@ -383,9 +383,9 @@ When `.fluent/` does not exist:
    Which coder setup should Fluent use?
 
    (a) Codex only — choose balanced or stronger next (recommended: balanced speed)
-   (b) Claude only — use claude-balanced
-   (c) Mixed providers — choose the writer provider next
-   (d) Custom — choose every writer and reviewer value
+   (b) Claude only — claude-balanced; (c) OpenCode only — opencode-default
+   (d) Mixed providers — choose the writer provider next
+   (e) Custom — choose every writer and reviewer value
    ```
 
 3. For Codex, ask `(a) codex-balanced — gpt-5.6-terra, medium` or

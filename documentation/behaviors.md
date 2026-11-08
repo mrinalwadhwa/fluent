@@ -11444,3 +11444,238 @@ explicitly supplied Work Item and Attempt's acceptance for the exact release
 HEAD while retaining every existing build, source, format, check, architecture,
 signature and checksum gate.
 Test: tests/behaviors/operations/test-release-script.sh
+
+## OpenCode coder
+
+THE SYSTEM SHALL recognize `opencode` as a valid Coder kind alongside
+`claude`, `codex`, and `pi`. Specifying `opencode` via `--coder`,
+`FLUENT_CODER`, or a coder mapping entry SHALL be accepted. Error messages,
+help output, and any documentation of available Coders SHALL list `opencode`.
+Test: src/coder.rs (coder_kind_resolves_opencode)
+Test: src/coder.rs (coder_kind_serializes_opencode_as_kebab_case)
+Test: src/coder.rs (coder_kind_rejects_unknown_lists_opencode)
+
+## OpenCode invocation mechanics
+
+### B1
+
+WHEN Fluent invokes OpenCode for an autonomous role,
+THE SYSTEM SHALL run `opencode run --standalone --auto --agent build` in the
+role workspace, request JSONL output when a transcript path is configured, and
+omit `--model` when no model is configured so OpenCode uses its own default.
+Test: src/coder.rs (opencode_run_command_uses_v2_standalone_and_json)
+Test: src/coder.rs (opencode_omits_json_format_without_transcript)
+Test: src/coder.rs (opencode_command_omits_model_when_unset)
+Test: src/coder.rs (opencode_sandbox_wraps_the_run_command)
+
+### B2
+
+WHEN Fluent resumes an OpenCode Writer session,
+THE SYSTEM SHALL pass `--session <session-id>` and send a continuation message
+that does not repeat the system prompt.
+Test: src/coder.rs (opencode_resume_uses_session_and_continuation_prompt)
+
+### B3
+
+WHEN `FLUENT_MODEL` is set without a provider-qualified `provider/model` value,
+THE SYSTEM SHALL NOT pass it to OpenCode, so OpenCode uses its own default
+instead of failing on an unqualified name.
+Test: src/coder.rs (opencode_model_requires_a_provider_qualified_global_model)
+
+### B4
+
+WHEN `FLUENT_MODEL` is set without a provider-qualified value and
+`FLUENT_OPENCODE_MODEL` is unset,
+THE SYSTEM SHALL warn once per process that the shared model was not applied.
+Test: src/coder.rs (opencode_model_warns_only_for_an_unqualified_global_model)
+
+## OpenCode readiness and failure handling
+
+### B1
+
+WHEN Fluent checks OpenCode readiness,
+THE SYSTEM SHALL reject a version older than 2 with a typed readiness error that
+names the upgrade command.
+Test: src/provider_readiness.rs (opencode_version_major_parses_supported_release)
+Test: src/provider_readiness.rs (opencode_rejects_v1_version)
+Test: tests/binary.rs (init_with_opencode_default_rejects_opencode_v1)
+
+### B2
+
+WHEN Fluent classifies provider-unavailable evidence for an OpenCode transcript,
+THE SYSTEM SHALL fail closed and report no unavailable evidence.
+Test: src/provider_evidence.rs (opencode_has_no_prelude_or_rate_limit_evidence)
+
+### B3
+
+WHEN a caller selects OpenCode for Fargate execution,
+THE SYSTEM SHALL reject the request with an explicit local-only error.
+Test: src/fargate.rs (opencode_is_rejected_on_fargate)
+Test: src/fargate.rs (mixed_mapping_rejects_a_local_only_review_coder)
+
+## OpenCode isolation
+
+### B1
+
+WHEN Fluent prepares an autonomous OpenCode Writer,
+THE SYSTEM SHALL create an Attempt-scoped OpenCode home, copy the host
+`auth.json` and `opencode.json` or `opencode.jsonc` into it, and launch with
+`HOME` set to that directory.
+Test: src/work_task_executor.rs (opencode_home_seeds_auth_and_config)
+Test: src/work_task_executor.rs (writer_launch_sets_opencode_home)
+
+### B2
+
+WHEN Fluent prepares an OpenCode home,
+THE SYSTEM SHALL NOT copy operator plugins, agents, commands, or global
+instructions.
+Test: src/work_task_executor.rs (opencode_home_excludes_plugins_and_agents)
+
+### B3
+
+WHEN Fluent prepares an autonomous OpenCode reviewer or Learner,
+THE SYSTEM SHALL use a home beneath that role's writable artifact or handoff
+directory and set `HOME` to it.
+Test: src/work_task_executor.rs (reviewer_launch_sets_opencode_home)
+Test: src/work_task_executor.rs (learner_launch_sets_opencode_home)
+
+### B4
+
+WHEN Fluent renders the OpenCode Seatbelt profile,
+THE SYSTEM SHALL include the OpenCode installer root for reading and SHALL NOT
+grant the operator's `~/.config/opencode` or `~/.local/share/opencode` in
+autonomous mode.
+Test: src/os.rs (opencode_profile_grants_installer_root_without_operator_state)
+
+### B5
+
+WHEN Fluent starts an interactive OpenCode session,
+THE SYSTEM SHALL append read/write grants for the operator's OpenCode config,
+data, cache, and state directories.
+Test: src/os.rs (grant_opencode_operator_state_appends_config_and_data_grants)
+Test: tests/binary.rs (dry_run_with_opencode_uses_opencode_profile_layer_and_operator_grants)
+
+### B6
+
+WHEN an OpenCode trusted launch restricts its environment,
+THE SYSTEM SHALL retain OpenCode's provider keys for that launch and SHALL NOT
+widen the shared trusted allowlist for Claude, Codex, or Pi.
+Test: src/coder.rs (opencode_trusted_launch_retains_only_its_provider_keys)
+
+## OpenCode transcript identity
+
+### B1
+
+WHEN Fluent parses an OpenCode `step_start` event,
+THE SYSTEM SHALL emit a session-init event carrying `sessionID` so Writer
+continuity can find the session.
+Test: src/transcript.rs (test_parse_opencode_step_start)
+Test: src/work_attempt_loop.rs (writer_session_identity_accepts_opencode_transcript)
+
+## OpenCode transcript projection
+
+### B1
+
+WHEN Fluent parses an OpenCode `text` event with non-empty text,
+THE SYSTEM SHALL emit a text event for the activity feed.
+Test: src/transcript.rs (test_parse_opencode_text)
+
+### B2
+
+WHEN Fluent parses an OpenCode completed `tool_use` event,
+THE SYSTEM SHALL emit a tool-use event carrying the call ID, tool name, and a
+human-readable summary derived from the tool title or its input path.
+Test: src/transcript.rs (test_parse_opencode_tool_use)
+Test: src/transcript.rs (test_parse_opencode_tool_use_uses_descriptive_title)
+Test: src/transcript.rs (test_parse_opencode_todowrite_summary)
+
+### B3
+
+WHEN Fluent parses an OpenCode `step_finish` event whose reason is `stop` or is
+absent,
+THE SYSTEM SHALL emit a result event carrying the step cost.
+Test: src/transcript.rs (test_parse_opencode_step_finish)
+Test: src/transcript.rs (test_parse_opencode_step_finish_without_reason)
+
+### B4
+
+WHEN Fluent parses an OpenCode `step_finish` event whose reason is `tool-calls`,
+THE SYSTEM SHALL NOT emit a session-complete result for that intermediate step.
+Test: src/transcript.rs (test_parse_opencode_tool_calls_step_finish_is_silent)
+
+### B5
+
+WHEN Fluent parses an OpenCode `error` event,
+THE SYSTEM SHALL project it as an unknown event type without failing the parse.
+Test: src/transcript.rs (test_parse_opencode_error)
+
+## OpenCode usage
+
+### B1
+
+WHEN Fluent parses an OpenCode transcript after Task completion,
+THE SYSTEM SHALL emit one usage row per `step_finish` event, with input and
+output tokens taken from `part.tokens`.
+Test: src/usage.rs (extract_opencode_usage_returns_one_row_per_step_finish)
+
+### B2
+
+WHEN Fluent parses an OpenCode transcript after Task completion,
+THE SYSTEM SHALL populate `cached_input_tokens` from `part.tokens.cache.read`
+and `reasoning_output_tokens` from `part.tokens.reasoning`.
+Test: src/usage.rs (extract_opencode_usage_reads_reasoning_and_cache_tokens)
+
+### B3
+
+WHEN an OpenCode `step_finish` follows a `step_start` event,
+THE SYSTEM SHALL derive `duration_ms` from their timestamps.
+Test: src/usage.rs (extract_opencode_usage_returns_one_row_per_step_finish)
+
+### B4
+
+IF an OpenCode transcript ends without a final `step_finish`,
+THEN THE SYSTEM SHALL return the rows it observed without failing the Task.
+Test: src/usage.rs (extract_opencode_usage_tolerates_missing_final_step_finish)
+
+### B5
+
+WHEN Fluent routes a completed OpenCode Task transcript to usage logging,
+THE SYSTEM SHALL select the OpenCode extractor for the `opencode` coder string.
+Test: src/usage.rs (extract_usage_for_coder_routes_opencode)
+
+## OpenCode review evidence
+
+### B1
+
+WHEN a passing OpenCode Review Task writes inspection evidence,
+THE SYSTEM SHALL accept the pass only when the transcript contains a completed
+`tool_use` event whose input names the exact candidate and a declared inspected
+file. A non-zero shell exit SHALL NOT count as inspection evidence.
+Test: src/review_inspection.rs (accepts_successful_opencode_inspection)
+Test: src/review_inspection.rs (rejects_failed_opencode_inspection)
+
+## OpenCode init profile
+
+### B1
+
+WHEN `fluent init --coder-profile opencode-default --follow-up-mode <mode>` runs,
+THE SYSTEM SHALL configure both Writer and reviewer roles with coder `opencode`
+and an empty model so OpenCode's own default applies.
+Test: src/setup.rs (configured_profile_opencode_default_sets_both_roles)
+
+### B2
+
+WHEN Fluent reports the available coder profiles,
+THE SYSTEM SHALL include `opencode-default`.
+Test: src/setup.rs (configured_profile_lists_opencode_default)
+
+## OpenCode coder cross-cutting
+
+### B1
+
+WHEN this Work Item lands,
+THE SYSTEM SHALL contain `Test:` references in `documentation/behaviors.md` for
+each new EARS statement here, covering coder recognition, invocation, readiness,
+isolation, transcript identity, review evidence, and the init profile.
+Test: all EARS statements in the OpenCode coder sections above carry `Test:`
+references

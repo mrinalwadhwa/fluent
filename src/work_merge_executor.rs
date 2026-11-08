@@ -3327,7 +3327,7 @@ fn run_reserved_rebase(
     let pump_config = crate::transcript_pump::resolve_config(config.project_root);
     let capture = crate::coder::TranscriptCapture::with_config(&transcript_path, pump_config);
 
-    let launch_env = codex_worker
+    let mut launch_env = codex_worker
         .map(|worker| vec![worker.launch_env()])
         .unwrap_or_default();
     let execution = if native {
@@ -3399,9 +3399,18 @@ fn run_reserved_rebase(
                     launch_env: &launch_env,
                 })
             }
+            CoderKind::Opencode => {
+                anyhow::bail!("OpenCode does not support the native Rebase path")
+            }
         }
         .map(|()| 0)
     } else {
+        if config.coder_kind == CoderKind::Opencode {
+            launch_env.extend(crate::work_task_executor::opencode_role_launch_env(
+                config.coder_kind,
+                rebase_artifact_dir,
+            )?);
+        }
         let coder = make_coder(
             sandbox,
             codex_worker.map(|worker| worker.launcher().execution_executable()),

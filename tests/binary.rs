@@ -18277,6 +18277,80 @@ fn dry_run_with_codex_uses_codex_profile_layer() {
     );
 }
 
+#[test]
+fn dry_run_with_opencode_uses_opencode_profile_layer_and_operator_grants() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    write_mock_executable(&bin_dir, "opencode", "#!/bin/bash\nexit 0\n");
+    write_mock_sandbox_exec(&bin_dir);
+
+    let output = fluent_cmd()
+        .current_dir(tmp.path())
+        .args(["--dry-run", "--coder", "opencode"])
+        .env("PATH", mock_path(&bin_dir))
+        .env("HOME", &home)
+        .env("SANDBOX_EXEC_LOG", tmp.path().join("sandbox-exec.log"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dry-run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("OpenCode CLI -- profile-specific Seatbelt rules"),
+        "dry-run should include the OpenCode profile layer: {stdout}"
+    );
+    let config_grant = format!(
+        "(allow file-write* (subpath \"{}\"))",
+        home.join(".config/opencode").display()
+    );
+    assert!(
+        stdout.contains(&config_grant),
+        "interactive dry-run should grant the operator's OpenCode config: {stdout}"
+    );
+}
+
+#[test]
+fn init_with_opencode_default_rejects_opencode_v1() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_git_repo(&project);
+    let bin_dir = tmp.path().join("bin");
+    write_mock_executable(
+        &bin_dir,
+        "opencode",
+        "#!/bin/bash\nif [ \"${1:-}\" = \"--version\" ]; then printf '1.19.0\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .args([
+            "init",
+            "--coder-profile",
+            "opencode-default",
+            "--follow-up-mode",
+            "propose",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("OpenCode 2 or newer"));
+
+    assert!(
+        !project.join(".fluent").exists(),
+        "a failed readiness check must not initialize the project"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Init
 // -------------------------------------------------------------------------
@@ -55545,6 +55619,61 @@ exit 0
     assert!(
         !quiet_stderr.contains("Coder plan:"),
         "FLUENT_QUIET should suppress coder plan; stderr:\n{quiet_stderr}"
+    );
+}
+
+#[test]
+fn attempt_run_on_fargate_rejects_a_local_only_review_coder() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "fargate-mixed",
+            "--title",
+            "Fargate mixed mapping",
+        ])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "create",
+            "fargate-mixed",
+            "attempt-1",
+            "--write-coder",
+            "codex",
+            "--review-coder",
+            "opencode",
+        ])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "attempt",
+            "run",
+            "fargate-mixed",
+            "attempt-1",
+            "--runtime",
+            "fargate",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "a local-only reviewer must prevent a remote Attempt"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("local-only") && stderr.contains("OpenCode"),
+        "unexpected error: {stderr}"
     );
 }
 

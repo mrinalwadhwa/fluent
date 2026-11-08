@@ -1,0 +1,22 @@
+;; ==========================================================================
+;; OpenCode CLI -- profile-specific Seatbelt rules
+;; ==========================================================================
+;; Concatenated after common.sb by Fluent when launching OpenCode.
+;;
+;; NOTE: No (allow iokit*) -- OpenCode is a CLI tool, not a GUI app.
+;; It does not need Metal GPU enumeration or any IOKit services.
+;;
+;; Autonomous runs receive a private HOME as a writable root, so their config,
+;; data, cache, and session database are granted by the root rules rather than
+;; here. This file only adds the installer-owned binary root, which lives
+;; outside HOME, and a Bun global install root used by the npm/bun installer.
+;;
+;; Interactive sessions append the operator's OpenCode config, data, cache, and
+;; state grants; see os::grant_opencode_operator_state.
+;; ==========================================================================
+
+;; curl-installer binary root (opencode, bin/opencode, and future siblings).
+(allow file-read* (subpath "_HOME_/.opencode"))
+
+;; Bun global installs when OpenCode was installed with `bun add -g`.
+(allow file-read* (subpath "_HOME_/.bun"))

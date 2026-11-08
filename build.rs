@@ -304,7 +304,7 @@ fn collect_skill_files(
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                if !dir_name.ends_with(".full") && full_overrides.iter().any(|n| *n == dir_name) {
+                if !dir_name.ends_with(".full") && full_overrides.contains(&dir_name) {
                     continue;
                 }
             }

@@ -1028,8 +1028,9 @@ rediscovering the author Task. Running a review Task requires
 `review-inspection.json`, which binds the Review Task role and exact candidate
 commit to at least one canonical repository-relative tracked file and explains
 what that role checked. The host verifies each path through Git and requires a
-successful Codex command event, Claude tool-result pair, or Pi tool-execution
-pair that identifies the exact candidate and declared file in the same event.
+successful Codex command event, Claude tool-result pair, Pi tool-execution
+pair, or OpenCode completed tool-use event that identifies the exact candidate
+and declared file in the same event.
 The event may name the joined absolute file path, keep the workspace and
 repository-relative path separate, or pair the exact candidate commit with the
 repository-relative path as Git `commit:path` inspection does. Workspace-only,
@@ -3720,9 +3721,9 @@ completed initialization.
 
 ### Coder selection
 
-Fluent supports three Coders: Claude Code, OpenAI Codex, and Pi.
+Fluent supports four Coders: Claude Code, OpenAI Codex, OpenCode v2, and Pi.
 Claude is the creation-time default. When creating an Attempt, select a
-different Coder with `--coder codex`, `--coder pi`, or
+different Coder with `--coder codex`, `--coder opencode`, `--coder pi`, or
 `FLUENT_CODER=<coder>`.
 
 Each Attempt stores a writer/reviewer **coder mapping** that determines
@@ -3774,6 +3775,22 @@ server lifecycle — the user starts it externally. The default model is
 run inside a Seatbelt profile with read access to `~/.pi/` and write
 access to `~/.pi/agent/`. Pi is local-only and cannot run on
 Fargate.
+
+OpenCode sessions require OpenCode 2 or newer and use
+`opencode run --standalone --format json --auto --agent build`. `--standalone`
+keeps OpenCode's server in the launching process; without it, OpenCode attaches
+to the operator's shared background server and tool execution happens outside
+Fluent's Seatbelt boundary. Fluent prepends the system prompt to the first
+message and sends a continuation message, with `--session <id>`, on later
+Writer rounds. `--model` is omitted when no model is configured, so OpenCode
+uses its own provider-qualified default. `FLUENT_OPENCODE_MODEL` overrides it.
+Autonomous launches use a private `HOME` seeded with the operator's
+`~/.local/share/opencode/auth.json` and `~/.config/opencode/opencode.json` or
+`.jsonc`; plugins, custom agents, commands, and global instructions are not
+copied. The private home is a writable root, so the OpenCode profile grants only
+the installer roots (`~/.opencode` and `~/.bun`) on its own. Interactive sessions
+append read/write grants for the operator's OpenCode config, data, cache, and
+state directories. OpenCode is local-only and cannot run on Fargate.
 
 Fargate supports both Claude and Codex. The base image
 (`infrastructure/run/Dockerfile`) installs both `@anthropic-ai/claude-code`
@@ -4707,14 +4724,20 @@ Each Coder invocation (write and review tasks) appends
 per-turn token usage rows to `~/.config/fluent/usage/usage.jsonl`. Rows
 follow a fixed JSONL schema: `ts`, `coder`, `work_item_id`, `attempt_id`,
 `task_id`, `model`, `input_tokens`, `output_tokens`,
-`cached_input_tokens`, and `reasoning_output_tokens` (Codex only, omitted
-for Claude).
+`cached_input_tokens`, and `reasoning_output_tokens` (Codex and OpenCode;
+omitted for Claude).
 
 Codex usage extraction accepts the legacy internal `event_msg/token_count`
 record and the public `turn.completed.usage` record emitted by current Codex
 CLI versions. If a transcript contains both shapes, Fluent uses the public
 completion record to avoid counting one turn twice. When that record omits the
 model, Fluent reads the model from the Task's sibling `coder-info.json`.
+
+OpenCode usage extraction emits one row per `step_finish` event, reading
+`part.tokens.input`, `part.tokens.output`, `part.tokens.reasoning`, and
+`part.tokens.cache.read`. Current OpenCode releases can omit the final
+`step_finish`, so a transcript undercounts rather than failing. The model is
+absent from these events and is filled from `coder-info.json` when available.
 
 After appending rows, the system recomputes
 `~/.config/fluent/usage/summary.json` with per-coder totals

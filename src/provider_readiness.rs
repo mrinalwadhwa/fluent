@@ -10,7 +10,9 @@ const CLAUDE_READINESS_MARKER: &str = "FLUENT_CLAUDE_READY";
 const DEFAULT_CLAUDE_READINESS_DEADLINE_SECS: u64 = 30;
 const CLAUDE_READINESS_DEADLINE_ENV: &str = "FLUENT_CLAUDE_READINESS_DEADLINE_SECS";
 
-/// A provider checked for local command and authentication readiness.
+/// A provider checked for local launch readiness. Claude and Codex also verify
+/// authentication; OpenCode checks only its version and surfaces authentication
+/// failures on first launch.
 ///
 /// Codex keeps its private worker home alive so the caller can use the exact
 /// authenticated boundary that passed the check for its subsequent launch.
@@ -171,6 +173,36 @@ impl ProviderReadiness {
                         condition: "command readiness check failed".to_string(),
                     });
                 }
+                Ok(Self { codex_worker: None })
+            }
+            CoderKind::Opencode => {
+                let output =
+                    Command::new("opencode")
+                        .arg("--version")
+                        .output()
+                        .map_err(|error| ProviderReadinessError::Provider {
+                            provider,
+                            condition: format!("command is not installed: {error}"),
+                        })?;
+                if !output.status.success() {
+                    return Err(ProviderReadinessError::Provider {
+                        provider,
+                        condition: "command readiness check failed".to_string(),
+                    });
+                }
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let major = opencode_major_version(&version);
+                if major.is_none_or(|major| major < crate::coder::MINIMUM_OPENCODE_MAJOR_VERSION) {
+                    return Err(ProviderReadinessError::Provider {
+                        provider,
+                        condition: format!(
+                            "OpenCode 2 or newer is required (found {version:?}); run `opencode upgrade --major`"
+                        ),
+                    });
+                }
+                // `opencode auth list` lists configured provider connections even
+                // when their environment variables are absent, so it cannot prove
+                // authentication. Let the first launch surface a real auth failure.
                 Ok(Self { codex_worker: None })
             }
         }
@@ -351,6 +383,14 @@ fn claude_version_warning(output: &[u8]) -> Option<String> {
     })
 }
 
+fn opencode_major_version(version: &str) -> Option<u32> {
+    version.split_whitespace().find_map(|token| {
+        let token = token.trim_start_matches('v');
+        let major = token.split('.').next()?;
+        major.parse::<u32>().ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +444,20 @@ mod tests {
         );
         assert!(configured_claude_readiness_deadline_from(Some("0")).is_err());
         assert!(configured_claude_readiness_deadline_from(Some("bad")).is_err());
+    }
+
+    #[test]
+    fn opencode_version_major_parses_supported_release() {
+        assert_eq!(opencode_major_version("2.0.26"), Some(2));
+        assert_eq!(opencode_major_version("opencode 2.0.26"), Some(2));
+        assert_eq!(opencode_major_version("v2.1.0"), Some(2));
+        assert_eq!(opencode_major_version("26.0.0"), Some(26));
+        assert_eq!(opencode_major_version("development build"), None);
+    }
+
+    #[test]
+    fn opencode_rejects_v1_version() {
+        let major = opencode_major_version("1.19.0");
+        assert!(major.is_some_and(|major| major < crate::coder::MINIMUM_OPENCODE_MAJOR_VERSION));
     }
 }
