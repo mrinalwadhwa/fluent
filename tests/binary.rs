@@ -42327,6 +42327,210 @@ fn queue_resume_records_exact_authorization_and_is_idempotent() {
 }
 
 #[test]
+fn queue_resume_without_a_scheduler_names_the_scheduler_command() {
+    use fluent::work_model::{AttemptStatus, PauseKind, TaskStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    let store = WorkModelStore::new(tmp.path());
+    let mut item = WorkItem::planned("wi-scheduler-command", "Resume without a scheduler");
+    item.add_initial_attempt("attempt-1").unwrap();
+    store.create_work_item(&item).unwrap();
+    store
+        .mutate_work_item("wi-scheduler-command", |item| {
+            let attempt = &mut item.attempts[0];
+            attempt.status = AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(PauseKind::Interrupted);
+            attempt.tasks[0].status = TaskStatus::NeedsUser;
+            Ok(())
+        })
+        .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "queue",
+            "resume",
+            "wi-scheduler-command",
+            "--attempt",
+            "attempt-1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Queued resume of Attempt attempt-1 for Work Item wi-scheduler-command",
+        ))
+        .stdout(predicate::str::contains("No scheduler is running"))
+        .stdout(predicate::str::contains("Next: fluent scheduler run"));
+}
+
+#[cfg(unix)]
+fn blocking_attempt_mock(bin_dir: &Path) {
+    write_mock_claude(
+        bin_dir,
+        r#"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+: > "$FLUENT_TEST_ATTEMPT_STARTED"
+i=0
+while [ "$i" -lt 2400 ]; do
+  [ -f "$FLUENT_TEST_ATTEMPT_RELEASE" ] && break
+  i=$((i+1))
+  sleep 0.05
+done
+exit 0
+"#,
+    );
+}
+
+#[cfg(unix)]
+fn blocking_attempt_fixture(tmp: &TempDir, work_item: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let project = setup_git_project(tmp);
+    let bin_dir = tmp.path().join(format!("{work_item}-bin"));
+    blocking_attempt_mock(&bin_dir);
+    let started = tmp.path().join(format!("{work_item}-started"));
+    for args in [
+        vec![
+            "work-item",
+            "create",
+            work_item,
+            "--title",
+            "Interrupted run",
+        ],
+        vec!["attempt", "create", work_item, "attempt-1"],
+    ] {
+        fluent_cmd()
+            .current_dir(&project)
+            .args(args)
+            .assert()
+            .success();
+    }
+    (project, bin_dir, started)
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_attempt_prints_the_resume_command() {
+    let tmp = TempDir::new().unwrap();
+    let (project, bin_dir, started) = blocking_attempt_fixture(&tmp, "interrupt-work");
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+    command
+        .current_dir(&project)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ATTEMPT_STARTED", &started)
+        .args([
+            "attempt",
+            "run",
+            "interrupt-work",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut running = OwnedFixtureProcess::spawn(&mut command);
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || started.exists()),
+        "the Attempt must reach its blocking coder before interruption"
+    );
+
+    send_signal(running.id(), "INT");
+    let output = running.wait_with_output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "an interrupted Attempt must settle cleanly: {combined}"
+    );
+    assert!(
+        combined.contains("fluent attempt run interrupt-work attempt-1"),
+        "the interruption must name the exact resume command: {combined}"
+    );
+
+    let shown = work_item_value(&project, "interrupt-work");
+    assert_eq!(shown["attempts"][0]["status"], "needs-user");
+    assert_eq!(shown["attempts"][0]["pause_kind"], "interrupted");
+    assert!(
+        shown["attempts"][0]["cancellation"]["settled_at"].is_string(),
+        "owned workers must settle before the resume command: {shown}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_attempt_prints_watch_and_stop_commands() {
+    let tmp = TempDir::new().unwrap();
+    let (project, bin_dir, started) = blocking_attempt_fixture(&tmp, "detach-work");
+    let output = fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ATTEMPT_STARTED", &started)
+        .args([
+            "attempt",
+            "run",
+            "detach-work",
+            "attempt-1",
+            "--no-sandbox",
+            "--detach",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        output.status.success(),
+        "detaching must return immediately: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Watch: tail -f"),
+        "a detached Attempt must name its watch command: {stdout}"
+    );
+    assert!(
+        stdout.contains("Stop: fluent attempt cancel detach-work attempt-1"),
+        "a detached Attempt must name its stop command: {stdout}"
+    );
+    let pid = stdout
+        .split("(pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .expect("the detached Attempt must report its background process");
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || started.exists()),
+        "the detached Attempt must continue in the background"
+    );
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "cancel", "detach-work", "attempt-1"])
+        .assert()
+        .success();
+    let shown = work_item_value(&project, "detach-work");
+    assert_eq!(shown["attempts"][0]["status"], "needs-user");
+    assert_eq!(shown["attempts"][0]["pause_kind"], "interrupted");
+    assert!(
+        shown["attempts"][0]["cancellation"]["settled_at"].is_string(),
+        "the detached Attempt must settle into a resumable pause: {shown}"
+    );
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || {
+            (unsafe { libc::kill(pid as i32, 0) }) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }),
+        "the detached background process {pid} must exit after cancellation"
+    );
+}
+
+#[test]
 fn queue_resume_accepts_verified_uncertain_review_pause() {
     use fluent::queue::{self, DispatchStatus};
     use fluent::work_model::{

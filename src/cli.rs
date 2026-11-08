@@ -694,6 +694,10 @@ pub enum AttemptCommands {
         #[arg(long)]
         no_sandbox: bool,
 
+        /// Run in the background and print how to watch and stop it
+        #[arg(long)]
+        detach: bool,
+
         /// Retry only the paused Tester Task without Fluent's Tester sandbox
         #[arg(long, hide = true)]
         tester_no_sandbox: bool,

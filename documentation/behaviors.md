@@ -371,6 +371,27 @@ WHEN an older supported Fluent binary sees a version 2 launch record, THE
 SYSTEM SHALL reject that record before mutating execution or Attempt state.
 Test: tests/execution_handoff.rs (launch_handoff_old_reader_rejects_new_protocol)
 
+## Interruption and detached execution
+
+### B1
+
+WHEN a foreground Attempt run is interrupted before settlement, THE SYSTEM
+SHALL settle its owned workers and print the exact resume command for that Work
+Item and Attempt.
+Test: tests/binary.rs (interrupted_attempt_prints_the_resume_command)
+
+### B2
+
+WHEN an operator runs an Attempt with `--detach`, THE SYSTEM SHALL run it in a
+background session and print how to watch and stop it.
+Test: tests/binary.rs (detached_attempt_prints_watch_and_stop_commands)
+
+### B3
+
+WHEN `queue resume` is requested while no scheduler is running, THE SYSTEM
+SHALL print the exact `fluent scheduler run` command as the primary remedy.
+Test: tests/binary.rs (queue_resume_without_a_scheduler_names_the_scheduler_command)
+
 ## Enclosing agent sandbox handoff
 
 ### B1
