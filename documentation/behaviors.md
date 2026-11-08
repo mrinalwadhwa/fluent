@@ -11562,6 +11562,13 @@ THE SYSTEM SHALL retain OpenCode's provider keys for that launch and SHALL NOT
 widen the shared trusted allowlist for Claude, Codex, or Pi.
 Test: src/coder.rs (opencode_trusted_launch_retains_only_its_provider_keys)
 
+### B7
+
+WHEN Fluent renders an autonomous Writer profile,
+THE SYSTEM SHALL keep the role's managed coder home writable after denying the
+other `.fluent/work` entries.
+Test: src/os.rs (writer_profile_blocks_actual_source_write_in_temporary_checkout)
+
 ## OpenCode transcript identity
 
 ### B1

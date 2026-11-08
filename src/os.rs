@@ -156,13 +156,18 @@ pub fn profile_with_terminal_resources(
 /// Deny existing source product entries after the profile's broad temporary
 /// directory grants. Include the physical path because macOS resolves /var to
 /// /private/var before applying Seatbelt rules.
+///
+/// The Work tree denial is followed by explicit allows for the progress
+/// directory, the Task artifact area, the Writer cache, and the role's managed
+/// home, because those paths sit beside the denied product entries under
+/// `.fluent/work/`.
 pub(crate) fn deny_writer_source_entries(
     profile: &SandboxProfile,
     source: &Path,
     candidate: &Path,
     task_artifact: &Path,
     writer_cache: &Path,
-    claude_home: Option<&Path>,
+    managed_home: Option<&Path>,
 ) -> Result<()> {
     let physical_source = std::fs::canonicalize(source)?;
     // The Writer profile is rendered before the worktree is created. Resolve
@@ -276,7 +281,9 @@ pub(crate) fn deny_writer_source_entries(
                         writer_cache,
                         "allow",
                     );
-                    if let Some(home) = claude_home {
+                    if let Some(home) = managed_home {
+                        let managed_root = artifact_root.join(work_item).join(attempt);
+                        validate_managed_home(home, &managed_root)?;
                         append_writer_source_rule(
                             &mut content,
                             source,
@@ -300,6 +307,24 @@ pub(crate) fn deny_writer_source_entries(
         append_writer_source_rule(&mut content, source, &physical_source, &path, "deny");
     }
     std::fs::write(&profile.path, content)?;
+    Ok(())
+}
+
+fn validate_managed_home(home: &Path, managed_root: &Path) -> Result<()> {
+    let suffix = home.strip_prefix(managed_root).with_context(|| {
+        format!(
+            "managed home {} must stay inside the Attempt artifact tree {}",
+            home.display(),
+            managed_root.display()
+        )
+    })?;
+    anyhow::ensure!(
+        suffix.components().count() == 1
+            && suffix
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "managed home must be one directory under the Attempt artifact tree"
+    );
     Ok(())
 }
 
@@ -1848,6 +1873,18 @@ mod tests {
     }
 
     #[test]
+    fn managed_home_must_be_one_directory_under_the_attempt() {
+        let managed_root = Path::new("/project/.fluent/work/artifacts/work/attempt");
+        assert!(validate_managed_home(&managed_root.join("opencode-home"), managed_root).is_ok());
+        assert!(validate_managed_home(managed_root, managed_root).is_err());
+        assert!(validate_managed_home(&managed_root.join("a/b"), managed_root).is_err());
+        assert!(
+            validate_managed_home(&managed_root.join("..").join("other"), managed_root).is_err()
+        );
+        assert!(validate_managed_home(Path::new("/project/unrelated"), managed_root).is_err());
+    }
+
+    #[test]
     fn writer_profile_blocks_actual_source_write_in_temporary_checkout() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
@@ -1857,10 +1894,14 @@ mod tests {
         let sibling_cache = source.join(".fluent/work/cache/writers/work/other-attempt");
         let sibling_artifact = source.join(".fluent/work/artifacts/work/attempt/other-task");
         let gate_artifact = source.join(".fluent/work/artifacts/work/attempt/candidate-gates");
+        let managed_home = source.join(".fluent/work/artifacts/work/attempt/opencode-home");
+        let sibling_home = source.join(".fluent/work/artifacts/work/other-attempt/opencode-home");
         let model = source.join(".fluent/work/items/work.json");
         std::fs::create_dir_all(&artifact).unwrap();
         std::fs::create_dir_all(&sibling_artifact).unwrap();
         std::fs::create_dir_all(&gate_artifact).unwrap();
+        std::fs::create_dir_all(&managed_home).unwrap();
+        std::fs::create_dir_all(&sibling_home).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir_all(&sibling_cache).unwrap();
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
@@ -1887,10 +1928,34 @@ mod tests {
                 Some(&other_home),
             )
             .is_err(),
-            "a Writer cannot grant a different Attempt's Claude home"
+            "a Writer cannot grant a different Attempt's managed home"
         );
-        deny_writer_source_entries(&profile, &source, &candidate, &artifact, &cache, None).unwrap();
+        deny_writer_source_entries(
+            &profile,
+            &source,
+            &candidate,
+            &artifact,
+            &cache,
+            Some(&managed_home),
+        )
+        .unwrap();
         let content = std::fs::read_to_string(&profile.path).unwrap();
+        let managed_allow = format!(
+            "(allow file-write* (subpath {}))",
+            sbpl_string(&managed_home)
+        );
+        let work_denial = format!(
+            "(deny file-write* (subpath {}))",
+            sbpl_string(&source.join(".fluent/work"))
+        );
+        assert!(
+            content.contains(&managed_allow),
+            "managed home must be writable: {content}"
+        );
+        assert!(
+            content.rfind(&managed_allow).unwrap() > content.rfind(&work_denial).unwrap(),
+            "managed-home allow must follow the Work tree denial"
+        );
         let denial = format!(
             "(deny file-write* (subpath {}))",
             sbpl_string(&source.join("src"))
@@ -1957,7 +2022,7 @@ mod tests {
             }
             let output = std::process::Command::new("/usr/bin/sandbox-exec")
                 .arg("-f").arg(&profile.path)
-                .args(["/bin/sh", "-c", "if /bin/echo changed > \"$1\"; then exit 10; fi; /bin/echo candidate > \"$2\" || exit 11; /bin/echo git > \"$3\" || exit 12; /bin/echo artifact > \"$4\" || exit 13; if /bin/echo model > \"$5\"; then exit 14; fi; if /bin/echo sibling > \"$6\"; then exit 15; fi; if /bin/echo gate > \"$7\"; then exit 16; fi; /bin/echo cache > \"$8\" || exit 17; if /bin/echo sibling-cache > \"$9\"; then exit 18; fi", "writer-profile-probe"])
+                .args(["/bin/sh", "-c", "if /bin/echo changed > \"$1\"; then exit 10; fi; /bin/echo candidate > \"$2\" || exit 11; /bin/echo git > \"$3\" || exit 12; /bin/echo artifact > \"$4\" || exit 13; if /bin/echo model > \"$5\"; then exit 14; fi; if /bin/echo sibling > \"$6\"; then exit 15; fi; if /bin/echo gate > \"$7\"; then exit 16; fi; /bin/echo cache > \"$8\" || exit 17; if /bin/echo sibling-cache > \"$9\"; then exit 18; fi; /bin/echo home > \"${10}\" || exit 19; if /bin/echo sibling-home > \"${11}\"; then exit 20; fi", "writer-profile-probe"])
                 .arg(source.join("src/lib.rs"))
                 .arg(candidate.join("change.txt"))
                 .arg(source.join(".git/test"))
@@ -1967,10 +2032,12 @@ mod tests {
                 .arg(gate_artifact.join("test"))
                 .arg(cache.join("test"))
                 .arg(sibling_cache.join("test"))
+                .arg(managed_home.join("test"))
+                .arg(sibling_home.join("test"))
                 .output().unwrap();
             assert!(
                 output.status.success(),
-                "Writer source-confinement child exited with {} (10: source write allowed; 11: candidate write denied; 12: Git write denied; 13: Task-artifact write denied; 14: Work-model write allowed; 15: sibling artifact write allowed; 16: gate artifact write allowed). stderr: {}",
+                "Writer source-confinement child exited with {} (10: source write allowed; 11: candidate write denied; 12: Git write denied; 13: Task-artifact write denied; 14: Work-model write allowed; 15: sibling artifact write allowed; 16: gate artifact write allowed; 17: cache write denied; 18: sibling cache write allowed; 19: managed home write denied; 20: sibling managed home write allowed). stderr: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );

@@ -4952,7 +4952,7 @@ fn preflight_write_sandbox_profile(
         workspace_path,
         &project_root.join(&task_artifact.path),
         writer_cache.root(),
-        claude_home,
+        managed_home,
     )?;
     os::admit_installed_tools(&profile, &node_tools, workspace_path)?;
     #[cfg(not(test))]
