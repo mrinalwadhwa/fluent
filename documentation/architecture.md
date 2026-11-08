@@ -1058,7 +1058,10 @@ the Task. If a reviewer changes source files or protected `.fluent/`
 state outside the Task artifact area, the guard restores protected
 checkout state before failing the Task. This restorative guard applies
 only to interactive `ReviewOnly` Attempts (e.g. `fluent review
-codebase`).
+codebase`). A skill tree under `.opencode` that carries a valid Fluent
+`.fluent-managed.json` sidecar is excluded from that source-change check; a
+missing or malformed sidecar leaves the tree user-owned, so unmanaged OpenCode
+edits still fail the Task.
 
 Post-merge review Attempts use `AttemptKind::PostMergeReview` and a
 non-restoring `PostMergeSourceGuard`. This guard verifies that the

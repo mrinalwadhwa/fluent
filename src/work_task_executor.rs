@@ -11334,15 +11334,19 @@ fn ensure_source_product_unchanged(
 }
 
 fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
+    let mut args = vec![
+        "--porcelain".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).fluent".to_string(),
+    ];
+    for managed in managed_opencode_skill_trees(workspace_path)? {
+        args.push(format!(":(exclude,literal){}", managed.display()));
+    }
     let output = git_status_output(
         workspace_path,
-        &[
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).fluent",
-        ],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
     )?;
     if !output.status.success() {
         bail!(
@@ -11358,6 +11362,64 @@ fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stdout)
         )
     }
+}
+
+/// Return the project-relative `.opencode` skill trees that carry a Fluent
+/// ownership sidecar. A missing or malformed sidecar leaves its directory
+/// user-owned, and symlinks are never followed.
+pub(crate) fn managed_opencode_skill_trees(source_root: &Path) -> Result<Vec<PathBuf>> {
+    let opencode = source_root.join(".opencode");
+    let metadata = match fs::symlink_metadata(&opencode) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to inspect {}", opencode.display()));
+        }
+    };
+    if !metadata.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut managed = Vec::new();
+    collect_managed_opencode_skill_trees(&opencode, source_root, &mut managed)?;
+    managed.sort();
+    Ok(managed)
+}
+
+fn collect_managed_opencode_skill_trees(
+    dir: &Path,
+    source_root: &Path,
+    managed: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
+    let mut managed_here = false;
+    let mut child_dirs = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            child_dirs.push(entry.path());
+        } else if file_type.is_file()
+            && entry.file_name() == crate::skill_install::SIDECAR_NAME
+            && fs::read(entry.path())
+                .is_ok_and(|bytes| crate::skill_install::sidecar_claims_ownership(&bytes))
+        {
+            managed_here = true;
+        }
+    }
+    if managed_here {
+        let relative = dir
+            .strip_prefix(source_root)
+            .expect("managed OpenCode directory remains below the source root");
+        managed.push(relative.to_path_buf());
+        return Ok(());
+    }
+    for child in child_dirs {
+        collect_managed_opencode_skill_trees(&child, source_root, managed)?;
+    }
+    Ok(())
 }
 
 fn ensure_head_matches_review_context(workspace_path: &Path, expected_head: &str) -> Result<()> {
@@ -18231,6 +18293,117 @@ mod tests {
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::ProviderUnavailable)
         );
+    }
+
+    fn opencode_guard_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        crate::git::run(root.path(), &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+            "configure fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["config", "user.name", "Test"],
+            "configure fixture",
+        )
+        .unwrap();
+        fs::write(root.path().join("tracked.txt"), "baseline\n").unwrap();
+        crate::git::run(root.path(), &["add", "tracked.txt"], "stage fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+        root
+    }
+
+    fn write_managed_opencode_skill(root: &Path, skill: &str, sidecar: &str) -> PathBuf {
+        let skill_dir = root.join(".opencode/skills").join(skill);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "managed skill\n").unwrap();
+        fs::write(skill_dir.join(".fluent-managed.json"), sidecar).unwrap();
+        skill_dir
+    }
+
+    #[test]
+    fn review_only_ignores_managed_opencode_skill_trees() {
+        let root = opencode_guard_fixture();
+        let skill_dir = write_managed_opencode_skill(
+            root.path(),
+            "fluent",
+            r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"fluent"}"#,
+        );
+
+        let managed = managed_opencode_skill_trees(root.path()).unwrap();
+        assert_eq!(
+            managed,
+            vec![skill_dir.strip_prefix(root.path()).unwrap().to_path_buf()],
+            "the enumerator reports the sidecar-bearing skill tree"
+        );
+        ensure_no_non_fluent_worktree_changes(root.path())
+            .expect("a managed OpenCode skill tree is not a source change");
+    }
+
+    #[test]
+    fn review_only_reports_unmanaged_opencode_changes() {
+        let root = opencode_guard_fixture();
+        fs::create_dir_all(root.path().join(".opencode/skills/local")).unwrap();
+        fs::write(
+            root.path().join(".opencode/skills/local/SKILL.md"),
+            "user skill\n",
+        )
+        .unwrap();
+
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("an unmanaged OpenCode skill remains a source change");
+        assert!(
+            format!("{error:#}").contains(".opencode/skills/local/SKILL.md"),
+            "the guard names the unmanaged path: {error:#}"
+        );
+    }
+
+    #[test]
+    fn managed_opencode_skill_trees_treat_invalid_sidecars_as_unmanaged() {
+        let root = opencode_guard_fixture();
+        write_managed_opencode_skill(root.path(), "broken", r#"{"schema_version":1}"#);
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("a malformed sidecar fails closed as unmanaged");
+        assert!(format!("{error:#}").contains(".opencode/skills/broken"));
+    }
+
+    #[test]
+    fn managed_opencode_skill_trees_do_not_follow_symlinks() {
+        let root = opencode_guard_fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill = write_managed_opencode_skill(
+            outside.path(),
+            "linked",
+            r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"linked"}"#,
+        );
+        fs::create_dir_all(root.path().join(".opencode/skills")).unwrap();
+        std::os::unix::fs::symlink(&outside_skill, root.path().join(".opencode/skills/linked"))
+            .unwrap();
+
+        assert!(
+            managed_opencode_skill_trees(root.path())
+                .unwrap()
+                .is_empty(),
+            "a symlinked skill tree outside the project is not a managed path"
+        );
+    }
+
+    #[test]
+    fn review_only_still_reports_source_changes_outside_opencode() {
+        let root = opencode_guard_fixture();
+        fs::write(root.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("a source change outside .opencode still fails the guard");
+        assert!(format!("{error:#}").contains("tracked.txt"));
     }
 
     #[test]

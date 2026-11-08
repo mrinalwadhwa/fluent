@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const SCHEMA_VERSION: u32 = 1;
-const SIDECAR_NAME: &str = ".fluent-managed.json";
+pub(crate) const SIDECAR_NAME: &str = ".fluent-managed.json";
 const SHIM_MARKER: &str = "fluent-shim: true";
 const FLUENT_SOURCE: &str = "mrinalwadhwa/fluent";
 const FLUENT_SKILL_PATH: &str = "skills/fluent/SKILL.md";
@@ -34,6 +34,29 @@ struct ManagedSkill {
     skill: String,
     bundle_sha256: String,
     files: Vec<String>,
+}
+
+/// Report whether sidecar bytes claim Fluent ownership of the enclosing skill
+/// tree. The source-change guard recognizes installs written by a different
+/// Fluent version, so it checks only the stable identity fields rather than the
+/// bundle digest and inventory.
+pub(crate) fn sidecar_claims_ownership(bytes: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct OwnershipClaim {
+        schema_version: u32,
+        agent: String,
+        scope: String,
+        skill: String,
+    }
+    match serde_json::from_slice::<OwnershipClaim>(bytes) {
+        Ok(claim) => {
+            claim.schema_version >= SCHEMA_VERSION
+                && !claim.agent.is_empty()
+                && !claim.scope.is_empty()
+                && !claim.skill.is_empty()
+        }
+        Err(_) => false,
+    }
 }
 
 /// A prepared handoff from the external `skills` CLI to Fluent ownership.

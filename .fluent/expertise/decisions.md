@@ -1135,3 +1135,13 @@ pytest verbose output, but a detected runner that emits none of those still
 needs the project to name a harness or a richer extractor. Keep the starter
 command, the extractor vocabulary, the Writer prompt, and the advisory
 reference check in step when a harness is added.
+
+## Exclude only sidecar-owned OpenCode skill trees from source checks
+
+The review-only source guard walks `.opencode` for directories whose
+`.fluent-managed.json` sidecar names a schema, agent, scope, and skill. It
+excludes exactly those trees from Git status and never follows a symlink. A
+missing, unreadable, or malformed sidecar leaves the directory user-owned, so
+unmanaged edits under `.opencode` still fail the Task. Do not widen the
+exclusion to all of `.opencode`: that would hide real source changes the guard
+exists to report.

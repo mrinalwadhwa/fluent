@@ -11570,3 +11570,18 @@ harness can produce,
 THE SYSTEM SHALL warn with the reference text and the configured harnesses
 instead of failing silently.
 Test: src/tester.rs (tester_check_warns_when_a_reference_cannot_match_any_harness)
+
+## OpenCode-managed paths
+
+### B1
+
+WHEN a review-only Task checks the source checkout and `.opencode` contains
+managed skill trees,
+THE SYSTEM SHALL exclude those managed paths from the source-change guard.
+Test: src/work_task_executor.rs (tests::review_only_ignores_managed_opencode_skill_trees)
+
+### B2
+
+IF an unmanaged file appears under `.opencode`,
+THEN THE SYSTEM SHALL still report it as a source change.
+Test: src/work_task_executor.rs (tests::review_only_reports_unmanaged_opencode_changes)
