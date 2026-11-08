@@ -13,6 +13,7 @@ use crate::process_settlement::{
 
 const TESTER_YAML_PATH: &str = ".fluent/tester.yaml";
 const EXTRACTOR_PATH: &str = ".fluent/extract-tester-results";
+const BEHAVIORS_PATH: &str = "documentation/behaviors.md";
 const FAILURE_EXCERPT_MAX: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +430,7 @@ pub fn check(
                 .join("\n")
         );
     }
+    warn_unmatchable_references(candidate_workspace)?;
     let plan = plan(candidate_workspace)?;
     let sandbox = prepare_sandbox_profile(
         candidate_workspace,
@@ -438,6 +440,88 @@ pub fn check(
         &plan,
     )?;
     run_with_sandbox_profile(candidate_workspace, artifact.path(), &sandbox)
+}
+
+/// Print advisory warnings for declared `Test:` references that no configured
+/// harness can produce. The check stays advisory: a project may intentionally
+/// declare partial coverage, and only the reference and harness list are facts.
+fn warn_unmatchable_references(candidate_workspace: &Path) -> Result<()> {
+    for warning in reference_warnings(candidate_workspace)? {
+        eprintln!("  warning: {warning}");
+    }
+    Ok(())
+}
+
+/// Return one warning per declared reference whose native identity no
+/// configured harness can emit.
+pub(crate) fn reference_warnings(candidate_workspace: &Path) -> Result<Vec<String>> {
+    let config = read_tester_config(&candidate_workspace.join(TESTER_YAML_PATH))?;
+    let Ok(behaviors) = fs::read_to_string(candidate_workspace.join(BEHAVIORS_PATH)) else {
+        return Ok(Vec::new());
+    };
+    let harnesses = config
+        .commands
+        .iter()
+        .map(|command| command.test_harness.as_str())
+        .collect::<Vec<_>>();
+    let configured = {
+        let mut names = harnesses.clone();
+        names.sort_unstable();
+        names.dedup();
+        names.join(", ")
+    };
+    let mut warnings = Vec::new();
+    for line in behaviors.lines() {
+        let Some(reference) = line.trim().strip_prefix("Test:") else {
+            continue;
+        };
+        let reference = reference.trim();
+        if reference.is_empty() || reference.starts_with("Untestable:") {
+            continue;
+        }
+        // Malformed references are diagnosed by planning validation; this
+        // advisory check must not duplicate or reinterpret them.
+        let Ok(parsed) = crate::verification_reference::parse_test_reference(reference) else {
+            continue;
+        };
+        if harnesses
+            .iter()
+            .any(|harness| harness_can_produce(harness, &parsed))
+        {
+            continue;
+        }
+        warnings.push(format!(
+            "Test: {reference} cannot be produced by any configured harness ({configured}); add a matching command to {TESTER_YAML_PATH}"
+        ));
+    }
+    Ok(warnings)
+}
+
+fn harness_can_produce(
+    harness: &str,
+    reference: &crate::verification_reference::TestReference,
+) -> bool {
+    // Command references are matched against command-level evidence, not a
+    // per-test identity, so any configured harness can carry them.
+    if reference.command.is_some() {
+        return true;
+    }
+    if reference.path.ends_with(".rs") {
+        return matches!(harness, "cargo-nextest" | "cargo-test");
+    }
+    if reference.path.ends_with(".py") {
+        return matches!(harness, "pytest" | "junit");
+    }
+    if reference.path.ends_with(".sh") {
+        return harness == "shell-harness";
+    }
+    if reference.path.is_empty() {
+        // `cargo test --lib <name>` and other selector-only references.
+        return matches!(harness, "cargo-nextest" | "cargo-test");
+    }
+    // Shapes that do not name a native test identity (docs, hooks, Dockerfiles,
+    // aggregate or wrapped references) stay with planning validation.
+    true
 }
 
 /// Validate Tester configuration and empty-artifact extraction without running
@@ -460,6 +544,7 @@ pub fn check_structural(
                 .join("\n")
         )
     }
+    warn_unmatchable_references(candidate_workspace)?;
     let plan = plan(candidate_workspace)?;
     let _sandbox = prepare_sandbox_profile(
         candidate_workspace,
@@ -2786,6 +2871,45 @@ mod tests {
 
         let error = check_structural(workspace.path(), true, &resolver()).unwrap_err();
         assert!(format!("{error:#}").contains("invalid empty artifact"));
+    }
+
+    #[test]
+    fn tester_check_warns_when_a_reference_cannot_match_any_harness() {
+        let workspace = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: echo hello\n    test_harness: shell-harness\n",
+        );
+        fs::create_dir_all(workspace.path().join("documentation")).unwrap();
+        fs::write(
+            workspace.path().join(BEHAVIORS_PATH),
+            "# Behaviors\n\n\
+             ## Example\n\n\
+             ### B1\n\n\
+             WHEN a shell script runs, THE SYSTEM SHALL pass.\n\
+             Test: tests/example.sh\n\n\
+             ### B2\n\n\
+             WHEN a Python test runs, THE SYSTEM SHALL pass.\n\
+             Test: tests/test_feature.py::test_ok\n\n\
+             ### B3\n\n\
+             WHEN a behavior is partial, THE SYSTEM SHALL stay quiet.\n\
+             Untestable: the sandbox cannot drive the interactive surface.\n",
+        )
+        .unwrap();
+
+        let warnings = reference_warnings(workspace.path()).unwrap();
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "only the unmatchable reference warns: {warnings:?}"
+        );
+        assert!(warnings[0].contains("tests/test_feature.py::test_ok"));
+        assert!(
+            warnings[0].contains("shell-harness"),
+            "the warning must name the configured harnesses: {warnings:?}"
+        );
     }
 
     #[test]

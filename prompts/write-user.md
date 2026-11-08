@@ -31,7 +31,7 @@ Schema:
 ```yaml
 commands:
   - command: <shell command to run>
-    test_harness: <identifier: cargo-nextest | cargo-test | shell-harness>
+    test_harness: <identifier: cargo-nextest | cargo-test | shell-harness | pytest | junit>
 ```
 
 Each entry's `command` is a shell string the Tester runs sequentially in the workspace root. `test_harness` identifies which parser the `extract-tester-results` script uses to normalize the output.
@@ -273,7 +273,7 @@ In your final response, include a concise `Verification` section. For every comm
      test_harness: cargo-nextest
    ```
 
-   `test_harness` must be one of: `cargo-nextest`, `cargo-test`, `shell-harness`.
+   `test_harness` must be one of: `cargo-nextest`, `cargo-test`, `shell-harness`, `pytest`, `junit`.
 3. Verify the command picks up your new tests. Run it directly. Use the harness' options to list discovered tests if needed.
 4. Include the `tester.yaml` update in the same commit as the test file.
 

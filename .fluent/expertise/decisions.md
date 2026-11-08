@@ -1123,3 +1123,15 @@ was approved against, and fall back to earlier Writers. A later round's matrix
 built against a revised contract must never replace the recorded source
 completion. This tie-break is part of the durable revision-audit identity, so
 reversing it can refuse otherwise-valid retries.
+
+## Bootstrap a starter Tester without promising per-test evidence
+
+`fluent init` writes a starter `.fluent/tester.yaml` and the bundled extractor
+only when the project has neither. Detection covers Cargo, pyproject, and
+package.json; an unrecognized project gets a documented no-op and an init
+warning. The detected command is a starting point, not a promise: the bundled
+extractor parses libtest JSON and text, TAP-shaped shell lines, JUnit XML, and
+pytest verbose output, but a detected runner that emits none of those still
+needs the project to name a harness or a richer extractor. Keep the starter
+command, the extractor vocabulary, the Writer prompt, and the advisory
+reference check in step when a harness is added.

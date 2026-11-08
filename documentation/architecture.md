@@ -1194,6 +1194,14 @@ without an Attempt dependency cache and its package-manager caches stay
 read-only; only Writer, Tester, and landing Attempt surfaces receive the cache
 environment.
 
+On a project's first `fluent init`, Fluent writes a starter
+`.fluent/tester.yaml` and the bundled `.fluent/extract-tester-results` when the
+project has neither. Detection covers Cargo, Python (`pyproject.toml`), and Node
+(`package.json`); an unrecognized project gets a documented no-op and an init
+warning rather than a silent green result. The starter is a starting point: a
+project replaces the command with its own runner and keeps the per-test
+extractor contract.
+
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it
 creates the Task artifact area or any guarded process-settlement directory.

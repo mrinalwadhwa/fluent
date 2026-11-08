@@ -18331,6 +18331,39 @@ fn init_writes_gitignore_when_absent() {
 }
 
 #[test]
+fn init_writes_a_starter_tester_with_a_detected_command() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("pyproject.toml"),
+        "[project]\nname = \"example\"\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let tester = fs::read_to_string(tmp.path().join(".fluent/tester.yaml")).unwrap();
+    assert!(
+        tester.contains("python3 -m pytest -v"),
+        "init must write the detected Python command: {tester}"
+    );
+    assert!(tester.contains("test_harness: pytest"));
+    let extractor = tmp.path().join(".fluent/extract-tester-results");
+    assert!(extractor.is_file(), "init must write the bundled extractor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            fs::metadata(&extractor).unwrap().permissions().mode() & 0o111 != 0,
+            "the starter extractor must be executable"
+        );
+    }
+}
+
+#[test]
 fn init_gitignore_excludes_working_state_and_tracks_durable() {
     let tmp = TempDir::new().unwrap();
     init_git_repo(tmp.path());
@@ -29779,6 +29812,35 @@ fn tester_check_uses_production_tester_boundary() {
         "run_with_sandbox_profile sandboxed=false\n",
         "tester check must enter the production runner that owns command execution and normalization"
     );
+}
+
+#[test]
+fn tester_check_prints_a_reference_harness_warning() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::write(
+        main_dir.join(".fluent/tester.yaml"),
+        "commands:\n  - command: \"true\"\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    fs::create_dir_all(main_dir.join("documentation")).unwrap();
+    fs::write(
+        main_dir.join("documentation/behaviors.md"),
+        "# Behaviors\n\n## Example\n\n\
+         ### B1\n\n\
+         WHEN a Python test runs, THE SYSTEM SHALL pass.\n\
+         Test: tests/test_feature.py::test_ok\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tester passed"))
+        .stderr(predicate::str::contains("tests/test_feature.py::test_ok"))
+        .stderr(predicate::str::contains("shell-harness"));
 }
 
 #[test]

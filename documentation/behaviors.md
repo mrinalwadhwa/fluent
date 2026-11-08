@@ -11534,3 +11534,39 @@ Test: src/work_task_executor.rs (tests::writer_finish_tolerates_a_concurrent_lan
 WHEN two Work Items run and one lands,
 THE SYSTEM SHALL let the other Writer finish without invalidating its Task.
 Test: tests/binary.rs (concurrent_landing_preserves_a_running_writer)
+
+## Tester bootstrap
+
+### B1
+
+WHEN `fluent init` runs in a project with no Tester,
+THE SYSTEM SHALL write a starter Tester whose command is a detected project
+test command or a documented no-op.
+Test: src/setup.rs (init_writes_a_starter_tester_for_a_project_without_one)
+
+### B2
+
+WHEN `fluent init` writes a starter Tester,
+THE SYSTEM SHALL also write the bundled per-test extractor and leave an existing
+Tester untouched.
+Test: src/setup.rs (init_writes_the_bundled_extractor_and_preserves_an_existing_tester)
+
+### B3
+
+WHEN the bundled extractor reads a JUnit XML result,
+THE SYSTEM SHALL emit one normalized result per test case.
+Test: tests/behaviors/operations/test-tester-extractor-junit.sh (parses JUnit XML cases)
+
+### B4
+
+WHEN the bundled extractor reads pytest verbose output,
+THE SYSTEM SHALL emit one normalized result per test.
+Test: tests/behaviors/operations/test-tester-extractor-pytest.sh (parses pytest verbose results)
+
+### B5
+
+WHEN `fluent tester check` finds a declared `Test:` reference that no configured
+harness can produce,
+THE SYSTEM SHALL warn with the reference text and the configured harnesses
+instead of failing silently.
+Test: src/tester.rs (tester_check_warns_when_a_reference_cannot_match_any_harness)

@@ -2599,6 +2599,26 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
         eprintln!("  Initialized .fluent/ in {}", cwd.display());
     }
 
+    match fluent::setup::write_starter_tester(cwd) {
+        Ok(starter) => {
+            if starter.wrote_tester {
+                if starter.detected_command {
+                    eprintln!("  Wrote a starter Tester with a detected project test command.");
+                } else {
+                    eprintln!(
+                        "  warning: no supported project test runner detected; wrote a documented no-op Tester. Edit .fluent/tester.yaml to run your tests."
+                    );
+                }
+            }
+            if starter.wrote_extractor {
+                eprintln!(
+                    "  Wrote the bundled per-test extractor at .fluent/extract-tester-results."
+                );
+            }
+        }
+        Err(error) => eprintln!("  warning: could not write the starter Tester: {error:#}"),
+    }
+
     if let Err(e) = seed_agent_instructions(cwd) {
         eprintln!("  warning: could not seed agent instructions: {e}");
     }
