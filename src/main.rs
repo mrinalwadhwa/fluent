@@ -3054,10 +3054,14 @@ fn install_identity(cwd: &Path, dir: &Path) -> (&'static str, &'static str) {
         ("claude", "project")
     } else if dir == cwd.join(".codex/skills") {
         ("codex", "project")
+    } else if dir == cwd.join(".opencode/skills") {
+        ("opencode", "project")
     } else if dir == cwd.join(".agents/skills") {
         ("universal", "project")
     } else if dir.ends_with(".codex/skills") {
         ("codex", "global")
+    } else if dir.ends_with(".config/opencode/skills") {
+        ("opencode", "global")
     } else if dir.ends_with(".agents/skills") || dir.ends_with(".config/agents/skills") {
         ("universal", "global")
     } else {
@@ -3074,7 +3078,7 @@ fn resolve_install_dirs(
 ) -> Result<Vec<PathBuf>> {
     let explicit_scope = force_global || force_project;
     match (explicit_scope, agent.as_ref()) {
-        (true, None) => bail!("--project and --global require --agent <codex|claude|*>"),
+        (true, None) => bail!("--project and --global require --agent <codex|claude|opencode|*>"),
         (false, Some(_)) => bail!("--agent requires either --project or --global"),
         _ => {}
     }
@@ -3085,15 +3089,20 @@ fn resolve_install_dirs(
         for a in agents.split(',') {
             let a = a.trim();
             let selected = match a {
-                "*" => vec!["claude", "codex"],
+                "*" => vec!["claude", "codex", "opencode"],
                 "claude" => vec!["claude"],
                 "codex" => vec!["codex"],
-                "" => bail!("--agent must name codex, claude, or *"),
-                other => bail!("Unsupported agent {other:?}; expected codex, claude, or *"),
+                "opencode" => vec!["opencode"],
+                "" => bail!("--agent must name codex, claude, opencode, or *"),
+                other => {
+                    bail!("Unsupported agent {other:?}; expected codex, claude, opencode, or *")
+                }
             };
             for selected_agent in selected {
                 let dir = if force_project {
                     cwd.join(format!(".{selected_agent}/skills"))
+                } else if selected_agent == "opencode" {
+                    home.join(".config/opencode/skills")
                 } else {
                     home.join(format!(".{selected_agent}/skills"))
                 };
@@ -3103,7 +3112,7 @@ fn resolve_install_dirs(
             }
         }
         if dirs.is_empty() {
-            bail!("--agent must name codex, claude, or *");
+            bail!("--agent must name codex, claude, opencode, or *");
         }
         return Ok(dirs);
     }
@@ -3130,6 +3139,7 @@ fn project_shim_candidate_roots(cwd: &Path) -> Vec<PathBuf> {
         cwd.join(".agents/skills"),
         cwd.join(".claude/skills"),
         cwd.join(".codex/skills"),
+        cwd.join(".opencode/skills"),
     ]
 }
 
@@ -3140,6 +3150,7 @@ fn global_shim_candidate_roots(home: &str) -> Vec<PathBuf> {
         home.join(".config/agents/skills"),
         home.join(".claude/skills"),
         home.join(".codex/skills"),
+        home.join(".config/opencode/skills"),
     ]
 }
 

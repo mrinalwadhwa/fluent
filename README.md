@@ -22,8 +22,9 @@ Use the command above from the project where you want Fluent. The `skills` CLI
 creates a project skill directory (commonly `.agents/skills/fluent` for Codex,
 or the agent-specific `.codex/skills/fluent` and `.claude/skills/fluent` roots)
 and records the source in `skills-lock.json`. OpenCode discovers the universal
-`.agents/skills/fluent` root as well as `.claude/skills/fluent`. Review and
-commit those project-local files according to your repository's policy.
+`.agents/skills/fluent` root as well as `.claude/skills/fluent` and
+`.opencode/skills/fluent`. Review and commit those project-local files according
+to your repository's policy.
 
 The installed skill is a small bootstrap. On its first invocation,
 `fluent skills add` replaces that marked bootstrap with the full skill and a
@@ -31,7 +32,7 @@ Fluent ownership sidecar. It also removes only Fluent's entry from
 `skills-lock.json`, so `npx skills update` cannot restore the bootstrap; other
 skills in the lock remain unchanged. Repeating the Fluent command leaves a
 current managed installation untouched. The bare command does not create an
-absent `.claude` or `.codex` skill root.
+absent `.claude`, `.codex`, or `.opencode` skill root.
 
 To install the interactive skill somewhere other than the detected bootstrap,
 name both the agent and the scope:
@@ -39,10 +40,13 @@ name both the agent and the scope:
 ```bash
 fluent skills add --agent codex --project
 fluent skills add --agent claude --global
-fluent skills add --agent codex,claude --global
+fluent skills add --agent opencode --project
+fluent skills add --agent codex,claude,opencode --global
 ```
 
-These commands choose where you invoke Fluent. The coder profile selected by
+OpenCode's global target is `~/.config/opencode/skills`; its project target is
+`.opencode/skills`. These commands choose where you invoke Fluent. The coder
+profile selected by
 `fluent init` separately chooses which providers run Writer and reviewer work.
 
 Start your coding agent in the project folder, then ask it to use Fluent and

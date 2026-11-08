@@ -11669,6 +11669,40 @@ WHEN Fluent reports the available coder profiles,
 THE SYSTEM SHALL include `opencode-default`.
 Test: src/setup.rs (configured_profile_lists_opencode_default)
 
+## OpenCode skills installation
+
+### B1
+
+WHEN `fluent skills add --agent opencode --project` runs,
+THE SYSTEM SHALL install the managed Fluent skill under `.opencode/skills`.
+Test: tests/binary.rs (skills_add_installs_opencode_project_skill)
+
+### B2
+
+WHEN `fluent skills add --agent opencode --global` runs,
+THE SYSTEM SHALL install the managed Fluent skill under `~/.config/opencode/skills`.
+Test: tests/binary.rs (skills_add_installs_opencode_global_skill)
+
+### B3
+
+WHEN `fluent skills add --agent '*'` runs,
+THE SYSTEM SHALL include OpenCode among the selected agents.
+Test: tests/binary.rs (skills_add_agent_wildcard_targets_all_agents)
+
+### B4
+
+WHEN Fluent writes an OpenCode skill installation,
+THE SYSTEM SHALL record the sidecar identity as `opencode` with the correct
+project or global scope.
+Test: tests/binary.rs (skills_add_opencode_records_managed_identity)
+
+### B5
+
+WHEN `fluent skills add` runs without `--agent`,
+THE SYSTEM SHALL discover an existing managed OpenCode installation at
+`~/.config/opencode/skills` and leave it current.
+Test: tests/binary.rs (skills_add_bare_refreshes_opencode_installation)
+
 ## OpenCode coder cross-cutting
 
 ### B1
@@ -11676,6 +11710,7 @@ Test: src/setup.rs (configured_profile_lists_opencode_default)
 WHEN this Work Item lands,
 THE SYSTEM SHALL contain `Test:` references in `documentation/behaviors.md` for
 each new EARS statement here, covering coder recognition, invocation, readiness,
-isolation, transcript identity, review evidence, and the init profile.
+isolation, transcript identity, review evidence, the init profile, and skills
+installation.
 Test: all EARS statements in the OpenCode coder sections above carry `Test:`
 references

@@ -53241,9 +53241,14 @@ fn skills_add_converges_project_bootstrap_roots_and_lock() {
         vec![(".agents/skills", "universal")],
         vec![(".claude/skills", "claude")],
         vec![(".codex/skills", "codex")],
+        vec![(".opencode/skills", "opencode")],
         vec![
             (".agents/skills", "universal"),
             (".claude/skills", "claude"),
+        ],
+        vec![
+            (".agents/skills", "universal"),
+            (".opencode/skills", "opencode"),
         ],
     ] {
         let tmp = TempDir::new().unwrap();
@@ -53335,7 +53340,11 @@ fn skills_add_converges_project_bootstrap_roots_and_lock() {
 
 #[test]
 fn skills_add_converges_global_canonical_roots_and_lock() {
-    for root in [".agents/skills", ".config/agents/skills"] {
+    for (root, agent) in [
+        (".agents/skills", "universal"),
+        (".config/agents/skills", "universal"),
+        (".config/opencode/skills", "opencode"),
+    ] {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         let project = tmp.path().join("project");
@@ -53374,7 +53383,7 @@ fn skills_add_converges_global_canonical_roots_and_lock() {
         let content = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
         assert!(!content.contains("fluent-shim: true"), "{root}");
         let sidecar: serde_json::Value = read_json_path(&skill_dir.join(".fluent-managed.json"));
-        assert_eq!(sidecar["agent"], "universal", "{root}");
+        assert_eq!(sidecar["agent"], agent, "{root}");
         assert_eq!(sidecar["scope"], "global", "{root}");
         let updated_lock: serde_json::Value = read_json_path(&lock_path);
         assert!(updated_lock["skills"].get("fluent").is_none());
@@ -53974,6 +53983,116 @@ fn skills_add_agent_wildcard_targets_all_agents() {
     assert!(
         home.join(".codex/skills/fluent/SKILL.md").exists(),
         "--agent * should install to .codex/skills/"
+    );
+    assert!(
+        home.join(".config/opencode/skills/fluent/SKILL.md")
+            .exists(),
+        "--agent * should install to .config/opencode/skills/"
+    );
+}
+
+#[test]
+fn skills_add_installs_opencode_global_skill() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "opencode", "--global"])
+        .assert()
+        .success();
+
+    assert!(
+        home.join(".config/opencode/skills/fluent/SKILL.md")
+            .exists(),
+        "--agent opencode --global should install to .config/opencode/skills/"
+    );
+    assert!(
+        !home.join(".opencode/skills").exists(),
+        "the global target must not use the project-style .opencode path"
+    );
+}
+
+#[test]
+fn skills_add_installs_opencode_project_skill() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "opencode", "--project"])
+        .assert()
+        .success();
+
+    assert!(
+        tmp.path().join(".opencode/skills/fluent/SKILL.md").exists(),
+        "--agent opencode --project should install to .opencode/skills/"
+    );
+}
+
+#[test]
+fn skills_add_opencode_records_managed_identity() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "opencode", "--global"])
+        .assert()
+        .success();
+    let global_sidecar = home.join(".config/opencode/skills/fluent/.fluent-managed.json");
+    let global: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&global_sidecar).unwrap()).unwrap();
+    assert_eq!(global["agent"], "opencode");
+    assert_eq!(global["scope"], "global");
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "opencode", "--project"])
+        .assert()
+        .success();
+    let project_sidecar = tmp
+        .path()
+        .join(".opencode/skills/fluent/.fluent-managed.json");
+    let project: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&project_sidecar).unwrap()).unwrap();
+    assert_eq!(project["agent"], "opencode");
+    assert_eq!(project["scope"], "project");
+}
+
+#[test]
+fn skills_add_bare_refreshes_opencode_installation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(tmp.path().join(".opencode/skills/other")).unwrap();
+
+    fluent_cmd()
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add", "--agent", "opencode", "--global"])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .env("HOME", home.to_str().unwrap())
+        .args(["skills", "add"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Skills are current in"));
+
+    assert!(
+        !tmp.path().join(".opencode/skills/fluent").exists(),
+        "bare refresh must not adopt a skills root that has no fluent installation"
+    );
+    assert!(
+        !home.join(".opencode/skills").exists(),
+        "bare refresh must not create a project-style global root"
     );
 }
 
