@@ -3149,6 +3149,9 @@ fn rebase_candidate_with_coder(
                 config.model.unwrap_or(&pair.model),
                 config.effort.or(pair.effort.as_deref()),
             )?,
+            CoderKind::Opencode => {
+                anyhow::bail!("OpenCode does not support the native Rebase path")
+            }
         }
     }
     let rebase_task_id = next_rebase_task_id(item, &candidate.attempt_id);

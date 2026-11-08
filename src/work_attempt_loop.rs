@@ -4339,6 +4339,9 @@ fn run_learner_step(
                 &pair.model,
                 pair.effort.as_deref(),
             )?,
+            CoderKind::Opencode => {
+                anyhow::bail!("OpenCode does not support native Learner execution")
+            }
         }
     }
 

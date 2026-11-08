@@ -210,16 +210,22 @@ pub(crate) fn deny_writer_source_entries(
         writer_cache == expected_cache,
         "Writer cache grant must name the exact current Attempt"
     );
-    if let Some(home) = claude_home {
+    if let Some(home) = managed_home {
         // Recovery artifacts can nest below the Attempt. Keep the home bound
         // to the same validated Work Item and Attempt as the dependency cache.
-        let expected_home = artifact_root
+        let attempt_root = artifact_root
             .join(work_item.as_os_str())
-            .join(attempt.as_os_str())
-            .join("claude-home");
-        anyhow::ensure!(
-            home == expected_home,
+            .join(attempt.as_os_str());
+        let expected_claude_home = attempt_root.join("claude-home");
+        let expected_opencode_home = attempt_root.join("opencode-home");
+        let rejection = if home.file_name().is_some_and(|name| name == "opencode-home") {
+            "Writer OpenCode home grant must name the exact current Attempt"
+        } else {
             "Writer Claude home grant must name the exact current Attempt"
+        };
+        anyhow::ensure!(
+            home == expected_claude_home || home == expected_opencode_home,
+            "{rejection}"
         );
     }
     if physical_source == physical_candidate {
