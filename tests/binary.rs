@@ -44169,6 +44169,165 @@ exit 0
     );
 }
 
+/// A role-aware coder for the concurrent-landing regression. The work-2 Writer
+/// commits and passes reviews so its candidate can land; the work-1 Writer
+/// blocks until the test lands work-2, then commits its own candidate.
+fn concurrent_landing_mock_script(work_item: &str, blocking_writer: bool) -> String {
+    let writer = if blocking_writer {
+        r#"    : > "$FLUENT_TEST_WRITER_STARTED"
+    i=0
+    while [ "$i" -lt 600 ]; do
+      [ -f "$FLUENT_TEST_WRITER_RELEASE" ] && break
+      i=$((i+1))
+      sleep 0.1
+    done
+    printf 'concurrent writer output\n' > concurrent-writer.txt
+    git add concurrent-writer.txt
+    git commit -m "Add concurrent writer output" >/dev/null 2>&1"#
+    } else {
+        r#"    printf 'landed work\n' > landed-work.txt
+    git add landed-work.txt
+    git commit -m "Add landed work" >/dev/null 2>&1"#
+    };
+    r#"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    printf '%s\n' '{"learning_summary":"@WORK@ complete","follow_ups":[]}' > "$DRAFT"
+  fi
+  exit 0
+fi
+case "$PWD" in
+  */work-6-@WORK@-attempt-1)
+@WRITER@
+    ;;
+  *)
+    printf 'Verdict: pass\n\nReview passed.\n' > review.md
+    ;;
+esac
+exit 0
+"#
+    .replace("@WORK@", work_item)
+    .replace("@WRITER@", writer)
+}
+
+#[test]
+fn concurrent_landing_preserves_a_running_writer() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let land_bin = tmp.path().join("concurrent-land-bin");
+    write_mock_claude(&land_bin, &concurrent_landing_mock_script("work-2", false));
+    let writer_bin = tmp.path().join("concurrent-writer-bin");
+    write_mock_claude(&writer_bin, &concurrent_landing_mock_script("work-1", true));
+
+    for id in ["work-1", "work-2"] {
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "create", id, "--title", "Concurrent landing"])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "create", id, "attempt-1"])
+            .assert()
+            .success();
+    }
+
+    // work-2 reaches a landable candidate before work-1 starts.
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "run", "work-2", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&land_bin))
+        .assert()
+        .success();
+
+    let writer_started = tmp.path().join("concurrent-writer-started");
+    let writer_release = tmp.path().join("concurrent-writer-release");
+    let mut writer = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&project)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+            .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+            .env("PATH", mock_path(&writer_bin))
+            .env("FLUENT_TEST_WRITER_STARTED", &writer_started)
+            .env("FLUENT_TEST_WRITER_RELEASE", &writer_release)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || {
+            writer_started.exists()
+        }),
+        "work-1 Writer must reach its blocking coder"
+    );
+
+    let before = git_head(&project);
+    let landing = fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-2",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--no-post-merge-review",
+        ])
+        .env("PATH", mock_path(&land_bin))
+        .output()
+        .unwrap();
+    assert!(
+        landing.status.success(),
+        "work-2 landing failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&landing.stdout),
+        String::from_utf8_lossy(&landing.stderr)
+    );
+    let landed = git_head(&project);
+    assert_ne!(
+        landed, before,
+        "work-2 landing must advance the source checkout"
+    );
+
+    fs::write(&writer_release, b"go").unwrap();
+    let output = writer.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Concurrent landing advanced source checkout") && stderr.contains(&landed),
+        "the Writer must report the concurrent landing {landed}: {stderr}"
+    );
+
+    let item = read_work_show_json(&project, "work-1");
+    assert_eq!(
+        item["attempts"][0]["tasks"][0]["status"], "complete",
+        "a concurrent landing must not invalidate the running Writer: {item}"
+    );
+    assert_eq!(
+        item["attempts"][0]["pause_kind"],
+        serde_json::Value::Null,
+        "the Writer Task must not be paused for inspection: {item}"
+    );
+    assert!(
+        !item["attempts"][0]["tasks"][0]["output"].is_null(),
+        "the Writer must retain its candidate output: {item}"
+    );
+}
+
 #[test]
 fn second_scheduler_run_reuses_live_coordinator() {
     let tmp = TempDir::new().unwrap();

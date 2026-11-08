@@ -11507,3 +11507,30 @@ explicitly supplied Work Item and Attempt's acceptance for the exact release
 HEAD while retaining every existing build, source, format, check, architecture,
 signature and checksum gate.
 Test: tests/behaviors/operations/test-release-script.sh
+## Concurrent landing
+
+### B1
+
+WHEN the source product check observes a clean HEAD advance,
+THE SYSTEM SHALL classify the change as a concurrent landing rather than a
+Writer change.
+Test: src/work_task_executor.rs (tests::source_product_change_classifies_a_clean_advance_as_a_landing)
+
+### B2
+
+IF the source checkout has uncommitted product changes,
+THEN THE SYSTEM SHALL classify the change as a Writer change and fail the Task
+with the existing inspection evidence.
+Test: src/work_task_executor.rs (tests::source_product_change_rejects_a_dirty_landing)
+
+### B3
+
+WHEN a Writer Task finishes during a concurrent landing,
+THE SYSTEM SHALL keep the Task alive and report the landed commit.
+Test: src/work_task_executor.rs (tests::writer_finish_tolerates_a_concurrent_landing)
+
+### B4
+
+WHEN two Work Items run and one lands,
+THE SYSTEM SHALL let the other Writer finish without invalidating its Task.
+Test: tests/binary.rs (concurrent_landing_preserves_a_running_writer)
