@@ -10671,6 +10671,38 @@ WHEN Fluent reclaims Writer dependency caches after Work becomes terminal, THE
 SYSTEM SHALL retire that Work Item/Attempt cache.
 Test: src/writer_cache.rs (reclamation_retires_a_cache_after_work_becomes_terminal)
 
+## Sandbox package-manager cache
+
+### B1
+
+WHEN Fluent prepares an Attempt dependency cache,
+THE SYSTEM SHALL expose one writable cache directory per supported package
+manager through that package manager's standard environment variable.
+Test: src/writer_cache.rs (attempt_cache_exposes_package_manager_cache_environment)
+
+### B2
+
+WHEN Fluent renders the Tester sandbox with an Attempt dependency cache,
+THE SYSTEM SHALL render each package-manager cache directory writable and
+prove the grant with a sandboxed write.
+Test: src/tester.rs (tester_sandbox_writes_package_manager_cache_directories)
+Example: a `uv run pytest` command writes into `<cache>/uv-cache` without `--no-sandbox`.
+
+### B3
+
+IF a Tester command fails with a sandbox denial naming a configured
+package-manager cache directory,
+THEN THE SYSTEM SHALL persist a harness error that names the denied path and
+the `--no-sandbox` remedy instead of reporting only the command exit code.
+Test: src/tester.rs (tester_diagnoses_package_manager_cache_denial)
+
+### B4
+
+WHEN `merge-candidate land` runs the final Tester for an Attempt,
+THE SYSTEM SHALL launch it with the same Attempt dependency cache environment
+the Attempt's Writer used.
+Test: src/work_merge_executor.rs (landing_tester_reuses_the_attempt_package_manager_cache)
+
 ## Generated commit wording
 
 ### B1

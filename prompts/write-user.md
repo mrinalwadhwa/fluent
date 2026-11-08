@@ -241,7 +241,7 @@ After committing, run `fluent task check-handoff <work-item-id> <attempt-id> <ta
 
 Run the smallest harness-native test selections that give useful feedback for the files and behaviors you changed. Do not run the complete configured suite merely to duplicate Fluent's final Tester gate; Fluent runs that canonical suite once after reviewers pass. Expand your focused selection when failures or the change's risk justify it.
 
-Fluent has assigned this Attempt a private dependency cache through `CARGO_HOME`. Reuse it for focused Cargo commands. Do not override that variable or read from or write to the operator's global Cargo home. When confirming that admitted dependencies are sufficient, prefer Cargo's `--offline` option.
+Fluent has assigned this Attempt a private dependency cache through `CARGO_HOME`. Reuse it for focused Cargo commands. The same cache root also provides `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and `npm_config_cache` for package-manager commands. Do not override those variables or read from or write to the operator's global Cargo or package-manager caches. When confirming that admitted dependencies are sufficient, prefer Cargo's `--offline` option.
 
 ### Task is done when
 

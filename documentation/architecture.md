@@ -845,8 +845,11 @@ Every autonomous Writer and final Tester receives Fluent-owned dependency
 caches under
 `.fluent/work/cache/writers/<work-item-id>/<attempt-id>/`. Its private
 `cargo-home/` is shared by initial, continuation, and corrective Writer Tasks
-and the final Tester in that exact Attempt, but never by another Attempt. Cargo
-build output remains in the candidate workspace so later Writer rounds, the
+and the final Tester in that exact Attempt, but never by another Attempt. The
+same root also holds a private `npm-cache/` and one writable cache directory per
+supported package manager — `uv-cache/` (`UV_CACHE_DIR`) and `pip-cache/`
+(`PIP_CACHE_DIR`) — so uv and pip write there instead of a read-only host cache.
+Cargo build output remains in the candidate workspace so later Writer rounds, the
 final Tester, and the candidate-keyed reviewer cache retain the existing
 warm-output path.
 Before the first launch, the host admits only `registry/` and `git/` from its
@@ -1177,6 +1180,19 @@ when that Task launches. Completed Writers are not rerun, and later Writers,
 reviewers, Testers, and the Learner retain the ordinary sandbox policy. The
 scheduler must itself run from a host boundary that permits the Xcode child
 sandbox; an enclosing agent sandbox still applies.
+
+A package-manager cache denial is a different condition. The Attempt dependency
+cache exposes `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and `npm_config_cache` inside the
+granted cache root, so a supported package manager does not need the operator's
+home cache. If a command still reports a permission denial naming one of those
+configured paths, Fluent persists a `package_manager_sandbox` Tester-harness
+error that names the denied path. This is an environment repair, not a
+dispatch-scoped `--no-sandbox` approval: repair the cache access and resume the
+same Attempt, or run the standalone `fluent tester check --no-sandbox` from a
+trusted host shell. Standalone `tester check` creates no Attempt, so it renders
+without an Attempt dependency cache and its package-manager caches stay
+read-only; only Writer, Tester, and landing Attempt surfaces receive the cache
+environment.
 
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it

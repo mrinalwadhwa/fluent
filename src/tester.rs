@@ -993,6 +993,26 @@ fn run_with_prepared_sandbox_profile_and_collector(
         );
     }
 
+    // Only a sandboxed command can report a sandbox denial. A `--no-sandbox`
+    // run or the test-support bypass has no profile to blame, and the same
+    // stderr there is an ordinary cache failure.
+    if let Some((command, denied)) = package_manager_sandbox_denial(
+        &command_results,
+        artifact_dir,
+        launch_env,
+        sandbox_profile.is_some(),
+    ) {
+        let details = package_manager_sandbox_details(&command, &denied);
+        eprintln!("  Tester guidance: {details}");
+        return persist_harness_error(
+            artifact_dir,
+            "package_manager_sandbox",
+            "A package-manager cache write was denied in the sandbox".to_string(),
+            details,
+            command_results,
+        );
+    }
+
     let (tests, summary) = match extract_and_normalize(
         candidate_workspace,
         &extractor_path,
@@ -1395,6 +1415,68 @@ fn is_nested_swiftpm_sandbox_failure(command: &str, stderr: &str) -> bool {
         && (stderr.contains("sandbox_apply") || stderr.contains("operation not permitted"))
 }
 
+/// Identify a sandboxed package-manager cache write denial.
+///
+/// Match only a permission denial that also names a configured
+/// package-manager cache directory from the Tester launch environment, so an
+/// unrelated denial of some other path stays a generic command failure.
+/// The physical path is accepted too, because a command may resolve the cache
+/// directory before it reports the denied path.
+/// Returns the denied cache path.
+fn package_manager_cache_denial(stderr: &str, launch_env: &[(String, String)]) -> Option<String> {
+    let stderr = stderr.to_ascii_lowercase();
+    if !(stderr.contains("operation not permitted") || stderr.contains("eperm")) {
+        return None;
+    }
+    launch_env
+        .iter()
+        .filter(|(name, _)| {
+            ["UV_CACHE_DIR", "PIP_CACHE_DIR", "npm_config_cache"].contains(&name.as_str())
+        })
+        .find(|(_, path)| {
+            stderr.contains(&path.to_ascii_lowercase())
+                || fs::canonicalize(path).ok().is_some_and(|physical| {
+                    stderr.contains(&physical.to_string_lossy().to_ascii_lowercase())
+                })
+        })
+        .map(|(_, path)| path.clone())
+}
+
+/// Return the failed, sandboxed command and denied cache path for the newest
+/// package-manager cache denial, if any.
+///
+/// A passing command, an unrelated stderr, or a run with no applied profile
+/// never produces a sandbox denial.
+fn package_manager_sandbox_denial(
+    command_results: &[CommandResult],
+    artifact_dir: &Path,
+    launch_env: &[(String, String)],
+    sandboxed: bool,
+) -> Option<(String, String)> {
+    if !sandboxed {
+        return None;
+    }
+    command_results.iter().rev().find_map(|result| {
+        if result.exit_code == 0 {
+            return None;
+        }
+        let stderr = fs::read_to_string(artifact_dir.join(&result.stderr_log)).ok()?;
+        let denied = package_manager_cache_denial(&stderr, launch_env)?;
+        Some((result.command.clone(), denied))
+    })
+}
+
+/// Render the operator-facing remedy for a package-manager cache denial.
+///
+/// The Attempt surface has no dispatch-scoped `--no-sandbox` recovery, so the
+/// message points at repairing the cache access and resuming, and keeps the
+/// standalone `tester check --no-sandbox` remedy for a trusted host shell.
+fn package_manager_sandbox_details(command: &str, denied: &str) -> String {
+    format!(
+        "A Tester command could not write its package-manager cache inside Fluent's sandbox: `{command}` was denied writes to {denied}. Fluent kept its sandbox enabled and did not modify .fluent/tester.yaml or project scripts. Package-manager caches are exposed through the Attempt dependency cache as UV_CACHE_DIR, PIP_CACHE_DIR, and npm_config_cache; extend that set if a tool ignores its standard cache variable. Repair the denied cache access, then resume the same Attempt. A trusted direct check from a host shell that is not itself sandboxed can run `fluent tester check --no-sandbox`."
+    )
+}
+
 /// Whether persisted Tester evidence identifies Xcode/SwiftPM's unsupported
 /// nested sandbox boundary. This is advisory classification for the recovery
 /// handoff; unreadable evidence remains a generic Tester-harness failure.
@@ -1612,6 +1694,135 @@ mod tests {
         let results = read_results(artifact_dir.path());
         assert_eq!(results.commands[0].exit_code, 0);
         assert!(results.error.is_none());
+    }
+
+    #[test]
+    fn tester_sandbox_writes_package_manager_cache_directories() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        make_workspace(workspace.path());
+        crate::git::run(
+            workspace.path(),
+            &["init", "-q"],
+            "initialize package-manager cache Tester sandbox fixture",
+        )
+        .unwrap();
+        let cache = crate::writer_cache::preflight_writer_dependency_cache(
+            workspace.path(),
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        crate::writer_cache::prepare_writer_dependency_cache(&cache, None).unwrap();
+        write_tester_yaml(
+            workspace.path(),
+            "commands:\n  - command: 'test -d \"$UV_CACHE_DIR\" && touch \"$UV_CACHE_DIR/uv-marker\" && touch \"$PIP_CACHE_DIR/pip-marker\" && touch \"$npm_config_cache/npm-marker\"'\n    test_harness: shell-harness\n",
+        );
+        write_extractor(workspace.path(), "#!/bin/sh\necho '[]'\n");
+
+        // Tester commands receive each package-manager cache directory through
+        // its standard environment variable and write into it.
+        let tester_plan = plan(workspace.path()).unwrap();
+        let settlement = prepare_settlement_directories(artifact_dir.path(), &tester_plan).unwrap();
+        let sandbox = render_sandbox_profile_with_cache(
+            workspace.path(),
+            artifact_dir.path(),
+            true,
+            &resolver(),
+            settlement,
+            Some(&cache),
+        )
+        .unwrap();
+        assert_eq!(sandbox.launch_env, cache.launch_env());
+        assert_eq!(
+            run_with_sandbox_profile(workspace.path(), artifact_dir.path(), &sandbox).unwrap(),
+            TesterOutcome::Passed
+        );
+        assert!(cache.root().join("uv-cache/uv-marker").is_file());
+        assert!(cache.root().join("pip-cache/pip-marker").is_file());
+        assert!(cache.root().join("npm-cache/npm-marker").is_file());
+
+        // The rendered Tester profile admits writes to every package-manager
+        // cache directory through the whole Attempt cache root.
+        unsafe {
+            std::env::set_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "render-pass");
+        }
+        let rendered = (|| -> Result<TesterSandbox> {
+            let settlement_plan = plan(workspace.path())?;
+            let settlement = prepare_settlement_directories(artifact_dir.path(), &settlement_plan)?;
+            render_sandbox_profile_with_cache(
+                workspace.path(),
+                artifact_dir.path(),
+                false,
+                &resolver(),
+                settlement,
+                Some(&cache),
+            )
+        })();
+        unsafe {
+            std::env::remove_var("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT");
+        }
+        let rendered_sandbox = rendered.unwrap();
+        let profile = rendered_sandbox
+            .profile()
+            .expect("the Tester with an Attempt cache renders a profile")
+            .path
+            .clone();
+        let content = fs::read_to_string(&profile).unwrap();
+        let cache_write = format!(
+            "(allow file-write* (subpath \"{}\"))",
+            cache.root().display()
+        );
+        assert!(
+            content.contains(&cache_write),
+            "the Tester profile must grant the package-manager cache root: {content}"
+        );
+
+        // A real sandboxed process writes into each cache directory on hosts
+        // that can apply nested Seatbelt confinement. Mirror the source-
+        // confinement probe: an authorized host run can require the live proof,
+        // and the canonical suite never silently downgrades without saying so.
+        let require_live =
+            std::env::var_os("FLUENT_TEST_REQUIRE_LIVE_PACKAGE_MANAGER_CACHE_CONFINEMENT")
+                .is_some();
+        let sandbox_usable = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !sandbox_usable {
+            let message = "Nested Seatbelt confinement is unavailable on this host; the package-manager cache write grant is asserted here against the rendered profile. Set FLUENT_TEST_REQUIRE_LIVE_PACKAGE_MANAGER_CACHE_CONFINEMENT=1 in an authorized host run to require the live write.";
+            assert!(
+                !require_live,
+                "live package-manager cache confinement was required but this host cannot apply a nested profile: {message}"
+            );
+            eprintln!("{message}");
+        }
+        for (variable, name) in [
+            ("UV_CACHE_DIR", "uv-cache"),
+            ("PIP_CACHE_DIR", "pip-cache"),
+            ("npm_config_cache", "npm-cache"),
+        ] {
+            let directory = cache.root().join(name);
+            if sandbox_usable {
+                let probe = std::process::Command::new("/usr/bin/sandbox-exec")
+                    .arg("-f")
+                    .arg(&profile)
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg("touch \"$1\"")
+                    .arg("package-manager-cache-write-probe")
+                    .arg(&directory)
+                    .output()
+                    .unwrap();
+                assert!(
+                    probe.status.success(),
+                    "the Tester sandbox must admit a write into {variable} cache {}: stderr: {}",
+                    directory.display(),
+                    String::from_utf8_lossy(&probe.stderr)
+                );
+            }
+        }
     }
 
     #[test]
@@ -2478,6 +2689,89 @@ mod tests {
         )
         .unwrap();
         assert!(is_nested_swiftpm_harness_error(artifact.path()));
+    }
+
+    #[test]
+    fn tester_diagnoses_package_manager_cache_denial() {
+        let workspace = TempDir::new().unwrap();
+        let artifact_dir = TempDir::new().unwrap();
+        let cache = crate::writer_cache::preflight_writer_dependency_cache(
+            workspace.path(),
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        crate::writer_cache::prepare_writer_dependency_cache(&cache, None).unwrap();
+        let launch_env = cache.launch_env();
+        let denied = cache.root().join("uv-cache");
+        let denial = format!(
+            "uv failed to write {}: Operation not permitted",
+            denied.display()
+        );
+        fs::write(artifact_dir.path().join("0-stderr.log"), &denial).unwrap();
+        let result = |exit_code: i32| CommandResult {
+            failure_cause: None,
+            command: "uv run pytest".to_string(),
+            test_harness: "shell-harness".to_string(),
+            exit_code,
+            duration_ms: 1,
+            stdout_log: "0-stdout.log".to_string(),
+            stderr_log: "0-stderr.log".to_string(),
+            process_settlement: None,
+        };
+
+        // A failed command under an applied profile is diagnosed.
+        let failure =
+            package_manager_sandbox_denial(&[result(7)], artifact_dir.path(), &launch_env, true)
+                .expect("a sandboxed cache denial must be diagnosed");
+        assert_eq!(failure.0, "uv run pytest");
+        assert_eq!(failure.1, denied.display().to_string());
+        let details = package_manager_sandbox_details(&failure.0, &failure.1);
+        assert!(
+            details.contains(&denied.display().to_string()),
+            "the harness error must name the denied cache path: {details}"
+        );
+        assert!(
+            details.contains("--no-sandbox"),
+            "the harness error must name the --no-sandbox remedy: {details}"
+        );
+        assert!(
+            !details.contains("one-run recovery"),
+            "the Attempt surface has no one-run --no-sandbox recovery: {details}"
+        );
+
+        // A passing command with the same stderr is not a sandbox failure.
+        assert!(
+            package_manager_sandbox_denial(&[result(0)], artifact_dir.path(), &launch_env, true)
+                .is_none()
+        );
+
+        // A run with no applied profile is not a sandbox failure.
+        assert!(
+            package_manager_sandbox_denial(&[result(7)], artifact_dir.path(), &launch_env, false)
+                .is_none()
+        );
+
+        // Unrelated failures keep the generic command-failure report.
+        let stderr_matches =
+            |stderr: &str| package_manager_cache_denial(stderr, &launch_env).is_some();
+        assert!(!stderr_matches(
+            "uv failed to write cache: Operation not permitted"
+        ));
+        assert!(!stderr_matches(
+            "uv succeeded past $UV_CACHE_DIR without errors"
+        ));
+
+        // A command that resolves the cache directory reports the physical path.
+        let physical = fs::canonicalize(&denied).unwrap();
+        let resolved = format!(
+            "uv failed to write {}: Operation not permitted",
+            physical.display()
+        );
+        assert!(
+            package_manager_cache_denial(&resolved, &launch_env).is_some(),
+            "a denial naming the physical cache path must still be diagnosed"
+        );
     }
 
     #[test]
