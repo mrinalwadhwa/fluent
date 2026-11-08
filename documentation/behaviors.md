@@ -3385,6 +3385,21 @@ to flag invalid history, identity, message encoding, and attribution, including 
 `Co-Authored-By` trailers.
 Test: src/work_task_executor.rs (documentation_review_treats_commit_presentation_as_advice)
 
+### B82
+
+IF `--from-working-tree` is invoked on a source checkout with uncommitted
+changes outside `.fluent` and Fluent-managed skill trees,
+THEN THE SYSTEM SHALL refuse to create the Attempt with a message naming every
+offending path and the clean-tree alternatives.
+Test: tests/binary.rs (review_only_from_working_tree_names_uncommitted_paths)
+### B83
+
+WHEN `--from-working-tree` runs on a checkout whose only changes are
+Fluent-managed skill trees,
+THE SYSTEM SHALL create the review-only Attempt instead of refusing.
+Test: tests/binary.rs (review_only_from_working_tree_accepts_managed_skill_installs)
+
+
 ## Atomic state-file writes
 
 ### B1

@@ -2171,6 +2171,10 @@ fn cmd_review(
             let resolver = ContentResolver::new(Some(project_root));
             fluent::tester::check_structural(project_root, false, &resolver)
                 .context("Tester is not ready; review state was not created")?;
+            if from_working_tree {
+                fluent::work_task_executor::ensure_review_working_tree_ready(project_root)
+                    .context("review codebase --from-working-tree was not started")?;
+            }
             let coder_mapping = work_model::resolve_coder_mapping(
                 &fluent::config::attempt_creation_inputs(project_root)?,
             )?;

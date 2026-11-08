@@ -1191,6 +1191,8 @@ pub enum ReviewCommands {
 
         /// Review the current working tree at `.` (with the source-checkout
         /// restorative guard) instead of the per-branch review-only worktree.
+        /// Requires a clean working tree outside `.fluent` and Fluent-managed
+        /// skill trees.
         #[arg(long)]
         from_working_tree: bool,
     },

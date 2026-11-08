@@ -11333,7 +11333,7 @@ fn ensure_source_product_unchanged(
     }
 }
 
-fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
+fn non_fluent_status_args(workspace_path: &Path) -> Result<Vec<String>> {
     let mut args = vec![
         "--porcelain".to_string(),
         "--untracked-files=all".to_string(),
@@ -11344,6 +11344,11 @@ fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
     for managed in managed_opencode_skill_trees(workspace_path)? {
         args.push(format!(":(exclude,literal){}", managed.display()));
     }
+    Ok(args)
+}
+
+fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
+    let args = non_fluent_status_args(workspace_path)?;
     let output = git_status_output(
         workspace_path,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -11362,6 +11367,33 @@ fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stdout)
         )
     }
+}
+
+/// Refuse a `--from-working-tree` review before it creates Work state when the
+/// source checkout has changes outside Fluent's managed paths.
+///
+/// The working-tree shape reviews the live checkout through a restorative guard,
+/// so it cannot start from a dirty tree. Name every offending path and the two
+/// ways forward instead of failing later inside the review Task.
+pub fn ensure_review_working_tree_ready(project_root: &Path) -> Result<()> {
+    let args = non_fluent_status_args(project_root)?;
+    let output = git_status_output(
+        project_root,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Failed to read source checkout status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if output.stdout.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "review codebase --from-working-tree requires a clean working tree; commit, stash, or remove these paths, or omit --from-working-tree to review the committed tree in a worktree:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    )
 }
 
 /// Return the project-relative `.opencode` skill trees that carry a Fluent

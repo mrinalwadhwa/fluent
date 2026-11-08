@@ -29624,6 +29624,104 @@ fn work_review_requires_completed_write_output() {
 }
 
 #[test]
+fn review_only_from_working_tree_accepts_managed_skill_installs() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    let skill = main_dir.join(".opencode/skills/fluent");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "# Fluent skill\n").unwrap();
+    fs::write(
+        skill.join(".fluent-managed.json"),
+        r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"fluent"}"#,
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created review-only Attempt attempt-review against source checkout",
+        ));
+}
+
+#[test]
+fn review_only_from_working_tree_names_uncommitted_paths() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    fs::write(main_dir.join("uncommitted-notes.md"), "notes\n").unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires a clean working tree"))
+        .stderr(predicate::str::contains("uncommitted-notes.md"))
+        .stderr(predicate::str::contains(
+            "omit --from-working-tree to review the committed tree",
+        ));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["attempts"].as_array().unwrap().len(),
+        0,
+        "a refused working-tree review must not create an Attempt"
+    );
+}
+
+#[test]
 fn work_review_codebase_creates_review_only_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
