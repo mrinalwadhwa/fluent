@@ -73428,6 +73428,43 @@ fn round_cap_approach_revision_resume_preserves_downstream_gates() {
 
 #[test]
 #[serial]
+fn approach_revision_corrective_writer_reaches_a_ready_candidate() {
+    let fixture = setup_uncertain_approach_revision_fixture();
+    revise_uncertain_approach(&fixture).success();
+
+    let prompt_log = fixture
+        ._tmp
+        .path()
+        .join("uncertain-approach-provider-prompts.log");
+    let bin = fixture._tmp.path().join("uncertain-approach-provider");
+    write_sandboxed_mock_claude(&bin, &round_cap_downstream_provider_script(&prompt_log));
+
+    fluent_cmd()
+        .current_dir(&fixture.main_dir)
+        .env("PATH", mock_path(&bin))
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let paused = fixture.store.read_work_item("work-1").unwrap();
+    assert_eq!(
+        paused.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.kind == fluent::work_model::TaskKind::Write
+                    && task.status == fluent::work_model::TaskStatus::Complete
+            })
+            .count(),
+        2,
+        "the corrected candidate must retain the completed corrective Writer"
+    );
+
+    assert_round_cap_downstream_completion(&fixture);
+}
+
+#[test]
+#[serial]
 fn round_cap_approach_revision_completed_resume_uses_effective_reviews() {
     use fluent::work_model::{
         AttemptStatus, EvidenceRecoveryState, LearningStatus, TaskKind, now_iso8601,
@@ -74258,6 +74295,59 @@ exit 0
 "##,
         prompt_log = prompt_log.display(),
     )
+}
+
+fn setup_uncertain_approach_revision_fixture() -> RoundCapApproachRevisionFixture {
+    let plan = "| # | State reached | Behaviors | Verification | Responsibility | Applicability | Req? |\n|---|---|---|---|---|---|---|\n| 1 | Preserve the contract. | B1 | `cargo test` | writer | | Yes |\n| 2 | Review the candidate. | | Review candidate | review | | Yes |\n| 3 | Run the final Tester. | | Run final Tester | tester | | Yes |\n| 4 | Capture Learning. | | Capture Learning | learner | | Yes |\n";
+    let fixture = setup_round_cap_approach_revision_fixture_with_plan(plan.to_string());
+    make_round_cap_downstream_behavior_testable(&fixture);
+    let main_dir = fixture.main_dir.clone();
+    fixture
+        .store
+        .mutate_work_item("work-1", |item| {
+            let attempt = &mut item.attempts[0];
+            let architecture = attempt
+                .tasks
+                .iter()
+                .find(|task| {
+                    task.kind == fluent::work_model::TaskKind::Review && task.role == "architecture"
+                })
+                .unwrap();
+            let path = main_dir
+                .join(&architecture.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::write(
+                path,
+                "Verdict: uncertain\n\nArchitecture requires a revised Approach.\n",
+            )
+            .unwrap();
+            attempt.status = fluent::work_model::AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(fluent::work_model::PauseKind::Uncertain);
+            attempt.review_state = Some(fluent::work_model::AttemptReviewState::Uncertain);
+            Ok(())
+        })
+        .unwrap();
+    fixture
+}
+
+fn revise_uncertain_approach(
+    fixture: &RoundCapApproachRevisionFixture,
+) -> assert_cmd::assert::Assert {
+    let approach_file = fixture.main_dir.join("replacement-approach-uncertain.md");
+    fs::write(&approach_file, &fixture.replacement).unwrap();
+    fluent_cmd()
+        .current_dir(&fixture.main_dir)
+        .args([
+            "attempt",
+            "revise-approach",
+            "work-1",
+            "attempt-1",
+            "--approach-file",
+            approach_file.to_str().unwrap(),
+            "--resolution",
+            &fixture.resolution,
+        ])
+        .assert()
 }
 
 fn attach_round_cap_host_evidence(

@@ -1111,3 +1111,15 @@ sequence through that same reader before Dashboard dispatch resumes. Do not
 replace this with a second competing reader or operator recovery bytes. See
 [the patch provenance](../../vendor/crossterm/FLUENT-PATCH.md) and the
 [handoff regression pattern](testing/patterns/dashboard-partial-input-handoff.md).
+
+## Bind Approach revisions to the newest Writer valid against the current contract
+
+An Approach revision identifies its source Writer by the reviewed candidate
+commit, not by "the latest completed Writer". Several Writers can share one
+candidate: a corrective or no-change round preserves that commit but writes a
+completion matrix against the revised contract. Select the newest completed
+Writer at the commit whose matrix validates against the contract the revision
+was approved against, and fall back to earlier Writers. A later round's matrix
+built against a revised contract must never replace the recorded source
+completion. This tie-break is part of the durable revision-audit identity, so
+reversing it can refuse otherwise-valid retries.

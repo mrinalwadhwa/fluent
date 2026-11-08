@@ -10846,6 +10846,37 @@ host-evidence, candidate, Review, final-Tester, and Learning gates. The Writer
 owns only its Writer obligations; those host and later Attempt gates remain
 separate.
 
+## Approach revision re-anchor
+
+### B1
+
+WHEN Fluent audits a `revise-approach` request,
+THE SYSTEM SHALL bind source completion to the completed Writer whose candidate
+commit matches the uncertain Architecture review.
+Test: src/planning_approach_recovery.rs (revision_binds_the_source_writer_matching_the_uncertain_review)
+
+### B2
+
+WHEN an Attempt with a completed corrective Writer resumes,
+THE SYSTEM SHALL accept the unchanged Approach revision audit instead of
+reporting changed source completion.
+Test: src/planning_approach_recovery.rs (second_revision_after_no_change_corrective_writer_binds_the_current_contract)
+
+### B3
+
+IF the latest Architecture review is not bound to the current candidate,
+THEN THE SYSTEM SHALL refuse `revise-approach` with a reason that names the
+missing review, not a missing completed Writer.
+Test: src/planning_approach_recovery.rs (stale_uncertain_review_refuses_revision_with_a_named_reason)
+
+### B4
+
+WHEN an uncertain Architecture review is revised and its corrective Writer
+completes,
+THE SYSTEM SHALL drive the Attempt through reviews to a ready Merge Candidate
+without a new Work Item.
+Test: tests/binary.rs (approach_revision_corrective_writer_reaches_a_ready_candidate)
+
 ## Writer recovery instructions
 
 ### B1
