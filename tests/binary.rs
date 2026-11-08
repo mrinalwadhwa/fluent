@@ -29713,6 +29713,54 @@ fn work_review_codebase_creates_review_only_attempt() {
 }
 
 #[test]
+fn review_only_attempt_uses_the_project_coder_mapping() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".fluent")).unwrap();
+    fs::write(
+        main_dir.join(".fluent/config.yaml"),
+        "coders:\n  writer:\n    coder: pi\n    model: project-write\n  reviewer:\n    coder: pi\n    model: project-review\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+        ])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let mapping = &value["attempts"][0]["coder_mapping"];
+    assert_eq!(
+        mapping["write"]["coder"], "pi",
+        "review-only creation should store the project writer coder"
+    );
+    assert_eq!(mapping["write"]["model"], "project-write");
+    assert_eq!(
+        mapping["review"]["coder"], "pi",
+        "review-only creation should store the project reviewer coder"
+    );
+    assert_eq!(mapping["review"]["model"], "project-review");
+}
+
+#[test]
 fn work_review_codebase_default_creates_worktree_attempt_with_tester() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -55688,6 +55736,64 @@ fn empty_work_item_list_primes_planning_stages() {
     assert!(
         stderr.contains("brief") && stderr.contains("work-item create"),
         "empty list should print planning primer on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn coder_plan_names_the_resolution_source() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".fluent")).unwrap();
+    fs::write(
+        main_dir.join(".fluent/config.yaml"),
+        "coders:\n  writer:\n    coder: claude\n    model: project-write\n    effort: low\n  reviewer:\n    coder: claude\n    model: project-review\n    effort: medium\n",
+    )
+    .unwrap();
+    let bin_dir = tmp.path().join("bin-coder-source");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"plan source","follow_ups":[]}"#),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Plan source"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "attempt run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let writer_line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("writer"))
+        .unwrap_or_else(|| panic!("missing writer plan line; stderr:\n{stderr}"));
+    assert!(
+        writer_line.contains("(coder: project, model: project, effort: project)"),
+        "writer plan must name the project resolution source; got: {writer_line}"
+    );
+    let reviewer_line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("reviewer"))
+        .unwrap_or_else(|| panic!("missing reviewer plan line; stderr:\n{stderr}"));
+    assert!(
+        reviewer_line.contains("(coder: project, model: project, effort: project)"),
+        "reviewer plan must name the project resolution source; got: {reviewer_line}"
     );
 }
 

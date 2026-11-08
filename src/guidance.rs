@@ -1,5 +1,6 @@
 use std::env;
 
+use crate::config::{CoderMappingSources, CoderRoleSources};
 use crate::work_attempt_loop::WorkAttemptRunOutcome;
 use crate::work_model::{CoderMapping, PauseKind};
 use crate::work_status::WorkStatus;
@@ -35,17 +36,30 @@ pub fn after_init_instruction_changes(paths: &[String]) -> String {
 }
 
 /// Format the resolved coder mapping as a multi-line plan for stderr output.
-pub fn format_coder_plan(mapping: &CoderMapping) -> String {
-    fn role_line(label: &str, coder: &str, model: &str, effort: Option<&str>) -> String {
+pub fn format_coder_plan(mapping: &CoderMapping, sources: &CoderMappingSources) -> String {
+    fn role_line(
+        label: &str,
+        coder: &str,
+        model: &str,
+        effort: Option<&str>,
+        sources: &CoderRoleSources,
+    ) -> String {
         let model_part = if model.is_empty() {
             "(default)".to_string()
         } else {
             model.to_string()
         };
-        match effort {
+        let line = match effort {
             Some(e) => format!("  {label:<20} {coder} / {model_part} / effort={e}"),
             None => format!("  {label:<20} {coder} / {model_part}"),
-        }
+        };
+        let effort_source = effort
+            .map(|_| format!(", effort: {}", sources.effort))
+            .unwrap_or_default();
+        format!(
+            "{line}  (coder: {}, model: {}{effort_source})",
+            sources.coder, sources.model
+        )
     }
 
     let mut lines = vec!["  Coder plan:".to_string()];
@@ -54,12 +68,14 @@ pub fn format_coder_plan(mapping: &CoderMapping) -> String {
         mapping.write.coder.as_str(),
         &mapping.write.model,
         mapping.write.effort.as_deref(),
+        &sources.write,
     ));
     lines.push(role_line(
         "reviewer",
         mapping.review.coder.as_str(),
         &mapping.review.model,
         mapping.review.effort.as_deref(),
+        &sources.review,
     ));
     lines.join("\n")
 }
@@ -717,6 +733,7 @@ mod tests {
     #[test]
     fn format_coder_plan_includes_all_roles_and_models() {
         use crate::coder::CoderKind;
+        use crate::config::ConfigSource;
         use crate::work_model::{CoderMapping, CoderModelPair};
 
         let mapping = CoderMapping {
@@ -731,7 +748,21 @@ mod tests {
                 effort: None,
             },
         };
-        let plan = format_coder_plan(&mapping);
+        let plan = format_coder_plan(
+            &mapping,
+            &CoderMappingSources {
+                write: CoderRoleSources {
+                    coder: ConfigSource::Project,
+                    model: ConfigSource::Project,
+                    effort: ConfigSource::Default,
+                },
+                review: CoderRoleSources {
+                    coder: ConfigSource::User,
+                    model: ConfigSource::Default,
+                    effort: ConfigSource::Default,
+                },
+            },
+        );
         assert!(plan.contains("writer"));
         assert!(plan.contains("claude"));
         assert!(plan.contains("claude-sonnet-4-6"));
@@ -739,6 +770,14 @@ mod tests {
         assert!(plan.contains("codex"));
         assert!(plan.contains("o3"));
         assert!(!plan.contains("effort="));
+        assert!(
+            plan.contains("(coder: project, model: project)"),
+            "writer source should name the layer; got:\n{plan}"
+        );
+        assert!(
+            plan.contains("(coder: user, model: default)"),
+            "reviewer source should name the layer; got:\n{plan}"
+        );
     }
 
     #[test]
@@ -758,7 +797,7 @@ mod tests {
                 effort: None,
             },
         };
-        let plan = format_coder_plan(&mapping);
+        let plan = format_coder_plan(&mapping, &CoderMappingSources::default());
         assert!(
             plan.contains("(default)"),
             "empty model should show (default); got:\n{plan}"
@@ -782,7 +821,7 @@ mod tests {
                 effort: None,
             },
         };
-        let plan = format_coder_plan(&mapping);
+        let plan = format_coder_plan(&mapping, &CoderMappingSources::default());
         assert!(
             plan.contains("effort=high"),
             "writer effort should appear; got:\n{plan}"

@@ -485,12 +485,16 @@ fn review_one(project_root: &Path, entry: &QueueEntry, fix_depth: u64) -> Result
     } else {
         Some(entry.base_commit.clone())
     };
-    item.add_post_merge_review_attempt(
+    let coder_mapping = crate::work_model::resolve_coder_mapping(
+        &crate::config::attempt_creation_inputs(project_root)?,
+    )?;
+    item.add_post_merge_review_attempt_with_coder_mapping(
         attempt_id,
         review::REVIEWERS,
         &entry.target_branch,
         &entry.merged_commit,
         base_commit,
+        coder_mapping,
     )
     .map_err(|e| anyhow::anyhow!("create post-merge review Attempt: {e}"))?;
     store

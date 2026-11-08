@@ -76,6 +76,27 @@ impl fmt::Display for ConfigSource {
     }
 }
 
+impl Default for ConfigSource {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+/// Which configuration layer supplied each coder mapping value for one role.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoderRoleSources {
+    pub coder: ConfigSource,
+    pub model: ConfigSource,
+    pub effort: ConfigSource,
+}
+
+/// Per-role resolution sources reported alongside the coder plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoderMappingSources {
+    pub write: CoderRoleSources,
+    pub review: CoderRoleSources,
+}
+
 /// Follow-up mode applied when a corrective learner Observation is promoted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowUpMode {
@@ -1050,6 +1071,88 @@ fn attempt_creation_inputs_with_environment(
     Ok(from_config(project_root)?.merge(environment))
 }
 
+/// Report which configuration layer supplied each coder mapping value for the
+/// project. A value that no project or user layer supplies is reported as
+/// `default`, including a value supplied by a run-time flag or environment
+/// override. The plan renderer uses this to make a project-versus-default
+/// mismatch visible without exposing configuration values.
+pub fn coder_mapping_sources(
+    project_root: &Path,
+    mapping: &CoderMapping,
+) -> Result<CoderMappingSources> {
+    coder_mapping_sources_from(
+        &project_config_path(project_root),
+        user_config_path().as_deref(),
+        mapping,
+    )
+}
+
+fn coder_mapping_sources_from(
+    project_path: &Path,
+    user_path: Option<&Path>,
+    mapping: &CoderMapping,
+) -> Result<CoderMappingSources> {
+    let layers = load_policy_layers(project_path, user_path)?;
+    Ok(CoderMappingSources {
+        write: coder_role_sources(&layers, "writer", &mapping.write)?,
+        review: coder_role_sources(&layers, "reviewer", &mapping.review)?,
+    })
+}
+
+fn coder_role_sources(
+    layers: &[ConfigLayer],
+    role: &str,
+    pair: &CoderModelPair,
+) -> Result<CoderRoleSources, FollowUpConfigError> {
+    Ok(CoderRoleSources {
+        coder: coder_value_source(layers, role, "coder", Some(pair.coder.as_str()))?,
+        model: coder_value_source(layers, role, "model", Some(pair.model.as_str()))?,
+        effort: coder_value_source(layers, role, "effort", pair.effort.as_deref())?,
+    })
+}
+
+fn coder_value_source(
+    layers: &[ConfigLayer],
+    role: &str,
+    field: &str,
+    resolved_value: Option<&str>,
+) -> Result<ConfigSource, FollowUpConfigError> {
+    let configured = resolve_leaf(
+        layers,
+        &["coders", role, field],
+        None,
+        convert_optional_string,
+    )?;
+    let matches = if field == "coder" {
+        // Configuration may spell a coder the way `CoderKind::resolve` accepts
+        // (`claude-code`), while the resolved mapping stores the canonical name.
+        match (
+            configured
+                .value
+                .as_deref()
+                .and_then(|value| crate::coder::CoderKind::resolve(Some(value)).ok()),
+            resolved_value.and_then(|value| crate::coder::CoderKind::resolve(Some(value)).ok()),
+        ) {
+            (Some(configured), Some(resolved)) => configured == resolved,
+            _ => false,
+        }
+    } else {
+        configured.value.as_deref() == resolved_value
+    };
+    Ok(if matches {
+        configured.source
+    } else {
+        ConfigSource::Default
+    })
+}
+
+fn convert_optional_string(raw: &serde_yaml::Value) -> Result<Option<String>, String> {
+    match raw {
+        serde_yaml::Value::String(value) => Ok(Some(value.clone())),
+        _ => Err("expected a string".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,6 +1287,135 @@ coders:
         let inputs = from_config(dir.path()).unwrap();
         assert!(inputs.write_coder.is_none());
         assert!(inputs.write_model.is_none());
+    }
+
+    #[test]
+    fn coder_mapping_sources_layer_project_user_and_default() {
+        use crate::coder::CoderKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "coders:\n  writer:\n    coder: pi\n    model: project-model\n",
+        );
+        let user = write_yaml(
+            dir.path(),
+            "user.yaml",
+            "coders:\n  writer:\n    coder: codex\n    effort: high\n  reviewer:\n    coder: pi\n",
+        );
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "project-model".to_string(),
+                effort: Some("high".to_string()),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "cli-model".to_string(),
+                effort: None,
+            },
+        };
+
+        let sources = coder_mapping_sources_from(&project, Some(&user), &mapping).unwrap();
+
+        assert_eq!(sources.write.coder, ConfigSource::Project);
+        assert_eq!(sources.write.model, ConfigSource::Project);
+        assert_eq!(sources.write.effort, ConfigSource::User);
+        assert_eq!(sources.review.coder, ConfigSource::User);
+        assert_eq!(sources.review.model, ConfigSource::Default);
+        assert_eq!(sources.review.effort, ConfigSource::Default);
+    }
+
+    #[test]
+    fn coder_mapping_sources_normalize_coder_names() {
+        use crate::coder::CoderKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "coders:\n  writer:\n    coder: claude-code\n",
+        );
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+        };
+
+        let sources = coder_mapping_sources_from(&project, None, &mapping).unwrap();
+
+        assert_eq!(
+            sources.write.coder,
+            ConfigSource::Project,
+            "an accepted alias must be attributed to the layer that supplied it"
+        );
+    }
+
+    #[test]
+    fn coder_mapping_sources_default_when_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("absent.yaml");
+
+        let sources = coder_mapping_sources_from(&project, None, &CoderMapping::default()).unwrap();
+
+        assert_eq!(
+            sources,
+            CoderMappingSources {
+                write: CoderRoleSources {
+                    coder: ConfigSource::Default,
+                    model: ConfigSource::Default,
+                    effort: ConfigSource::Default,
+                },
+                review: CoderRoleSources {
+                    coder: ConfigSource::Default,
+                    model: ConfigSource::Default,
+                    effort: ConfigSource::Default,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn coder_mapping_sources_do_not_claim_a_different_config_value() {
+        use crate::coder::CoderKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_yaml(
+            dir.path(),
+            "project.yaml",
+            "coders:\n  writer:\n    coder: pi\n    model: project-model\n",
+        );
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: "run-override".to_string(),
+                effort: None,
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Claude,
+                model: String::new(),
+                effort: None,
+            },
+        };
+
+        let sources = coder_mapping_sources_from(&project, None, &mapping).unwrap();
+
+        assert_eq!(
+            sources.write.coder,
+            ConfigSource::Default,
+            "a stored Claude mapping must not be attributed to a different project coder setting"
+        );
+        assert_eq!(sources.write.model, ConfigSource::Default);
+        assert_eq!(sources.review.coder, ConfigSource::Default);
+        assert_eq!(sources.review.model, ConfigSource::Default);
     }
 
     #[test]

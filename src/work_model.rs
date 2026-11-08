@@ -1077,6 +1077,29 @@ impl WorkItem {
         source_commit: impl Into<String>,
         from_working_tree: bool,
     ) -> Result<Vec<String>, WorkModelError> {
+        self.add_review_only_attempt_with_coder_mapping(
+            attempt_id,
+            roles,
+            source_ref,
+            source_commit,
+            from_working_tree,
+            CoderMapping::default(),
+        )
+    }
+
+    /// Add a review-only Attempt from the resolved project coder mapping.
+    ///
+    /// The stored mapping is authoritative for every later run and resume, the
+    /// same as an ordinary Attempt.
+    pub fn add_review_only_attempt_with_coder_mapping(
+        &mut self,
+        attempt_id: impl Into<String>,
+        roles: &[&str],
+        source_ref: impl Into<String>,
+        source_commit: impl Into<String>,
+        from_working_tree: bool,
+        coder_mapping: CoderMapping,
+    ) -> Result<Vec<String>, WorkModelError> {
         let attempt_id = attempt_id.into();
         let source_ref = source_ref.into();
         let source_commit = source_commit.into();
@@ -1086,6 +1109,7 @@ impl WorkItem {
                 roles,
                 source_ref,
                 source_commit,
+                coder_mapping,
             )
         } else {
             self.append_review_only_worktree_attempt(
@@ -1095,6 +1119,7 @@ impl WorkItem {
                 source_ref,
                 source_commit,
                 None,
+                coder_mapping,
             )
         }
     }
@@ -1107,6 +1132,26 @@ impl WorkItem {
         source_commit: impl Into<String>,
         base_commit: Option<String>,
     ) -> Result<Vec<String>, WorkModelError> {
+        self.add_post_merge_review_attempt_with_coder_mapping(
+            attempt_id,
+            roles,
+            source_ref,
+            source_commit,
+            base_commit,
+            CoderMapping::default(),
+        )
+    }
+
+    /// Add a post-merge review Attempt from the resolved project coder mapping.
+    pub fn add_post_merge_review_attempt_with_coder_mapping(
+        &mut self,
+        attempt_id: impl Into<String>,
+        roles: &[&str],
+        source_ref: impl Into<String>,
+        source_commit: impl Into<String>,
+        base_commit: Option<String>,
+        coder_mapping: CoderMapping,
+    ) -> Result<Vec<String>, WorkModelError> {
         let attempt_id = attempt_id.into();
         let source_ref = source_ref.into();
         let source_commit = source_commit.into();
@@ -1117,6 +1162,7 @@ impl WorkItem {
             source_ref,
             source_commit,
             base_commit,
+            coder_mapping,
         )
     }
 
@@ -1126,6 +1172,7 @@ impl WorkItem {
         roles: &[&str],
         source_ref: String,
         source_commit: String,
+        coder_mapping: CoderMapping,
     ) -> Result<Vec<String>, WorkModelError> {
         self.ensure_not_abandoned()?;
         validate_id("work item", &self.id)?;
@@ -1183,7 +1230,7 @@ impl WorkItem {
             work_item_id: self.id.clone(),
             kind: AttemptKind::ReviewOnly,
             status: AttemptStatus::Reviewing,
-            coder_mapping: CoderMapping::default(),
+            coder_mapping,
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             pause_kind: None,
@@ -1205,6 +1252,7 @@ impl WorkItem {
         source_ref: String,
         source_commit: String,
         base_commit: Option<String>,
+        coder_mapping: CoderMapping,
     ) -> Result<Vec<String>, WorkModelError> {
         debug_assert!(kind.is_review_only_like(), "kind must be review-only-like");
         self.ensure_not_abandoned()?;
@@ -1311,7 +1359,7 @@ impl WorkItem {
             work_item_id: self.id.clone(),
             kind,
             status: AttemptStatus::Reviewing,
-            coder_mapping: CoderMapping::default(),
+            coder_mapping,
             tasks,
             review_state: Some(AttemptReviewState::NotReviewed),
             pause_kind: None,
@@ -16911,6 +16959,89 @@ random banner prose that must be ignored
             .unwrap();
         assert!(instructions.contains("# Brief"));
         assert!(instructions.contains("Review only skills/ and focus on prompts."));
+    }
+
+    #[test]
+    fn review_only_attempt_with_coder_mapping_stores_each_role() {
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "project-write".to_string(),
+                effort: Some("high".to_string()),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "project-review".to_string(),
+                effort: None,
+            },
+        };
+
+        for from_working_tree in [true, false] {
+            let mut work_item = WorkItem {
+                id: "work-1".to_string(),
+                title: "Review the codebase".to_string(),
+                planning_context: None,
+                instructions: None,
+                abandonment: None,
+                post_merge_review_fix_depth: None,
+                attempts: Vec::new(),
+                merge_candidates: Vec::new(),
+                ..Default::default()
+            };
+
+            work_item
+                .add_review_only_attempt_with_coder_mapping(
+                    "attempt-review",
+                    &["tests"],
+                    "main",
+                    "abc123",
+                    from_working_tree,
+                    mapping.clone(),
+                )
+                .unwrap();
+
+            assert_eq!(work_item.attempts[0].coder_mapping, mapping);
+        }
+    }
+
+    #[test]
+    fn post_merge_review_attempt_with_coder_mapping_stores_each_role() {
+        let mapping = CoderMapping {
+            write: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "project-write".to_string(),
+                effort: Some("high".to_string()),
+            },
+            review: CoderModelPair {
+                coder: CoderKind::Pi,
+                model: "project-review".to_string(),
+                effort: None,
+            },
+        };
+        let mut work_item = WorkItem {
+            id: "work-1".to_string(),
+            title: "Review the merge".to_string(),
+            planning_context: None,
+            instructions: None,
+            abandonment: None,
+            post_merge_review_fix_depth: None,
+            attempts: Vec::new(),
+            merge_candidates: Vec::new(),
+            ..Default::default()
+        };
+
+        work_item
+            .add_post_merge_review_attempt_with_coder_mapping(
+                "attempt-review",
+                &["tests"],
+                "main",
+                "abc123",
+                None,
+                mapping.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(work_item.attempts[0].coder_mapping, mapping);
     }
 
     #[test]

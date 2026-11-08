@@ -3759,7 +3759,17 @@ subprocess without a Coder. Configure with per-role flags like
 At Attempt creation, per-role and global CLI flags take precedence over
 environment, project config, user config, and coder defaults. Fluent stores the
 resolved mapping on the Attempt record so different Attempts of the same Work
-Item can use different Coder configurations.
+Item can use different Coder configurations. Review-only Attempts resolve the
+same project, user, and environment layers at creation, so a project configured
+for another coder review with it instead of the built-in Claude default.
+
+Before a run, the coder plan names the `project`, `user`, or `default` layer
+that supplied each role's coder, model, and effort from configuration. A value
+supplied by a CLI flag or environment override is reported as `default`,
+because the plan attributes configuration layers, not run-time overrides. The
+plan reports only the layer name, never configuration values or credential
+material, so a project-versus-default mismatch is visible without exposing
+secrets.
 
 Running or resuming an existing Attempt or one of its Tasks starts from that
 stored mapping. A flagless `attempt run` or `task run` does not resolve config or

@@ -6385,6 +6385,16 @@ THE SYSTEM SHALL print the resolved coder and model (and effort, when set) for e
 role before any coder starts. It SHALL suppress this under `FLUENT_QUIET`.
 Test: tests/binary.rs (attempt_run_prints_resolved_coder_plan)
 
+### B3a
+
+WHEN Fluent prints the coder plan,
+THE SYSTEM SHALL name the configuration layer — `project`, `user`, or `default` —
+that supplied each coder mapping value for each role.
+Test: tests/binary.rs (coder_plan_names_the_resolution_source)
+Test: src/config.rs (coder_mapping_sources_layer_project_user_and_default,
+coder_mapping_sources_default_when_no_config)
+Test: src/guidance.rs (format_coder_plan_includes_all_roles_and_models)
+
 ### B4
 
 WHERE no model is configured or overridden for a role,
@@ -6405,6 +6415,14 @@ Test: src/work_model.rs (coder_mapping_for_task_kind_returns_correct_pair)
 WHEN Fluent executes a Tester Task within an Attempt,
 THE SYSTEM SHALL run the deterministic Tester without spawning a Coder.
 Test: src/work_task_executor.rs (tester_task_invokes_subcommand_not_coder)
+
+### B1b
+
+WHEN Fluent creates a review-only Attempt,
+THE SYSTEM SHALL store the project's resolved coder mapping instead of the
+built-in default.
+Test: tests/binary.rs (review_only_attempt_uses_the_project_coder_mapping)
+Test: src/work_model.rs (review_only_attempt_with_coder_mapping_stores_each_role)
 
 ### B2
 
