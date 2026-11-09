@@ -133,13 +133,13 @@ pub fn revise(
         WriterCompletionContract::from_planning_context(&revised_context)
             .ok_or_else(|| anyhow::anyhow!("replacement Approach lost the completion contract"))?;
     validate_contract_delta(&old_planning_contract, &new_planning_contract)?;
-    let writer = attempt
-        .tasks
-        .iter()
-        .rev()
-        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .expect("frontier validates the completed Writer");
-    let source_completion = capture_source_completion(project_root, attempt, writer, old_contract)?;
+    let source_completion = source_writer(
+        project_root,
+        attempt,
+        &audited_frontier.candidate_commit,
+        old_contract,
+    )
+    .map(|(_, completion)| completion);
     if round_cap_revision && source_completion.is_none() {
         bail!("round-cap Approach revision requires source completion evidence");
     }
@@ -306,26 +306,13 @@ pub fn revise(
                 reason: "planning context lost its completion contract".to_string(),
             });
         }
-        let fresh_writer = fresh.attempts[index]
-            .tasks
-            .iter()
-            .rev()
-            .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-            .ok_or_else(|| WorkModelError::AttemptResumeIneligible {
-                attempt_id: attempt_id.to_string(),
-                reason: "source Writer disappeared before Approach revision".to_string(),
-            })?;
-        let fresh_source_completion =
-            capture_source_completion(
-                project_root,
-                &fresh.attempts[index],
-                fresh_writer,
-                old_contract,
-            )
-                .map_err(|error| WorkModelError::AttemptResumeIneligible {
-                    attempt_id: attempt_id.to_string(),
-                    reason: format!("source completion changed before Approach revision: {error:#}"),
-                })?;
+        let fresh_source_completion = source_writer(
+            project_root,
+            &fresh.attempts[index],
+            &candidate_commit,
+            old_contract,
+        )
+        .map(|(_, completion)| completion);
         if fresh_source_completion != expected_source_completion {
             return Err(WorkModelError::AttemptResumeIneligible {
                 attempt_id: attempt_id.to_string(),
@@ -417,6 +404,42 @@ struct Frontier<'a> {
     round_cap_extension: Option<RoundCapExtension>,
 }
 
+/// Select the completed Writer whose output is the reviewed candidate and whose
+/// completion matrix validates against the contract the revision was approved
+/// against.
+///
+/// The reviewed candidate, not the latest Writer, is the stable anchor of an
+/// Approach revision: a corrective or no-change Writer may later preserve the
+/// same candidate while writing a matrix against the revised contract. Prefer
+/// the newest Writer whose matrix still validates against the historical
+/// contract so a later round cannot replace the recorded source completion;
+/// fall back to earlier Writers.
+fn source_writer<'a>(
+    project_root: &Path,
+    attempt: &'a Attempt,
+    candidate_commit: &str,
+    contract: &WriterCompletionContract,
+) -> Option<(&'a Task, crate::work_model::PlanningCompletionSource)> {
+    attempt
+        .tasks
+        .iter()
+        .rev()
+        .filter(|task| {
+            task.kind == TaskKind::Write
+                && task.status == TaskStatus::Complete
+                && task
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| output.commit == candidate_commit)
+        })
+        .find_map(|task| {
+            capture_source_completion(project_root, attempt, task, contract)
+                .ok()
+                .flatten()
+                .map(|completion| (task, completion))
+        })
+}
+
 fn frontier<'a>(project_root: &Path, attempt: &'a Attempt) -> Result<Frontier<'a>> {
     if attempt.status == AttemptStatus::NeedsUser
         && attempt.pause_kind == Some(PauseKind::RoundCap)
@@ -481,24 +504,25 @@ fn frontier<'a>(project_root: &Path, attempt: &'a Attempt) -> Result<Frontier<'a
                 && task.status == TaskStatus::Complete
         })
         .ok_or_else(|| anyhow::anyhow!("Attempt has no settled Architecture review"))?;
-    let writer = attempt
+    let current_candidate = attempt
         .tasks
         .iter()
         .rev()
         .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .ok_or_else(|| anyhow::anyhow!("Attempt has no completed Writer candidate"))?;
-    let candidate_commit = writer
-        .output
-        .as_ref()
+        .and_then(|task| task.output.as_ref())
         .map(|output| output.commit.clone())
-        .ok_or_else(|| anyhow::anyhow!("latest Writer has no candidate commit"))?;
+        .ok_or_else(|| anyhow::anyhow!("Attempt has no completed Writer candidate"))?;
     let context = source_review
         .review_context
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Architecture review has no candidate context"))?;
-    if context.candidate_commit != candidate_commit {
-        bail!("Architecture review is not bound to the current candidate");
+    if context.candidate_commit != current_candidate {
+        bail!(
+            "the latest Architecture review {:?} is not bound to the current candidate {current_candidate}; run reviews on the corrected candidate before another Approach revision",
+            source_review.id
+        );
     }
+    let candidate_commit = context.candidate_commit.clone();
     let source_artifact = review_artifact(source_review)?;
     if !fs::read_to_string(project_root.join(source_artifact.path))
         .is_ok_and(|text| text.contains("Verdict: uncertain"))
@@ -824,14 +848,14 @@ fn expected_round_cap_revision_audit(
         .writer_completion_contract
         .as_ref()
         .context("Attempt has no authoritative completion contract")?;
-    let writer = attempt
-        .tasks
-        .iter()
-        .rev()
-        .find(|task| task.kind == TaskKind::Write && task.status == TaskStatus::Complete)
-        .context("Attempt has no completed Writer candidate")?;
-    let source_completion = capture_source_completion(project_root, attempt, writer, old_contract)?
-        .context("round-cap Approach revision requires source completion evidence")?;
+    let source_completion = source_writer(
+        project_root,
+        attempt,
+        &frontier.candidate_commit,
+        old_contract,
+    )
+    .map(|(_, completion)| completion)
+    .context("round-cap Approach revision requires source completion evidence")?;
     let prior_approach = context
         .approach
         .as_deref()
@@ -970,6 +994,10 @@ mod tests {
     // tied to this module's regression fixture.
     const BEHAVIOR_TEST_SELECTORS: &[&str] = &[
         "tests::revises_approach_and_records_candidate_bound_audit",
+        "tests::revision_binds_the_source_writer_matching_the_uncertain_review",
+        "tests::corrective_writer_commit_preserves_revision_resume",
+        "tests::stale_uncertain_review_refuses_revision_with_a_named_reason",
+        "tests::second_revision_after_no_change_corrective_writer_binds_the_current_contract",
         "tests::recovers_legacy_generic_handoff_with_codex_parser_diagnostics",
         "tests::schedules_documentation_correction_and_targeted_reviews",
         "tests::repeated_revision_is_idempotent",
@@ -978,6 +1006,7 @@ mod tests {
 
     const APPROACH: &str = "# Approach\n\n## Key decisions\n\n### Keep the boundary\n\nChoice: Keep it narrow.\n\n## Structure\n\nRecover under a lock.\n";
     const REPLACEMENT: &str = "# Approach\n\n## Key decisions\n\n### Recover the boundary\n\nChoice: Keep recovery narrow.\n\n## Structure\n\nRecover under a lock.\n";
+    const SECOND_REPLACEMENT: &str = "# Approach\n\n## Key decisions\n\n### Recover the boundary twice\n\nChoice: Keep recovery narrow and ordered.\n\n## Structure\n\nRecover under a lock.\n";
 
     fn fixture() -> (tempfile::TempDir, WorkModelStore) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1030,6 +1059,24 @@ mod tests {
         }
         store.create_work_item(&item).unwrap();
         (tmp, store)
+    }
+
+    fn write_source_matrix(
+        root: &Path,
+        writer: &Task,
+        contract: &WriterCompletionContract,
+    ) -> std::path::PathBuf {
+        let path = root
+            .join(&writer.artifact_area.as_ref().unwrap().path)
+            .join("writer-completion.json");
+        let findings = crate::recovery_contracts::writer_completion_findings(root, writer).unwrap();
+        let matrix = crate::work_model::WriterCompletionMatrix::skeleton(
+            contract, &writer.id, &findings, None,
+        )
+        .unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec_pretty(&matrix).unwrap()).unwrap();
+        path
     }
 
     fn assert_rejected_without_mutation(tmp: &tempfile::TempDir, store: &WorkModelStore) {
@@ -1144,7 +1191,7 @@ mod tests {
 
     #[test]
     fn behavior_selector_manifest_covers_recovery_regressions() {
-        assert_eq!(BEHAVIOR_TEST_SELECTORS.len(), 5);
+        assert_eq!(BEHAVIOR_TEST_SELECTORS.len(), 9);
     }
 
     #[test]
@@ -1371,6 +1418,315 @@ mod tests {
         assert_eq!(
             stored.attempts[0].recovery_operations[0].operation_kind,
             "planning-approach-revision"
+        );
+    }
+
+    #[test]
+    fn revision_binds_the_source_writer_matching_the_uncertain_review() {
+        use crate::work_model::AttemptReviewState;
+
+        let (tmp, store) = fixture();
+        let root = tmp.path();
+        let source = store.read_work_item("work-1").unwrap().attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Write)
+            .unwrap()
+            .clone();
+        let contract = store.read_work_item("work-1").unwrap().attempts[0]
+            .writer_completion_contract
+            .clone()
+            .unwrap();
+        let matrix_path = write_source_matrix(root, &source, &contract);
+        let matrix_bytes = fs::read(&matrix_path).unwrap();
+
+        // A later no-change Writer preserves the reviewed candidate but has no
+        // completion matrix of its own. The revision must still bind source
+        // completion to the Writer the settled review examined.
+        store
+            .mutate_work_item("work-1", |item| {
+                let output = item.attempts[0].tasks[0].output.clone().unwrap();
+                item.add_next_write_round("attempt-1", Vec::new())?;
+                let writer = item.attempts[0].tasks.last_mut().unwrap();
+                writer.status = TaskStatus::Complete;
+                writer.output = Some(TaskOutput {
+                    commit: output.commit.clone(),
+                    ..output
+                });
+                item.attempts[0].status = AttemptStatus::NeedsUser;
+                item.attempts[0].pause_kind = Some(PauseKind::Uncertain);
+                item.attempts[0].review_state = Some(AttemptReviewState::Uncertain);
+                Ok(())
+            })
+            .unwrap();
+
+        let revision = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            REPLACEMENT.as_bytes(),
+            "Approve recovery.",
+        )
+        .unwrap();
+        let audit: RevisionAudit =
+            serde_json::from_slice(&fs::read(root.join(&revision.audit_artifact)).unwrap())
+                .unwrap();
+        let source_completion = audit
+            .source_completion
+            .expect("the reviewed candidate has source completion evidence");
+        assert_eq!(source_completion.artifact.producer_id, source.id);
+        assert_eq!(source_completion.sha256, digest(&matrix_bytes));
+    }
+
+    #[test]
+    fn corrective_writer_commit_preserves_revision_resume() {
+        use crate::work_model::AttemptReviewState;
+
+        let (tmp, store) = fixture();
+        let root = tmp.path();
+        let source = store.read_work_item("work-1").unwrap().attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Write)
+            .unwrap()
+            .clone();
+        let contract = store.read_work_item("work-1").unwrap().attempts[0]
+            .writer_completion_contract
+            .clone()
+            .unwrap();
+        write_source_matrix(root, &source, &contract);
+
+        let first = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            REPLACEMENT.as_bytes(),
+            "Approve recovery.",
+        )
+        .unwrap();
+
+        // The corrective Writer commits a new candidate before the next resume.
+        store
+            .mutate_work_item("work-1", |item| {
+                let attempt = &mut item.attempts[0];
+                let mut output = attempt.tasks[0].output.clone().unwrap();
+                output.commit = "corrected-candidate".to_string();
+                let writer = attempt
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.role == CORRECTIVE_WRITER_ROLE)
+                    .unwrap();
+                writer.status = TaskStatus::Complete;
+                writer.output = Some(output);
+                attempt.status = AttemptStatus::Executing;
+                Ok(())
+            })
+            .unwrap();
+
+        // A new uncertain Architecture review settles on the corrected candidate.
+        store
+            .mutate_work_item("work-1", |item| {
+                let review_ids =
+                    item.add_next_review_tasks("attempt-1", &["architecture", "documentation"])?;
+                for task in item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .filter(|task| review_ids.contains(&task.id))
+                {
+                    task.status = TaskStatus::Complete;
+                    let path = root
+                        .join(&task.artifact_area.as_ref().unwrap().path)
+                        .join("review.md");
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    let body = if task.role == "architecture" {
+                        "Verdict: uncertain\n"
+                    } else {
+                        "Verdict: pass\n"
+                    };
+                    fs::write(path, body).unwrap();
+                }
+                item.attempts[0].status = AttemptStatus::NeedsUser;
+                item.attempts[0].pause_kind = Some(PauseKind::Uncertain);
+                item.attempts[0].review_state = Some(AttemptReviewState::Uncertain);
+                Ok(())
+            })
+            .unwrap();
+
+        let resumed = store.read_work_item("work-1").unwrap();
+        crate::recovery_contracts::validate_planning_resume(root, &resumed, &resumed.attempts[0])
+            .unwrap();
+
+        let again = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            REPLACEMENT.as_bytes(),
+            "Approve recovery.",
+        )
+        .unwrap();
+        assert!(again.already_applied);
+        assert_eq!(again.writer_task_id, first.writer_task_id);
+    }
+
+    #[test]
+    fn second_revision_after_no_change_corrective_writer_binds_the_current_contract() {
+        use crate::work_model::AttemptReviewState;
+
+        let (tmp, store) = fixture();
+        let root = tmp.path();
+        let source = store.read_work_item("work-1").unwrap().attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Write)
+            .unwrap()
+            .clone();
+        let old_contract = store.read_work_item("work-1").unwrap().attempts[0]
+            .writer_completion_contract
+            .clone()
+            .unwrap();
+        write_source_matrix(root, &source, &old_contract);
+
+        // The first revision binds the source Writer and moves the Attempt to
+        // the revised contract.
+        let first = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            REPLACEMENT.as_bytes(),
+            "Approve recovery.",
+        )
+        .unwrap();
+
+        // A no-change corrective Writer preserves the reviewed candidate and
+        // writes the only matrix built against the revised contract.
+        let revised_contract = store.read_work_item("work-1").unwrap().attempts[0]
+            .writer_completion_contract
+            .clone()
+            .unwrap();
+        let corrective = store.read_work_item("work-1").unwrap().attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.id == first.writer_task_id)
+            .unwrap()
+            .clone();
+        write_source_matrix(root, &corrective, &revised_contract);
+        store
+            .mutate_work_item("work-1", |item| {
+                let output = item.attempts[0].tasks[0].output.clone().unwrap();
+                let writer = item.attempts[0]
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == first.writer_task_id)
+                    .unwrap();
+                writer.status = TaskStatus::Complete;
+                writer.output = Some(TaskOutput {
+                    no_change: None,
+                    ..output
+                });
+                item.attempts[0].status = AttemptStatus::NeedsUser;
+                item.attempts[0].pause_kind = Some(PauseKind::Uncertain);
+                item.attempts[0].review_state = Some(AttemptReviewState::Uncertain);
+                Ok(())
+            })
+            .unwrap();
+
+        // A second, different revision must bind the newest Writer whose matrix
+        // validates against the current contract, not the original Writer.
+        let second = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            SECOND_REPLACEMENT.as_bytes(),
+            "Approve the second revision.",
+        )
+        .unwrap();
+        let audit: RevisionAudit =
+            serde_json::from_slice(&fs::read(root.join(&second.audit_artifact)).unwrap()).unwrap();
+        let source_completion = audit
+            .source_completion
+            .expect("the second revision must bind a source completion");
+        assert_eq!(
+            source_completion.artifact.producer_id, first.writer_task_id,
+            "the newest Writer whose matrix validates against the current contract must be the source"
+        );
+
+        // Repeating the same revision reuses the unchanged audit instead of
+        // recomputing it against a later Writer.
+        let repeated = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            SECOND_REPLACEMENT.as_bytes(),
+            "Approve the second revision.",
+        )
+        .unwrap();
+        assert!(repeated.already_applied);
+        assert_eq!(repeated.audit_artifact, second.audit_artifact);
+        assert_eq!(repeated.writer_task_id, second.writer_task_id);
+    }
+
+    #[test]
+    fn stale_uncertain_review_refuses_revision_with_a_named_reason() {
+        use crate::work_model::AttemptReviewState;
+
+        let (tmp, store) = fixture();
+        let root = tmp.path();
+        let source_review_id = store.read_work_item("work-1").unwrap().attempts[0]
+            .tasks
+            .iter()
+            .find(|task| task.kind == TaskKind::Review && task.role == "architecture")
+            .unwrap()
+            .id
+            .clone();
+
+        // The corrective Writer advances the Attempt's candidate without a
+        // settled Architecture review of that candidate.
+        store
+            .mutate_work_item("work-1", |item| {
+                let output = item.attempts[0].tasks[0].output.clone().unwrap();
+                item.add_next_write_round("attempt-1", Vec::new())?;
+                let writer = item.attempts[0].tasks.last_mut().unwrap();
+                writer.status = TaskStatus::Complete;
+                writer.output = Some(TaskOutput {
+                    commit: "corrected-candidate".to_string(),
+                    ..output
+                });
+                item.attempts[0].status = AttemptStatus::NeedsUser;
+                item.attempts[0].pause_kind = Some(PauseKind::Uncertain);
+                item.attempts[0].review_state = Some(AttemptReviewState::Uncertain);
+                Ok(())
+            })
+            .unwrap();
+
+        let before = serde_json::to_vec(&store.read_work_item("work-1").unwrap()).unwrap();
+        let error = revise(
+            root,
+            &store,
+            "work-1",
+            "attempt-1",
+            REPLACEMENT.as_bytes(),
+            "Approve recovery.",
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(&source_review_id), "{message}");
+        assert!(
+            message.contains("not bound to the current candidate"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("no completed Writer candidate"),
+            "{message}"
+        );
+        assert_eq!(
+            serde_json::to_vec(&store.read_work_item("work-1").unwrap()).unwrap(),
+            before
         );
     }
 

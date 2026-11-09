@@ -5082,6 +5082,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn landing_tester_reuses_the_attempt_package_manager_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let store = WorkModelStore::new(&project_root);
+        let candidate_workspace = dir.path().join("candidate");
+        fs::create_dir_all(candidate_workspace.join(".fluent")).unwrap();
+        fs::write(
+            candidate_workspace.join(".fluent/tester.yaml"),
+            "commands:\n  - command: 'test -d \"$UV_CACHE_DIR\" && touch \"$UV_CACHE_DIR/landing-uv-marker\" && touch \"$PIP_CACHE_DIR/landing-pip-marker\" && touch \"$npm_config_cache/landing-npm-marker\"'\n    test_harness: shell-harness\n",
+        )
+        .unwrap();
+        let extractor = candidate_workspace.join(".fluent/extract-tester-results");
+        fs::write(&extractor, "#!/bin/sh\necho '[]'\n").unwrap();
+        let mut permissions = fs::metadata(&extractor).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&extractor, permissions).unwrap();
+        crate::git::run(
+            &candidate_workspace,
+            &["init", "-q"],
+            "initialize landing Tester package-manager cache fixture",
+        )
+        .unwrap();
+        for args in [
+            &["config", "user.email", "test@test"] as &[&str],
+            &["config", "user.name", "test"],
+            &["add", "."],
+            &["commit", "-q", "-m", "seed landing fixture"],
+        ] {
+            crate::git::run(&candidate_workspace, args, "prepare landing fixture").unwrap();
+        }
+        let candidate_commit = crate::git::run_stdout(
+            &candidate_workspace,
+            &["rev-parse", "HEAD"],
+            "read fixture HEAD",
+        )
+        .unwrap();
+        let candidate = MergeCandidate {
+            candidate_commit: candidate_commit.clone(),
+            ..merge_candidate_fixture(&candidate_workspace)
+        };
+
+        let config = WorkMergeConfig {
+            project_root: &project_root,
+            store: &store,
+            work_item_id: "work-1",
+            merge_candidate_id: "attempt-1-merge-candidate",
+            resolver: &ContentResolver::new(None),
+            extra_args: &[],
+            coder_kind: CoderKind::Claude,
+            coder_override: None,
+            model: None,
+            effort: None,
+            use_attempt_mapping: false,
+            no_sandbox: true,
+            run_post_merge_review: false,
+        };
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let outcome = run_merge_tester(
+            &config,
+            &candidate,
+            &candidate_workspace,
+            artifact_dir.path(),
+            &candidate_commit,
+        )
+        .unwrap();
+        assert_eq!(outcome, crate::tester::TesterOutcome::Passed);
+
+        let cache = crate::writer_cache::preflight_writer_dependency_cache(
+            &project_root,
+            "work-1",
+            "attempt-1",
+        )
+        .unwrap();
+        assert!(cache.root().join("uv-cache/landing-uv-marker").is_file());
+        assert!(cache.root().join("pip-cache/landing-pip-marker").is_file());
+        assert!(cache.root().join("npm-cache/landing-npm-marker").is_file());
+    }
+
     /// Build a Work Item whose Attempt carries a completed Write Task and one valid
     /// Merge Candidate in `Executing` merge state, rooted at `source_workspace`. The
     /// model rejects a candidate without a completed Write Task and matching

@@ -968,6 +968,34 @@ fn run_write_task(config: WorkTaskRunConfig<'_>) -> Result<WorkTaskRunResult> {
     run_write_task_with_coder(config, None)
 }
 
+/// Recheck the source checkout after a Writer launch. A clean HEAD advance is
+/// another Work Item's landing and keeps this Task valid; any Writer-produced
+/// change still fails the Task with the existing inspection evidence.
+fn ensure_source_product_unchanged_or_pause(
+    config: &WorkTaskRunConfig<'_>,
+    before: &SourceProductSnapshot,
+) -> Result<()> {
+    match ensure_source_product_unchanged(config.project_root, before) {
+        Ok(Some(landing)) => {
+            eprintln!("{}", landing.report());
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            mark_task_failed_attempt_needs_user(
+                config.store,
+                config.project_root,
+                config.work_item_id,
+                config.attempt_id,
+                config.task_id,
+                &TaskFailure::WriterCompletion(error.to_string()),
+                &crate::notify::notify,
+            )?;
+            Err(error)
+        }
+    }
+}
+
 #[cfg(feature = "test-support")]
 pub fn run_write_task_with_coder_for_test(
     config: WorkTaskRunConfig<'_>,
@@ -1366,18 +1394,7 @@ fn run_write_task_with_coder(
         reservation.coder,
         transcript.clone(),
     );
-    if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
-        mark_task_failed_attempt_needs_user(
-            config.store,
-            config.project_root,
-            config.work_item_id,
-            config.attempt_id,
-            config.task_id,
-            &TaskFailure::WriterCompletion(error.to_string()),
-            &crate::notify::notify,
-        )?;
-        return Err(error);
-    }
+    ensure_source_product_unchanged_or_pause(&config, &source_before)?;
     let mut retries = 0;
     while !plan.task.input_artifacts.iter().any(|a| {
         matches!(
@@ -1424,18 +1441,7 @@ fn run_write_task_with_coder(
             reservation.coder,
             transcript.clone(),
         );
-        if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
-            mark_task_failed_attempt_needs_user(
-                config.store,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::WriterCompletion(error.to_string()),
-                &crate::notify::notify,
-            )?;
-            return Err(error);
-        }
+        ensure_source_product_unchanged_or_pause(&config, &source_before)?;
     }
 
     if let Err(error) = run_result {
@@ -1499,18 +1505,7 @@ fn run_write_task_with_coder(
             reservation.coder,
             transcript.clone(),
         );
-        if let Err(error) = ensure_source_product_unchanged(config.project_root, &source_before) {
-            mark_task_failed_attempt_needs_user(
-                config.store,
-                config.project_root,
-                config.work_item_id,
-                config.attempt_id,
-                config.task_id,
-                &TaskFailure::WriterCompletion(error.to_string()),
-                &crate::notify::notify,
-            )?;
-            return Err(error);
-        }
+        ensure_source_product_unchanged_or_pause(&config, &source_before)?;
         if let Err(error) = run_result {
             mark_task_failed_attempt_needs_user(
                 config.store,
@@ -11165,12 +11160,59 @@ pub(crate) fn writer_handoff_result(
 #[derive(Debug, PartialEq, Eq)]
 struct SourceProductSnapshot {
     head: String,
+    subject: String,
     status: Vec<u8>,
     content_hashes: BTreeMap<PathBuf, String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SourceProductChange {
+    Unchanged,
+    ConcurrentLanding,
+    WriterChange,
+}
+
+/// Classify a source product difference without trusting the Writer to have
+/// produced it. The Writer profile denies source and `.git` writes, so a clean
+/// tree that only advanced HEAD can only be another Work Item's landing.
+fn classify_source_product_change(
+    before: &SourceProductSnapshot,
+    after: &SourceProductSnapshot,
+) -> SourceProductChange {
+    if before == after {
+        return SourceProductChange::Unchanged;
+    }
+    if before.head != after.head && before.status.is_empty() && after.status.is_empty() {
+        return SourceProductChange::ConcurrentLanding;
+    }
+    SourceProductChange::WriterChange
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SourceProductLanding {
+    source: PathBuf,
+    commit: String,
+    subject: String,
+}
+
+impl SourceProductLanding {
+    fn report(&self) -> String {
+        format!(
+            "Concurrent landing advanced source checkout {} to {} ({}); keeping this Writer Task valid",
+            self.source.display(),
+            self.commit,
+            self.subject,
+        )
+    }
+}
+
 fn source_product_snapshot(source: &Path) -> Result<SourceProductSnapshot> {
     let head = head_commit(source)?;
+    let subject = git::run_stdout(
+        source,
+        &["log", "-1", "--format=%s", &head],
+        "read source checkout HEAD subject",
+    )?;
     let output = git_status_output(
         source,
         &[
@@ -11253,42 +11295,63 @@ fn source_product_snapshot(source: &Path) -> Result<SourceProductSnapshot> {
     }
     Ok(SourceProductSnapshot {
         head,
+        subject,
         status: output.stdout,
         content_hashes,
     })
 }
 
-fn ensure_source_product_unchanged(source: &Path, before: &SourceProductSnapshot) -> Result<()> {
+fn ensure_source_product_unchanged(
+    source: &Path,
+    before: &SourceProductSnapshot,
+) -> Result<Option<SourceProductLanding>> {
     let after = source_product_snapshot(source)?;
-    let changed_paths = before
-        .content_hashes
-        .keys()
-        .chain(after.content_hashes.keys())
-        .filter(|path| before.content_hashes.get(*path) != after.content_hashes.get(*path))
-        .collect::<BTreeSet<_>>();
-    anyhow::ensure!(
-        &after == before,
-        "Writer changed source checkout {}; preserve it for inspection and stop this Task (before HEAD {}, after HEAD {}; before status {:?}, after status {:?}; changed product paths {:?})",
-        source.display(),
-        before.head,
-        after.head,
-        String::from_utf8_lossy(&before.status),
-        String::from_utf8_lossy(&after.status),
-        changed_paths,
-    );
-    Ok(())
+    match classify_source_product_change(before, &after) {
+        SourceProductChange::Unchanged => Ok(None),
+        SourceProductChange::ConcurrentLanding => Ok(Some(SourceProductLanding {
+            source: source.to_path_buf(),
+            commit: after.head,
+            subject: after.subject,
+        })),
+        SourceProductChange::WriterChange => {
+            let changed_paths = before
+                .content_hashes
+                .keys()
+                .chain(after.content_hashes.keys())
+                .filter(|path| before.content_hashes.get(*path) != after.content_hashes.get(*path))
+                .collect::<BTreeSet<_>>();
+            bail!(
+                "Writer changed source checkout {}; preserve it for inspection and stop this Task (before HEAD {}, after HEAD {}; before status {:?}, after status {:?}; changed product paths {:?})",
+                source.display(),
+                before.head,
+                after.head,
+                String::from_utf8_lossy(&before.status),
+                String::from_utf8_lossy(&after.status),
+                changed_paths,
+            )
+        }
+    }
+}
+
+fn non_fluent_status_args(workspace_path: &Path) -> Result<Vec<String>> {
+    let mut args = vec![
+        "--porcelain".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        ":(exclude).fluent".to_string(),
+    ];
+    for managed in managed_opencode_skill_trees(workspace_path)? {
+        args.push(format!(":(exclude,literal){}", managed.display()));
+    }
+    Ok(args)
 }
 
 fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
+    let args = non_fluent_status_args(workspace_path)?;
     let output = git_status_output(
         workspace_path,
-        &[
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).fluent",
-        ],
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
     )?;
     if !output.status.success() {
         bail!(
@@ -11304,6 +11367,91 @@ fn ensure_no_non_fluent_worktree_changes(workspace_path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stdout)
         )
     }
+}
+
+/// Refuse a `--from-working-tree` review before it creates Work state when the
+/// source checkout has changes outside Fluent's managed paths.
+///
+/// The working-tree shape reviews the live checkout through a restorative guard,
+/// so it cannot start from a dirty tree. Name every offending path and the two
+/// ways forward instead of failing later inside the review Task.
+pub fn ensure_review_working_tree_ready(project_root: &Path) -> Result<()> {
+    let args = non_fluent_status_args(project_root)?;
+    let output = git_status_output(
+        project_root,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Failed to read source checkout status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if output.stdout.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "review codebase --from-working-tree requires a clean working tree; commit, stash, or remove these paths, or omit --from-working-tree to review the committed tree in a worktree:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    )
+}
+
+/// Return the project-relative `.opencode` skill trees that carry a Fluent
+/// ownership sidecar. A missing or malformed sidecar leaves its directory
+/// user-owned, and symlinks are never followed.
+pub(crate) fn managed_opencode_skill_trees(source_root: &Path) -> Result<Vec<PathBuf>> {
+    let opencode = source_root.join(".opencode");
+    let metadata = match fs::symlink_metadata(&opencode) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to inspect {}", opencode.display()));
+        }
+    };
+    if !metadata.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut managed = Vec::new();
+    collect_managed_opencode_skill_trees(&opencode, source_root, &mut managed)?;
+    managed.sort();
+    Ok(managed)
+}
+
+fn collect_managed_opencode_skill_trees(
+    dir: &Path,
+    source_root: &Path,
+    managed: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
+    let mut managed_here = false;
+    let mut child_dirs = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            child_dirs.push(entry.path());
+        } else if file_type.is_file()
+            && entry.file_name() == crate::skill_install::SIDECAR_NAME
+            && fs::read(entry.path())
+                .is_ok_and(|bytes| crate::skill_install::sidecar_claims_ownership(&bytes))
+        {
+            managed_here = true;
+        }
+    }
+    if managed_here {
+        let relative = dir
+            .strip_prefix(source_root)
+            .expect("managed OpenCode directory remains below the source root");
+        managed.push(relative.to_path_buf());
+        return Ok(());
+    }
+    for child in child_dirs {
+        collect_managed_opencode_skill_trees(&child, source_root, managed)?;
+    }
+    Ok(())
 }
 
 fn ensure_head_matches_review_context(workspace_path: &Path, expected_head: &str) -> Result<()> {
@@ -18177,6 +18325,117 @@ mod tests {
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::ProviderUnavailable)
         );
+    }
+
+    fn opencode_guard_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        crate::git::run(root.path(), &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+            "configure fixture",
+        )
+        .unwrap();
+        crate::git::run(
+            root.path(),
+            &["config", "user.name", "Test"],
+            "configure fixture",
+        )
+        .unwrap();
+        fs::write(root.path().join("tracked.txt"), "baseline\n").unwrap();
+        crate::git::run(root.path(), &["add", "tracked.txt"], "stage fixture").unwrap();
+        crate::git::run(
+            root.path(),
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+        root
+    }
+
+    fn write_managed_opencode_skill(root: &Path, skill: &str, sidecar: &str) -> PathBuf {
+        let skill_dir = root.join(".opencode/skills").join(skill);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "managed skill\n").unwrap();
+        fs::write(skill_dir.join(".fluent-managed.json"), sidecar).unwrap();
+        skill_dir
+    }
+
+    #[test]
+    fn review_only_ignores_managed_opencode_skill_trees() {
+        let root = opencode_guard_fixture();
+        let skill_dir = write_managed_opencode_skill(
+            root.path(),
+            "fluent",
+            r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"fluent"}"#,
+        );
+
+        let managed = managed_opencode_skill_trees(root.path()).unwrap();
+        assert_eq!(
+            managed,
+            vec![skill_dir.strip_prefix(root.path()).unwrap().to_path_buf()],
+            "the enumerator reports the sidecar-bearing skill tree"
+        );
+        ensure_no_non_fluent_worktree_changes(root.path())
+            .expect("a managed OpenCode skill tree is not a source change");
+    }
+
+    #[test]
+    fn review_only_reports_unmanaged_opencode_changes() {
+        let root = opencode_guard_fixture();
+        fs::create_dir_all(root.path().join(".opencode/skills/local")).unwrap();
+        fs::write(
+            root.path().join(".opencode/skills/local/SKILL.md"),
+            "user skill\n",
+        )
+        .unwrap();
+
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("an unmanaged OpenCode skill remains a source change");
+        assert!(
+            format!("{error:#}").contains(".opencode/skills/local/SKILL.md"),
+            "the guard names the unmanaged path: {error:#}"
+        );
+    }
+
+    #[test]
+    fn managed_opencode_skill_trees_treat_invalid_sidecars_as_unmanaged() {
+        let root = opencode_guard_fixture();
+        write_managed_opencode_skill(root.path(), "broken", r#"{"schema_version":1}"#);
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("a malformed sidecar fails closed as unmanaged");
+        assert!(format!("{error:#}").contains(".opencode/skills/broken"));
+    }
+
+    #[test]
+    fn managed_opencode_skill_trees_do_not_follow_symlinks() {
+        let root = opencode_guard_fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill = write_managed_opencode_skill(
+            outside.path(),
+            "linked",
+            r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"linked"}"#,
+        );
+        fs::create_dir_all(root.path().join(".opencode/skills")).unwrap();
+        std::os::unix::fs::symlink(&outside_skill, root.path().join(".opencode/skills/linked"))
+            .unwrap();
+
+        assert!(
+            managed_opencode_skill_trees(root.path())
+                .unwrap()
+                .is_empty(),
+            "a symlinked skill tree outside the project is not a managed path"
+        );
+    }
+
+    #[test]
+    fn review_only_still_reports_source_changes_outside_opencode() {
+        let root = opencode_guard_fixture();
+        fs::write(root.path().join("tracked.txt"), "changed\n").unwrap();
+
+        let error = ensure_no_non_fluent_worktree_changes(root.path())
+            .expect_err("a source change outside .opencode still fails the guard");
+        assert!(format!("{error:#}").contains("tracked.txt"));
     }
 
     #[test]
@@ -25733,12 +25992,102 @@ while time.monotonic() < deadline:
         assert!(ensure_source_product_unchanged(&source, &untracked_before).is_err());
     }
 
+    fn init_source_product_repo(root: &Path) -> PathBuf {
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        crate::git::run(&source, &["init", "-q", "-b", "main"], "init source").unwrap();
+        crate::git::run(&source, &["config", "user.email", "test@test"], "set email").unwrap();
+        crate::git::run(&source, &["config", "user.name", "test"], "set name").unwrap();
+        fs::write(source.join("tracked.txt"), "before\n").unwrap();
+        crate::git::run(&source, &["add", "."], "add source").unwrap();
+        crate::git::run(
+            &source,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit source",
+        )
+        .unwrap();
+        source
+    }
+
+    fn commit_source_landing(source: &Path) -> String {
+        fs::write(source.join("tracked.txt"), "landed\n").unwrap();
+        crate::git::run(source, &["add", "tracked.txt"], "stage landing").unwrap();
+        crate::git::run(
+            source,
+            &["commit", "-q", "-m", "Land sibling Work Item"],
+            "commit landing",
+        )
+        .unwrap();
+        head_commit(source).unwrap()
+    }
+
+    #[test]
+    fn source_product_change_classifies_a_clean_advance_as_a_landing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = init_source_product_repo(root.path());
+        let before = source_product_snapshot(&source).unwrap();
+        let landed_head = commit_source_landing(&source);
+        let after = source_product_snapshot(&source).unwrap();
+
+        assert_eq!(
+            classify_source_product_change(&before, &after),
+            SourceProductChange::ConcurrentLanding
+        );
+        let landing = ensure_source_product_unchanged(&source, &before)
+            .unwrap()
+            .expect("a clean advance reports the concurrent landing");
+        assert_eq!(landing.commit, landed_head);
+        assert_eq!(landing.subject, "Land sibling Work Item");
+        let report = landing.report();
+        assert!(report.contains("Concurrent landing"), "{report}");
+        assert!(report.contains(&landed_head), "{report}");
+        assert!(report.contains("Land sibling Work Item"), "{report}");
+    }
+
+    #[test]
+    fn source_product_change_rejects_a_dirty_landing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = init_source_product_repo(root.path());
+        let before = source_product_snapshot(&source).unwrap();
+        commit_source_landing(&source);
+        fs::write(source.join("tracked.txt"), "writer change\n").unwrap();
+        let after = source_product_snapshot(&source).unwrap();
+
+        assert_eq!(
+            classify_source_product_change(&before, &after),
+            SourceProductChange::WriterChange
+        );
+        let error = ensure_source_product_unchanged(&source, &before).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("preserve it for inspection"), "{message}");
+        assert!(message.contains("before HEAD"), "{message}");
+        assert!(message.contains("after HEAD"), "{message}");
+        assert!(message.contains("before status"), "{message}");
+        assert!(message.contains("after status"), "{message}");
+        assert!(message.contains("changed product paths"), "{message}");
+        assert!(message.contains("tracked.txt"), "{message}");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
+            "writer change\n",
+            "the dirty source is preserved for inspection"
+        );
+
+        let dirty_before = source_product_snapshot(&source).unwrap();
+        fs::write(source.join("tracked.txt"), "changed again\n").unwrap();
+        let error = ensure_source_product_unchanged(&source, &dirty_before).unwrap_err();
+        assert!(
+            error.to_string().contains("preserve it for inspection"),
+            "{error:#}"
+        );
+    }
+
     struct HandoffCoder {
         launches: Arc<Mutex<Vec<String>>>,
         sessions: Arc<Mutex<Vec<String>>>,
         first_no_output: bool,
         second_commit: bool,
         source_drift: Option<PathBuf>,
+        source_land: Option<PathBuf>,
     }
 
     impl crate::coder::Coder for HandoffCoder {
@@ -25782,6 +26131,16 @@ while time.monotonic() < deadline:
                 }
                 if let Some(source) = &self.source_drift {
                     fs::write(source.join("tracked.txt"), "source drift\n").unwrap();
+                }
+                if let Some(source) = &self.source_land {
+                    fs::write(source.join("tracked.txt"), "landed\n").unwrap();
+                    crate::git::run(source, &["add", "tracked.txt"], "stage landing").unwrap();
+                    crate::git::run(
+                        source,
+                        &["commit", "-q", "-m", "Land sibling Work Item"],
+                        "commit landing",
+                    )
+                    .unwrap();
                 }
             }
             if number == 1 && !self.first_no_output {
@@ -25851,6 +26210,7 @@ while time.monotonic() < deadline:
                     first_no_output,
                     second_commit,
                     source_drift: None,
+                    source_land: None,
                 }) as Box<dyn crate::coder::Coder>
             };
             let result = run_write_task_with_coder(
@@ -25927,6 +26287,7 @@ while time.monotonic() < deadline:
                 first_no_output: true,
                 second_commit: false,
                 source_drift: Some(drift_source.clone()),
+                source_land: None,
             }) as Box<dyn crate::coder::Coder>
         };
         let error = run_write_task_with_coder(
@@ -25959,6 +26320,87 @@ while time.monotonic() < deadline:
             stored.attempts[0].pause_kind,
             Some(crate::work_model::PauseKind::WriterCompletion)
         );
+    }
+
+    #[test]
+    fn writer_finish_tolerates_a_concurrent_landing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir_all(source.join(".fluent/expertise")).unwrap();
+        fs::write(source.join(".fluent/expertise/INDEX.md"), "# Index\n").unwrap();
+        crate::git::run(&source, &["init", "-q", "-b", "main"], "init fixture").unwrap();
+        crate::git::run(&source, &["config", "user.email", "test@test"], "set email").unwrap();
+        crate::git::run(&source, &["config", "user.name", "test"], "set name").unwrap();
+        fs::write(source.join("tracked.txt"), "baseline\n").unwrap();
+        crate::git::run(&source, &["add", "."], "add fixture").unwrap();
+        crate::git::run(
+            &source,
+            &["commit", "-q", "-m", "Add fixture"],
+            "commit fixture",
+        )
+        .unwrap();
+        let baseline = head_commit(&source).unwrap();
+        let mut item = WorkItem {
+            id: "work-1".into(),
+            title: "Concurrent landing".into(),
+            ..Default::default()
+        };
+        item.add_initial_attempt("attempt-1").unwrap();
+        let store = WorkModelStore::new(&source);
+        store.create_work_item(&item).unwrap();
+        let resolver = ContentResolver::new(Some(&source));
+        let launches = Arc::new(Mutex::new(Vec::new()));
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&launches);
+        let recorded_sessions = Arc::clone(&sessions);
+        let land_source = source.clone();
+        let make_coder = move |_sandbox| {
+            Box::new(HandoffCoder {
+                launches: Arc::clone(&recorded),
+                sessions: Arc::clone(&recorded_sessions),
+                first_no_output: false,
+                second_commit: true,
+                source_drift: None,
+                source_land: Some(land_source.clone()),
+            }) as Box<dyn crate::coder::Coder>
+        };
+        let result = run_write_task_with_coder(
+            WorkTaskRunConfig {
+                project_root: &source,
+                store: &store,
+                work_item_id: "work-1",
+                attempt_id: "attempt-1",
+                task_id: "attempt-1-write-1",
+                resolver: &resolver,
+                extra_args: &[],
+                no_sandbox: true,
+                store_lock: None,
+            },
+            Some(&make_coder),
+        )
+        .unwrap();
+
+        assert_ne!(head_commit(&source).unwrap(), baseline);
+        assert_eq!(
+            crate::git::run_stdout(
+                &source,
+                &["log", "-1", "--format=%s"],
+                "read landed subject"
+            )
+            .unwrap(),
+            "Land sibling Work Item"
+        );
+        let stored = store.read_work_item("work-1").unwrap();
+        assert_eq!(stored.attempts[0].tasks[0].status, TaskStatus::Complete);
+        assert_eq!(
+            stored.attempts[0].tasks[0]
+                .output
+                .as_ref()
+                .expect("the Writer committed its candidate")
+                .commit,
+            result.output
+        );
+        assert_eq!(result.task_id, "attempt-1-write-1");
     }
 
     #[test]

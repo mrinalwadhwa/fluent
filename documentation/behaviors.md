@@ -371,6 +371,27 @@ WHEN an older supported Fluent binary sees a version 2 launch record, THE
 SYSTEM SHALL reject that record before mutating execution or Attempt state.
 Test: tests/execution_handoff.rs (launch_handoff_old_reader_rejects_new_protocol)
 
+## Interruption and detached execution
+
+### B1
+
+WHEN a foreground Attempt run is interrupted before settlement, THE SYSTEM
+SHALL settle its owned workers and print the exact resume command for that Work
+Item and Attempt.
+Test: tests/binary.rs (interrupted_attempt_prints_the_resume_command)
+
+### B2
+
+WHEN an operator runs an Attempt with `--detach`, THE SYSTEM SHALL run it in a
+background session and print how to watch and stop it.
+Test: tests/binary.rs (detached_attempt_prints_watch_and_stop_commands)
+
+### B3
+
+WHEN `queue resume` is requested while no scheduler is running, THE SYSTEM
+SHALL print the exact `fluent scheduler run` command as the primary remedy.
+Test: tests/binary.rs (queue_resume_without_a_scheduler_names_the_scheduler_command)
+
 ## Enclosing agent sandbox handoff
 
 ### B1
@@ -3385,6 +3406,21 @@ to flag invalid history, identity, message encoding, and attribution, including 
 `Co-Authored-By` trailers.
 Test: src/work_task_executor.rs (documentation_review_treats_commit_presentation_as_advice)
 
+### B82
+
+IF `--from-working-tree` is invoked on a source checkout with uncommitted
+changes outside `.fluent` and Fluent-managed skill trees,
+THEN THE SYSTEM SHALL refuse to create the Attempt with a message naming every
+offending path and the clean-tree alternatives.
+Test: tests/binary.rs (review_only_from_working_tree_names_uncommitted_paths)
+### B83
+
+WHEN `--from-working-tree` runs on a checkout whose only changes are
+Fluent-managed skill trees,
+THE SYSTEM SHALL create the review-only Attempt instead of refusing.
+Test: tests/binary.rs (review_only_from_working_tree_accepts_managed_skill_installs)
+
+
 ## Atomic state-file writes
 
 ### B1
@@ -6385,6 +6421,16 @@ THE SYSTEM SHALL print the resolved coder and model (and effort, when set) for e
 role before any coder starts. It SHALL suppress this under `FLUENT_QUIET`.
 Test: tests/binary.rs (attempt_run_prints_resolved_coder_plan)
 
+### B3a
+
+WHEN Fluent prints the coder plan,
+THE SYSTEM SHALL name the configuration layer — `project`, `user`, or `default` —
+that supplied each coder mapping value for each role.
+Test: tests/binary.rs (coder_plan_names_the_resolution_source)
+Test: src/config.rs (coder_mapping_sources_layer_project_user_and_default,
+coder_mapping_sources_default_when_no_config)
+Test: src/guidance.rs (format_coder_plan_includes_all_roles_and_models)
+
 ### B4
 
 WHERE no model is configured or overridden for a role,
@@ -6405,6 +6451,14 @@ Test: src/work_model.rs (coder_mapping_for_task_kind_returns_correct_pair)
 WHEN Fluent executes a Tester Task within an Attempt,
 THE SYSTEM SHALL run the deterministic Tester without spawning a Coder.
 Test: src/work_task_executor.rs (tester_task_invokes_subcommand_not_coder)
+
+### B1b
+
+WHEN Fluent creates a review-only Attempt,
+THE SYSTEM SHALL store the project's resolved coder mapping instead of the
+built-in default.
+Test: tests/binary.rs (review_only_attempt_uses_the_project_coder_mapping)
+Test: src/work_model.rs (review_only_attempt_with_coder_mapping_stores_each_role)
 
 ### B2
 
@@ -10671,6 +10725,38 @@ WHEN Fluent reclaims Writer dependency caches after Work becomes terminal, THE
 SYSTEM SHALL retire that Work Item/Attempt cache.
 Test: src/writer_cache.rs (reclamation_retires_a_cache_after_work_becomes_terminal)
 
+## Sandbox package-manager cache
+
+### B1
+
+WHEN Fluent prepares an Attempt dependency cache,
+THE SYSTEM SHALL expose one writable cache directory per supported package
+manager through that package manager's standard environment variable.
+Test: src/writer_cache.rs (attempt_cache_exposes_package_manager_cache_environment)
+
+### B2
+
+WHEN Fluent renders the Tester sandbox with an Attempt dependency cache,
+THE SYSTEM SHALL render each package-manager cache directory writable and
+prove the grant with a sandboxed write.
+Test: src/tester.rs (tester_sandbox_writes_package_manager_cache_directories)
+Example: a `uv run pytest` command writes into `<cache>/uv-cache` without `--no-sandbox`.
+
+### B3
+
+IF a Tester command fails with a sandbox denial naming a configured
+package-manager cache directory,
+THEN THE SYSTEM SHALL persist a harness error that names the denied path and
+the `--no-sandbox` remedy instead of reporting only the command exit code.
+Test: src/tester.rs (tester_diagnoses_package_manager_cache_denial)
+
+### B4
+
+WHEN `merge-candidate land` runs the final Tester for an Attempt,
+THE SYSTEM SHALL launch it with the same Attempt dependency cache environment
+the Attempt's Writer used.
+Test: src/work_merge_executor.rs (landing_tester_reuses_the_attempt_package_manager_cache)
+
 ## Generated commit wording
 
 ### B1
@@ -10813,6 +10899,37 @@ corrective Writer completes, the Attempt must still pass its separate
 host-evidence, candidate, Review, final-Tester, and Learning gates. The Writer
 owns only its Writer obligations; those host and later Attempt gates remain
 separate.
+
+## Approach revision re-anchor
+
+### B1
+
+WHEN Fluent audits a `revise-approach` request,
+THE SYSTEM SHALL bind source completion to the completed Writer whose candidate
+commit matches the uncertain Architecture review.
+Test: src/planning_approach_recovery.rs (revision_binds_the_source_writer_matching_the_uncertain_review)
+
+### B2
+
+WHEN an Attempt with a completed corrective Writer resumes,
+THE SYSTEM SHALL accept the unchanged Approach revision audit instead of
+reporting changed source completion.
+Test: src/planning_approach_recovery.rs (second_revision_after_no_change_corrective_writer_binds_the_current_contract)
+
+### B3
+
+IF the latest Architecture review is not bound to the current candidate,
+THEN THE SYSTEM SHALL refuse `revise-approach` with a reason that names the
+missing review, not a missing completed Writer.
+Test: src/planning_approach_recovery.rs (stale_uncertain_review_refuses_revision_with_a_named_reason)
+
+### B4
+
+WHEN an uncertain Architecture review is revised and its corrective Writer
+completes,
+THE SYSTEM SHALL drive the Attempt through reviews to a ready Merge Candidate
+without a new Work Item.
+Test: tests/binary.rs (approach_revision_corrective_writer_reaches_a_ready_candidate)
 
 ## Writer recovery instructions
 
@@ -11444,3 +11561,81 @@ explicitly supplied Work Item and Attempt's acceptance for the exact release
 HEAD while retaining every existing build, source, format, check, architecture,
 signature and checksum gate.
 Test: tests/behaviors/operations/test-release-script.sh
+## Concurrent landing
+
+### B1
+
+WHEN the source product check observes a clean HEAD advance,
+THE SYSTEM SHALL classify the change as a concurrent landing rather than a
+Writer change.
+Test: src/work_task_executor.rs (tests::source_product_change_classifies_a_clean_advance_as_a_landing)
+
+### B2
+
+IF the source checkout has uncommitted product changes,
+THEN THE SYSTEM SHALL classify the change as a Writer change and fail the Task
+with the existing inspection evidence.
+Test: src/work_task_executor.rs (tests::source_product_change_rejects_a_dirty_landing)
+
+### B3
+
+WHEN a Writer Task finishes during a concurrent landing,
+THE SYSTEM SHALL keep the Task alive and report the landed commit.
+Test: src/work_task_executor.rs (tests::writer_finish_tolerates_a_concurrent_landing)
+
+### B4
+
+WHEN two Work Items run and one lands,
+THE SYSTEM SHALL let the other Writer finish without invalidating its Task.
+Test: tests/binary.rs (concurrent_landing_preserves_a_running_writer)
+
+## Tester bootstrap
+
+### B1
+
+WHEN `fluent init` runs in a project with no Tester,
+THE SYSTEM SHALL write a starter Tester whose command is a detected project
+test command or a documented no-op.
+Test: src/setup.rs (init_writes_a_starter_tester_for_a_project_without_one)
+
+### B2
+
+WHEN `fluent init` writes a starter Tester,
+THE SYSTEM SHALL also write the bundled per-test extractor and leave an existing
+Tester untouched.
+Test: src/setup.rs (init_writes_the_bundled_extractor_and_preserves_an_existing_tester)
+
+### B3
+
+WHEN the bundled extractor reads a JUnit XML result,
+THE SYSTEM SHALL emit one normalized result per test case.
+Test: tests/behaviors/operations/test-tester-extractor-junit.sh (parses JUnit XML cases)
+
+### B4
+
+WHEN the bundled extractor reads pytest verbose output,
+THE SYSTEM SHALL emit one normalized result per test.
+Test: tests/behaviors/operations/test-tester-extractor-pytest.sh (parses pytest verbose results)
+
+### B5
+
+WHEN `fluent tester check` finds a declared `Test:` reference that no configured
+harness can produce,
+THE SYSTEM SHALL warn with the reference text and the configured harnesses
+instead of failing silently.
+Test: src/tester.rs (tester_check_warns_when_a_reference_cannot_match_any_harness)
+
+## OpenCode-managed paths
+
+### B1
+
+WHEN a review-only Task checks the source checkout and `.opencode` contains
+managed skill trees,
+THE SYSTEM SHALL exclude those managed paths from the source-change guard.
+Test: src/work_task_executor.rs (tests::review_only_ignores_managed_opencode_skill_trees)
+
+### B2
+
+IF an unmanaged file appears under `.opencode`,
+THEN THE SYSTEM SHALL still report it as a source change.
+Test: src/work_task_executor.rs (tests::review_only_reports_unmanaged_opencode_changes)

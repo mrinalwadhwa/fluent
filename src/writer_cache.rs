@@ -12,6 +12,10 @@ use crate::work_model::WorkModelStore;
 const WRITER_CACHE_RELATIVE_ROOT: &str = ".fluent/work/cache/writers";
 const WRITER_CACHE_LOCK_RELATIVE_PATH: &str = ".fluent/work/locks/writer-cache.lock";
 const ADMITTED_CARGO_DIRS: &[&str] = &["registry", "git"];
+/// Standard environment variable and directory name for every package-manager
+/// cache the Attempt dependency cache provides.
+const PACKAGE_MANAGER_CACHE_DIRS: &[(&str, &str)] =
+    &[("UV_CACHE_DIR", "uv-cache"), ("PIP_CACHE_DIR", "pip-cache")];
 
 /// One private dependency cache shared by every Writer round and the final
 /// Tester in an exact Work Item Attempt. It is rebuildable execution state,
@@ -39,6 +43,12 @@ impl WriterDependencyCache {
             "CARGO_HOME".to_string(),
             self.cargo_home.to_string_lossy().into_owned(),
         )];
+        for (variable, name) in PACKAGE_MANAGER_CACHE_DIRS {
+            env.push((
+                variable.to_string(),
+                self.root.join(name).to_string_lossy().into_owned(),
+            ));
+        }
         // npm accepts either case; override both so an inherited lowercase
         // setting cannot redirect mutable data or load operator credentials.
         for (name, path) in [
@@ -76,7 +86,8 @@ pub(crate) fn preflight_writer_dependency_cache(
     })
 }
 
-/// Materialize an exact-Attempt cache and seed only Cargo dependency stores for
+/// Materialize an exact-Attempt cache, seed only Cargo dependency stores, and
+/// create one writable cache directory per supported package manager for
 /// Writer and final Tester tasks. Credentials, configuration, binaries, and
 /// every other user Cargo-home entry remain outside both task boundaries.
 pub(crate) fn prepare_writer_dependency_cache(
@@ -111,6 +122,22 @@ pub(crate) fn prepare_writer_dependency_cache(
     }
     reject_symlinked_existing_components(&cache.project_root, &cache.cargo_home)?;
     reject_symlinked_existing_components(&cache.project_root, &cache.npm_cache)?;
+    prepare_package_manager_cache_dirs(cache)?;
+    Ok(())
+}
+
+/// Create one writable cache directory per supported package manager under the
+/// Attempt cache root. npm state is prepared above; its directory is already
+/// covered. The Tester and Writer profiles grant the whole cache root, so the
+/// remaining directories need no new Seatbelt rule.
+fn prepare_package_manager_cache_dirs(cache: &WriterDependencyCache) -> Result<()> {
+    for (_, name) in PACKAGE_MANAGER_CACHE_DIRS {
+        let directory = cache.root.join(name);
+        reject_symlinked_existing_components(&cache.project_root, &directory)?;
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("create package-manager cache {}", directory.display()))?;
+        reject_symlinked_existing_components(&cache.project_root, &directory)?;
+    }
     Ok(())
 }
 
@@ -467,6 +494,46 @@ mod tests {
     }
 
     #[test]
+    fn attempt_cache_exposes_package_manager_cache_environment() {
+        let tmp = TempDir::new().unwrap();
+        let cache = preflight_writer_dependency_cache(tmp.path(), "work-1", "attempt-1").unwrap();
+
+        for (variable, name) in [
+            ("UV_CACHE_DIR", "uv-cache"),
+            ("PIP_CACHE_DIR", "pip-cache"),
+            ("npm_config_cache", "npm-cache"),
+        ] {
+            let expected = cache.root().join(name).to_string_lossy().into_owned();
+            assert!(
+                cache
+                    .launch_env()
+                    .iter()
+                    .any(|(key, value)| key == variable && *value == expected),
+                "launch env must expose {variable} at {expected}: {:?}",
+                cache.launch_env()
+            );
+        }
+        assert!(
+            cache
+                .launch_env()
+                .iter()
+                .any(|(key, _)| key == "CARGO_HOME")
+        );
+
+        prepare_writer_dependency_cache(&cache, None).unwrap();
+        for (_, name) in [
+            ("UV_CACHE_DIR", "uv-cache"),
+            ("PIP_CACHE_DIR", "pip-cache"),
+            ("npm_config_cache", "npm-cache"),
+        ] {
+            assert!(
+                cache.root().join(name).is_dir(),
+                "{name} must exist after cache preparation"
+            );
+        }
+    }
+
+    #[test]
     fn unsafe_work_and_attempt_ids_cannot_select_cache_paths() {
         let tmp = TempDir::new().unwrap();
 
@@ -573,6 +640,22 @@ mod tests {
         let cache = preflight_writer_dependency_cache(tmp.path(), "work-1", "attempt-1").unwrap();
         fs::create_dir_all(cache.root()).unwrap();
         std::os::unix::fs::symlink(&external, cache.cargo_home()).unwrap();
+
+        let error = prepare_writer_dependency_cache(&cache, None).unwrap_err();
+
+        assert!(format!("{error:#}").contains("must not be a symlink"));
+        assert!(fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparation_rejects_a_package_manager_cache_leaf_symlink_before_writing_through_it() {
+        let tmp = TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        let cache = preflight_writer_dependency_cache(tmp.path(), "work-1", "attempt-1").unwrap();
+        fs::create_dir_all(cache.root()).unwrap();
+        std::os::unix::fs::symlink(&external, cache.root().join("uv-cache")).unwrap();
 
         let error = prepare_writer_dependency_cache(&cache, None).unwrap_err();
 

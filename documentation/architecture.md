@@ -845,8 +845,11 @@ Every autonomous Writer and final Tester receives Fluent-owned dependency
 caches under
 `.fluent/work/cache/writers/<work-item-id>/<attempt-id>/`. Its private
 `cargo-home/` is shared by initial, continuation, and corrective Writer Tasks
-and the final Tester in that exact Attempt, but never by another Attempt. Cargo
-build output remains in the candidate workspace so later Writer rounds, the
+and the final Tester in that exact Attempt, but never by another Attempt. The
+same root also holds a private `npm-cache/` and one writable cache directory per
+supported package manager — `uv-cache/` (`UV_CACHE_DIR`) and `pip-cache/`
+(`PIP_CACHE_DIR`) — so uv and pip write there instead of a read-only host cache.
+Cargo build output remains in the candidate workspace so later Writer rounds, the
 final Tester, and the candidate-keyed reviewer cache retain the existing
 warm-output path.
 Before the first launch, the host admits only `registry/` and `git/` from its
@@ -1055,7 +1058,10 @@ the Task. If a reviewer changes source files or protected `.fluent/`
 state outside the Task artifact area, the guard restores protected
 checkout state before failing the Task. This restorative guard applies
 only to interactive `ReviewOnly` Attempts (e.g. `fluent review
-codebase`).
+codebase`). A skill tree under `.opencode` that carries a valid Fluent
+`.fluent-managed.json` sidecar is excluded from that source-change check; a
+missing or malformed sidecar leaves the tree user-owned, so unmanaged OpenCode
+edits still fail the Task.
 
 Post-merge review Attempts use `AttemptKind::PostMergeReview` and a
 non-restoring `PostMergeSourceGuard`. This guard verifies that the
@@ -1177,6 +1183,27 @@ when that Task launches. Completed Writers are not rerun, and later Writers,
 reviewers, Testers, and the Learner retain the ordinary sandbox policy. The
 scheduler must itself run from a host boundary that permits the Xcode child
 sandbox; an enclosing agent sandbox still applies.
+
+A package-manager cache denial is a different condition. The Attempt dependency
+cache exposes `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and `npm_config_cache` inside the
+granted cache root, so a supported package manager does not need the operator's
+home cache. If a command still reports a permission denial naming one of those
+configured paths, Fluent persists a `package_manager_sandbox` Tester-harness
+error that names the denied path. This is an environment repair, not a
+dispatch-scoped `--no-sandbox` approval: repair the cache access and resume the
+same Attempt, or run the standalone `fluent tester check --no-sandbox` from a
+trusted host shell. Standalone `tester check` creates no Attempt, so it renders
+without an Attempt dependency cache and its package-manager caches stay
+read-only; only Writer, Tester, and landing Attempt surfaces receive the cache
+environment.
+
+On a project's first `fluent init`, Fluent writes a starter
+`.fluent/tester.yaml` and the bundled `.fluent/extract-tester-results` when the
+project has neither. Detection covers Cargo, Python (`pyproject.toml`), and Node
+(`package.json`); an unrecognized project gets a documented no-op and an init
+warning rather than a silent green result. The starter is a starting point: a
+project replaces the command with its own runner and keeps the per-test
+extractor contract.
 
 For a Tester that runs as a Work Task, Fluent reads and validates its
 configuration without creating paths, then durably reserves the Task before it
@@ -3732,7 +3759,17 @@ subprocess without a Coder. Configure with per-role flags like
 At Attempt creation, per-role and global CLI flags take precedence over
 environment, project config, user config, and coder defaults. Fluent stores the
 resolved mapping on the Attempt record so different Attempts of the same Work
-Item can use different Coder configurations.
+Item can use different Coder configurations. Review-only Attempts resolve the
+same project, user, and environment layers at creation, so a project configured
+for another coder review with it instead of the built-in Claude default.
+
+Before a run, the coder plan names the `project`, `user`, or `default` layer
+that supplied each role's coder, model, and effort from configuration. A value
+supplied by a CLI flag or environment override is reported as `default`,
+because the plan attributes configuration layers, not run-time overrides. The
+plan reports only the layer name, never configuration values or credential
+material, so a project-versus-default mismatch is visible without exposing
+secrets.
 
 Running or resuming an existing Attempt or one of its Tasks starts from that
 stored mapping. A flagless `attempt run` or `task run` does not resolve config or

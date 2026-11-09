@@ -1111,3 +1111,37 @@ sequence through that same reader before Dashboard dispatch resumes. Do not
 replace this with a second competing reader or operator recovery bytes. See
 [the patch provenance](../../vendor/crossterm/FLUENT-PATCH.md) and the
 [handoff regression pattern](testing/patterns/dashboard-partial-input-handoff.md).
+
+## Bind Approach revisions to the newest Writer valid against the current contract
+
+An Approach revision identifies its source Writer by the reviewed candidate
+commit, not by "the latest completed Writer". Several Writers can share one
+candidate: a corrective or no-change round preserves that commit but writes a
+completion matrix against the revised contract. Select the newest completed
+Writer at the commit whose matrix validates against the contract the revision
+was approved against, and fall back to earlier Writers. A later round's matrix
+built against a revised contract must never replace the recorded source
+completion. This tie-break is part of the durable revision-audit identity, so
+reversing it can refuse otherwise-valid retries.
+
+## Bootstrap a starter Tester without promising per-test evidence
+
+`fluent init` writes a starter `.fluent/tester.yaml` and the bundled extractor
+only when the project has neither. Detection covers Cargo, pyproject, and
+package.json; an unrecognized project gets a documented no-op and an init
+warning. The detected command is a starting point, not a promise: the bundled
+extractor parses libtest JSON and text, TAP-shaped shell lines, JUnit XML, and
+pytest verbose output, but a detected runner that emits none of those still
+needs the project to name a harness or a richer extractor. Keep the starter
+command, the extractor vocabulary, the Writer prompt, and the advisory
+reference check in step when a harness is added.
+
+## Exclude only sidecar-owned OpenCode skill trees from source checks
+
+The review-only source guard walks `.opencode` for directories whose
+`.fluent-managed.json` sidecar names a schema, agent, scope, and skill. It
+excludes exactly those trees from Git status and never follows a symlink. A
+missing, unreadable, or malformed sidecar leaves the directory user-owned, so
+unmanaged edits under `.opencode` still fail the Task. Do not widen the
+exclusion to all of `.opencode`: that would hide real source changes the guard
+exists to report.

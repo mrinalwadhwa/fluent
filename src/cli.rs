@@ -694,6 +694,10 @@ pub enum AttemptCommands {
         #[arg(long)]
         no_sandbox: bool,
 
+        /// Run in the background and print how to watch and stop it
+        #[arg(long)]
+        detach: bool,
+
         /// Retry only the paused Tester Task without Fluent's Tester sandbox
         #[arg(long, hide = true)]
         tester_no_sandbox: bool,
@@ -1191,6 +1195,8 @@ pub enum ReviewCommands {
 
         /// Review the current working tree at `.` (with the source-checkout
         /// restorative guard) instead of the per-branch review-only worktree.
+        /// Requires a clean working tree outside `.fluent` and Fluent-managed
+        /// skill trees.
         #[arg(long)]
         from_working_tree: bool,
     },

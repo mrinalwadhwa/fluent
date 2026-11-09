@@ -18331,6 +18331,39 @@ fn init_writes_gitignore_when_absent() {
 }
 
 #[test]
+fn init_writes_a_starter_tester_with_a_detected_command() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("pyproject.toml"),
+        "[project]\nname = \"example\"\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let tester = fs::read_to_string(tmp.path().join(".fluent/tester.yaml")).unwrap();
+    assert!(
+        tester.contains("python3 -m pytest -v"),
+        "init must write the detected Python command: {tester}"
+    );
+    assert!(tester.contains("test_harness: pytest"));
+    let extractor = tmp.path().join(".fluent/extract-tester-results");
+    assert!(extractor.is_file(), "init must write the bundled extractor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            fs::metadata(&extractor).unwrap().permissions().mode() & 0o111 != 0,
+            "the starter extractor must be executable"
+        );
+    }
+}
+
+#[test]
 fn init_gitignore_excludes_working_state_and_tracks_durable() {
     let tmp = TempDir::new().unwrap();
     init_git_repo(tmp.path());
@@ -29591,6 +29624,104 @@ fn work_review_requires_completed_write_output() {
 }
 
 #[test]
+fn review_only_from_working_tree_accepts_managed_skill_installs() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    let skill = main_dir.join(".opencode/skills/fluent");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "# Fluent skill\n").unwrap();
+    fs::write(
+        skill.join(".fluent-managed.json"),
+        r#"{"schema_version":1,"agent":"opencode","scope":"project","skill":"fluent"}"#,
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Created review-only Attempt attempt-review against source checkout",
+        ));
+}
+
+#[test]
+fn review_only_from_working_tree_names_uncommitted_paths() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    let brief_path = tmp.path().join("review-brief.md");
+    fs::write(
+        &brief_path,
+        "Review only skills/ and focus on review-only prompt context.\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+            "--brief-file",
+            &brief_path.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    fs::write(main_dir.join("uncommitted-notes.md"), "notes\n").unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires a clean working tree"))
+        .stderr(predicate::str::contains("uncommitted-notes.md"))
+        .stderr(predicate::str::contains(
+            "omit --from-working-tree to review the committed tree",
+        ));
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    assert_eq!(
+        value["attempts"].as_array().unwrap().len(),
+        0,
+        "a refused working-tree review must not create an Attempt"
+    );
+}
+
+#[test]
 fn work_review_codebase_creates_review_only_attempt() {
     let tmp = TempDir::new().unwrap();
     let main_dir = setup_git_project(&tmp);
@@ -29677,6 +29808,54 @@ fn work_review_codebase_creates_review_only_attempt() {
         review_task["review_context"]["candidate_commit"],
         git_head(&main_dir)
     );
+}
+
+#[test]
+fn review_only_attempt_uses_the_project_coder_mapping() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".fluent")).unwrap();
+    fs::write(
+        main_dir.join(".fluent/config.yaml"),
+        "coders:\n  writer:\n    coder: pi\n    model: project-write\n  reviewer:\n    coder: pi\n    model: project-review\n",
+    )
+    .unwrap();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "work-item",
+            "create",
+            "work-1",
+            "--title",
+            "Review codebase",
+        ])
+        .assert()
+        .success();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args([
+            "review",
+            "codebase",
+            "work-1",
+            "attempt-review",
+            "--from-working-tree",
+        ])
+        .assert()
+        .success();
+
+    let value = read_work_show_json(&main_dir, "work-1");
+    let mapping = &value["attempts"][0]["coder_mapping"];
+    assert_eq!(
+        mapping["write"]["coder"], "pi",
+        "review-only creation should store the project writer coder"
+    );
+    assert_eq!(mapping["write"]["model"], "project-write");
+    assert_eq!(
+        mapping["review"]["coder"], "pi",
+        "review-only creation should store the project reviewer coder"
+    );
+    assert_eq!(mapping["review"]["model"], "project-review");
 }
 
 #[test]
@@ -29779,6 +29958,35 @@ fn tester_check_uses_production_tester_boundary() {
         "run_with_sandbox_profile sandboxed=false\n",
         "tester check must enter the production runner that owns command execution and normalization"
     );
+}
+
+#[test]
+fn tester_check_prints_a_reference_harness_warning() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::write(
+        main_dir.join(".fluent/tester.yaml"),
+        "commands:\n  - command: \"true\"\n    test_harness: shell-harness\n",
+    )
+    .unwrap();
+    fs::create_dir_all(main_dir.join("documentation")).unwrap();
+    fs::write(
+        main_dir.join("documentation/behaviors.md"),
+        "# Behaviors\n\n## Example\n\n\
+         ### B1\n\n\
+         WHEN a Python test runs, THE SYSTEM SHALL pass.\n\
+         Test: tests/test_feature.py::test_ok\n",
+    )
+    .unwrap();
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["tester", "check", "--no-sandbox"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tester passed"))
+        .stderr(predicate::str::contains("tests/test_feature.py::test_ok"))
+        .stderr(predicate::str::contains("shell-harness"));
 }
 
 #[test]
@@ -42119,6 +42327,210 @@ fn queue_resume_records_exact_authorization_and_is_idempotent() {
 }
 
 #[test]
+fn queue_resume_without_a_scheduler_names_the_scheduler_command() {
+    use fluent::work_model::{AttemptStatus, PauseKind, TaskStatus, WorkItem, WorkModelStore};
+
+    let tmp = TempDir::new().unwrap();
+    let store = WorkModelStore::new(tmp.path());
+    let mut item = WorkItem::planned("wi-scheduler-command", "Resume without a scheduler");
+    item.add_initial_attempt("attempt-1").unwrap();
+    store.create_work_item(&item).unwrap();
+    store
+        .mutate_work_item("wi-scheduler-command", |item| {
+            let attempt = &mut item.attempts[0];
+            attempt.status = AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(PauseKind::Interrupted);
+            attempt.tasks[0].status = TaskStatus::NeedsUser;
+            Ok(())
+        })
+        .unwrap();
+
+    fluent_cmd()
+        .current_dir(tmp.path())
+        .args([
+            "queue",
+            "resume",
+            "wi-scheduler-command",
+            "--attempt",
+            "attempt-1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Queued resume of Attempt attempt-1 for Work Item wi-scheduler-command",
+        ))
+        .stdout(predicate::str::contains("No scheduler is running"))
+        .stdout(predicate::str::contains("Next: fluent scheduler run"));
+}
+
+#[cfg(unix)]
+fn blocking_attempt_mock(bin_dir: &Path) {
+    write_mock_claude(
+        bin_dir,
+        r#"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+: > "$FLUENT_TEST_ATTEMPT_STARTED"
+i=0
+while [ "$i" -lt 2400 ]; do
+  [ -f "$FLUENT_TEST_ATTEMPT_RELEASE" ] && break
+  i=$((i+1))
+  sleep 0.05
+done
+exit 0
+"#,
+    );
+}
+
+#[cfg(unix)]
+fn blocking_attempt_fixture(tmp: &TempDir, work_item: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let project = setup_git_project(tmp);
+    let bin_dir = tmp.path().join(format!("{work_item}-bin"));
+    blocking_attempt_mock(&bin_dir);
+    let started = tmp.path().join(format!("{work_item}-started"));
+    for args in [
+        vec![
+            "work-item",
+            "create",
+            work_item,
+            "--title",
+            "Interrupted run",
+        ],
+        vec!["attempt", "create", work_item, "attempt-1"],
+    ] {
+        fluent_cmd()
+            .current_dir(&project)
+            .args(args)
+            .assert()
+            .success();
+    }
+    (project, bin_dir, started)
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_attempt_prints_the_resume_command() {
+    let tmp = TempDir::new().unwrap();
+    let (project, bin_dir, started) = blocking_attempt_fixture(&tmp, "interrupt-work");
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+    command
+        .current_dir(&project)
+        .env("FLUENT_NO_UPDATE_CHECK", "1")
+        .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+        .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ATTEMPT_STARTED", &started)
+        .args([
+            "attempt",
+            "run",
+            "interrupt-work",
+            "attempt-1",
+            "--no-sandbox",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut running = OwnedFixtureProcess::spawn(&mut command);
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || started.exists()),
+        "the Attempt must reach its blocking coder before interruption"
+    );
+
+    send_signal(running.id(), "INT");
+    let output = running.wait_with_output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "an interrupted Attempt must settle cleanly: {combined}"
+    );
+    assert!(
+        combined.contains("fluent attempt run interrupt-work attempt-1"),
+        "the interruption must name the exact resume command: {combined}"
+    );
+
+    let shown = work_item_value(&project, "interrupt-work");
+    assert_eq!(shown["attempts"][0]["status"], "needs-user");
+    assert_eq!(shown["attempts"][0]["pause_kind"], "interrupted");
+    assert!(
+        shown["attempts"][0]["cancellation"]["settled_at"].is_string(),
+        "owned workers must settle before the resume command: {shown}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_attempt_prints_watch_and_stop_commands() {
+    let tmp = TempDir::new().unwrap();
+    let (project, bin_dir, started) = blocking_attempt_fixture(&tmp, "detach-work");
+    let output = fluent_cmd()
+        .current_dir(&project)
+        .env("PATH", mock_path(&bin_dir))
+        .env("FLUENT_TEST_ATTEMPT_STARTED", &started)
+        .args([
+            "attempt",
+            "run",
+            "detach-work",
+            "attempt-1",
+            "--no-sandbox",
+            "--detach",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        output.status.success(),
+        "detaching must return immediately: stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Watch: tail -f"),
+        "a detached Attempt must name its watch command: {stdout}"
+    );
+    assert!(
+        stdout.contains("Stop: fluent attempt cancel detach-work attempt-1"),
+        "a detached Attempt must name its stop command: {stdout}"
+    );
+    let pid = stdout
+        .split("(pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .expect("the detached Attempt must report its background process");
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || started.exists()),
+        "the detached Attempt must continue in the background"
+    );
+
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "cancel", "detach-work", "attempt-1"])
+        .assert()
+        .success();
+    let shown = work_item_value(&project, "detach-work");
+    assert_eq!(shown["attempts"][0]["status"], "needs-user");
+    assert_eq!(shown["attempts"][0]["pause_kind"], "interrupted");
+    assert!(
+        shown["attempts"][0]["cancellation"]["settled_at"].is_string(),
+        "the detached Attempt must settle into a resumable pause: {shown}"
+    );
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || {
+            (unsafe { libc::kill(pid as i32, 0) }) == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }),
+        "the detached background process {pid} must exit after cancellation"
+    );
+}
+
+#[test]
 fn queue_resume_accepts_verified_uncertain_review_pause() {
     use fluent::queue::{self, DispatchStatus};
     use fluent::work_model::{
@@ -44166,6 +44578,165 @@ exit 0
     assert_eq!(
         max_active, 4,
         "scheduler should fill the default capacity of four concurrently"
+    );
+}
+
+/// A role-aware coder for the concurrent-landing regression. The work-2 Writer
+/// commits and passes reviews so its candidate can land; the work-1 Writer
+/// blocks until the test lands work-2, then commits its own candidate.
+fn concurrent_landing_mock_script(work_item: &str, blocking_writer: bool) -> String {
+    let writer = if blocking_writer {
+        r#"    : > "$FLUENT_TEST_WRITER_STARTED"
+    i=0
+    while [ "$i" -lt 600 ]; do
+      [ -f "$FLUENT_TEST_WRITER_RELEASE" ] && break
+      i=$((i+1))
+      sleep 0.1
+    done
+    printf 'concurrent writer output\n' > concurrent-writer.txt
+    git add concurrent-writer.txt
+    git commit -m "Add concurrent writer output" >/dev/null 2>&1"#
+    } else {
+        r#"    printf 'landed work\n' > landed-work.txt
+    git add landed-work.txt
+    git commit -m "Add landed work" >/dev/null 2>&1"#
+    };
+    r#"#!/bin/bash
+PROMPT=""
+NEXT_IS_PROMPT=0
+for arg in "$@"; do
+  if [ "$NEXT_IS_PROMPT" = 1 ]; then PROMPT="$arg"; break; fi
+  if [ "$arg" = "-p" ]; then NEXT_IS_PROMPT=1; fi
+done
+if [ -z "$PROMPT" ]; then exit 0; fi
+if printf '%s' "$PROMPT" | grep -q "Rebase the candidate branch"; then
+  TARGET=$(printf '%s' "$PROMPT" | grep -o 'onto `[^`]*`' | sed 's/onto `//;s/`//')
+  git rebase "$TARGET" 2>/dev/null
+  exit $?
+fi
+if printf '%s' "$PROMPT" | grep -q "You are the Learner"; then
+  DRAFT=$(printf '%s' "$PROMPT" | grep -o '/[^ ]*follow-up-draft.json' | head -1)
+  if [ -n "$DRAFT" ]; then
+    mkdir -p "$(dirname "$DRAFT")"
+    printf '%s\n' '{"learning_summary":"@WORK@ complete","follow_ups":[]}' > "$DRAFT"
+  fi
+  exit 0
+fi
+case "$PWD" in
+  */work-6-@WORK@-attempt-1)
+@WRITER@
+    ;;
+  *)
+    printf 'Verdict: pass\n\nReview passed.\n' > review.md
+    ;;
+esac
+exit 0
+"#
+    .replace("@WORK@", work_item)
+    .replace("@WRITER@", writer)
+}
+
+#[test]
+fn concurrent_landing_preserves_a_running_writer() {
+    let tmp = TempDir::new().unwrap();
+    let project = setup_git_project(&tmp);
+    let land_bin = tmp.path().join("concurrent-land-bin");
+    write_mock_claude(&land_bin, &concurrent_landing_mock_script("work-2", false));
+    let writer_bin = tmp.path().join("concurrent-writer-bin");
+    write_mock_claude(&writer_bin, &concurrent_landing_mock_script("work-1", true));
+
+    for id in ["work-1", "work-2"] {
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["work-item", "create", id, "--title", "Concurrent landing"])
+            .assert()
+            .success();
+        fluent_cmd()
+            .current_dir(&project)
+            .args(["attempt", "create", id, "attempt-1"])
+            .assert()
+            .success();
+    }
+
+    // work-2 reaches a landable candidate before work-1 starts.
+    fluent_cmd()
+        .current_dir(&project)
+        .args(["attempt", "run", "work-2", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&land_bin))
+        .assert()
+        .success();
+
+    let writer_started = tmp.path().join("concurrent-writer-started");
+    let writer_release = tmp.path().join("concurrent-writer-release");
+    let mut writer = {
+        let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("fluent"));
+        command
+            .current_dir(&project)
+            .env("FLUENT_NO_UPDATE_CHECK", "1")
+            .env("FLUENT_TEST_HERMETIC_PROVIDERS", "1")
+            .env("FLUENT_TEST_HOST_SANDBOX_PREFLIGHT", "pass")
+            .env("PATH", mock_path(&writer_bin))
+            .env("FLUENT_TEST_WRITER_STARTED", &writer_started)
+            .env("FLUENT_TEST_WRITER_RELEASE", &writer_release)
+            .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        OwnedFixtureProcess::spawn(&mut command)
+    };
+    assert!(
+        poll_until(std::time::Duration::from_secs(60), || {
+            writer_started.exists()
+        }),
+        "work-1 Writer must reach its blocking coder"
+    );
+
+    let before = git_head(&project);
+    let landing = fluent_cmd()
+        .current_dir(&project)
+        .args([
+            "merge-candidate",
+            "land",
+            "work-2",
+            "attempt-1-merge-candidate",
+            "--no-sandbox",
+            "--no-post-merge-review",
+        ])
+        .env("PATH", mock_path(&land_bin))
+        .output()
+        .unwrap();
+    assert!(
+        landing.status.success(),
+        "work-2 landing failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&landing.stdout),
+        String::from_utf8_lossy(&landing.stderr)
+    );
+    let landed = git_head(&project);
+    assert_ne!(
+        landed, before,
+        "work-2 landing must advance the source checkout"
+    );
+
+    fs::write(&writer_release, b"go").unwrap();
+    let output = writer.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Concurrent landing advanced source checkout") && stderr.contains(&landed),
+        "the Writer must report the concurrent landing {landed}: {stderr}"
+    );
+
+    let item = read_work_show_json(&project, "work-1");
+    assert_eq!(
+        item["attempts"][0]["tasks"][0]["status"], "complete",
+        "a concurrent landing must not invalidate the running Writer: {item}"
+    );
+    assert_eq!(
+        item["attempts"][0]["pause_kind"],
+        serde_json::Value::Null,
+        "the Writer Task must not be paused for inspection: {item}"
+    );
+    assert!(
+        !item["attempts"][0]["tasks"][0]["output"].is_null(),
+        "the Writer must retain its candidate output: {item}"
     );
 }
 
@@ -55467,6 +56038,64 @@ fn empty_work_item_list_primes_planning_stages() {
     assert!(
         stderr.contains("brief") && stderr.contains("work-item create"),
         "empty list should print planning primer on stderr; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn coder_plan_names_the_resolution_source() {
+    let tmp = TempDir::new().unwrap();
+    let main_dir = setup_git_project(&tmp);
+    fs::create_dir_all(main_dir.join(".fluent")).unwrap();
+    fs::write(
+        main_dir.join(".fluent/config.yaml"),
+        "coders:\n  writer:\n    coder: claude\n    model: project-write\n    effort: low\n  reviewer:\n    coder: claude\n    model: project-review\n    effort: medium\n",
+    )
+    .unwrap();
+    let bin_dir = tmp.path().join("bin-coder-source");
+    write_mock_claude(
+        &bin_dir,
+        &learner_mock_script(r#"{"learning_summary":"plan source","follow_ups":[]}"#),
+    );
+
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["work-item", "create", "work-1", "--title", "Plan source"])
+        .assert()
+        .success();
+    fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "create", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let output = fluent_cmd()
+        .current_dir(&main_dir)
+        .args(["attempt", "run", "work-1", "attempt-1", "--no-sandbox"])
+        .env("PATH", mock_path(&bin_dir))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "attempt run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let writer_line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("writer"))
+        .unwrap_or_else(|| panic!("missing writer plan line; stderr:\n{stderr}"));
+    assert!(
+        writer_line.contains("(coder: project, model: project, effort: project)"),
+        "writer plan must name the project resolution source; got: {writer_line}"
+    );
+    let reviewer_line = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("reviewer"))
+        .unwrap_or_else(|| panic!("missing reviewer plan line; stderr:\n{stderr}"));
+    assert!(
+        reviewer_line.contains("(coder: project, model: project, effort: project)"),
+        "reviewer plan must name the project resolution source; got: {reviewer_line}"
     );
 }
 
@@ -73428,6 +74057,43 @@ fn round_cap_approach_revision_resume_preserves_downstream_gates() {
 
 #[test]
 #[serial]
+fn approach_revision_corrective_writer_reaches_a_ready_candidate() {
+    let fixture = setup_uncertain_approach_revision_fixture();
+    revise_uncertain_approach(&fixture).success();
+
+    let prompt_log = fixture
+        ._tmp
+        .path()
+        .join("uncertain-approach-provider-prompts.log");
+    let bin = fixture._tmp.path().join("uncertain-approach-provider");
+    write_sandboxed_mock_claude(&bin, &round_cap_downstream_provider_script(&prompt_log));
+
+    fluent_cmd()
+        .current_dir(&fixture.main_dir)
+        .env("PATH", mock_path(&bin))
+        .args(["attempt", "run", "work-1", "attempt-1"])
+        .assert()
+        .success();
+
+    let paused = fixture.store.read_work_item("work-1").unwrap();
+    assert_eq!(
+        paused.attempts[0]
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.kind == fluent::work_model::TaskKind::Write
+                    && task.status == fluent::work_model::TaskStatus::Complete
+            })
+            .count(),
+        2,
+        "the corrected candidate must retain the completed corrective Writer"
+    );
+
+    assert_round_cap_downstream_completion(&fixture);
+}
+
+#[test]
+#[serial]
 fn round_cap_approach_revision_completed_resume_uses_effective_reviews() {
     use fluent::work_model::{
         AttemptStatus, EvidenceRecoveryState, LearningStatus, TaskKind, now_iso8601,
@@ -74258,6 +74924,59 @@ exit 0
 "##,
         prompt_log = prompt_log.display(),
     )
+}
+
+fn setup_uncertain_approach_revision_fixture() -> RoundCapApproachRevisionFixture {
+    let plan = "| # | State reached | Behaviors | Verification | Responsibility | Applicability | Req? |\n|---|---|---|---|---|---|---|\n| 1 | Preserve the contract. | B1 | `cargo test` | writer | | Yes |\n| 2 | Review the candidate. | | Review candidate | review | | Yes |\n| 3 | Run the final Tester. | | Run final Tester | tester | | Yes |\n| 4 | Capture Learning. | | Capture Learning | learner | | Yes |\n";
+    let fixture = setup_round_cap_approach_revision_fixture_with_plan(plan.to_string());
+    make_round_cap_downstream_behavior_testable(&fixture);
+    let main_dir = fixture.main_dir.clone();
+    fixture
+        .store
+        .mutate_work_item("work-1", |item| {
+            let attempt = &mut item.attempts[0];
+            let architecture = attempt
+                .tasks
+                .iter()
+                .find(|task| {
+                    task.kind == fluent::work_model::TaskKind::Review && task.role == "architecture"
+                })
+                .unwrap();
+            let path = main_dir
+                .join(&architecture.artifact_area.as_ref().unwrap().path)
+                .join("review.md");
+            fs::write(
+                path,
+                "Verdict: uncertain\n\nArchitecture requires a revised Approach.\n",
+            )
+            .unwrap();
+            attempt.status = fluent::work_model::AttemptStatus::NeedsUser;
+            attempt.pause_kind = Some(fluent::work_model::PauseKind::Uncertain);
+            attempt.review_state = Some(fluent::work_model::AttemptReviewState::Uncertain);
+            Ok(())
+        })
+        .unwrap();
+    fixture
+}
+
+fn revise_uncertain_approach(
+    fixture: &RoundCapApproachRevisionFixture,
+) -> assert_cmd::assert::Assert {
+    let approach_file = fixture.main_dir.join("replacement-approach-uncertain.md");
+    fs::write(&approach_file, &fixture.replacement).unwrap();
+    fluent_cmd()
+        .current_dir(&fixture.main_dir)
+        .args([
+            "attempt",
+            "revise-approach",
+            "work-1",
+            "attempt-1",
+            "--approach-file",
+            approach_file.to_str().unwrap(),
+            "--resolution",
+            &fixture.resolution,
+        ])
+        .assert()
 }
 
 fn attach_round_cap_host_evidence(

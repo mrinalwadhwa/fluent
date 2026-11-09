@@ -9,13 +9,31 @@ Supported test_harness values:
   - cargo-nextest: parses libtest-json events from stdout log
   - cargo-test: parses libtest-json events from stdout log
   - shell-harness: parses "ok <name>" / "not ok <name>" lines
+  - pytest: parses "PASSED"/"FAILED"/"SKIPPED" lines from verbose output
+  - junit: parses the XML file named by --junitxml=<path>
 """
 
+import glob
 import json
 import os
+import re
 import sys
+import xml.etree.ElementTree as ET
 
 FAILURE_EXCERPT_MAX = 500
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+PYTEST_RESULT = re.compile(
+    r"^(?P<nodeid>\S.*?::.*?)\s+"
+    r"(?P<status>PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b"
+)
+PYTEST_PARAMETER = re.compile(r"\[[^\]]*\]$")
+LIBTEST_TEXT = re.compile(
+    r"^test (?P<name>.+?) \.\.\. (?P<status>ok|FAILED|ignored)"
+)
+JUNIT_PATH = re.compile(
+    r"--junitxml(?:=|\s+)(?P<path>\"[^\"]+\"|'[^']+'|\S+)"
+)
+TAP_PREFIX = re.compile(r"^\d+\s*-\s*")
 
 
 def main():
@@ -32,6 +50,11 @@ def main():
     tests = []
     for cmd in commands:
         harness = cmd["test_harness"]
+
+        if harness == "junit":
+            tests.extend(parse_junit(cmd, artifact_dir))
+            continue
+
         stdout_path = os.path.join(artifact_dir, cmd["stdout_log"])
 
         if not os.path.isfile(stdout_path):
@@ -44,6 +67,8 @@ def main():
             tests.extend(parse_libtest_json(stdout, harness))
         elif harness == "shell-harness":
             tests.extend(parse_shell_harness(stdout, harness))
+        elif harness == "pytest":
+            tests.extend(parse_pytest(stdout, harness))
 
     json.dump(tests, sys.stdout)
 
@@ -95,6 +120,22 @@ def parse_libtest_json(stdout, harness):
             "failure_excerpt": failure_excerpt,
         })
 
+    if tests:
+        return tests
+    # Plain `cargo test` writes libtest text rather than JSON events.
+    status_map = {"ok": "pass", "FAILED": "fail", "ignored": "skipped"}
+    for line in ANSI_ESCAPE.sub("", stdout).splitlines():
+        match = LIBTEST_TEXT.match(line.strip())
+        if match is None:
+            continue
+        tests.append({
+            "id": match.group("name"),
+            "test_harness": harness,
+            "status": status_map[match.group("status")],
+            "duration_ms": None,
+            "failure_excerpt": None,
+        })
+
     return tests
 
 
@@ -103,7 +144,7 @@ def parse_shell_harness(stdout, harness):
     for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("ok "):
-            name = line[3:].strip()
+            name = TAP_PREFIX.sub("", line[3:].strip())
             tests.append({
                 "id": name,
                 "test_harness": harness,
@@ -112,7 +153,7 @@ def parse_shell_harness(stdout, harness):
                 "failure_excerpt": None,
             })
         elif line.startswith("not ok "):
-            name = line[7:].strip()
+            name = TAP_PREFIX.sub("", line[7:].strip())
             tests.append({
                 "id": name,
                 "test_harness": harness,
@@ -122,6 +163,140 @@ def parse_shell_harness(stdout, harness):
             })
 
     return tests
+
+
+def parse_junit(cmd, artifact_dir):
+    command = cmd.get("command", "")
+    match = JUNIT_PATH.search(command)
+    if match is None:
+        fail(f"junit: command has no --junitxml=<path>: {command!r}")
+
+    pattern = match.group("path").strip("\"'")
+    paths = resolve_junit_paths(pattern, artifact_dir)
+    if not paths:
+        fail(f"junit: result file not found: {pattern}")
+
+    tests = []
+    for path in paths:
+        try:
+            root = ET.parse(path).getroot()
+        except (ET.ParseError, OSError) as error:
+            fail(f"junit: cannot read {path}: {error}")
+        for case in root.iter("testcase"):
+            tests.append(junit_case(case))
+    return tests
+
+
+def resolve_junit_paths(pattern, artifact_dir):
+    candidates = [pattern] if os.path.isabs(pattern) else [
+        os.path.join(os.getcwd(), pattern),
+        os.path.join(artifact_dir, pattern),
+    ]
+    paths = []
+    for candidate in candidates:
+        for match in sorted(glob.glob(candidate)):
+            if os.path.isfile(match) and match not in paths:
+                paths.append(match)
+    return paths
+
+
+def junit_case(case):
+    name = (case.get("name") or "").strip()
+    classname = (case.get("classname") or "").strip()
+    file_name = (case.get("file") or "").strip()
+    failure = case.find("failure")
+    if failure is None:
+        failure = case.find("error")
+
+    if failure is not None:
+        status = "fail"
+        excerpt = (failure.text or failure.get("message") or "").strip()
+        failure_excerpt = excerpt[-FAILURE_EXCERPT_MAX:] if excerpt else None
+    elif case.find("skipped") is not None:
+        status = "skipped"
+        failure_excerpt = None
+    else:
+        status = "pass"
+        failure_excerpt = None
+
+    duration_ms = None
+    raw_time = case.get("time")
+    if raw_time:
+        try:
+            duration_ms = int(float(raw_time) * 1000)
+        except ValueError:
+            pass
+
+    return {
+        "id": junit_identity(file_name, classname, name),
+        "test_harness": "junit",
+        "status": status,
+        "duration_ms": duration_ms,
+        "failure_excerpt": failure_excerpt,
+    }
+
+
+def junit_identity(file_name, classname, name):
+    if not file_name:
+        if classname and name:
+            return f"{classname}.{name}"
+        return classname or name or "unknown"
+
+    module = None
+    if file_name.endswith(".py"):
+        module = file_name[: -len(".py")].replace(os.sep, ".").replace("/", ".")
+
+    qualifier = ""
+    if classname and classname != module:
+        if module and classname.startswith(module + "."):
+            qualifier = classname[len(module) + 1:]
+        elif "." not in classname:
+            qualifier = classname
+        else:
+            qualifier = classname.rsplit(".", 1)[-1]
+
+    parts = [part for part in (qualifier, name) if part]
+    if not parts:
+        return file_name
+    return file_name + "::" + ".".join(parts)
+
+
+def pytest_identity(nodeid):
+    parts = nodeid.strip().split("::")
+    selectors = [PYTEST_PARAMETER.sub("", part) for part in parts[1:]]
+    selectors = [part for part in selectors if part]
+    if not selectors:
+        return parts[0]
+    return parts[0] + "::" + ".".join(selectors)
+
+
+def parse_pytest(stdout, harness):
+    status_map = {
+        "PASSED": "pass",
+        "FAILED": "fail",
+        "ERROR": "fail",
+        "SKIPPED": "skipped",
+        "XFAIL": "skipped",
+        "XPASS": "pass",
+    }
+    tests = []
+    for line in ANSI_ESCAPE.sub("", stdout).splitlines():
+        match = PYTEST_RESULT.match(line.strip())
+        if match is None:
+            continue
+        tests.append({
+            "id": pytest_identity(match.group("nodeid")),
+            "test_harness": harness,
+            "status": status_map[match.group("status")],
+            "duration_ms": None,
+            "failure_excerpt": None,
+        })
+    return tests
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

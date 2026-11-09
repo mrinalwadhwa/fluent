@@ -3,7 +3,9 @@ use clap::Parser;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -745,6 +747,92 @@ fn reject_retired_behavior_test_args(extra_args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn detached_attempt_log_path(project_root: &Path, work_item_id: &str, attempt_id: &str) -> PathBuf {
+    project_root.join(work_model::work_artifact_path(
+        work_item_id,
+        attempt_id,
+        "detached-run.log",
+    ))
+}
+
+fn shell_quoted_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Gracefully settle an interrupted foreground Attempt before printing the exact
+/// resume command. The handler reuses the same durable stop and owned-child
+/// settlement as `fluent attempt cancel`; it never starts a second tracker.
+struct AttemptInterruption {
+    requested: Arc<AtomicBool>,
+    settled: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl AttemptInterruption {
+    fn install(project_root: &Path, work_item_id: &str, attempt_id: &str) -> Result<Self> {
+        let requested = Arc::new(AtomicBool::new(false));
+        let settled = Arc::new((Mutex::new(false), Condvar::new()));
+        let handler_requested = Arc::clone(&requested);
+        let handler_settled = Arc::clone(&settled);
+        let project_root = project_root.to_path_buf();
+        let work_item_id = work_item_id.to_string();
+        let attempt_id = attempt_id.to_string();
+        ctrlc::set_handler(move || {
+            if handler_requested.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            eprintln!(
+                "\nInterrupted Attempt {attempt_id} for Work Item {work_item_id}; settling owned workers..."
+            );
+            let store = WorkModelStore::new(&project_root);
+            match work_attempt_loop::cancel_local_attempt(
+                &project_root,
+                &store,
+                &work_item_id,
+                &attempt_id,
+            ) {
+                Ok(_) => {
+                    println!(
+                        "Attempt {attempt_id} remains resumable at its last settled boundary."
+                    );
+                    println!("Next: fluent attempt run {work_item_id} {attempt_id}");
+                }
+                Err(error) => {
+                    eprintln!("Could not settle the interrupted Attempt: {error:#}");
+                    println!("Next: fluent attempt cancel {work_item_id} {attempt_id}");
+                    println!("Then: fluent attempt run {work_item_id} {attempt_id}");
+                }
+            }
+            let (lock, wake) = &*handler_settled;
+            *lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+        })
+        .map_err(|error| anyhow::anyhow!("install Attempt interruption handler: {error}"))?;
+        Ok(Self { requested, settled })
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_settlement(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let (lock, wake) = &*self.settled;
+        let mut settled = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*settled {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, _) = wake
+                .wait_timeout(settled, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settled = guard;
+        }
+    }
+}
+
 fn cmd_attempt(
     project_root: &Path,
     command: AttemptCommands,
@@ -1338,6 +1426,7 @@ fn cmd_attempt(
             work_item_id,
             attempt_id,
             no_sandbox,
+            detach,
             tester_no_sandbox,
             dispatch_id,
             coder,
@@ -1378,6 +1467,98 @@ fn cmd_attempt(
                         .to_string()
                 }
             };
+            if detach {
+                if dispatch_id.is_some() {
+                    bail!("--detach cannot be combined with an internal scheduler dispatch");
+                }
+                if runtime.as_deref() == Some("fargate") {
+                    bail!(
+                        "--detach starts a local background Attempt; use --runtime fargate for remote execution"
+                    );
+                }
+                let log_path = detached_attempt_log_path(project_root, &work_item_id, &attempt_id);
+                if let Some(parent) = log_path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("create detached Attempt log directory {}", parent.display())
+                    })?;
+                }
+                let log = fs::File::create(&log_path).with_context(|| {
+                    format!("create detached Attempt log {}", log_path.display())
+                })?;
+                let stderr_log = log.try_clone().with_context(|| {
+                    format!("duplicate detached Attempt log {}", log_path.display())
+                })?;
+                let executable = std::env::current_exe()
+                    .context("resolve the fluent executable for a detached Attempt")?;
+                let mut command = Command::new(executable);
+                command.current_dir(project_root);
+                command
+                    .arg("attempt")
+                    .arg("run")
+                    .arg(&work_item_id)
+                    .arg(&attempt_id);
+                if no_sandbox || global_no_sandbox {
+                    command.arg("--no-sandbox");
+                }
+                if tester_no_sandbox {
+                    command.arg("--tester-no-sandbox");
+                }
+                if let Some(coder) = coder.as_deref().or(global_coder) {
+                    command.arg("--coder").arg(coder);
+                }
+                if let Some(model) = model.as_deref() {
+                    command.arg("--model").arg(model);
+                }
+                if let Some(effort) = effort.as_deref() {
+                    command.arg("--effort").arg(effort);
+                }
+                if let Some(write_coder) = write_coder.as_deref() {
+                    command.arg("--write-coder").arg(write_coder);
+                }
+                if let Some(write_model) = write_model.as_deref() {
+                    command.arg("--write-model").arg(write_model);
+                }
+                if let Some(write_effort) = write_effort.as_deref() {
+                    command.arg("--write-effort").arg(write_effort);
+                }
+                if let Some(review_coder) = review_coder.as_deref() {
+                    command.arg("--review-coder").arg(review_coder);
+                }
+                if let Some(review_model) = review_model.as_deref() {
+                    command.arg("--review-model").arg(review_model);
+                }
+                if let Some(review_effort) = review_effort.as_deref() {
+                    command.arg("--review-effort").arg(review_effort);
+                }
+                if let Some(runtime) = runtime.as_deref() {
+                    command.arg("--runtime").arg(runtime);
+                }
+                if !extra_args.is_empty() {
+                    command.arg("--").args(&extra_args);
+                }
+                command.stdin(Stdio::null()).stdout(log).stderr(stderr_log);
+                #[cfg(unix)]
+                unsafe {
+                    use std::os::unix::process::CommandExt;
+                    command.pre_exec(|| {
+                        if libc::setsid() == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let child = command.spawn().with_context(|| {
+                    format!("start detached Attempt {attempt_id} for Work Item {work_item_id}")
+                })?;
+                println!(
+                    "Detached Attempt {attempt_id} for Work Item {work_item_id} (pid {})",
+                    child.id()
+                );
+                println!("Log: {}", log_path.display());
+                println!("Watch: tail -f {}", shell_quoted_path(&log_path));
+                println!("Stop: fluent attempt cancel {work_item_id} {attempt_id}");
+                return Ok(());
+            }
             // Capture direct recovery authority before initialization can race
             // with cancellation. Scheduler children use their earlier admission.
             let resume_cancellation_requested_at = match dispatch_id.as_deref() {
@@ -1448,12 +1629,15 @@ fn cmd_attempt(
             }
 
             if guidance::guidance_enabled() {
-                eprintln!("{}", guidance::format_coder_plan(&coder_mapping));
+                let sources = fluent::config::coder_mapping_sources(project_root, &coder_mapping)?;
+                eprintln!("{}", guidance::format_coder_plan(&coder_mapping, &sources));
             }
 
             if tester_no_sandbox {
                 eprintln!("  Tester recovery   validating exact paused Tester capability");
             }
+            let interruption =
+                AttemptInterruption::install(project_root, &work_item_id, &attempt_id)?;
             let result = work_attempt_loop::run_attempt(WorkAttemptRunConfig {
                 project_root,
                 store: &store,
@@ -1465,7 +1649,20 @@ fn cmd_attempt(
                 tester_no_sandbox,
                 resume_cancellation_requested_at: resume_cancellation_requested_at.as_deref(),
                 coder_mapping_inputs: cli_inputs.has_run_overrides().then_some(&cli_inputs),
-            })?;
+            });
+            if interruption.requested() {
+                interruption.wait_for_settlement();
+                // A foreground Attempt does not claim a scheduler dispatch. If it
+                // advances an Attempt that was previously paused by the scheduler,
+                // reconcile that exact queue entry before returning.
+                fluent::scheduler::reconcile_direct_attempt(
+                    project_root,
+                    &work_item_id,
+                    &attempt_id,
+                )?;
+                return Ok(());
+            }
+            let result = result?;
             // A foreground Attempt does not claim a scheduler dispatch. If it
             // advances an Attempt that was previously paused by the scheduler,
             // reconcile that exact queue entry before printing status hints so
@@ -1997,6 +2194,10 @@ fn cmd_queue(project_root: &Path, command: QueueCommands) -> Result<()> {
                     "Resume of Attempt {attempt} for Work Item {work_item_id} is already queued"
                 ),
             }
+            if !fluent::scheduler::coordinator_is_live(project_root) {
+                println!("No scheduler is running, so the resume stays queued until one starts.");
+                println!("Next: fluent scheduler run");
+            }
         }
         QueueCommands::List => {
             let entries = fluent::queue::list(project_root)?;
@@ -2170,12 +2371,20 @@ fn cmd_review(
             let resolver = ContentResolver::new(Some(project_root));
             fluent::tester::check_structural(project_root, false, &resolver)
                 .context("Tester is not ready; review state was not created")?;
-            let task_ids = item.add_review_only_attempt(
+            if from_working_tree {
+                fluent::work_task_executor::ensure_review_working_tree_ready(project_root)
+                    .context("review codebase --from-working-tree was not started")?;
+            }
+            let coder_mapping = work_model::resolve_coder_mapping(
+                &fluent::config::attempt_creation_inputs(project_root)?,
+            )?;
+            let task_ids = item.add_review_only_attempt_with_coder_mapping(
                 attempt_id.clone(),
                 review::REVIEWERS,
                 source_ref,
                 source_commit,
                 from_working_tree,
+                coder_mapping,
             )?;
             store.write_work_item(&item)?;
             let variant = if from_working_tree {
@@ -2597,6 +2806,26 @@ fn cmd_init(cwd: &Path, inputs: fluent::setup::InitSetupInputs) -> Result<()> {
         fs::create_dir_all(fluent_dir.join("expertise"))?;
         write_gitignore_if_absent(&fluent_dir)?;
         eprintln!("  Initialized .fluent/ in {}", cwd.display());
+    }
+
+    match fluent::setup::write_starter_tester(cwd) {
+        Ok(starter) => {
+            if starter.wrote_tester {
+                if starter.detected_command {
+                    eprintln!("  Wrote a starter Tester with a detected project test command.");
+                } else {
+                    eprintln!(
+                        "  warning: no supported project test runner detected; wrote a documented no-op Tester. Edit .fluent/tester.yaml to run your tests."
+                    );
+                }
+            }
+            if starter.wrote_extractor {
+                eprintln!(
+                    "  Wrote the bundled per-test extractor at .fluent/extract-tester-results."
+                );
+            }
+        }
+        Err(error) => eprintln!("  warning: could not write the starter Tester: {error:#}"),
     }
 
     if let Err(e) = seed_agent_instructions(cwd) {

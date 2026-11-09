@@ -185,12 +185,16 @@ Reviewers treat the Writer’s focused report as advisory evidence, inspect the 
 
 After every Reviewer passes, the Tester runs once as the authoritative final gate. It is a deterministic runner, not a coding agent. It reads one or more test commands from the project’s `.fluent/tester.yaml`, runs them sequentially in the candidate workspace, and captures each command’s output, exit code, and duration. The project’s `.fluent/extract-tester-results` executable normalizes those outputs into a single `tester-results.json` artifact, which Fluent binds to the exact reviewed commit. An introduced regression or infrastructure error returns to the Writer; a clean result advances the candidate to Learning.
 
+`fluent init` writes a starter Tester and extractor when the project has neither. The starter command is detected for Cargo, Python (`pyproject.toml`), and Node (`package.json`) projects; an unrecognized project gets a documented no-op instead of a silent green result. The bundled extractor understands `cargo-nextest`, `cargo-test`, `shell-harness`, `pytest`, and `junit` results, including JUnit XML named by `--junitxml=<path>`.
+
 Some test tools update tracked lockfiles or generated metadata as a side effect. A Work Task Tester starts only from a clean tracked candidate and restores tracked side effects after each run while retaining the original command evidence. It leaves untracked and ignored build outputs alone; a preexisting tracked edit or changed candidate commit fails closed instead of being overwritten.
 
 Writer and final Tester Tasks in one Attempt share the Fluent-owned
-Attempt-scoped Cargo and npm dependency caches, while another Attempt never
-receives those caches. Cargo admits only dependency stores; npm starts empty
-and uses private user/global configuration. Installed tools receive read/execute
+Attempt-scoped Cargo, npm, uv, and pip dependency caches, while another Attempt
+never receives those caches. Cargo admits only dependency stores; npm starts
+empty and uses private user/global configuration; `uv-cache/` and `pip-cache/`
+are exposed as `UV_CACHE_DIR` and `PIP_CACHE_DIR` so uv and pip write inside the
+Attempt instead of a read-only host cache. Installed tools receive read/execute
 access separately, and operator credentials and mutable caches stay outside the
 new grants.
 
@@ -216,11 +220,11 @@ cold if protected usage leaves no room. A Reviewer also uses its Task scratch
 area for a cold build when an existing protected cache has grown over budget;
 Fluent keeps that shared cache on disk until it can safely reclaim it.
 
-Before starting review work, run `fluent tester check` to validate the Tester through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun the check.
+Before starting review work, run `fluent tester check` to validate the Tester through the same boundary that a Tester Task uses. If this standalone preflight reports a harness problem, repair the declared configuration, extractor, or sandbox setup and rerun the check. The check also compares the `Test:` references in `documentation/behaviors.md` with the configured harnesses and warns when no harness can produce a referenced test; the warning is advisory because a project may declare partial coverage. Standalone `tester check` has no Attempt dependency cache, so its package-manager caches stay read-only; only Writer, Tester, and landing Attempt surfaces receive the cached environment.
 
 If a production Tester Task needs a tracked change to `.fluent/tester.yaml` or `.fluent/extract-tester-results`, run the exact `fluent attempt repair-tester <work-item-id> <attempt-id> --resolution "<repair needed>"` command reported by `fluent status` or the needs-user handoff. Fluent records the decision and failed Tester artifacts, schedules a narrowly scoped Writer, and accepts only a clean commit whose changes stay inside those two project Tester files. If the Writer exceeds that boundary, Fluent records the rejected commit and restores the approved candidate so a public resume can retry. After Fluent accepts the repair request, resume through the scheduler or foreground Attempt command. Fresh reviews and the final Tester bind to the repair commit; the failed Tester and original candidate remain in the Attempt history.
 
-An environmental repair that does not change the candidate can retry the same Tester directly. A SwiftPM nested-sandbox diagnostic has its separate one-Task `--no-sandbox` approval. Fluent never edits project test configuration or scripts itself.
+An environmental repair that does not change the candidate can retry the same Tester directly. A SwiftPM nested-sandbox diagnostic has its separate one-Task `--no-sandbox` approval. A package-manager cache denial is an environment repair: the `package_manager_sandbox` harness error names the denied path, and resuming the same Attempt retries the Tester. Fluent never edits project test configuration or scripts itself.
 
 Use `fluent scheduler status` to see which Fluent build owns the current
 project's queue. `fluent scheduler stop` stops claims only for that project.
