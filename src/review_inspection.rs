@@ -250,6 +250,30 @@ fn transcript_records_successful_inspection(
                 return Ok(true);
             }
         }
+
+        // OpenCode emits one completed `tool_use` record per finished tool call.
+        // A non-zero shell exit stays in `metadata.exit`; treat any failed exit as
+        // non-evidence even though the tool-call itself completed.
+        if value.get("type").and_then(|value| value.as_str()) == Some("tool_use") {
+            let state = &value["part"]["state"];
+            let completed =
+                state.get("status").and_then(|value| value.as_str()) == Some("completed");
+            let exit_ok = state["metadata"]
+                .get("exit")
+                .and_then(|value| value.as_i64())
+                .is_none_or(|exit| exit == 0);
+            if completed
+                && exit_ok
+                && value_names_any_candidate_path(
+                    &state["input"],
+                    candidate_workspace,
+                    candidate_commit,
+                    inspected_paths,
+                )
+            {
+                return Ok(true);
+            }
+        }
     }
 
     Ok(false)
@@ -897,6 +921,58 @@ mod tests {
         )
         .unwrap();
         validate(&artifact, workspace.path(), &transcript, &commit, "skills").unwrap();
+    }
+
+    #[test]
+    fn accepts_successful_opencode_inspection() {
+        let (workspace, commit) = committed_workspace();
+        let artifact = write_inspection(
+            workspace.path(),
+            &commit,
+            "skills",
+            "src/lib.rs",
+            "Confirmed the change introduces no agent-skill surface.",
+        );
+        let inspected = workspace.path().join("src/lib.rs").display().to_string();
+        let transcript = workspace.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"tool_use\",\"sessionID\":\"ses_1\",\"part\":{{\"tool\":\"read\",\"state\":{{\"status\":\"completed\",\"input\":{{\"filePath\":\"{inspected}\"}},\"output\":\"source\"}}}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        validate(&artifact, workspace.path(), &transcript, &commit, "skills").unwrap();
+    }
+
+    #[test]
+    fn rejects_failed_opencode_inspection() {
+        let (workspace, commit) = committed_workspace();
+        let artifact = write_inspection(
+            workspace.path(),
+            &commit,
+            "skills",
+            "src/lib.rs",
+            "Confirmed the change introduces no agent-skill surface.",
+        );
+        let inspected = workspace.path().join("src/lib.rs").display().to_string();
+        let transcript = workspace.path().join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"tool_use\",\"sessionID\":\"ses_1\",\"part\":{{\"tool\":\"bash\",\"state\":{{\"status\":\"completed\",\"input\":{{\"command\":\"sed -n 1,40p {inspected}\"}},\"metadata\":{{\"exit\":1}}}}}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let error =
+            validate(&artifact, workspace.path(), &transcript, &commit, "skills").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no successful provider tool result")
+        );
     }
 
     #[test]

@@ -178,7 +178,7 @@ SIDECAR
       && [ "$4" = "--follow-up-mode" ] && [ "$5" = "propose" ] \
       || reject "init must configure a coder profile and follow-up mode"
     case "$3" in
-      codex-balanced|codex-stronger|claude-balanced|codex-write-claude-review|claude-write-codex-review) ;;
+      codex-balanced|codex-stronger|claude-balanced|opencode-default|codex-write-claude-review|claude-write-codex-review) ;;
       *) reject "unsupported coder profile: $3" ;;
     esac
     case "$(stage)" in skills|init) ;; *) reject "init out of order (stage=$(stage))" ;; esac
@@ -737,7 +737,7 @@ test_prepare_records_every_curated_profile() {
 
   local rc=0 profile profile_root
   for profile in codex-balanced codex-stronger claude-balanced \
-    codex-write-claude-review claude-write-codex-review; do
+    opencode-default codex-write-claude-review claude-write-codex-review; do
     profile_root="$WORK/smoke-$profile"
     HOME="$REAL_HOME" FAKE_CMD_LOG="$FAKE_CMD_LOG" \
       bash "$HARNESS" prepare "$profile_root" --coder-profile "$profile" \

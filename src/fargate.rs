@@ -577,6 +577,32 @@ fn repair_sibling_worktrees(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Reject a coder that cannot run inside a Fargate task.
+///
+/// Attempt launches resolve both the Writer and reviewer coders before this
+/// check, so a mixed mapping cannot smuggle a local-only reviewer into a
+/// remote Attempt.
+pub fn ensure_remote_capable_coder(coder: CoderKind) -> Result<()> {
+    match coder {
+        CoderKind::Claude | CoderKind::Codex => Ok(()),
+        CoderKind::Opencode | CoderKind::Pi => Err(local_only_coder_error(coder)),
+    }
+}
+
+fn local_only_coder_error(coder: CoderKind) -> anyhow::Error {
+    match coder {
+        CoderKind::Opencode => anyhow::anyhow!(
+            "OpenCode coder is local-only and cannot run on Fargate. \
+             Use --coder claude or --coder codex for remote execution."
+        ),
+        CoderKind::Pi => anyhow::anyhow!(
+            "Pi coder is local-only and cannot run on Fargate. \
+             Use --coder claude or --coder codex for remote execution."
+        ),
+        _ => unreachable!("only local-only coders are rejected"),
+    }
+}
+
 /// Build the coder-specific environment overrides for an ECS task.
 /// Always includes `FLUENT_CODER`. For Claude, reads the OAuth token
 /// from the environment. For Codex, reads `~/.codex/auth.json` from
@@ -614,12 +640,7 @@ pub fn coder_task_overrides(coder: CoderKind) -> Result<Vec<(String, String)>> {
             }
             env.push(("CODEX_AUTH_JSON".to_string(), auth_json));
         }
-        CoderKind::Pi => {
-            anyhow::bail!(
-                "Pi coder is local-only and cannot run on Fargate. \
-                 Use --coder claude or --coder codex for remote execution."
-            );
-        }
+        CoderKind::Pi | CoderKind::Opencode => return Err(local_only_coder_error(coder)),
     }
     Ok(env)
 }
@@ -910,6 +931,25 @@ mod tests {
                 .any(|(k, v)| k == "CODEX_AUTH_JSON" && v == auth_json),
             "must include CODEX_AUTH_JSON with auth.json content"
         );
+    }
+
+    #[test]
+    fn opencode_is_rejected_on_fargate() {
+        let error = coder_task_overrides(CoderKind::Opencode)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("local-only") && error.contains("OpenCode"),
+            "OpenCode must be rejected as local-only: {error}"
+        );
+    }
+
+    #[test]
+    fn mixed_mapping_rejects_a_local_only_review_coder() {
+        assert!(ensure_remote_capable_coder(CoderKind::Claude).is_ok());
+        assert!(ensure_remote_capable_coder(CoderKind::Codex).is_ok());
+        assert!(ensure_remote_capable_coder(CoderKind::Opencode).is_err());
+        assert!(ensure_remote_capable_coder(CoderKind::Pi).is_err());
     }
 
     #[test]

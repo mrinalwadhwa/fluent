@@ -53,7 +53,9 @@ impl Event {
                 };
                 // Blank line before file operations for visual separation
                 match name.as_str() {
-                    "Read" | "Write" | "Edit" | "Bash" | "Grep" | "Glob" | "Agent" => {
+                    "Read" | "Write" | "Edit" | "Bash" | "Grep" | "Glob" | "Agent" | "read"
+                    | "write" | "edit" | "bash" | "grep" | "glob" | "task" | "todowrite"
+                    | "TodoWrite" => {
                         vec![String::new(), header]
                     }
                     _ => vec![header],
@@ -211,6 +213,52 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         "thread.started" => vec![Event::SessionInit {
             session_id: val["thread_id"].as_str().unwrap_or("").to_string(),
             model: "codex".to_string(),
+        }],
+        "step_start" => vec![Event::SessionInit {
+            session_id: val["sessionID"]
+                .as_str()
+                .or_else(|| val["part"]["sessionID"].as_str())
+                .unwrap_or("")
+                .to_string(),
+            model: "opencode".to_string(),
+        }],
+        "text" => {
+            let text = val["part"]["text"].as_str().unwrap_or("").to_string();
+            if text.is_empty() {
+                vec![]
+            } else {
+                vec![Event::Text { text }]
+            }
+        }
+        "tool_use" => {
+            let part = &val["part"];
+            let id = part["callID"]
+                .as_str()
+                .or_else(|| part["id"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = part["tool"].as_str().unwrap_or("?").to_string();
+            let title = part["state"]["title"].as_str().unwrap_or("");
+            let summary = if !title.is_empty() && title != name {
+                title.to_string()
+            } else {
+                summarize_tool_input(&name, &part["state"]["input"])
+            };
+            vec![Event::ToolUse { id, name, summary }]
+        }
+        "step_finish" => {
+            let part = &val["part"];
+            if part["reason"].as_str() == Some("tool-calls") {
+                vec![]
+            } else {
+                vec![Event::Result {
+                    duration_ms: None,
+                    cost_usd: part["cost"].as_f64(),
+                }]
+            }
+        }
+        "error" => vec![Event::Unknown {
+            event_type: "error".to_string(),
         }],
         "turn.started" => vec![],
         "turn.completed" => vec![Event::Result {
@@ -452,10 +500,10 @@ fn extract_tool_result_content(block: &serde_json::Value) -> String {
 /// Summarize tool input for display.
 fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
-        "Read" => input["file_path"].as_str().unwrap_or("").to_string(),
-        "Edit" => input["file_path"].as_str().unwrap_or("").to_string(),
-        "Write" => input["file_path"].as_str().unwrap_or("").to_string(),
-        "Bash" => {
+        "Read" | "read" => tool_path(input),
+        "Edit" | "edit" => tool_path(input),
+        "Write" | "write" => tool_path(input),
+        "Bash" | "bash" => {
             let cmd = input["command"].as_str().unwrap_or("");
             let desc = input["description"].as_str().unwrap_or("");
             if !desc.is_empty() && !cmd.is_empty() {
@@ -466,7 +514,7 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
                 format!("$ {cmd}")
             }
         }
-        "Grep" => {
+        "Grep" | "grep" => {
             let pattern = input["pattern"].as_str().unwrap_or("");
             let path = input["path"].as_str().unwrap_or("");
             if !path.is_empty() {
@@ -475,14 +523,23 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
                 format!("/{pattern}/")
             }
         }
-        "Glob" => input["pattern"].as_str().unwrap_or("").to_string(),
-        "TodoWrite" => "update tasks".to_string(),
-        "Agent" => {
-            let desc = input["description"].as_str().unwrap_or("");
-            desc.to_string()
-        }
+        "Glob" | "glob" => input["pattern"].as_str().unwrap_or("").to_string(),
+        "TodoWrite" | "todowrite" => "update tasks".to_string(),
+        "Agent" | "task" => input["description"].as_str().unwrap_or("").to_string(),
+        "webfetch" => input["url"].as_str().unwrap_or("").to_string(),
+        "websearch" => input["query"].as_str().unwrap_or("").to_string(),
         _ => String::new(),
     }
+}
+
+/// OpenCode tool inputs use `path`; Claude-compatible inputs use `file_path`.
+fn tool_path(input: &serde_json::Value) -> String {
+    input["path"]
+        .as_str()
+        .or_else(|| input["filePath"].as_str())
+        .or_else(|| input["file_path"].as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Incrementally read new lines from a transcript file.
@@ -779,6 +836,114 @@ mod tests {
                 assert_eq!(model, "codex");
             }
             _ => panic!("Expected SessionInit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_step_start() {
+        let line = r#"{"type":"step_start","timestamp":1767036059338,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_1","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","type":"step-start"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::SessionInit { session_id, model } => {
+                assert_eq!(session_id, "ses_494719016ffe85dkDMj0FPRbHK");
+                assert_eq!(model, "opencode");
+            }
+            _ => panic!("Expected SessionInit"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_text() {
+        let line = r#"{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"FLUENT_OPENCODE_READY"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Text { text } => assert_eq!(text, "FLUENT_OPENCODE_READY"),
+            _ => panic!("Expected Text"),
+        }
+        assert!(parse_line(r#"{"type":"text","part":{"text":""}}"#).is_empty());
+    }
+
+    #[test]
+    fn test_parse_opencode_tool_use() {
+        let line = r#"{"type":"tool_use","sessionID":"ses_1","part":{"type":"tool","callID":"call-1","tool":"read","state":{"status":"completed","input":{"path":"/tmp/secret.txt"},"title":"read"}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::ToolUse { id, name, summary } => {
+                assert_eq!(id, "call-1");
+                assert_eq!(name, "read");
+                assert_eq!(summary, "/tmp/secret.txt");
+            }
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_tool_use_uses_descriptive_title() {
+        let line = r#"{"type":"tool_use","sessionID":"ses_1","part":{"type":"tool","callID":"call-2","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"title":"List install dir"}}}"#;
+        let events = parse_line(line);
+        match &events[0] {
+            Event::ToolUse { summary, .. } => assert_eq!(summary, "List install dir"),
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_todowrite_summary() {
+        let line = r#"{"type":"tool_use","sessionID":"ses_1","part":{"type":"tool","callID":"call-3","tool":"todowrite","state":{"status":"completed","input":{},"title":"todowrite"}}}"#;
+        let events = parse_line(line);
+        match &events[0] {
+            Event::ToolUse { summary, .. } => assert_eq!(summary, "update tasks"),
+            _ => panic!("Expected ToolUse"),
+        }
+        assert!(
+            events[0].lines().first().is_some_and(String::is_empty),
+            "file-work tools keep the blank separator line"
+        );
+    }
+
+    #[test]
+    fn test_parse_opencode_step_finish() {
+        let line = r#"{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop","cost":0.001,"tokens":{"input":671,"output":8,"reasoning":0,"cache":{"read":21415,"write":0}}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Result { cost_usd, .. } => {
+                assert!((cost_usd.unwrap() - 0.001).abs() < 0.000001);
+            }
+            _ => panic!("Expected Result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_step_finish_without_reason() {
+        let line = r#"{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","cost":0.001,"tokens":{"input":671,"output":8}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Result { cost_usd, .. } => {
+                assert!((cost_usd.unwrap() - 0.001).abs() < 0.000001);
+            }
+            _ => panic!("Expected Result for a finish without a reason"),
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_tool_calls_step_finish_is_silent() {
+        let line = r#"{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":3,"output":108}}}"#;
+        assert!(parse_line(line).is_empty());
+    }
+
+    #[test]
+    fn test_parse_opencode_error() {
+        let line = r#"{"type":"error","sessionID":"ses_1","error":{"name":"APIError","data":{"message":"Rate limit exceeded"}}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Unknown { event_type } => assert_eq!(event_type, "error"),
+            _ => panic!("Expected Unknown"),
         }
     }
 

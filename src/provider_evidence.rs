@@ -403,6 +403,7 @@ fn is_safe_prelude(provider: CoderKind, event: &Value) -> bool {
             event["type"].as_str(),
             Some("thread.started") | Some("turn.started")
         ),
+        CoderKind::Opencode => false,
         CoderKind::Pi => false,
     }
 }
@@ -418,6 +419,7 @@ fn is_terminal_rate_limit(provider: CoderKind, event: &Value) -> bool {
                 && event["code"].as_str() == Some("rate_limit")
                 && has_timing
         }
+        CoderKind::Opencode => false,
         CoderKind::Pi => false,
     }
 }
@@ -431,6 +433,27 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/provider-transcripts")
             .join(name)
+    }
+
+    #[test]
+    fn opencode_has_no_prelude_or_rate_limit_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript = directory.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_1\"}\n{\"type\":\"error\",\"error\":{\"data\":{\"statusCode\":429}}}\n",
+        )
+        .unwrap();
+
+        assert!(classify_provider_unavailable(CoderKind::Opencode, &transcript).is_none());
+        assert!(!is_safe_prelude(
+            CoderKind::Opencode,
+            &serde_json::json!({"type":"step_start"})
+        ));
+        assert!(!is_terminal_rate_limit(
+            CoderKind::Opencode,
+            &serde_json::json!({"type":"error","retry_after":1})
+        ));
     }
 
     #[test]

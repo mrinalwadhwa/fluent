@@ -31,7 +31,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_sandbox: bool,
 
-    /// Coding agent to launch: claude, codex, or pi
+    /// Coding agent to launch: claude, codex, opencode, or pi
     #[arg(long)]
     pub coder: Option<String>,
 
@@ -157,7 +157,7 @@ pub enum Commands {
     /// Initialize .fluent/ directory
     Init {
         /// Coder profile: codex-balanced, codex-stronger, claude-balanced,
-        /// codex-write-claude-review, claude-write-codex-review, or custom
+        /// codex-write-claude-review, claude-write-codex-review, opencode-default, or custom
         #[arg(long)]
         coder_profile: Option<String>,
 
@@ -497,7 +497,7 @@ pub enum AttemptCommands {
         #[arg(long, value_parser = ["headless", "native"])]
         terminal_mode: Option<String>,
 
-        /// Coding agent to launch: claude, codex, or pi
+        /// Coding agent to launch: claude, codex, opencode, or pi
         #[arg(long)]
         coder: Option<String>,
 
@@ -509,7 +509,7 @@ pub enum AttemptCommands {
         #[arg(long)]
         effort: Option<String>,
 
-        /// Coder for write Tasks: claude, codex, or pi
+        /// Coder for write Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         write_coder: Option<String>,
 
@@ -521,7 +521,7 @@ pub enum AttemptCommands {
         #[arg(long)]
         write_effort: Option<String>,
 
-        /// Coder for review Tasks: claude, codex, or pi
+        /// Coder for review Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         review_coder: Option<String>,
 
@@ -702,7 +702,7 @@ pub enum AttemptCommands {
         #[arg(long, hide = true)]
         dispatch_id: Option<String>,
 
-        /// Coding agent to launch: claude, codex, or pi
+        /// Coding agent to launch: claude, codex, opencode, or pi
         #[arg(long)]
         coder: Option<String>,
 
@@ -714,7 +714,7 @@ pub enum AttemptCommands {
         #[arg(long)]
         effort: Option<String>,
 
-        /// Coder for write Tasks: claude, codex, or pi
+        /// Coder for write Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         write_coder: Option<String>,
 
@@ -726,7 +726,7 @@ pub enum AttemptCommands {
         #[arg(long)]
         write_effort: Option<String>,
 
-        /// Coder for review Tasks: claude, codex, or pi
+        /// Coder for review Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         review_coder: Option<String>,
 
@@ -1022,7 +1022,7 @@ pub enum TaskCommands {
         #[arg(long)]
         no_sandbox: bool,
 
-        /// Coding agent to launch: claude, codex, or pi
+        /// Coding agent to launch: claude, codex, opencode, or pi
         #[arg(long)]
         coder: Option<String>,
 
@@ -1034,7 +1034,7 @@ pub enum TaskCommands {
         #[arg(long)]
         effort: Option<String>,
 
-        /// Coder for write Tasks: claude, codex, or pi
+        /// Coder for write Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         write_coder: Option<String>,
 
@@ -1046,7 +1046,7 @@ pub enum TaskCommands {
         #[arg(long)]
         write_effort: Option<String>,
 
-        /// Coder for review Tasks: claude, codex, or pi
+        /// Coder for review Tasks: claude, codex, opencode, or pi
         #[arg(long)]
         review_coder: Option<String>,
 
@@ -1246,7 +1246,7 @@ pub enum SkillsCommands {
         #[arg(long, conflicts_with = "global")]
         project: bool,
 
-        /// Select agents to install for: codex, claude, comma-separated, or *
+        /// Select agents to install for: codex, claude, opencode, comma-separated, or *
         #[arg(long)]
         agent: Option<String>,
     },

@@ -467,6 +467,92 @@ pub fn extract_pi_usage(
     rows
 }
 
+/// Extract per-step token usage from an OpenCode JSONL transcript.
+///
+/// OpenCode emits `type: "step_finish"` events carrying
+/// `part.tokens.{input,output,reasoning}` and `part.tokens.cache.read`.
+/// The model is absent from the event, so rows start as `unknown` and
+/// `log_usage_from_transcript` fills them from `coder-info.json` when possible.
+/// Current releases can omit the final `step_finish`; a short transcript then
+/// yields fewer rows rather than an error.
+pub fn extract_opencode_usage(
+    transcript_path: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Vec<UsageRow> {
+    let content = match fs::read_to_string(transcript_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut rows = Vec::new();
+    let mut step_start_ms: Option<u64> = None;
+
+    for line in content.lines() {
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if val["type"].as_str() == Some("step_start") {
+            step_start_ms = val["timestamp"].as_u64();
+            continue;
+        }
+        if val["type"].as_str() != Some("step_finish") {
+            continue;
+        }
+
+        let tokens = &val["part"]["tokens"];
+        let input_tokens = match tokens["input"].as_u64() {
+            Some(n) => n,
+            None => continue,
+        };
+        let output_tokens = match tokens["output"].as_u64() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let duration_ms = val["timestamp"]
+            .as_u64()
+            .zip(step_start_ms)
+            .map(|(end, start)| end.saturating_sub(start));
+        step_start_ms = None;
+
+        rows.push(UsageRow {
+            ts: chrono::Utc::now().to_rfc3339(),
+            coder: "opencode".to_string(),
+            work_item_id: work_item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            task_id: task_id.to_string(),
+            model: "unknown".to_string(),
+            input_tokens,
+            output_tokens,
+            cached_input_tokens: tokens["cache"]["read"].as_u64().unwrap_or(0),
+            reasoning_output_tokens: tokens["reasoning"].as_u64(),
+            duration_ms,
+        });
+    }
+
+    rows
+}
+
+fn extract_usage_for_coder(
+    coder: &str,
+    transcript_path: &Path,
+    work_item_id: &str,
+    attempt_id: &str,
+    task_id: &str,
+) -> Vec<UsageRow> {
+    match coder {
+        "claude" => extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id),
+        "codex" => extract_codex_usage(transcript_path, work_item_id, attempt_id, task_id),
+        "opencode" => extract_opencode_usage(transcript_path, work_item_id, attempt_id, task_id),
+        "pi" => extract_pi_usage(transcript_path, work_item_id, attempt_id, task_id),
+        _ => Vec::new(),
+    }
+}
+
 pub fn log_usage_from_transcript(
     transcript_path: &Path,
     coder: &str,
@@ -475,6 +561,8 @@ pub fn log_usage_from_transcript(
     task_id: &str,
 ) {
     let mut rows = match coder {
+        // Keep the native Claude session evidence v0.7.0 added, then defer the
+        // remaining coders to the shared extractor (which includes OpenCode).
         "claude" => {
             let native_session = transcript_path.with_file_name("claude-task-usage.jsonl");
             if native_session.is_file() {
@@ -488,9 +576,7 @@ pub fn log_usage_from_transcript(
                 extract_claude_usage(transcript_path, work_item_id, attempt_id, task_id)
             }
         }
-        "codex" => extract_codex_usage(transcript_path, work_item_id, attempt_id, task_id),
-        "pi" => extract_pi_usage(transcript_path, work_item_id, attempt_id, task_id),
-        _ => return,
+        _ => extract_usage_for_coder(coder, transcript_path, work_item_id, attempt_id, task_id),
     };
 
     if rows.is_empty() {
@@ -1121,6 +1207,87 @@ mod tests {
         let rows = extract_pi_usage(&path, "wi-1", "a1", "t1");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cached_input_tokens, 42);
+    }
+
+    #[test]
+    fn extract_opencode_usage_returns_one_row_per_step_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"step_start","timestamp":1000,"sessionID":"ses_1","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"working"}}
+{"type":"step_finish","timestamp":1500,"sessionID":"ses_1","part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":3,"output":108,"reasoning":0,"cache":{"read":0,"write":26627}}}}
+{"type":"step_start","timestamp":2000,"sessionID":"ses_1","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"done"}}
+"#,
+        )
+        .unwrap();
+
+        let rows = extract_opencode_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1, "only observed step_finish events count");
+        assert_eq!(rows[0].coder, "opencode");
+        assert_eq!(rows[0].input_tokens, 3);
+        assert_eq!(rows[0].output_tokens, 108);
+        assert_eq!(rows[0].duration_ms, Some(500));
+        assert_eq!(rows[0].model, "unknown");
+    }
+
+    #[test]
+    fn extract_opencode_usage_reads_reasoning_and_cache_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"step_start","timestamp":1000,"sessionID":"ses_1","part":{"type":"step-start"}}
+{"type":"step_finish","timestamp":1400,"sessionID":"ses_1","part":{"type":"step-finish","reason":"stop","tokens":{"input":671,"output":8,"reasoning":5,"cache":{"read":21415,"write":0}}}}
+"#,
+        )
+        .unwrap();
+
+        let rows = extract_opencode_usage(&path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].input_tokens, 671);
+        assert_eq!(rows[0].output_tokens, 8);
+        assert_eq!(rows[0].reasoning_output_tokens, Some(5));
+        assert_eq!(rows[0].cached_input_tokens, 21415);
+    }
+
+    #[test]
+    fn extract_opencode_usage_tolerates_missing_final_step_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"step_start","timestamp":1000,"sessionID":"ses_1","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"final answer"}}
+"#,
+        )
+        .unwrap();
+
+        assert!(extract_opencode_usage(&path, "wi-1", "a1", "t1").is_empty());
+    }
+
+    #[test]
+    fn extract_opencode_usage_returns_empty_for_missing_file() {
+        let rows = extract_opencode_usage(Path::new("/nonexistent"), "wi-1", "a1", "t1");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn extract_usage_for_coder_routes_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"step_finish","timestamp":1000,"sessionID":"ses_1","part":{"type":"step-finish","reason":"stop","tokens":{"input":10,"output":4}}}
+"#,
+        )
+        .unwrap();
+
+        let rows = extract_usage_for_coder("opencode", &path, "wi-1", "a1", "t1");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].coder, "opencode");
     }
 
     #[test]

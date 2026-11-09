@@ -288,8 +288,8 @@ Autonomous Codex workers use a private authentication home, not the interactive
 Codex configuration or hooks. If Fluent pauses an Attempt for Codex
 authentication, run `codex login`, then resume it with `fluent attempt run
 <work-item-id> [attempt-id]`. Interactive sessions use the user's normal
-configuration. For explicit skill roots or the autonomous Claude home, read
-[`references/coder-environment.md`](references/coder-environment.md).
+configuration. For explicit skill roots or the autonomous Claude or OpenCode
+home, read [`references/coder-environment.md`](references/coder-environment.md).
 
 ### Recover Claude readiness failures
 
@@ -383,9 +383,9 @@ When `.fluent/` does not exist:
    Which coder setup should Fluent use?
 
    (a) Codex only — choose balanced or stronger next (recommended: balanced speed)
-   (b) Claude only — use claude-balanced
-   (c) Mixed providers — choose the writer provider next
-   (d) Custom — choose every writer and reviewer value
+   (b) Claude only — claude-balanced; (c) OpenCode only — opencode-default
+   (d) Mixed providers — choose the writer provider next
+   (e) Custom — choose every writer and reviewer value
    ```
 
 3. For Codex, ask `(a) codex-balanced — gpt-5.6-terra, medium` or
@@ -407,9 +407,9 @@ When `.fluent/` does not exist:
    flags may also override individual values in a curated profile.
 
    The coder profile controls Fluent's Writer and reviewers. It does not install
-   the interactive Fluent skill into Codex or Claude Code directories; skill
-   installation is separate. Use `fluent skills add --agent codex --project` or
-   `fluent skills add --agent claude --global` for an explicit target.
+   the interactive Fluent skill into Codex, Claude Code, or OpenCode directories;
+   skill installation is separate. Use `fluent skills add --agent codex --project`,
+   `--agent claude --global`, or `--agent opencode --project` for an explicit target.
 
 6. Configured init checks durable Git paths, the host sandbox, and each distinct
    selected provider before mutation. For `FLUENT_INIT_DURABLE_PATH_IGNORED`,

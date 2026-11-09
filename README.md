@@ -10,7 +10,7 @@ Fluent is a factory that autonomously turns your team's vision, ideas, bug repor
   </picture>
 </p>
 
-You use the factory through the Fluent [skill](https://agentskills.io/) in Codex, Claude Code, Pi, or another coding agent that supports skills. The skill turns your conversation into Fluent's interface and drives its command-line machinery for you.
+You use the factory through the Fluent [skill](https://agentskills.io/) in Codex, Claude Code, OpenCode, Pi, or another coding agent that supports skills. The skill turns your conversation into Fluent's interface and drives its command-line machinery for you.
 
 ### Install
 
@@ -21,8 +21,10 @@ npx skills add mrinalwadhwa/fluent --skill fluent  # currently macOS only
 Use the command above from the project where you want Fluent. The `skills` CLI
 creates a project skill directory (commonly `.agents/skills/fluent` for Codex,
 or the agent-specific `.codex/skills/fluent` and `.claude/skills/fluent` roots)
-and records the source in `skills-lock.json`. Review and commit those
-project-local files according to your repository's policy.
+and records the source in `skills-lock.json`. OpenCode discovers the universal
+`.agents/skills/fluent` root as well as `.claude/skills/fluent` and
+`.opencode/skills/fluent`. Review and commit those project-local files according
+to your repository's policy.
 
 The installed skill is a small bootstrap. On its first invocation,
 `fluent skills add` replaces that marked bootstrap with the full skill and a
@@ -30,7 +32,7 @@ Fluent ownership sidecar. It also removes only Fluent's entry from
 `skills-lock.json`, so `npx skills update` cannot restore the bootstrap; other
 skills in the lock remain unchanged. Repeating the Fluent command leaves a
 current managed installation untouched. The bare command does not create an
-absent `.claude` or `.codex` skill root.
+absent `.claude`, `.codex`, or `.opencode` skill root.
 
 To install the interactive skill somewhere other than the detected bootstrap,
 name both the agent and the scope:
@@ -38,16 +40,19 @@ name both the agent and the scope:
 ```bash
 fluent skills add --agent codex --project
 fluent skills add --agent claude --global
-fluent skills add --agent codex,claude --global
+fluent skills add --agent opencode --project
+fluent skills add --agent codex,claude,opencode --global
 ```
 
-These commands choose where you invoke Fluent. The coder profile selected by
+OpenCode's global target is `~/.config/opencode/skills`; its project target is
+`.opencode/skills`. These commands choose where you invoke Fluent. The coder
+profile selected by
 `fluent init` separately chooses which providers run Writer and reviewer work.
 
 Start your coding agent in the project folder, then ask it to use Fluent and
 describe what you want to explore, build, fix, or improve.
 
-The first invocation sets up Fluent for that project and starts shaping the work with you. You can also invoke the skill explicitly: `$fluent` in Codex, `/fluent` in Claude Code, or `/skill:fluent` in Pi.
+The first invocation sets up Fluent for that project and starts shaping the work with you. You can also invoke the skill explicitly: `$fluent` in Codex, `/fluent` in Claude Code, or `/skill:fluent` in Pi. In OpenCode, ask it to load the `fluent` skill.
 
 For autonomous Codex work, Fluent accepts a standalone `codex` executable or
 an official npm installation whose platform-native package is paired with that
@@ -263,7 +268,7 @@ command and first coding-agent conversation.
 Fluent's declared release suites run nested provider routes through the
 fixture-controlled executables in `tests/fixtures/provider-doubles`. The
 `FLUENT_TEST_HERMETIC_PROVIDERS` test marker makes the provider boundary remove
-Claude, Codex, and Pi credentials from child processes. A fixture that must
+Claude, Codex, OpenCode, and Pi credentials from child processes. A fixture that must
 exercise one credential path names that credential explicitly with
 `FLUENT_TEST_FIXTURE_PROVIDER_CREDENTIAL`; no other provider credential crosses
 the boundary. The doubles accept only their readiness probes and fail every
@@ -287,7 +292,7 @@ Fluent then runs independent Reviewers in parallel. Every Reviewer reads the app
 - The Documentation Reviewer checks whether the change is documented at the levels its readers need, from code comments and module documentation to architecture and user-facing guides. It reads the documentation alongside the code to find missing or inaccurate explanations, inconsistent vocabulary, poor organization, vague claims, and prose that does not help someone understand or use the system.
 - The Skills Reviewer reads each changed Agent Skill as a complete package and traces how it is invoked. It checks the skill’s specification, discoverability, progressive disclosure, instructions, references, scripts, assets, writing, interactive questions, and overlap with sibling skills, then asks whether the package is likely to accomplish its stated purpose.
 
-Each Reviewer writes a report that records its evidence, classifies each finding as blocking or minor, and returns `pass`, `fail`, or `uncertain`. `pass` means no blocking findings remain. A passing Reviewer also names at least one tracked file it inspected; Fluent binds that declaration to the exact candidate commit and requires a successful Codex, Claude, or Pi tool event that identifies both the candidate and the file. The event may use one absolute path, workspace and repository-relative path arguments, or exact commit and repository-relative path arguments. A tool failure is harmless when the Reviewer recovers and supplies that evidence, but a pass without verified inspection evidence fails closed. `fail` means the Writer must address at least one blocking finding. `uncertain` means the Reviewer cannot confidently decide from the approved context and returns the question to the human queue.
+Each Reviewer writes a report that records its evidence, classifies each finding as blocking or minor, and returns `pass`, `fail`, or `uncertain`. `pass` means no blocking findings remain. A passing Reviewer also names at least one tracked file it inspected; Fluent binds that declaration to the exact candidate commit and requires a successful Codex, Claude, OpenCode, or Pi tool event that identifies both the candidate and the file. The event may use one absolute path, workspace and repository-relative path arguments, or exact commit and repository-relative path arguments. A tool failure is harmless when the Reviewer recovers and supplies that evidence, but a pass without verified inspection evidence fails closed. `fail` means the Writer must address at least one blocking finding. `uncertain` means the Reviewer cannot confidently decide from the approved context and returns the question to the human queue.
 
 When an uncertain review came from an external problem and the candidate does not need to change, repair that problem and run the exact `fluent queue resume <work-item-id> --attempt <attempt-id>` command from status for scheduler-owned Work, or use `fluent attempt run <work-item-id> <attempt-id>` in the foreground. Fluent verifies that the candidate is still clean at the reviewed commit, then reruns only the uncertain Reviewer roles. Passing reviews remain valid. If the candidate or review evidence changed, Fluent refuses the resume instead of combining evidence from different candidate states.
 

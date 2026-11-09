@@ -136,6 +136,7 @@ pub fn bundled_content(relative: &str) -> Option<String> {
         "sandbox/common.sb" => Some(include_str!("../sandboxes/common.sb").to_string()),
         "sandbox/claude-code.sb" => Some(include_str!("../sandboxes/claude-code.sb").to_string()),
         "sandbox/codex.sb" => Some(include_str!("../sandboxes/codex.sb").to_string()),
+        "sandbox/opencode.sb" => Some(include_str!("../sandboxes/opencode.sb").to_string()),
         "sandbox/pi.sb" => Some(include_str!("../sandboxes/pi.sb").to_string()),
         // General expertise
         "expertise/INDEX.md" => Some(include_str!("../expertise/INDEX.md").to_string()),
@@ -728,6 +729,7 @@ Check item {{ITEM_ID}}.
         assert!(bundled_content("sandbox/common.sb").is_some());
         assert!(bundled_content("sandbox/claude-code.sb").is_some());
         assert!(bundled_content("sandbox/codex.sb").is_some());
+        assert!(bundled_content("sandbox/opencode.sb").is_some());
     }
 
     #[test]
@@ -1146,11 +1148,13 @@ Check item {{ITEM_ID}}.
         assert!(
             setup.contains("(a) Codex only")
                 && setup.contains("(b) Claude only")
-                && setup.contains("(c) Mixed providers")
-                && setup.contains("(d) Custom")
+                && setup.contains("(c) OpenCode only")
+                && setup.contains("(d) Mixed providers")
+                && setup.contains("(e) Custom")
                 && setup.contains("codex-balanced")
                 && setup.contains("codex-stronger")
                 && setup.contains("claude-balanced")
+                && setup.contains("opencode-default")
                 && setup.contains("codex-write-claude-review")
                 && setup.contains("claude-write-codex-review")
         );

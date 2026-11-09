@@ -275,7 +275,7 @@ LOCK
 
 validate_coder_profile() {
   case "$1" in
-    codex-balanced|codex-stronger|claude-balanced|codex-write-claude-review|claude-write-codex-review)
+    codex-balanced|codex-stronger|claude-balanced|opencode-default|codex-write-claude-review|claude-write-codex-review)
       return 0
       ;;
     *)

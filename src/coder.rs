@@ -7,6 +7,13 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_PI_MODEL: &str = "qwen3.6-35b-a3b";
+/// OpenCode v2 is required so every autonomous launch can use `run --standalone`
+/// and keep tool execution inside Fluent's Seatbelt boundary instead of the
+/// operator's shared background server.
+pub(crate) const MINIMUM_OPENCODE_MAJOR_VERSION: u32 = 2;
+/// A resumed OpenCode session already carries the Fluent system prompt, so the
+/// continuation names the remaining work instead of repeating it.
+const OPENCODE_CONTINUATION_PROMPT: &str = "Continue the current Fluent Task from the existing session state. Do not repeat completed tool actions. Finish the requested work and report completion evidence.";
 pub(crate) const PROVIDER_STDERR_FILENAME: &str = "provider-stderr.log";
 pub(crate) const PROVIDER_TIMING_FILENAME: &str = "provider-timing.json";
 const PROVIDER_ARGUMENT_DIAGNOSTIC_LIMIT: usize = 512;
@@ -186,6 +193,57 @@ fn pi_model() -> String {
         .unwrap_or_else(|_| DEFAULT_PI_MODEL.to_string())
 }
 
+/// OpenCode expects a provider-qualified model (`provider/model`). An explicit
+/// `FLUENT_OPENCODE_MODEL` is passed as written; the shared `FLUENT_MODEL`
+/// fallback only applies when it already names a provider, because the other
+/// coders accept unqualified model names.
+fn opencode_model() -> Option<String> {
+    let explicit = std::env::var("FLUENT_OPENCODE_MODEL").ok();
+    let global = std::env::var("FLUENT_MODEL").ok();
+    let resolved = resolve_opencode_model(explicit.as_deref(), global.as_deref());
+    if resolved.is_none() && opencode_model_warning_is_due(explicit.as_deref(), global.as_deref()) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "warning: FLUENT_MODEL not applied to OpenCode: provider-qualified 'provider/model' required (set FLUENT_OPENCODE_MODEL)"
+            );
+        });
+    }
+    resolved
+}
+
+/// Whether a shared, unqualified `FLUENT_MODEL` was ignored for OpenCode and
+/// the operator has not supplied an explicit OpenCode model.
+fn opencode_model_warning_is_due(explicit: Option<&str>, global: Option<&str>) -> bool {
+    explicit.map(str::trim).is_none_or(str::is_empty)
+        && global
+            .map(str::trim)
+            .is_some_and(|model| !model.is_empty() && !model.contains('/'))
+}
+
+fn resolve_opencode_model(explicit: Option<&str>, global: Option<&str>) -> Option<String> {
+    if let Some(model) = explicit.map(str::trim).filter(|model| !model.is_empty()) {
+        return Some(model.to_string());
+    }
+    global
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && model.contains('/'))
+        .map(str::to_string)
+}
+
+/// Provider credentials an OpenCode launch may read from its environment.
+pub(crate) const OPENCODE_PROVIDER_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "OLLAMA_API_KEY",
+];
+
 /// Apply Fluent's env defaults plus caller-provided extras to a Coder command.
 /// `GIT_EDITOR` and `GIT_SEQUENCE_EDITOR` default to `false` so interactive editor
 /// prompts (commit messages, `rebase -i` reword, broken commit messages during
@@ -255,6 +313,7 @@ pub(crate) fn codex_ca_bundle() -> Option<PathBuf> {
 pub enum CoderKind {
     Claude,
     Codex,
+    Opencode,
     Pi,
 }
 
@@ -277,8 +336,9 @@ impl CoderKind {
         match value.trim().to_lowercase().as_str() {
             "claude" | "claude-code" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "opencode" => Ok(Self::Opencode),
             "pi" => Ok(Self::Pi),
-            other => bail!("Unknown coder '{other}'. Available: claude, codex, pi."),
+            other => bail!("Unknown coder '{other}'. Available: claude, codex, opencode, pi."),
         }
     }
 
@@ -286,6 +346,7 @@ impl CoderKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Opencode => "opencode",
             Self::Pi => "pi",
         }
     }
@@ -294,6 +355,7 @@ impl CoderKind {
         match self {
             Self::Claude => claude_model().unwrap_or_default(),
             Self::Codex => codex_model().unwrap_or_default(),
+            Self::Opencode => opencode_model().unwrap_or_default(),
             Self::Pi => pi_model(),
         }
     }
@@ -351,6 +413,15 @@ impl CoderKind {
                     .unwrap_or_else(|| PathBuf::from("codex")),
             }),
             Self::Pi => Box::new(PiCode {
+                sandbox_profile: match &sandbox {
+                    CoderSandbox::SeatbeltProfile(profile)
+                    | CoderSandbox::TrustedSeatbeltProfile(profile) => Some(profile.clone()),
+                    _ => None,
+                },
+                trusted_sandbox: matches!(sandbox, CoderSandbox::TrustedSeatbeltProfile(_)),
+                model_override: model.map(str::to_string),
+            }),
+            Self::Opencode => Box::new(OpencodeCode {
                 sandbox_profile: match &sandbox {
                     CoderSandbox::SeatbeltProfile(profile)
                     | CoderSandbox::TrustedSeatbeltProfile(profile) => Some(profile.clone()),
@@ -1354,6 +1425,14 @@ fn classify_pi_provider_argument_failure(
     classify_provider_argument_failure(completion, capture, extra_args, CoderKind::Pi)
 }
 
+fn classify_opencode_provider_argument_failure(
+    completion: CoderRunCompletion,
+    capture: Option<&TranscriptCapture<'_>>,
+    extra_args: &[String],
+) -> CoderRunCompletion {
+    classify_provider_argument_failure(completion, capture, extra_args, CoderKind::Opencode)
+}
+
 fn classify_provider_argument_failure(
     mut completion: CoderRunCompletion,
     capture: Option<&TranscriptCapture<'_>>,
@@ -1711,6 +1790,214 @@ impl Coder for PiCode {
         apply_coder_env(&mut cmd, extra_env);
         cmd.args(["--thinking", "off"]);
         cmd.args(["--append-system-prompt", system_prompt]);
+        cmd.args(extra_args);
+
+        let status = cmd.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// OpenCode v2 invoked through its non-interactive `run` command.
+///
+/// Autonomous launches always request `--standalone`. Without it, OpenCode
+/// attaches to the operator's shared background server and tool execution
+/// happens outside Fluent's Seatbelt boundary.
+pub struct OpencodeCode {
+    pub sandbox_profile: Option<String>,
+    pub trusted_sandbox: bool,
+    pub model_override: Option<String>,
+}
+
+impl OpencodeCode {
+    fn effective_model(&self) -> Option<String> {
+        self.model_override
+            .clone()
+            .filter(|model| !model.trim().is_empty())
+            .or_else(opencode_model)
+    }
+
+    fn build_command(&self, working_dir: &Path) -> Command {
+        if let Some(profile) = &self.sandbox_profile {
+            let mut cmd = Command::new(if self.trusted_sandbox {
+                trusted_sandbox_executable()
+            } else {
+                "sandbox-exec"
+            });
+            if self.trusted_sandbox {
+                restrict_trusted_coder_env(&mut cmd);
+                // The shared trusted allowlist stays minimal. OpenCode's own
+                // provider keys are restored only for an OpenCode launch.
+                for key in OPENCODE_PROVIDER_ENV_KEYS {
+                    if let Some(value) = std::env::var_os(key) {
+                        cmd.env(key, value);
+                    }
+                }
+            }
+            cmd.args(["-f", profile]);
+            cmd.arg("opencode");
+            cmd.current_dir(working_dir);
+            cmd
+        } else {
+            let mut cmd = Command::new("opencode");
+            cmd.current_dir(working_dir);
+            cmd
+        }
+    }
+
+    fn build_run_command(
+        &self,
+        working_dir: &Path,
+        session: CoderSession<'_>,
+        system_prompt: &str,
+        prompt: &str,
+        extra_args: &[String],
+        capture_transcript: bool,
+    ) -> Command {
+        let mut cmd = self.build_command(working_dir);
+        cmd.arg("run");
+        cmd.arg("--standalone");
+        cmd.args(["--auto", "--agent", "build"]);
+        // Autonomous work must not attempt self-updates or download language
+        // servers from inside the role sandbox.
+        cmd.env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+        cmd.env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1");
+        if capture_transcript {
+            cmd.args(["--format", "json"]);
+        }
+        if let Some(model) = self.effective_model() {
+            cmd.args(["--model", &model]);
+        }
+        let resume = matches!(session, CoderSession::Resume(_));
+        if let CoderSession::Resume(session_id) = session {
+            cmd.args(["--session", session_id]);
+        }
+        if resume {
+            cmd.arg(OPENCODE_CONTINUATION_PROMPT);
+        } else {
+            cmd.arg(format!("{system_prompt}\n\n---\n\n{prompt}"));
+        }
+        cmd.args(extra_args);
+        cmd
+    }
+}
+
+impl Coder for OpencodeCode {
+    fn run(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        transcript_file: Option<&Path>,
+    ) -> Result<i32> {
+        let capture =
+            transcript_file.map(|path| TranscriptCapture::with_config(path, Default::default()));
+        self.run_captured(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture.as_ref(),
+        )
+    }
+
+    fn run_captured(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> Result<i32> {
+        self.run_captured_reported(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+        )
+        .into_result()
+    }
+
+    fn run_captured_reported(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+    ) -> CoderRunCompletion {
+        self.run_captured_reported_session(
+            prompt,
+            system_prompt,
+            working_dir,
+            extra_args,
+            extra_env,
+            capture,
+            CoderSession::Ephemeral,
+        )
+    }
+
+    fn run_captured_reported_session(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+        capture: Option<&TranscriptCapture<'_>>,
+        session: CoderSession<'_>,
+    ) -> CoderRunCompletion {
+        let want_transcript = capture.is_some();
+        let transcript_file = capture.map(|c| c.path);
+        let config = capture.map(|c| c.config.clone()).unwrap_or_default();
+        classify_opencode_provider_argument_failure(
+            run_with_transcript_retrying_reported(
+                || {
+                    let mut cmd = self.build_run_command(
+                        working_dir,
+                        session,
+                        system_prompt,
+                        prompt,
+                        extra_args,
+                        want_transcript,
+                    );
+                    apply_coder_env(&mut cmd, extra_env);
+                    cmd
+                },
+                transcript_file,
+                &config,
+                &crate::notify::notify,
+                &real_credential_refresh,
+                false,
+                None,
+            ),
+            capture,
+            extra_args,
+        )
+    }
+
+    fn run_interactive(
+        &self,
+        system_prompt: &str,
+        working_dir: &Path,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
+    ) -> Result<i32> {
+        let mut cmd = self.build_command(working_dir);
+        apply_coder_env(&mut cmd, extra_env);
+        cmd.arg("--auto");
+        if let Some(model) = self.effective_model() {
+            cmd.args(["--model", &model]);
+        }
+        if !system_prompt.trim().is_empty() {
+            cmd.args(["--prompt", system_prompt]);
+        }
         cmd.args(extra_args);
 
         let status = cmd.status()?;
@@ -6215,6 +6502,28 @@ mod coder_kind_tests {
     }
 
     #[test]
+    fn coder_kind_resolves_opencode() {
+        let kind = CoderKind::resolve(Some("opencode")).unwrap();
+        assert_eq!(kind, CoderKind::Opencode);
+        assert_eq!(kind.as_str(), "opencode");
+    }
+
+    #[test]
+    fn coder_kind_serializes_opencode_as_kebab_case() {
+        let json = serde_json::to_string(&CoderKind::Opencode).unwrap();
+        assert_eq!(json, "\"opencode\"");
+    }
+
+    #[test]
+    fn coder_kind_rejects_unknown_lists_opencode() {
+        let err = CoderKind::resolve(Some("unknown")).unwrap_err().to_string();
+        assert!(
+            err.contains("opencode"),
+            "error should list opencode: {err}"
+        );
+    }
+
+    #[test]
     fn coder_kind_rejects_unknown() {
         let result = CoderKind::resolve(Some("unknown"));
         assert!(result.is_err());
@@ -6236,7 +6545,12 @@ mod coder_kind_tests {
 
     #[test]
     fn coder_kind_round_trips_all_variants() {
-        for kind in [CoderKind::Claude, CoderKind::Codex, CoderKind::Pi] {
+        for kind in [
+            CoderKind::Claude,
+            CoderKind::Codex,
+            CoderKind::Opencode,
+            CoderKind::Pi,
+        ] {
             let json = serde_json::to_string(&kind).unwrap();
             let parsed: CoderKind = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, kind);
@@ -6505,6 +6819,228 @@ mod model_default_tests {
             !cmd_has_arg(&cmd, "--model"),
             "codex should not pass --model when no model is configured"
         );
+    }
+
+    #[test]
+    fn opencode_run_command_uses_v2_standalone_and_json() {
+        let coder = OpencodeCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: Some("anthropic/claude-sonnet-4-5".to_string()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_run_command(
+            dir.path(),
+            CoderSession::Ephemeral,
+            "SYSTEM",
+            "TASK",
+            &[],
+            true,
+        );
+
+        assert_eq!(cmd.get_program(), OsStr::new("opencode"));
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "run"));
+        assert!(args.iter().any(|arg| arg == "--standalone"));
+        assert!(args.iter().any(|arg| arg == "--auto"));
+        assert!(args.windows(2).any(|pair| pair == ["--agent", "build"]));
+        assert!(args.windows(2).any(|pair| pair == ["--format", "json"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model", "anthropic/claude-sonnet-4-5"])
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("SYSTEM\n\n---\n\nTASK")
+        );
+        assert!(cmd.get_envs().any(|(key, value)| {
+            key == OsStr::new("OPENCODE_DISABLE_AUTOUPDATE") && value == Some(OsStr::new("1"))
+        }));
+    }
+
+    #[test]
+    fn opencode_resume_uses_session_and_continuation_prompt() {
+        let coder = OpencodeCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_run_command(
+            dir.path(),
+            CoderSession::Resume("ses_123"),
+            "SYSTEM",
+            "TASK",
+            &[],
+            true,
+        );
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["--session", "ses_123"]));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(OPENCODE_CONTINUATION_PROMPT)
+        );
+        assert!(!args.iter().any(|arg| arg.contains("SYSTEM")));
+    }
+
+    #[test]
+    fn opencode_omits_json_format_without_transcript() {
+        let coder = OpencodeCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_run_command(
+            dir.path(),
+            CoderSession::Ephemeral,
+            "SYSTEM",
+            "TASK",
+            &[],
+            false,
+        );
+        assert!(!cmd_has_arg(&cmd, "--format"));
+    }
+
+    #[test]
+    fn opencode_command_omits_model_when_unset() {
+        let coder = OpencodeCode {
+            sandbox_profile: None,
+            trusted_sandbox: false,
+            model_override: None,
+        };
+        assert!(
+            coder.effective_model().is_none(),
+            "OpenCode must fall back to its own configured default model"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_run_command(
+            dir.path(),
+            CoderSession::Ephemeral,
+            "SYSTEM",
+            "TASK",
+            &[],
+            true,
+        );
+        assert!(
+            !cmd_has_arg(&cmd, "--model"),
+            "opencode should not pass --model when no model is configured"
+        );
+    }
+
+    #[test]
+    fn opencode_model_requires_a_provider_qualified_global_model() {
+        assert_eq!(
+            resolve_opencode_model(None, Some("anthropic/claude-sonnet-4-5")).as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            resolve_opencode_model(None, Some("claude-sonnet-4-5")),
+            None,
+            "an unqualified shared FLUENT_MODEL must not reach OpenCode"
+        );
+        assert_eq!(
+            resolve_opencode_model(Some("openrouter/x"), Some("claude-sonnet-4-5")).as_deref(),
+            Some("openrouter/x")
+        );
+        assert_eq!(
+            resolve_opencode_model(Some("  "), Some("claude-sonnet-4-5")),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_model_warns_only_for_an_unqualified_global_model() {
+        assert!(opencode_model_warning_is_due(
+            None,
+            Some("claude-sonnet-4-5")
+        ));
+        assert!(opencode_model_warning_is_due(Some("  "), Some("claude")));
+        assert!(!opencode_model_warning_is_due(
+            Some("openrouter/x"),
+            Some("claude-sonnet-4-5")
+        ));
+        assert!(!opencode_model_warning_is_due(
+            None,
+            Some("anthropic/claude-sonnet-4-5")
+        ));
+        assert!(!opencode_model_warning_is_due(None, None));
+        assert!(!opencode_model_warning_is_due(None, Some("  ")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn opencode_trusted_launch_retains_only_its_provider_keys() {
+        unsafe { std::env::set_var("GEMINI_API_KEY", "gemini-test") };
+        let dir = tempfile::tempdir().unwrap();
+        let opencode = OpencodeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: true,
+            model_override: None,
+        };
+        let claude = SandboxedClaudeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: true,
+            model_override: None,
+            effort: None,
+        };
+        let opencode_env = opencode
+            .build_command(dir.path())
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect::<Vec<_>>();
+        let claude_env = claude
+            .build_command(dir.path(), true)
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect::<Vec<_>>();
+        unsafe { std::env::remove_var("GEMINI_API_KEY") };
+
+        assert!(
+            opencode_env.iter().any(|(key, value)| {
+                key == OsStr::new("GEMINI_API_KEY")
+                    && value.as_deref() == Some(OsStr::new("gemini-test"))
+            }),
+            "an OpenCode trusted launch must retain its provider keys"
+        );
+        assert!(
+            !claude_env
+                .iter()
+                .any(|(key, _)| key == OsStr::new("GEMINI_API_KEY")),
+            "a Claude trusted launch must not inherit OpenCode provider keys"
+        );
+    }
+
+    #[test]
+    fn opencode_sandbox_wraps_the_run_command() {
+        let coder = OpencodeCode {
+            sandbox_profile: Some("/tmp/profile".to_string()),
+            trusted_sandbox: false,
+            model_override: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = coder.build_run_command(
+            dir.path(),
+            CoderSession::Ephemeral,
+            "SYSTEM",
+            "TASK",
+            &[],
+            true,
+        );
+        assert_eq!(cmd.get_program(), OsStr::new("sandbox-exec"));
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(&args[..3], ["-f", "/tmp/profile", "opencode"]);
+        assert_eq!(args.get(3).map(String::as_str), Some("run"));
     }
 
     #[test]

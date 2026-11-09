@@ -4339,6 +4339,9 @@ fn run_learner_step(
                 &pair.model,
                 pair.effort.as_deref(),
             )?,
+            CoderKind::Opencode => {
+                anyhow::bail!("OpenCode does not support native Learner execution")
+            }
         }
     }
 
@@ -14709,6 +14712,9 @@ mod tests {
                 "{\"type\":\"error\",\"code\":\"rate_limit\",\"retry_after\":1}\n",
             ),
             crate::coder::CoderKind::Pi => unreachable!("Pi has no provider outage contract"),
+            crate::coder::CoderKind::Opencode => {
+                unreachable!("OpenCode has no provider outage contract")
+            }
         };
         fs::create_dir_all(artifact_dir).unwrap();
         for phase in 0..crate::coder::RATE_LIMIT_MAX_RETRIES {
@@ -27529,6 +27535,22 @@ print(json.dumps([json.loads(line) for line in (pathlib.Path(sys.argv[1])/'comma
             fs::write(&transcript, rows.join("\n") + "\n").unwrap();
             assert_eq!(writer_session_id(&transcript), None);
         }
+    }
+
+    #[test]
+    fn writer_session_identity_accepts_opencode_transcript() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let transcript = tmp.path().join("opencode.jsonl");
+        fs::write(
+            &transcript,
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_494719016ffe85dkDMj0FPRbHK\",\"part\":{\"type\":\"step-start\"}}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            writer_session_id(&transcript).as_deref(),
+            Some("ses_494719016ffe85dkDMj0FPRbHK")
+        );
     }
 
     #[test]
