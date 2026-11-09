@@ -15,9 +15,10 @@ __pycache__/
 # Dependencies
 node_modules/
 
-# Fluent — working state, except expertise, hooks, Dockerfile, and tester
-# contract files. Observations stay local (a working backlog), not committed.
+# Fluent — working state, except project config, expertise, hooks, Dockerfile,
+# and tester contract files. Observations stay local, not committed.
 .fluent/*
+!.fluent/config.yaml
 !.fluent/expertise/
 !.fluent/hooks/
 !.fluent/Dockerfile

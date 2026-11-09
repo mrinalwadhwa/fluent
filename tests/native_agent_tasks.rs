@@ -953,8 +953,21 @@ fn attempt_retains_native_mode_across_resume() {
         Some(Commands::Attempt { command: AttemptCommands::Create { terminal_mode: Some(mode), .. } })
         if mode == "native"));
 
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".fluent")).unwrap();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".fluent/config.yaml"),
+        project.path().join(".fluent/config.yaml"),
+    )
+    .expect("this project must track its default terminal mode");
+    let mode = fluent::config::attempt_terminal_mode(project.path(), None).unwrap();
+    assert_eq!(mode, TerminalMode::Native);
+    let override_mode =
+        fluent::config::attempt_terminal_mode(project.path(), Some("headless")).unwrap();
+    assert_eq!(override_mode, TerminalMode::Headless);
+
     let mut attempt = Attempt {
-        terminal_mode: TerminalMode::Native,
+        terminal_mode: mode,
         ..Default::default()
     };
     let saved = serde_json::to_string(&attempt).unwrap();
@@ -964,7 +977,8 @@ fn attempt_retains_native_mode_across_resume() {
 
     let mut legacy: serde_json::Value = serde_json::from_str(&saved).unwrap();
     legacy.as_object_mut().unwrap().remove("terminal_mode");
-    let legacy: Attempt = serde_json::from_value(legacy).unwrap();
+    let mut legacy: Attempt = serde_json::from_value(legacy).unwrap();
+    reopen_attempt(&mut legacy);
     assert_eq!(legacy.terminal_mode, TerminalMode::Headless);
 
     let mut item = WorkItem {
@@ -972,19 +986,21 @@ fn attempt_retains_native_mode_across_resume() {
         title: "Native mode fixture".into(),
         ..Default::default()
     };
-    item.add_initial_attempt_with_settings(
-        "attempt-1",
-        CoderMapping::default(),
-        TerminalMode::Native,
-    )
-    .unwrap();
+    item.add_initial_attempt_with_settings("attempt-1", CoderMapping::default(), mode)
+        .unwrap();
     assert_eq!(item.attempts[0].terminal_mode, TerminalMode::Native);
-    let stored_project = tempfile::tempdir().unwrap();
-    let store = fluent::work_model::WorkModelStore::new(stored_project.path());
+    item.add_initial_attempt_with_settings("attempt-2", CoderMapping::default(), override_mode)
+        .unwrap();
+    let store = fluent::work_model::WorkModelStore::new(project.path());
     store.create_work_item(&item).unwrap();
+    // The explicit override must stay headless when reopened under the
+    // project's native default, just as native mode survives a later change.
+    let mut overridden = store.read_work_item_snapshot("work-1").unwrap();
+    reopen_attempt(&mut overridden.attempts[1]);
+    assert_eq!(overridden.attempts[1].terminal_mode, TerminalMode::Headless);
     let attempt_record: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
-            stored_project
+            project
                 .path()
                 .join(".fluent/work/attempts/work-1/attempt-1.json"),
         )
@@ -993,6 +1009,16 @@ fn attempt_retains_native_mode_across_resume() {
     .unwrap();
     assert_eq!(attempt_record["schema_version"], 14);
     assert_eq!(attempt_record["terminal_mode"], "native");
+    // Changing the project default must not change an existing Attempt.
+    std::fs::write(
+        project.path().join(".fluent/config.yaml"),
+        "terminal:\n  mode: headless\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fluent::config::attempt_terminal_mode(project.path(), None).unwrap(),
+        TerminalMode::Headless
+    );
     let mut loaded = store.read_work_item_snapshot("work-1").unwrap();
     reopen_attempt(&mut loaded.attempts[0]);
     assert_eq!(loaded.attempts[0].terminal_mode, TerminalMode::Native);
@@ -1022,22 +1048,6 @@ fn attempt_retains_native_mode_across_resume() {
     assert_eq!(
         retried.attempts[0].tasks[1].status,
         fluent::work_model::TaskStatus::Planned
-    );
-
-    let project = tempfile::tempdir().unwrap();
-    std::fs::create_dir(project.path().join(".fluent")).unwrap();
-    std::fs::write(
-        project.path().join(".fluent/config.yaml"),
-        "terminal:\n  mode: native\n",
-    )
-    .unwrap();
-    assert_eq!(
-        fluent::config::attempt_terminal_mode(project.path(), None).unwrap(),
-        TerminalMode::Native
-    );
-    assert_eq!(
-        fluent::config::attempt_terminal_mode(project.path(), Some("headless")).unwrap(),
-        TerminalMode::Headless
     );
 }
 

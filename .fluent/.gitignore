@@ -2,6 +2,7 @@
 # Durable content is re-included below.
 /*
 !/.gitignore
+!/config.yaml
 !/expertise/
 !/hooks/
 !/Dockerfile

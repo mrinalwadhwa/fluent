@@ -6,6 +6,8 @@
 
 - [native-websocket-pressure](testing/patterns/native-websocket-pressure.md) — read when testing concurrent input and partial native display writes
 
+- [observe-descendant-socket-eof](testing/patterns/observe-descendant-socket-eof.md) — read when proving that process cleanup closes a descendant's inherited descriptor
+
 - [verified-historical-readers](testing/patterns/verified-historical-readers.md) — read when adding pinned historical executable fixtures that run across worktrees.
 
 Fluent has four complementary test surfaces:

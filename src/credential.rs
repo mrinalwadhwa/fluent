@@ -663,25 +663,122 @@ mod tests {
         assert!(failure.diagnostic().chars().count() < 530);
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_probe_timeout_terminates_process_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("descendant-survived");
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            &format!("(sleep 1; touch '{}') & sleep 60", marker.display()),
-        ]);
-
-        assert!(matches!(
-            run_refresh_probe(command, Duration::from_millis(30)),
-            Err(CredentialRefreshError::Timeout(_))
-        ));
-        std::thread::sleep(Duration::from_millis(1100));
-        assert!(
-            !marker.exists(),
-            "the refresh probe descendant survived the timeout cleanup"
+        assert_eq!(
+            observe_refresh_probe_tree_cleanup(Duration::from_millis(30), true)
+                .expect("probe descendant survived cleanup"),
+            0
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_probe_tree_cleanup_tolerates_late_timeout_poll() {
+        // A busy host can delay the timeout poll past the old marker timer.
+        assert_eq!(
+            observe_refresh_probe_tree_cleanup(Duration::from_millis(1200), true)
+                .expect("probe descendant survived late cleanup"),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_probe_tree_observer_detects_surviving_descendant() {
+        let error = observe_refresh_probe_tree_cleanup(Duration::from_millis(30), false)
+            .expect_err("killing only the leader must leave the descendant's socket open");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+    }
+
+    #[cfg(unix)]
+    fn observe_refresh_probe_tree_cleanup(
+        deadline: Duration,
+        sweep_descendants: bool,
+    ) -> std::io::Result<usize> {
+        use std::net::Shutdown;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::process::Child;
+
+        struct Fixture {
+            observer: UnixStream,
+            retained_leader: Option<Child>,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                // Release a surviving descendant even if an assertion panics.
+                // The negative control keeps its leader waitable to pin the
+                // group identity until this fallback sweep and reap.
+                let _ = self.observer.shutdown(Shutdown::Both);
+                if let Some(child) = self.retained_leader.take() {
+                    let _ = crate::coder::terminate_owned_process_tree(child);
+                }
+            }
+        }
+
+        let (observer, descendant) = UnixStream::pair().unwrap();
+        let mut fixture = Fixture {
+            observer,
+            retained_leader: None,
+        };
+        fixture
+            .observer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#"exec 3<&0
+/bin/sh -c 'printf R >&3; IFS= read -r release <&3' &
+exec 0<&- 3<&-
+wait"#,
+            ])
+            .stdin(Stdio::from(OwnedFd::from(descendant)));
+
+        let mut ready = [0u8; 1];
+        let mut readiness = None;
+        let result = run_bounded_claude_probe_with_cleanup(command, deadline, |child| {
+            // Wait for the descendant itself, even if the deadline expires
+            // before it gets CPU time. Do not assert until cleanup has run.
+            readiness = Some(fixture.observer.read_exact(&mut ready));
+            if sweep_descendants {
+                crate::coder::terminate_owned_process_tree(child)
+            } else {
+                fixture.retained_leader = Some(child);
+                fixture
+                    .retained_leader
+                    .as_mut()
+                    .unwrap()
+                    .kill()
+                    .map_err(|error| error.to_string())?;
+                // Deliberately claim success without sweeping descendants.
+                // The socket observation must detect this false claim.
+                Ok(crate::coder::GroupSweepDisposition::Delivered)
+            }
+        });
+        assert!(
+            matches!(result, Err(CredentialRefreshError::Timeout(_))),
+            "expected confirmed timeout cleanup, got {result:?}"
+        );
+        readiness
+            .expect("probe did not reach timeout cleanup")
+            .expect("probe descendant did not announce readiness");
+        assert_eq!(ready, *b"R");
+
+        // Command has dropped its copy of the peer, and the leader closed its
+        // descriptors before waiting. Only the descendant can hold it open.
+        // Observe before Drop can release or sweep a survivor. An empty buffer
+        // would return zero without observing EOF, so always read one byte.
+        // Keep the timeout installed before spawn: macOS can reject changing
+        // socket options after the peer has already closed during cleanup.
+        fixture.observer.read(&mut [0u8; 1])
     }
 
     #[test]
