@@ -9,6 +9,7 @@ filter = '''
   test(=launch_handoff_route_task_recovers_after_parent_publication_loss) +
   test(=tester_settled_command_barrier_allows_normal_completion) +
   test(=verification_worker_does_not_block_unrelated_attempt_progress) +
-  test(=codex_relay_delivers_overlapping_app_responses_and_turn_events)
+  test(=codex_relay_delivers_overlapping_app_responses_and_turn_events) +
+  test(=workflow_integrated_child_receipt_survives_parent_crash)
 '''
 threads-required = "num-test-threads"

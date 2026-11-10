@@ -36237,7 +36237,7 @@ fn workflow_integrated_child_receipt_survives_parent_crash() {
         .spawn()
         .unwrap();
     let receipt = area.join("execution-receipt");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let ready = barrier.with_file_name("allow-child-exec.ready");
     while !ready.is_file() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
