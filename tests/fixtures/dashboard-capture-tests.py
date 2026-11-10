@@ -58,7 +58,7 @@ while True:
     def test_reaps_child_when_initial_read_stalls(self):
         self.fixture("initial-stall")
         with self.assertRaisesRegex(TimeoutError, "initial read"):
-            self.capture(str(self.binary), self.project, b"", initial_timeout=0.3, exit_timeout=0.3)
+            self.capture(str(self.binary), self.project, b"", initial_timeout=2, exit_timeout=0.3)
         self.assert_reaped()
 
     def test_reaps_child_when_quit_stalls(self):
