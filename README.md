@@ -79,7 +79,7 @@ history, and Tester files. When an initial Writer has no `.fluent/tester.yaml`
 or result extractor, its assignment explicitly asks it to create and commit
 the missing files.
 
-See the [v0.6.0 release notes](documentation/releases/v0.6.0.md) for behavior
+See the [v0.8.0 release notes](documentation/releases/v0.8.0.md) for behavior
 changes, assurance limits, and recovery commands.
 For Claude session recovery from v0.6.0, or a transition from v0.5.0 with a
 shared scheduler, follow the
